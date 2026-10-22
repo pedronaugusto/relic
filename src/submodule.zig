@@ -66,3 +66,4 @@ pub const planFetch = @import("submodule/changes.zig").planFetch;
 pub const parseRecurse = @import("submodule/changes.zig").parseRecurse;
 pub const fetchJobs = @import("submodule/changes.zig").fetchJobs;
 pub const defaultRemote = @import("submodule/submodule.zig").defaultRemote;
+pub const CloneRequest = @import("submodule/submodule.zig").CloneRequest;

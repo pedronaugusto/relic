@@ -2256,6 +2256,7 @@ const SubmoduleWorld = struct {
             defer gpa.free(bare);
             try world.git(gpa, io, ".", &.{ "init", "-q", "--bare", "-b", "main", bare });
             try world.git(gpa, io, ".", &.{ "--git-dir", bare, "config", "uploadpack.allowAnySHA1InWant", "true" });
+            try world.git(gpa, io, ".", &.{ "--git-dir", bare, "config", "uploadpack.allowFilter", "true" });
             try world.git(gpa, io, ".", &.{ "init", "-q", "-b", "main", name });
             const served = try world.url(gpa, name);
             defer gpa.free(served);
@@ -2413,5 +2414,114 @@ test "a fetch goes into the submodules as git's fetch_submodules does: on demand
         try testing.expectEqual(case.went.len, went.items.len);
         for (case.went, went.items) |want, got| try testing.expectEqualStrings(want, got);
         try expectSameSubmoduleFetch(gpa, io, &world);
+    }
+}
+
+/// Each git directory of two recursive clones the same: refs, `HEAD`, the
+/// settings a clone and an update write, its lenders and its boundary.
+fn expectSameRecursiveClone(gpa: Allocator, io: Io, world: *SubmoduleWorld) !void {
+    for ([_][]const u8{ ".git", ".git/modules/lib", ".git/modules/lib/modules/inner", ".git/modules/vendor/inner" }) |git_dir| {
+        var outs: [2][4][]u8 = undefined;
+        for ([_][]const u8{ "by-git", "by-relic" }, &outs) |name, *out| {
+            var dir = try world.work.dir.openDir(io, name, .{});
+            defer dir.close(io);
+            out[0] = testremote.gitInput(gpa, io, dir, &.{ "--git-dir", git_dir, "for-each-ref", "--format=%(refname) %(objectname) %(symref)" }, "") catch try gpa.dupe(u8, "(none)");
+            out[1] = testremote.gitInput(gpa, io, dir, &.{ "--git-dir", git_dir, "config", "--local", "--get-regexp", "^(remote|branch|submodule|core\\.(bare|worktree))" }, "") catch try gpa.dupe(u8, "(none)");
+            for ([_][]const u8{ "objects/info/alternates", "shallow" }, out[2..4]) |file, *content| {
+                const path = try gpa.print("{s}/{s}", .{ git_dir, file });
+                defer gpa.free(path);
+                content.* = dir.readFileAlloc(io, path, gpa, .unlimited) catch |err| switch (err) {
+                    error.FileNotFound => try gpa.dupe(u8, "(none)"),
+                    else => return err,
+                };
+            }
+        }
+        defer for (outs) |out| for (out) |o| gpa.free(o);
+        for (outs[0], outs[1]) |theirs, ours| try testing.expectEqualStrings(theirs, ours);
+    }
+    var statuses: [2][]u8 = undefined;
+    for ([_][]const u8{ "by-git", "by-relic" }, &statuses) |name, *out| {
+        var dir = try world.work.dir.openDir(io, name, .{});
+        defer dir.close(io);
+        out.* = try testremote.gitInput(gpa, io, dir, &.{ "submodule", "status", "--recursive" }, "");
+    }
+    defer for (statuses) |s| gpa.free(s);
+    try testing.expectEqualStrings(statuses[0], statuses[1]);
+}
+
+test "a clone with --recurse-submodules is git's: the pathspecs active, shallow and filtered submodules, and the lenders' own lending to them" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var env = try testremote.environ(gpa);
+    defer env.deinit();
+    const Case = struct {
+        git_args: []const []const u8,
+        options: clone_mod.Options,
+        /// A recursive clone by git, at `lender`, borrowed from.
+        lender: bool = false,
+        config: []const config_mod.Sources.Pair = &.{},
+        refused: ?anyerror = null,
+    };
+    const lender_ref = [_]clone_mod.Reference{.{ .path = "LENDER" }};
+    const cases = [_]Case{
+        .{ .git_args = &.{"--recurse-submodules"}, .options = .{ .who = test_who, .recurse_submodules = &.{} } },
+        .{ .git_args = &.{"--recurse-submodules=lib"}, .options = .{ .who = test_who, .recurse_submodules = &.{"lib"} } },
+        .{ .git_args = &.{ "--recurse-submodules", "--shallow-submodules" }, .options = .{ .who = test_who, .recurse_submodules = &.{}, .shallow_submodules = true } },
+        .{ .git_args = &.{ "--recurse-submodules", "--filter=blob:none", "--also-filter-submodules" }, .options = .{ .who = test_who, .recurse_submodules = &.{}, .filter = "blob:none", .filter_submodules = true } },
+        .{ .git_args = &.{ "-c", "clone.filterSubmodules=true", "--recurse-submodules", "--filter=blob:none" }, .options = .{ .who = test_who, .recurse_submodules = &.{}, .filter = "blob:none" }, .config = &.{.{ .name = "clone.filterSubmodules", .value = "true" }} },
+        .{ .git_args = &.{ "--recurse-submodules", "--reference", "LENDER" }, .options = .{ .who = test_who, .recurse_submodules = &.{}, .reference = &lender_ref }, .lender = true },
+        .{ .git_args = &.{ "--recurse-submodules", "--also-filter-submodules" }, .options = .{ .who = test_who, .recurse_submodules = &.{}, .filter_submodules = true }, .refused = error.FilterSubmodulesAlone },
+    };
+    for (cases) |case| {
+        var world = try SubmoduleWorld.init(gpa, io);
+        defer world.deinit(gpa);
+        const super_url = try world.url(gpa, "super");
+        defer gpa.free(super_url);
+        const lender = try gpa.print("{s}/lender", .{world.root_path});
+        defer gpa.free(lender);
+        if (case.lender) {
+            var root = try world.work.dir.openDir(io, ".", .{});
+            defer root.close(io);
+            const out = try testremote.gitInput(gpa, io, root, &.{ "clone", "-q", "--recurse-submodules", super_url, lender }, "");
+            gpa.free(out);
+            try world.advance(gpa, io, "refs/heads/main", true);
+        }
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(gpa);
+        for (case.git_args) |arg| try argv.append(gpa, if (std.mem.eql(u8, arg, "LENDER")) lender else arg);
+        // `-c` goes before `clone`.
+        var git_argv: std.ArrayList([]const u8) = .empty;
+        defer git_argv.deinit(gpa);
+        if (argv.items.len > 1 and std.mem.eql(u8, argv.items[0], "-c")) {
+            try git_argv.appendSlice(gpa, argv.items[0..2]);
+            try git_argv.appendSlice(gpa, &.{ "clone", "-q" });
+            try git_argv.appendSlice(gpa, argv.items[2..]);
+        } else {
+            try git_argv.appendSlice(gpa, &.{ "clone", "-q" });
+            try git_argv.appendSlice(gpa, argv.items);
+        }
+        try git_argv.appendSlice(gpa, &.{ super_url, "by-git" });
+        var root = try world.work.dir.openDir(io, ".", .{});
+        defer root.close(io);
+        const by_git = testremote.gitInputEnv(gpa, io, root, &env, git_argv.items, "", false);
+
+        try root.createDirPath(io, "by-relic");
+        var dir = try root.openDir(io, "by-relic", .{ .iterate = true });
+        defer dir.close(io);
+        var options = case.options;
+        options.programs = .{ .environ = &env };
+        options.user_config = .{ .pairs = case.config };
+        const references = [_]clone_mod.Reference{.{ .path = lender }};
+        if (case.lender) options.reference = &references;
+        const made = clone_mod.clone(gpa, io, super_url, dir, options);
+        if (case.refused) |err| {
+            try testing.expectError(error.GitFailed, by_git);
+            try testing.expectError(err, made);
+            continue;
+        }
+        gpa.free(try by_git);
+        var repo = try made;
+        repo.deinit(io);
+        try expectSameRecursiveClone(gpa, io, &world);
     }
 }

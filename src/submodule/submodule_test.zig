@@ -1005,11 +1005,11 @@ const GitTransport = struct {
         return .{ .context = t, .cloneFn = clone, .fetchFn = fetch };
     }
 
-    fn clone(gpa: Allocator, io: Io, context: *anyopaque, url: []const u8, git_dir: Io.Dir) submodule.TransportError!void {
+    fn clone(gpa: Allocator, io: Io, context: *anyopaque, request: submodule.CloneRequest) submodule.TransportError!void {
         const t: *GitTransport = @ptrCast(@alignCast(context));
-        const target = absolute(gpa, io, git_dir) catch return error.TransportFailed;
+        const target = absolute(gpa, io, request.git_dir) catch return error.TransportFailed;
         defer gpa.free(target);
-        t.git.exec(io, &.{ "clone", "-q", "--bare", url, target }) catch return error.TransportFailed;
+        t.git.exec(io, &.{ "clone", "-q", "--bare", request.url, target }) catch return error.TransportFailed;
         t.git.exec(io, &.{ "--git-dir", target, "config", "core.bare", "false" }) catch return error.TransportFailed;
         t.clones += 1;
     }

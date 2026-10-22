@@ -119,11 +119,11 @@ pub const GitClone = struct {
         return .{ .context = t, .cloneFn = clone, .fetchFn = fetch };
     }
 
-    fn clone(gpa: std.mem.Allocator, io: Io, context: *anyopaque, url: []const u8, git_dir: Io.Dir) submodule.TransportError!void {
+    fn clone(gpa: std.mem.Allocator, io: Io, context: *anyopaque, request: submodule.CloneRequest) submodule.TransportError!void {
         const t: *GitClone = @ptrCast(@alignCast(context)); // safe: the context handed out with this function is a GitClone
-        const target = git_dir.realPathFileAlloc(io, ".", gpa) catch return error.TransportFailed;
+        const target = request.git_dir.realPathFileAlloc(io, ".", gpa) catch return error.TransportFailed;
         defer gpa.free(target);
-        t.git.exec(io, &.{ "clone", "-q", "--bare", url, target }) catch return error.TransportFailed;
+        t.git.exec(io, &.{ "clone", "-q", "--bare", request.url, target }) catch return error.TransportFailed;
         t.git.exec(io, &.{ "--git-dir", target, "config", "core.bare", "false" }) catch return error.TransportFailed;
         t.clones += 1;
     }

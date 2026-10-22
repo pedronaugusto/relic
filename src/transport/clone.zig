@@ -83,7 +83,15 @@ pub const Error = error{
     /// `bundle_uri` with `depth`, `shallow_since` or `shallow_exclude`,
     /// which git refuses together.
     BundleUriShallow,
-} || reference.Error || alternate_refs.Error || transport.Error || shallow_mod.Error || partial.FilterError || repo_mod.Error || refs_mod.TransactionError || object_walk.Error ||
+    /// `filter_submodules` asked without `filter`, or without
+    /// `recurse_submodules`: git's "the option '--also-filter-submodules'
+    /// requires '--filter'" and "... requires '--recurse-submodules'".
+    FilterSubmodulesAlone,
+    /// `recurse_submodules` with both a `reference` and a `reference` that
+    /// is `if_able`: git's "clone --recursive is not compatible with both
+    /// --reference and --reference-if-able".
+    MixedReferencesRecursive,
+} || submodule.Error || fetch_mod.Error || partial.Error || reference.Error || alternate_refs.Error || transport.Error || shallow_mod.Error || partial.FilterError || repo_mod.Error || refs_mod.TransactionError || object_walk.Error ||
     worktree.Error || Repository.WriteConfigError || Io.Dir.RealPathFileAllocError || Io.Dir.Iterator.Error ||
     filter.Drivers.LoadError || fsck.LoadError;
 
@@ -126,6 +134,19 @@ pub const Options = struct {
     /// copied in and the lenders forgotten, as git's `repack -a -d` and the
     /// alternates file removed.
     dissociate: bool = false,
+    /// `--recurse-submodules[=<pathspec>]`: `submodule.active` set to these
+    /// pathspecs (none is `.`), and once the branch is checked out each
+    /// active submodule cloned and checked out, and theirs, as git's
+    /// `submodule update --init --recursive` after its clone, through a
+    /// `SubmoduleTransport` made with this clone's settings. With
+    /// `reference`, the submodules borrow from the lenders' own
+    /// (`submodule.alternateLocation`). `null` leaves them be.
+    recurse_submodules: ?[]const []const u8 = null,
+    /// `--shallow-submodules`: each submodule cloned one commit deep.
+    shallow_submodules: bool = false,
+    /// `--[no-]also-filter-submodules`: the submodules cloned with `filter`
+    /// too; `null` takes `clone.filterSubmodules`.
+    filter_submodules: ?bool = null,
     /// Optional native filters supplied by the operation owner.
     native_filters: ?FilterLoader = null,
     /// The remote's name in the new configuration: git's `--origin`.
@@ -252,7 +273,61 @@ fn withSettings(settings: ?*const config_mod.Config, asked: Options) Error!Optio
     var options = asked;
     options.origin = asked.origin orelse try settingString(settings, "clone.defaultremotename") orelse "origin";
     options.reject_shallow = asked.reject_shallow orelse try settingBool(settings, "clone.rejectshallow");
+    options.filter_submodules = asked.filter_submodules orelse try settingBool(settings, "clone.filtersubmodules");
+    // Only what the caller asked for is refused: the setting is set and
+    // forgotten, as git's.
+    if (asked.filter_submodules == true and (asked.filter == null or asked.recurse_submodules == null)) return error.FilterSubmodulesAlone;
     return options;
+}
+
+/// What `--recurse-submodules` writes before the remote, as git writes
+/// its `--config` values: `submodule.active`, `submodule.recurse` under
+/// `submodule.stickyRecursiveClone`, and with lenders
+/// `submodule.alternateLocation` and its error strategy.
+fn configureSubmodules(arena: Allocator, io: Io, repo: *Repository, settings: ?*const config_mod.Config, options: Options) Error!void {
+    const specs = options.recurse_submodules orelse return;
+    var edits: std.ArrayList(Repository.ConfigEdit) = .empty;
+    if (specs.len == 0) try edits.append(arena, .{ .add = .{ .name = "submodule.active", .value = "." } });
+    for (specs) |spec| try edits.append(arena, .{ .add = .{ .name = "submodule.active", .value = spec } });
+    if (try settingBool(settings, "submodule.stickyrecursiveclone")) try edits.append(arena, .{ .add = .{ .name = "submodule.recurse", .value = "true" } });
+    var required = false;
+    var if_able = false;
+    for (options.reference) |r| {
+        if (r.if_able) if_able = true else required = true;
+    }
+    if (required and if_able) return error.MixedReferencesRecursive;
+    if (required or if_able) {
+        try edits.append(arena, .{ .add = .{ .name = "submodule.alternateLocation", .value = "superproject" } });
+        try edits.append(arena, .{ .add = .{ .name = "submodule.alternateErrorStrategy", .value = if (required) "die" else "info" } });
+    }
+    _ = try repo.writeConfig(io, .local, edits.items, .{});
+}
+
+/// git's `submodule update --require-init --recursive` after its clone:
+/// each active submodule cloned as this clone was, one commit deep under
+/// `shallow_submodules`, with the filter under `filter_submodules`, with
+/// `ref_format` as given, and one branch or every one as this clone
+/// decided for itself -- git hands its own `--[no-]single-branch` on, so a
+/// shallow submodule of a whole clone still takes every branch.
+fn updateSubmodules(gpa: Allocator, io: Io, repo: *Repository, settings: ?*const config_mod.Config, how: struct { filter: ?[]const u8, single_branch: bool }, options: Options) Error!void {
+    var t: SubmoduleTransport = .init(.{
+        .who = options.who,
+        .programs = options.programs,
+        .config = settings,
+        .prompt = options.prompt,
+        .progress = options.progress,
+        .check_objects = options.check_objects,
+        .warnings = options.warnings,
+        .depth = if (options.shallow_submodules) 1 else null,
+        .filter = if (options.filter_submodules.?) how.filter else null,
+        .single_branch = how.single_branch,
+        .ref_format = options.ref_format,
+    });
+    defer t.deinit();
+    _ = submodule.update(gpa, io, repo, .{ .init = true, .recursive = true, .who = options.who, .transport = t.transport(), .programs = options.programs }) catch |err| switch (err) {
+        error.TransportFailed => return t.failure orelse err,
+        else => |e| return e,
+    };
 }
 
 /// A `clone.*` string, which git refuses with no value.
@@ -372,6 +447,7 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, asked: Option
 
     // One branch, or one tag, when that is all that is fetched.
     const single_tag = try singleTagRef(arena, head, single_branch, options);
+    try configureSubmodules(arena, io, &repo, settings, options);
     try configureRemote(arena, io, &repo, target.recorded, filter_spec, single_branch, head.branch, single_tag, options);
     try reference.borrow(arena, io, &repo, options.reference, options.warnings);
 
@@ -407,9 +483,10 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, asked: Option
         repo = reopened;
     }
 
-    if (!options.bare and !options.separate_git_dir and options.checkout) {
-        if (head_commit) |commit| try checkOutCloned(arena, gpa, io, &repo, &session, commit, send_filter != null, options);
-    }
+    if (!options.bare and !options.separate_git_dir and options.checkout) if (head_commit) |commit| {
+        try checkOutCloned(arena, gpa, io, &repo, &session, commit, send_filter != null, options);
+        if (options.recurse_submodules != null) try updateSubmodules(gpa, io, &repo, settings, .{ .filter = filter_spec, .single_branch = single_branch }, options);
+    };
     return repo;
 }
 
@@ -1065,6 +1142,15 @@ pub const SubmoduleOptions = struct {
     /// checks them: `null` takes `fetch.fsckObjects` or
     /// `transfer.fsckObjects`; see `fetch.Options.check_objects`.
     check_objects: ?bool = null,
+    warnings: ?*warning.Warnings = null,
+    /// git's `submodule update --depth`: each clone and fetch this deep.
+    depth: ?u32 = null,
+    /// `--filter`: each submodule cloned partial, as `Options.filter`.
+    filter: ?[]const u8 = null,
+    /// `--[no-]single-branch`, as `Options.single_branch`.
+    single_branch: ?bool = null,
+    /// `--ref-format`, as `Options.ref_format`.
+    ref_format: ?refs_mod.Format = null,
 };
 
 /// Where a submodule's repository and its missing commits come from: relic's
@@ -1085,7 +1171,7 @@ pub const SubmoduleOptions = struct {
 /// kept in `failure`, and a refused credential is described in
 /// `auth_failure`, for the caller's message.
 pub const SubmoduleTransport = struct {
-    pub const Error = ErrorNamespace.Error || fetch_mod.Error || odb_mod.Error;
+    pub const Error = ErrorNamespace.Error || fetch_mod.Error || odb_mod.Error || partial.Error;
     options: SubmoduleOptions,
     /// The error behind the last `error.TransportFailed`.
     failure: ?SubmoduleTransport.Error = null,
@@ -1109,7 +1195,7 @@ pub const SubmoduleTransport = struct {
     /// The seam `submodule.UpdateOptions.transport` takes. `t` must
     /// outlive the update.
     pub fn transport(t: *SubmoduleTransport) submodule.Transport {
-        return .{ .context = t, .cloneFn = cloneFn, .fetchFn = fetchFn };
+        return .{ .context = t, .cloneFn = cloneFn, .fetchFn = fetchFn, .fetchPromisedFn = fetchPromisedFn };
     }
 
     fn failed(t: *SubmoduleTransport, err: SubmoduleTransport.Error) submodule.TransportError {
@@ -1123,10 +1209,23 @@ pub const SubmoduleTransport = struct {
         };
     }
 
-    fn cloneFn(gpa: Allocator, io: Io, context: *anyopaque, url: []const u8, git_dir: Io.Dir) submodule.TransportError!void {
+    fn cloneFn(gpa: Allocator, io: Io, context: *anyopaque, request: submodule.CloneRequest) submodule.TransportError!void {
         const t: *SubmoduleTransport = @ptrCast(@alignCast(context)); // safe: the context handed out with this function is a SubmoduleTransport
+        t.cloneInto(gpa, io, request) catch |err| return t.failed(err);
+        t.clones += 1;
+    }
+
+    /// git's `clone_submodule`: the lenders `submodule.alternateLocation`
+    /// gives (`reference.forSubmodule`) borrowed from, and that setting
+    /// and `submodule.alternateErrorStrategy` written into the new
+    /// repository, so its own submodules borrow the same way.
+    fn cloneInto(t: *SubmoduleTransport, gpa: Allocator, io: Io, request: submodule.CloneRequest) SubmoduleTransport.Error!void {
         const o = t.options;
-        var repo = clone(gpa, io, url, git_dir, .{
+        var arena_state: std.heap.ArenaAllocator = .init(gpa);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+        const lenders = if (request.within) |w| try reference.forSubmodule(arena, io, w.superproject, w.name, o.warnings) else &.{};
+        var repo = try clone(gpa, io, request.url, request.git_dir, .{
             .separate_git_dir = true,
             .who = o.who,
             .programs = o.programs,
@@ -1134,13 +1233,25 @@ pub const SubmoduleTransport = struct {
             .prompt = o.prompt,
             .auth_failure = &t.auth_failure,
             .progress = o.progress,
+            .warnings = o.warnings,
             .check_objects = o.check_objects,
+            .reference = lenders,
+            .depth = o.depth,
+            .filter = o.filter,
+            .single_branch = o.single_branch,
+            .ref_format = o.ref_format,
             // A `.gitmodules` names this URL, not the person, as git's
             // `GIT_PROTOCOL_FROM_USER=0` says for a submodule.
             .from_user = false,
-        }) catch |err| return t.failed(err);
-        repo.deinit(io);
-        t.clones += 1;
+        });
+        defer repo.deinit(io);
+        const w = request.within orelse return;
+        var edits: std.ArrayList(Repository.ConfigEdit) = .empty;
+        for ([_][]const u8{ "submodule.alternateLocation", "submodule.alternateErrorStrategy" }) |name| {
+            const value = w.superproject.configuration().get(name) orelse continue;
+            try edits.append(arena, .{ .set = .{ .name = name, .value = value } });
+        }
+        if (edits.items.len != 0) _ = try repo.writeConfig(io, .local, edits.items, .{});
     }
 
     fn fetchFn(gpa: Allocator, io: Io, context: *anyopaque, repo: *Repository, remote: []const u8, want: Oid) submodule.TransportError!void {
@@ -1154,6 +1265,14 @@ pub const SubmoduleTransport = struct {
         t.fetchOnce(gpa, io, repo, remote, &.{want.hex(&hex)}) catch |err| return t.failed(err);
     }
 
+    fn fetchPromisedFn(gpa: Allocator, io: Io, context: *anyopaque, repo: *Repository, oids: []const Oid) submodule.TransportError!void {
+        const t: *SubmoduleTransport = @ptrCast(@alignCast(context)); // safe: the context handed out with this function is a SubmoduleTransport
+        const o = t.options;
+        var lazy: partial.Lazy = .init(gpa, repo, .{ .programs = o.programs, .prompt = o.prompt, .check_objects = o.check_objects });
+        defer lazy.deinit();
+        lazy.fetch(io, oids) catch |err| return t.failed(err);
+    }
+
     fn fetchOnce(t: *SubmoduleTransport, gpa: Allocator, io: Io, repo: *Repository, remote: []const u8, refspecs: []const []const u8) SubmoduleTransport.Error!void {
         const o = t.options;
         var outcome = try fetch_mod.fetch(gpa, io, repo, remote, .{
@@ -1164,6 +1283,8 @@ pub const SubmoduleTransport = struct {
             .auth_failure = &t.auth_failure,
             .progress = o.progress,
             .check_objects = o.check_objects,
+            .warnings = o.warnings,
+            .depth = o.depth,
             .from_user = false,
         });
         outcome.deinit();
@@ -1814,7 +1935,7 @@ test "a submodule URL naming a repository on this machine is refused unless prot
     defer refused_dir.close(io);
     var refused: SubmoduleTransport = .init(.{ .who = test_who });
     defer refused.deinit();
-    try testing.expectError(error.TransportFailed, SubmoduleTransport.cloneFn(gpa, io, &refused, source_path, refused_dir));
+    try testing.expectError(error.TransportFailed, SubmoduleTransport.cloneFn(gpa, io, &refused, .{ .url = source_path, .git_dir = refused_dir }));
     try testing.expectEqual(@as(?SubmoduleTransport.Error, error.TransportNotAllowed), refused.failure);
     try testing.expectEqual(@as(u32, 0), refused.clones);
 
@@ -1825,7 +1946,7 @@ test "a submodule URL naming a repository on this machine is refused unless prot
     defer allowed_dir.close(io);
     var allowed: SubmoduleTransport = .init(.{ .who = test_who, .config = &config });
     defer allowed.deinit();
-    try SubmoduleTransport.cloneFn(gpa, io, &allowed, source_path, allowed_dir);
+    try SubmoduleTransport.cloneFn(gpa, io, &allowed, .{ .url = source_path, .git_dir = allowed_dir });
     try testing.expectEqual(@as(u32, 1), allowed.clones);
 }
 

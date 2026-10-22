@@ -54,6 +54,7 @@ const worktree = @import("../checkout/checkout.zig");
 const program = @import("../process.zig").program;
 const pathspec_mod = @import("../patterns.zig").pathspec;
 const remote_mod = @import("../wire.zig").remote;
+const promisors = @import("../wire.zig").promisors;
 const three_way = @import("../merge/three_way.zig");
 const branch_mod = @import("../commit/branch.zig");
 
@@ -1567,15 +1568,65 @@ fn connectAt(gpa: Allocator, io: Io, repo: *Repository, wt: Io.Dir, path: []cons
 /// hands it in here.
 pub const Transport = struct {
     context: *anyopaque,
-    /// Fill `git_dir`, an empty directory, with the repository at `url`,
-    /// the way `git clone --no-checkout --separate-git-dir` leaves one: a
-    /// non-bare repository with its objects, its refs, `HEAD` on the
-    /// default branch, and `remote.origin` configured. `update` writes the
-    /// `.git` file and `core.worktree` itself, and checks out the commit.
-    cloneFn: *const fn (gpa: Allocator, io: Io, context: *anyopaque, url: []const u8, git_dir: Io.Dir) TransportError!void,
+    /// Fill `request.git_dir`, an empty directory, with the repository at
+    /// `request.url`, the way `git clone --no-checkout --separate-git-dir`
+    /// leaves one: a non-bare repository with its objects, its refs, `HEAD`
+    /// on the default branch, and `remote.origin` configured. `update`
+    /// writes the `.git` file and `core.worktree` itself, and checks out
+    /// the commit.
+    cloneFn: *const fn (gpa: Allocator, io: Io, context: *anyopaque, request: CloneRequest) TransportError!void,
     /// Bring `want` into `repo`, a submodule's repository, from `remote`,
     /// its default remote — what git's fetch inside the submodule does.
     fetchFn: *const fn (gpa: Allocator, io: Io, context: *anyopaque, repo: *Repository, remote: []const u8, want: Oid) TransportError!void,
+    /// Bring `oids`, which `repo` -- a submodule's repository that is a
+    /// partial clone -- was promised, from its promisor remotes: what git's
+    /// lazy fetch does when a checkout reads one. `update` has every read
+    /// of a missing object in such a submodule ask; `null` leaves it
+    /// missing.
+    fetchPromisedFn: ?*const fn (gpa: Allocator, io: Io, context: *anyopaque, repo: *Repository, oids: []const Oid) TransportError!void = null,
+};
+
+/// A submodule's reads of what it was promised, sent to the transport
+/// while `update` has its repository open.
+const Promised = struct {
+    gpa: Allocator,
+    repo: *Repository,
+    transport: Transport,
+
+    /// Install on `repo` when it is a partial clone and `transport` fetches
+    /// what is promised.
+    fn install(p: *Promised, arena: Allocator) Allocator.Error!void {
+        if (p.transport.fetchPromisedFn == null) return;
+        if ((try promisors.remotes(arena, p.repo.configuration())).len == 0) return;
+        p.repo.objectDatabase().lazy = .{ .context = p, .fetch = fetch };
+    }
+
+    fn uninstall(p: *Promised) void {
+        if (p.repo.objectDatabase().lazy) |lazy| if (lazy.context == @as(*anyopaque, p)) {
+            p.repo.objectDatabase().lazy = null;
+        };
+    }
+
+    fn fetch(io: Io, context: *anyopaque, oids: []const Oid) (Allocator.Error || Io.Cancelable || error{PromisorFetchFailed})!void {
+        const p: *Promised = @ptrCast(@alignCast(context)); // safe: the context handed out with this function is a Promised
+        p.transport.fetchPromisedFn.?(p.gpa, io, p.transport.context, p.repo, oids) catch |err| return switch (err) {
+            error.TransportFailed => error.PromisorFetchFailed,
+            error.OutOfMemory => error.OutOfMemory,
+            error.Canceled => error.Canceled,
+        };
+    }
+};
+
+/// What `Transport.cloneFn` is asked to clone.
+pub const CloneRequest = struct {
+    url: []const u8,
+    git_dir: Io.Dir,
+    /// The submodule's name and the repository it is a submodule of, whose
+    /// `submodule.alternateLocation` and lenders the clone may borrow from;
+    /// `null` for a clone that borrows nothing.
+    within: ?Within = null,
+
+    pub const Within = struct { name: []const u8, superproject: *Repository };
 };
 
 /// Errors a `Transport` may give. Its own detail is its to keep.
@@ -1702,6 +1753,9 @@ fn updateIn(
 
         var sub = try openSubmodule(gpa, io, repo, entry.path, options.open);
         defer sub.deinit(io);
+        var promised: ?Promised = if (options.transport) |t| .{ .gpa = gpa, .repo = &sub, .transport = t } else null;
+        if (promised) |*p| try p.install(arena);
+        defer if (promised) |*p| p.uninstall();
 
         var strategy: gitmodules.Update = options.strategy orelse configured orelse .checkout;
         if (just_cloned) switch (strategy) {
@@ -1776,7 +1830,7 @@ fn populate(
         try fs.makeDirs(io, where.base, target, repo.sharedPermissions());
         const dir = try where.base.openDir(io, target, .{ .iterate = true });
         errdefer dir.close(io);
-        transport.cloneFn(gpa, io, transport.context, url, dir) catch |err| switch (err) {
+        transport.cloneFn(gpa, io, transport.context, .{ .url = url, .git_dir = dir, .within = .{ .name = module.name, .superproject = repo } }) catch |err| switch (err) {
             error.TransportFailed => return refuse(options.refusal, display, url, error.TransportFailed),
             else => |e| return e,
         };
