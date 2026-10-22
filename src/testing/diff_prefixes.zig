@@ -67,7 +67,7 @@ test "a patch's headers take the prefixes git's settings give for what is compar
             var mine: Io.Writer.Allocating = .init(gpa);
             defer mine.deinit();
             const prefixes = try diff.Prefixes.configured(repo.configuration(), kind.compared);
-            try diff.unified(gpa, io, .{ .db = db, .changes = changes.items }, &mine.writer, try diff.configured(repo.configuration(), .{ .prefixes = prefixes }));
+            try diff.unified(gpa, io, &mine.writer, .{ .db = db, .changes = changes.items }, try diff.configured(repo.configuration(), .{ .prefixes = prefixes }));
             std.testing.expectEqualStrings(theirs, mine.written()) catch |err| {
                 for (settings) |s| std.debug.print("{s}={s} ", .{ s.key, s.value });
                 std.debug.print("{s}\n", .{@tagName(kind.compared)});

@@ -1272,7 +1272,7 @@ const Batch = struct {
 
 /// `git grep`: write to `w` what git writes, and say whether anything
 /// matched.
-pub fn grep(gpa: Allocator, io: Io, repo: *Repository, options: Options, w: *Io.Writer) Self.Error!Outcome {
+pub fn grep(gpa: Allocator, io: Io, w: *Io.Writer, repo: *Repository, options: Options) Self.Error!Outcome {
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
     const a = arena_instance.allocator();

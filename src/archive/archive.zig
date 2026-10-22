@@ -859,7 +859,7 @@ fn peel(gpa: Allocator, io: Io, db: *odb_mod.Odb, treeish: Oid, now: i64) Error!
 /// `git archive <tree-ish> [<path>...]`: write the archive to `w`.
 pub const Inputs = struct { repo: *Repository, treeish: Oid };
 
-pub fn archive(gpa: Allocator, io: Io, inputs: Inputs, w: *Io.Writer, options: Options) Self.Error!void {
+pub fn archive(gpa: Allocator, io: Io, w: *Io.Writer, inputs: Inputs, options: Options) Self.Error!void {
     const repo = inputs.repo;
     const treeish = inputs.treeish;
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);

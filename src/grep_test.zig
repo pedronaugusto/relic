@@ -29,7 +29,7 @@ fn compare(gpa: Allocator, io: Io, git: *testgit.Repo, repo: *Repository, args: 
     defer c.deinit(gpa);
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
-    const outcome = try grep_mod.grep(gpa, io, repo, options, &out.writer);
+    const outcome = try grep_mod.grep(gpa, io, &out.writer, repo, options);
     if (!std.mem.eql(u8, c.stdout, out.written()) or (c.code == 0) != outcome.matched) {
         std.debug.print("git grep {any}: exit {d}\n{s}\n", .{ args, c.code, c.stderr });
     }
@@ -170,10 +170,10 @@ test "--and, --or, --not, parentheses and --all-match select lines and files as 
 
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
-    try std.testing.expectError(error.InvalidExpression, grep_mod.grep(gpa, io, &repo, .{ .expression = &.{ .@"and", .{ .pattern = "a" } } }, &out.writer));
-    try std.testing.expectError(error.InvalidExpression, grep_mod.grep(gpa, io, &repo, .{ .expression = &.{ .open, .{ .pattern = "a" } } }, &out.writer));
-    try std.testing.expectError(error.InvalidExpression, grep_mod.grep(gpa, io, &repo, .{ .expression = &.{ .{ .pattern = "a" }, .close } }, &out.writer));
-    try std.testing.expectError(error.InvalidExpression, grep_mod.grep(gpa, io, &repo, .{ .expression = &.{ .{ .pattern = "a" }, .not } }, &out.writer));
+    try std.testing.expectError(error.InvalidExpression, grep_mod.grep(gpa, io, &out.writer, &repo, .{ .expression = &.{ .@"and", .{ .pattern = "a" } } }));
+    try std.testing.expectError(error.InvalidExpression, grep_mod.grep(gpa, io, &out.writer, &repo, .{ .expression = &.{ .open, .{ .pattern = "a" } } }));
+    try std.testing.expectError(error.InvalidExpression, grep_mod.grep(gpa, io, &out.writer, &repo, .{ .expression = &.{ .{ .pattern = "a" }, .close } }));
+    try std.testing.expectError(error.InvalidExpression, grep_mod.grep(gpa, io, &out.writer, &repo, .{ .expression = &.{ .{ .pattern = "a" }, .not } }));
 }
 
 const functions_c =
@@ -315,7 +315,7 @@ test "-P matches through the caller's matcher, and without one is refused by nam
     try compare(gpa, io, &git, &repo, &.{ "-F", "-w", "-c", "-e", "count", "--and", "--not", "-e", "x *" }, .{ .expression = &.{ .{ .pattern = "count" }, .@"and", .not, .{ .pattern = "x *" } }, .syntax = .perl, .perl = perl, .word = true, .show = .count });
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
-    try std.testing.expectError(error.UnsupportedPerlRegex, grep_mod.grep(gpa, io, &repo, .{ .patterns = &.{"a"}, .syntax = .perl }, &out.writer));
+    try std.testing.expectError(error.UnsupportedPerlRegex, grep_mod.grep(gpa, io, &out.writer, &repo, .{ .patterns = &.{"a"}, .syntax = .perl }));
 }
 
 fn randomAtom(a: Allocator, random: std.Random, out: *std.ArrayList(u8), depth: u32, extended: bool) !void {
@@ -426,7 +426,7 @@ test "patterns made of braces, brackets, anchors and repetitions compile and mat
         var out: Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
         const options: grep_mod.Options = .{ .patterns = &.{pattern.items}, .syntax = if (extended) .extended else .basic, .only_matching = true, .line_number = true, .column = true };
-        if (grep_mod.grep(gpa, io, &repo, options, &out.writer)) |outcome| {
+        if (grep_mod.grep(gpa, io, &out.writer, &repo, options)) |outcome| {
             if (c.code > 1) std.debug.print("git refused {s} {s}: {s}\n", .{ flag, pattern.items, c.stderr });
             try std.testing.expect(c.code <= 1);
             try std.testing.expectEqualStrings(c.stdout, out.written());

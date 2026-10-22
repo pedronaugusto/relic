@@ -35,9 +35,9 @@ fn acks(gpa: std.mem.Allocator, io: Io, version: protocol.Version, repeat: usize
         try pkt_line.write(w, "object-format=sha1\n");
         try pkt_line.delim(w);
     }
-    try pkt_line.print("want {s}\n", .{commit}, w);
+    try pkt_line.print(w, "want {s}\n", .{commit});
     if (version != .v2) try pkt_line.flush(w);
-    for (0..repeat) |_| try pkt_line.print("have {s}\n", .{tree}, w);
+    for (0..repeat) |_| try pkt_line.print(w, "have {s}\n", .{tree});
     try pkt_line.flush(w);
 
     var remote = try local.Remote.open(gpa, io, path, .{});
@@ -48,7 +48,7 @@ fn acks(gpa: std.mem.Allocator, io: Io, version: protocol.Version, repeat: usize
     var in = request_reader.limited(.unlimited, &in_buffer);
     var answer: Io.Writer.Allocating = .init(gpa);
     defer answer.deinit();
-    try server.serveRequest(&in.interface, &answer.writer);
+    try server.serveRequest(&answer.writer, &in.interface);
 
     var count: usize = 0;
     var buffer: [pkt_line.max_line]u8 = undefined;

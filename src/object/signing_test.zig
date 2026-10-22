@@ -324,12 +324,12 @@ test "export-subst's signature placeholders check the commit as git archive does
     const head = try Oid.parse(repo.objectFormat(), text);
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
-    try archive_mod.archive(gpa, io, .{ .repo = &repo, .treeish = head }, &out.writer, .{ .programs = k.programs() });
+    try archive_mod.archive(gpa, io, &out.writer, .{ .repo = &repo, .treeish = head }, .{ .programs = k.programs() });
     try testing.expectEqualSlices(u8, theirs, out.written());
     // without the programs, a signed commit's signature cannot be checked
     var none: Io.Writer.Allocating = .init(gpa);
     defer none.deinit();
-    try testing.expectError(error.SignatureNeedsSigner, archive_mod.archive(gpa, io, .{ .repo = &repo, .treeish = head }, &none.writer, .{}));
+    try testing.expectError(error.SignatureNeedsSigner, archive_mod.archive(gpa, io, &none.writer, .{ .repo = &repo, .treeish = head }, .{}));
 }
 
 test "openpgp signatures made here verify in git, and git's verify here" {
@@ -689,6 +689,6 @@ test "for-each-ref's signature atoms check each commit as git's do" {
     defer signer.deinit();
     var ours: Io.Writer.Allocating = .init(gpa);
     defer ours.deinit();
-    try refs_filter.listRefs(gpa, io, &repo, .{ .format = format, .context = .{ .signer = &signer } }, &ours.writer);
+    try refs_filter.listRefs(gpa, io, &ours.writer, &repo, .{ .format = format, .context = .{ .signer = &signer } });
     try testing.expectEqualStrings(theirs, ours.written());
 }

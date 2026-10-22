@@ -8,6 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Breaking
 
+- A function that writes takes its writer first, after `gpa` and `io` (and the receiver), as the family's convention puts it (packages.md §4.7): `grep.grep`, `archive.archive`, `archive.remote.fetch`, `notes.formatNote`, `transport.bundle.write`, `transport.download`, `transport.smart_http.download`, `transport.pkt_line.print`, `fast.exporter.write`, `diff.unified`, `patch.range_diff.write`, `pretty.refs.listRefs`, `listBranches`, `listTags` and `Listing.write`, `odb.pack.Writer.openStream`, `index.UntrackedCache.write`, and the servers' `serve` and `serveRequest` (`upload_pack`, `receive_pack`, `archive.remote`: the writer before the reader).
 - `transport.clone.Options.origin`, `default_branch` and `ref_format` are optional: `null` takes `clone.defaultRemoteName` (else `origin`), `init.defaultBranch` (else git's `master`, where relic named `main`) and `init.defaultRefFormat` from the caller's levels, as git's clone reads them.
 - `pretty.Decorations.load` takes `LoadOptions` (`filter`, and `style`, short or full names) where it took the filter.
 - `merge.ort.emptyTree(kind)` is `hash.Kind.emptyTree()`, the one name of the empty tree; the sequencer, `am`, the stash, subtree shifting and fast-import name it there.

@@ -215,7 +215,7 @@ pub fn send(
     const status = status_v2 or adv.has("report-status");
 
     const w = try conn.request();
-    for (request.shallow) |oid| pkt_line.print("shallow {f}\n", .{oid}, w) catch |err| return conn.writeFailed(err);
+    for (request.shallow) |oid| pkt_line.print(w, "shallow {f}\n", .{oid}) catch |err| return conn.writeFailed(err);
     writeCommands(w, adv, request, band, status_v2, status) catch |err| return conn.writeFailed(err);
     if (needs_pack) {
         // The settings git's pack-objects reads, its delta form the server's.
@@ -275,7 +275,7 @@ fn writeCommands(
     if (request.session_id) |sid| if (adv.has("session-id")) try caps.print(" session-id={s}", .{sid});
     if (request.certificate) |cert| {
         // Each line a packet, its newline kept.
-        try pkt_line.print("push-cert\x00{s}", .{caps.buffered()}, w);
+        try pkt_line.print(w, "push-cert\x00{s}", .{caps.buffered()});
         var at: usize = 0;
         while (at < cert.len) {
             const end = if (std.mem.findScalarPos(u8, cert, at, '\n')) |nl| nl + 1 else cert.len;
@@ -286,12 +286,12 @@ fn writeCommands(
     } else for (request.commands, 0..) |command, i| {
         // No newline after a command.
         if (i != 0) {
-            try pkt_line.print("{f} {f} {s}", .{ command.old, command.new, command.name }, w);
-        } else try pkt_line.print("{f} {f} {s}\x00{s}", .{ command.old, command.new, command.name, caps.buffered() }, w);
+            try pkt_line.print(w, "{f} {f} {s}", .{ command.old, command.new, command.name });
+        } else try pkt_line.print(w, "{f} {f} {s}\x00{s}", .{ command.old, command.new, command.name, caps.buffered() });
     }
     try pkt_line.flush(w);
     if (request.push_options.len != 0) {
-        for (request.push_options) |option| try pkt_line.print("{s}", .{option}, w);
+        for (request.push_options) |option| try pkt_line.print(w, "{s}", .{option});
         try pkt_line.flush(w);
     }
 }

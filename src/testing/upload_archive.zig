@@ -32,7 +32,7 @@ pub fn main(init: std.process.Init) !void {
         .programs = .{ .environ = init.environ_map },
         .now = Io.Clock.real.now(io),
     } };
-    const served = try server.serve(&in.interface, &out.interface);
+    const served = try server.serve(&out.interface, &in.interface);
     try out.interface.flush();
     if (served == .refused) {
         var err_buffer: [256]u8 = undefined;

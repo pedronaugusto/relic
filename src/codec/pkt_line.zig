@@ -99,7 +99,7 @@ pub fn write(w: *Io.Writer, data: []const u8) Self.WriteError!void {
 }
 
 /// Write a line formatted in place, as git's `packet_write_fmt` does.
-pub fn print(comptime fmt: []const u8, args: anytype, w: *Io.Writer) Self.WriteError!void {
+pub fn print(w: *Io.Writer, comptime fmt: []const u8, args: anytype) Self.WriteError!void {
     const len = std.fmt.count(fmt, args);
     if (len > max_data) return error.PacketTooLong;
     try writeLength(w, len + 4);
@@ -144,7 +144,7 @@ test "a message written is the message read" {
     defer out.deinit();
     try write(&out.writer, "command=ls-refs\n");
     try delim(&out.writer);
-    try print("ref-prefix {s}\n", .{"refs/heads/"}, &out.writer);
+    try print(&out.writer, "ref-prefix {s}\n", .{"refs/heads/"});
     try write(&out.writer, "");
     try flush(&out.writer);
     try responseEnd(&out.writer);

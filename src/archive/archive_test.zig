@@ -24,7 +24,7 @@ fn oidOf(gpa: Allocator, io: Io, git: *testgit.Repo, rev: []const u8) !Oid {
 fn ours(gpa: Allocator, io: Io, repo: *Repository, treeish: Oid, options: archive_mod.Options) ![]u8 {
     var out: Io.Writer.Allocating = .init(gpa);
     errdefer out.deinit();
-    try archive_mod.archive(gpa, io, .{ .repo = repo, .treeish = treeish }, &out.writer, options);
+    try archive_mod.archive(gpa, io, &out.writer, .{ .repo = repo, .treeish = treeish }, options);
     return out.toOwnedSlice();
 }
 
@@ -106,7 +106,7 @@ test "a commit is archived as git archives it: tar with every kind of entry, att
     try compare(gpa, io, &git, &again, &.{"HEAD"}, head, .{});
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
-    try std.testing.expectError(error.PathspecNoMatch, archive_mod.archive(gpa, io, .{ .repo = &repo, .treeish = head }, &out.writer, .{ .pathspecs = &.{"nowhere"} }));
+    try std.testing.expectError(error.PathspecNoMatch, archive_mod.archive(gpa, io, &out.writer, .{ .repo = &repo, .treeish = head }, .{ .pathspecs = &.{"nowhere"} }));
 }
 
 test "export-subst names people by the mailmap and commits by their refs, and tar.umask=user is the process's" {
@@ -154,7 +154,7 @@ test "export-subst names people by the mailmap and commits by their refs, and ta
     defer bad.deinit(io);
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
-    try std.testing.expectError(error.InvalidTarUmask, archive_mod.archive(gpa, io, .{ .repo = &bad, .treeish = head }, &out.writer, .{}));
+    try std.testing.expectError(error.InvalidTarUmask, archive_mod.archive(gpa, io, &out.writer, .{ .repo = &bad, .treeish = head }, .{}));
 }
 
 test "a stored zip is git's byte for byte, and a deflated one holds the same files" {
@@ -249,7 +249,7 @@ test "a commit dated before 1970 is archived as git archives it: a tar with git'
     if (builtin.target.os.tag != .windows) try std.testing.expect(zip.code != 0);
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
-    try std.testing.expectError(error.TimestampTooLarge, archive_mod.archive(gpa, io, .{ .repo = &repo, .treeish = commit }, &out.writer, .{ .format = .zip }));
+    try std.testing.expectError(error.TimestampTooLarge, archive_mod.archive(gpa, io, &out.writer, .{ .repo = &repo, .treeish = commit }, .{ .format = .zip }));
 }
 
 test "a tree deeper than sixty-four directories, and a zip of more entries than its end record counts, are git's byte for byte" {

@@ -208,12 +208,12 @@ pub fn negotiateOnly(gpa: Allocator, io: Io, conn: *Connection, inputs: Inputs) 
             pkt_line.write(w, "wait-for-done") catch |e| break :write e;
             for (request.include_haves) |oid| {
                 if (!try negotiator.haveSent(oid)) continue;
-                pkt_line.print("have {f}\n", .{oid}, w) catch |e| break :write e;
+                pkt_line.print(w, "have {f}\n", .{oid}) catch |e| break :write e;
             }
             var added: usize = 0;
             while (added < haves_to_send) {
                 const oid = (try negotiator.next()) orelse break;
-                pkt_line.print("have {f}\n", .{oid}, w) catch |e| break :write e;
+                pkt_line.print(w, "have {f}\n", .{oid}) catch |e| break :write e;
                 added += 1;
             }
             haves_to_send = nextFlush(haves_to_send);
@@ -399,18 +399,18 @@ fn writeFetchV2(
     if (request.include_tag) try pkt_line.write(w, "include-tag");
     try pkt_line.write(w, "ofs-delta");
     try writeShallowRequest(w, request, true);
-    if (request.filter) |spec| try pkt_line.print("filter {s}", .{spec}, w);
-    for (request.wants) |oid| try pkt_line.print("want {f}\n", .{oid}, w);
-    for (common) |oid| try pkt_line.print("have {f}\n", .{oid}, w);
+    if (request.filter) |spec| try pkt_line.print(w, "filter {s}", .{spec});
+    for (request.wants) |oid| try pkt_line.print(w, "want {f}\n", .{oid});
+    for (common) |oid| try pkt_line.print(w, "have {f}\n", .{oid});
     // git's `add_haves`: the included ones every round, not counted.
     for (request.include_haves) |oid| {
         if (!try negotiator.haveSent(oid)) continue;
-        try pkt_line.print("have {f}\n", .{oid}, w);
+        try pkt_line.print(w, "have {f}\n", .{oid});
     }
     var added: usize = 0;
     while (added < haves_to_send) {
         const oid = (try negotiator.next()) orelse break;
-        try pkt_line.print("have {f}\n", .{oid}, w);
+        try pkt_line.print(w, "have {f}\n", .{oid});
         added += 1;
     }
     in_vain.* += added;
@@ -424,11 +424,11 @@ fn writeFetchV2(
 /// git's `add_shallow_requests`: the boundary, then how to move it.
 /// In v0 `deepen-relative` is a capability rather than a line.
 fn writeShallowRequest(w: *Io.Writer, request: Request, v2: bool) pkt_line.WriteError!void {
-    for (request.shallow) |oid| try pkt_line.print("shallow {f}\n", .{oid}, w);
+    for (request.shallow) |oid| try pkt_line.print(w, "shallow {f}\n", .{oid});
     const deepen = request.deepen orelse return;
-    if (deepen.depth) |depth| try pkt_line.print("deepen {d}", .{depth}, w);
-    if (deepen.since) |since| try pkt_line.print("deepen-since {d}", .{since}, w);
-    for (deepen.not) |name| try pkt_line.print("deepen-not {s}", .{name}, w);
+    if (deepen.depth) |depth| try pkt_line.print(w, "deepen {d}", .{depth});
+    if (deepen.since) |since| try pkt_line.print(w, "deepen-since {d}", .{since});
+    for (deepen.not) |name| try pkt_line.print(w, "deepen-not {s}", .{name});
     if (v2 and deepen.relative) try pkt_line.write(w, "deepen-relative\n");
 }
 
@@ -620,7 +620,7 @@ fn fetchV0(
     var acked: Oid = undefined;
     count += try offerIncluded(&round.writer, request, negotiator);
     negotiate: while (try negotiator.next()) |oid| {
-        pkt_line.print("have {f}\n", .{oid}, &round.writer) catch return error.OutOfMemory;
+        pkt_line.print(&round.writer, "have {f}\n", .{oid}) catch return error.OutOfMemory;
         in_vain += 1;
         count += 1;
         if (count < flush_at) continue;
@@ -651,8 +651,8 @@ fn fetchV0(
                     if (stateless and ack == .common and !was_common) {
                         // Replayed in every request after, so the server
                         // keeps knowing it.
-                        pkt_line.print("have {f}\n", .{acked}, &state.writer) catch return error.OutOfMemory;
-                        pkt_line.print("have {f}\n", .{acked}, &round.writer) catch return error.OutOfMemory;
+                        pkt_line.print(&state.writer, "have {f}\n", .{acked}) catch return error.OutOfMemory;
+                        pkt_line.print(&round.writer, "have {f}\n", .{acked}) catch return error.OutOfMemory;
                         in_vain = 0;
                     } else if (!stateless or ack != .common) in_vain = 0;
                     acked_any = true;
@@ -691,7 +691,7 @@ fn fetchV0(
 /// the flush but not as offered in vain. How many.
 fn offerIncluded(w: *Io.Writer, request: Request, negotiator: *Negotiator) Error!usize {
     for (request.include_haves) |oid| {
-        pkt_line.print("have {f}\n", .{oid}, w) catch return error.OutOfMemory;
+        pkt_line.print(w, "have {f}\n", .{oid}) catch return error.OutOfMemory;
         _ = try negotiator.haveSent(oid);
     }
     return request.include_haves.len;
@@ -789,7 +789,7 @@ fn writeWantsV0(
 ) (pkt_line.WriteError || Allocator.Error)!void {
     for (request.wants, 0..) |oid, i| {
         if (i != 0) {
-            try pkt_line.print("want {f}\n", .{oid}, w);
+            try pkt_line.print(w, "want {f}\n", .{oid});
             continue;
         }
         var caps_buffer: [512]u8 = undefined;
@@ -812,10 +812,10 @@ fn writeWantsV0(
         if (request.filter != null) try c.writeAll(" filter");
         // git names the hash only when it is not SHA-1.
         if (adv.has("object-format") and adv.kind != .sha1) try c.print(" object-format={s}", .{adv.kind.name()});
-        try pkt_line.print("want {f}{s}\n", .{ oid, caps.buffered() }, w);
+        try pkt_line.print(w, "want {f}{s}\n", .{ oid, caps.buffered() });
     }
     try writeShallowRequest(w, request, false);
-    if (request.filter) |spec| try pkt_line.print("filter {s}", .{spec}, w);
+    if (request.filter) |spec| try pkt_line.print(w, "filter {s}", .{spec});
     try pkt_line.flush(w);
 }
 

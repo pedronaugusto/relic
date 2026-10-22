@@ -225,19 +225,19 @@ pub const Server = struct {
 
     fn advertiseV2(s: *Server, w: *Io.Writer) (pkt_line.WriteError || Allocator.Error)!void {
         try pkt_line.write(w, "version 2\n");
-        try pkt_line.print("agent={s}\n", .{protocol.agent}, w);
+        try pkt_line.print(w, "agent={s}\n", .{protocol.agent});
         try pkt_line.write(w, "ls-refs=unborn\n");
-        try pkt_line.print("fetch=shallow wait-for-done{s}{s}\n", .{ if (s.allow_filter) " filter" else "", if (s.allow_ref_in_want) " ref-in-want" else "" }, w);
+        try pkt_line.print(w, "fetch=shallow wait-for-done{s}{s}\n", .{ if (s.allow_filter) " filter" else "", if (s.allow_ref_in_want) " ref-in-want" else "" });
         try pkt_line.write(w, "server-option\n");
-        try pkt_line.print("object-format={s}\n", .{s.kind().name()}, w);
-        if (s.sessionId()) |sid| try pkt_line.print("session-id={s}\n", .{sid}, w);
+        try pkt_line.print(w, "object-format={s}\n", .{s.kind().name()});
+        if (s.sessionId()) |sid| try pkt_line.print(w, "session-id={s}\n", .{sid});
         if (s.advertise_object_info) try pkt_line.write(w, "object-info\n");
         if (s.advertise_bundle_uris) try pkt_line.write(w, "bundle-uri\n");
         // `promisor.advertise`: the promisor remotes this one borrows from.
         var arena_state: std.heap.ArenaAllocator = .init(s.gpa);
         defer arena_state.deinit();
         if (try promisors.advertisement(arena_state.allocator(), s.remote.repo.configuration(), null)) |info| {
-            try pkt_line.print("promisor-remote={s}\n", .{info}, w);
+            try pkt_line.print(w, "promisor-remote={s}\n", .{info});
         }
         try pkt_line.flush(w);
     }
@@ -268,12 +268,12 @@ pub const Server = struct {
         for (refs.refs) |ref| {
             if (ref.unborn) continue;
             if (first) {
-                try pkt_line.print("{f} {s}\x00{s}\n", .{ ref.oid, ref.name, caps.items }, w);
+                try pkt_line.print(w, "{f} {s}\x00{s}\n", .{ ref.oid, ref.name, caps.items });
                 first = false;
-            } else try pkt_line.print("{f} {s}\n", .{ ref.oid, ref.name }, w);
-            if (ref.peeled) |p| try pkt_line.print("{f} {s}^{{}}\n", .{ p, ref.name }, w);
+            } else try pkt_line.print(w, "{f} {s}\n", .{ ref.oid, ref.name });
+            if (ref.peeled) |p| try pkt_line.print(w, "{f} {s}^{{}}\n", .{ p, ref.name });
         }
-        if (first) try pkt_line.print("{f} capabilities^{{}}\x00{s}\n", .{ Oid.zero(s.kind()), caps.items }, w);
+        if (first) try pkt_line.print(w, "{f} capabilities^{{}}\x00{s}\n", .{ Oid.zero(s.kind()), caps.items });
         // A shallow server says where its history ends, as git's does.
         const boundary = try s.gpa.alloc(Oid, s.db().shallow.count());
         defer s.gpa.free(boundary);
@@ -285,13 +285,13 @@ pub const Server = struct {
                 return a.order(b) == .lt;
             }
         }.lessThan);
-        for (boundary) |oid| try pkt_line.print("shallow {f}\n", .{oid}, w);
+        for (boundary) |oid| try pkt_line.print(w, "shallow {f}\n", .{oid});
         try pkt_line.flush(w);
     }
 
     /// A whole conversation over a pipe: the advertisement, then every
     /// request until the client ends it.
-    pub fn serve(s: *Server, in: *Io.Reader, out: *Io.Writer) Self.Error!void {
+    pub fn serve(s: *Server, out: *Io.Writer, in: *Io.Reader) Self.Error!void {
         try s.advertise(out);
         out.flush() catch return error.WriteFailed;
         switch (s.version) {
@@ -303,7 +303,7 @@ pub const Server = struct {
 
     /// One request of a stateless conversation: a v2 command, or a v0
     /// round of wants and haves.
-    pub fn serveRequest(s: *Server, in: *Io.Reader, out: *Io.Writer) Self.Error!void {
+    pub fn serveRequest(s: *Server, out: *Io.Writer, in: *Io.Reader) Self.Error!void {
         switch (s.version) {
             .v2 => _ = try s.commandV2(in, out),
             .v0, .v1 => try s.conversationV0(in, out),
@@ -388,13 +388,13 @@ pub const Server = struct {
                     size = true;
                 } else if (std.mem.startsWith(u8, arg, "oid ")) {
                     try oids.append(arena, arg["oid ".len..]);
-                } else pkt_line.print("ERR object-info: unexpected line: '{s}'", .{arg}, out) catch |e| break :write e;
+                } else pkt_line.print(out, "ERR object-info: unexpected line: '{s}'", .{arg}) catch |e| break :write e;
             }
             if (oids.items.len != 0) {
                 if (size) pkt_line.write(out, "size") catch |e| break :write e;
                 for (oids.items) |text| {
                     const oid = s.parseOid(text) orelse {
-                        pkt_line.print("ERR object-info: protocol error, expected to get oid, not '{s}'", .{text}, out) catch |e| break :write e;
+                        pkt_line.print(out, "ERR object-info: protocol error, expected to get oid, not '{s}'", .{text}) catch |e| break :write e;
                         continue;
                     };
                     if (!size) {
@@ -403,8 +403,8 @@ pub const Server = struct {
                     }
                     if (try s.db().exists(s.io, oid)) {
                         const header = try s.db().readHeader(s.io, oid);
-                        pkt_line.print("{s} {d}", .{ text, header.size }, out) catch |e| break :write e;
-                    } else pkt_line.print("{s} ", .{text}, out) catch |e| break :write e;
+                        pkt_line.print(out, "{s} {d}", .{ text, header.size }) catch |e| break :write e;
+                    } else pkt_line.print(out, "{s} ", .{text}) catch |e| break :write e;
                 }
             }
             pkt_line.flush(out) catch |e| break :write e;
@@ -510,7 +510,7 @@ pub const Server = struct {
                 (write: {
                     pkt_line.write(out, "acknowledgments\n") catch |e| break :write e;
                     if (n.have_obj.items.len == 0) pkt_line.write(out, "NAK\n") catch |e| break :write e;
-                    for (n.have_obj.items) |oid| pkt_line.print("ACK {f}\n", .{oid}, out) catch |e| break :write e;
+                    for (n.have_obj.items) |oid| pkt_line.print(out, "ACK {f}\n", .{oid}) catch |e| break :write e;
                 }) catch |err| return writeError(err);
                 if (!wait_for_done and try n.okToGiveUp()) {
                     pkt_line.write(out, "ready\n") catch |err| return writeError(err);
@@ -526,7 +526,7 @@ pub const Server = struct {
         // git's `send_wanted_ref_info`.
         if (n.wanted_refs.items.len != 0) {
             pkt_line.write(out, "wanted-refs\n") catch |err| return writeError(err);
-            for (n.wanted_refs.items) |ref| pkt_line.print("{f} {s}\n", .{ ref.oid, ref.name }, out) catch |err| return writeError(err);
+            for (n.wanted_refs.items) |ref| pkt_line.print(out, "{f} {s}\n", .{ ref.oid, ref.name }) catch |err| return writeError(err);
             pkt_line.delim(out) catch |err| return writeError(err);
         }
         if (n.depth != 0 or n.deepen_since != null or n.deepen_not.items.len != 0 or n.client_shallows.items.len != 0 or s.db().shallow.count() != 0) {
@@ -644,7 +644,7 @@ pub const Server = struct {
     }
 
     fn sendError(_: *Server, out: *Io.Writer, text: []const u8) Error!void {
-        pkt_line.print("ERR upload-pack: {s}\n", .{text}, out) catch return error.WriteFailed;
+        pkt_line.print(out, "ERR upload-pack: {s}\n", .{text}) catch return error.WriteFailed;
         out.flush() catch return error.WriteFailed;
     }
 
@@ -657,7 +657,7 @@ pub const Server = struct {
     /// sends one with no `upload-pack:` before it, and the conversation
     /// ends.
     fn refusePlain(_: *Server, out: *Io.Writer, comptime fmt: []const u8, args: anytype, err: Error) Error {
-        pkt_line.print("ERR " ++ fmt ++ "\n", args, out) catch return error.WriteFailed;
+        pkt_line.print(out, "ERR " ++ fmt ++ "\n", args) catch return error.WriteFailed;
         out.flush() catch return error.WriteFailed;
         return err;
     }
@@ -852,11 +852,11 @@ const Negotiation = struct {
                     (write: {
                         if (multi_ack == 2 and got_common and !got_other and try n.okToGiveUp()) {
                             sent_ready = true;
-                            pkt_line.print("ACK {f} ready\n", .{last.?}, out) catch |e| break :write e;
+                            pkt_line.print(out, "ACK {f} ready\n", .{last.?}) catch |e| break :write e;
                         }
                         if (n.have_obj.items.len == 0 or multi_ack != 0) pkt_line.write(out, "NAK\n") catch |e| break :write e;
                         if (no_done and sent_ready) {
-                            pkt_line.print("ACK {f}\n", .{last.?}, out) catch |e| break :write e;
+                            pkt_line.print(out, "ACK {f}\n", .{last.?}) catch |e| break :write e;
                             out.flush() catch |e| break :write e;
                             return true;
                         }
@@ -877,8 +877,8 @@ const Negotiation = struct {
                     if (multi_ack != 0 and try n.okToGiveUp()) {
                         if (multi_ack == 2) {
                             sent_ready = true;
-                            pkt_line.print("ACK {f} ready\n", .{oid}, out) catch |err| return writeError(err);
-                        } else pkt_line.print("ACK {f} continue\n", .{oid}, out) catch |err| return writeError(err);
+                            pkt_line.print(out, "ACK {f} ready\n", .{oid}) catch |err| return writeError(err);
+                        } else pkt_line.print(out, "ACK {f} continue\n", .{oid}) catch |err| return writeError(err);
                     }
                     continue;
                 }
@@ -886,18 +886,18 @@ const Negotiation = struct {
                 got_common = true;
                 last = oid;
                 (if (multi_ack == 2)
-                    pkt_line.print("ACK {f} common\n", .{oid}, out)
+                    pkt_line.print(out, "ACK {f} common\n", .{oid})
                 else if (multi_ack == 1)
-                    pkt_line.print("ACK {f} continue\n", .{oid}, out)
+                    pkt_line.print(out, "ACK {f} continue\n", .{oid})
                 else if (n.have_obj.items.len == 1)
-                    pkt_line.print("ACK {f}\n", .{oid}, out)
+                    pkt_line.print(out, "ACK {f}\n", .{oid})
                 else {}) catch |err| return writeError(err);
                 continue;
             }
             if (std.mem.eql(u8, line, "done")) {
                 (write: {
                     if (n.have_obj.items.len > 0) {
-                        if (multi_ack != 0) pkt_line.print("ACK {f}\n", .{last.?}, out) catch |e| break :write e;
+                        if (multi_ack != 0) pkt_line.print(out, "ACK {f}\n", .{last.?}) catch |e| break :write e;
                     } else pkt_line.write(out, "NAK\n") catch |e| break :write e;
                 }) catch |err| return writeError(err);
                 return true;
@@ -1035,7 +1035,7 @@ const Negotiation = struct {
             const oid = result[i];
             if (n.client_shallow_set.contains(oid) or n.not_shallow.contains(oid)) continue;
             if (n.boundary.contains(oid)) continue;
-            pkt_line.print("shallow {f}\n", .{oid}, out) catch |err| return writeError(err);
+            pkt_line.print(out, "shallow {f}\n", .{oid}) catch |err| return writeError(err);
             try n.boundary.put(n.arena, oid, {});
         }
     }
@@ -1045,7 +1045,7 @@ const Negotiation = struct {
     fn sendUnshallow(n: *Negotiation, out: *Io.Writer) Error!void {
         for (n.client_shallows.items) |oid| {
             if (n.not_shallow.contains(oid)) {
-                pkt_line.print("unshallow {f}\n", .{oid}, out) catch |err| return writeError(err);
+                pkt_line.print(out, "unshallow {f}\n", .{oid}) catch |err| return writeError(err);
                 const c = (try n.commit(oid)) orelse continue;
                 for (c.parents) |p| try n.extra_wants.append(n.arena, p);
                 try n.edges.append(n.arena, oid);
@@ -1554,7 +1554,7 @@ fn fuzzServe(remote: *local.Remote, case: *shakedown.Case) anyerror!void {
         var out: Io.Writer.Allocating = .init(std.testing.allocator);
         defer out.deinit();
         // glint-ignore: Z026 -- refusing a malformed request is the expected outcome; only a crash or a leak fails the fuzzer
-        server.serveRequest(&limited.interface, &out.writer) catch {};
+        server.serveRequest(&out.writer, &limited.interface) catch {};
     }
 }
 

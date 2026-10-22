@@ -159,7 +159,7 @@ pub const UntrackedCache = struct {
 
     /// The extension's bytes, as git's `write_untracked_extension` writes
     /// them, into `out`.
-    pub fn write(uc: *const UntrackedCache, gpa: Allocator, kind: hash.Kind, out: *Io.Writer) Self.Error!void {
+    pub fn write(uc: *const UntrackedCache, gpa: Allocator, out: *Io.Writer, kind: hash.Kind) Self.Error!void {
         const raw_len = kind.rawLen();
         try writeVarint(out, uc.ident.len);
         try out.writeAll(uc.ident);

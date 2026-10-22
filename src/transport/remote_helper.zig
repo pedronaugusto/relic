@@ -689,7 +689,7 @@ pub const Helper = struct {
         const conn = h.conn.?;
         const w = try conn.request();
         const export_tmp = if (h.export_marks) |m| try arena.print("{s}.tmp", .{m}) else null;
-        fast_export.write(h.gpa, h.io, repo, w, .{
+        fast_export.write(h.gpa, h.io, w, repo, .{
             .tips = tips.items,
             .exclude = exclude.items,
             .use_done_feature = true,

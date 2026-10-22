@@ -203,7 +203,7 @@ fn compare(gpa: Allocator, io: Io, git: *testgit.Repo, command: Command, args: [
                 try keys.append(arena, .{ .atom = "refname" });
                 try keys.appendSlice(arena, p.sort.items);
             }
-            try filter.listRefs(gpa, io, &repo, .{
+            try filter.listRefs(gpa, io, &ours.writer, &repo, .{
                 .filter = .{
                     .kinds = if (p.root_refs) .{ .branches = true, .remotes = true, .tags = true, .others = true, .detached_head = true, .root_refs = true } else .regular,
                     .patterns = p.patterns.items,
@@ -223,9 +223,9 @@ fn compare(gpa: Allocator, io: Io, git: *testgit.Repo, command: Command, args: [
                 .count = p.count,
                 .omit_empty = p.omit_empty,
                 .context = context,
-            }, &ours.writer);
+            });
         },
-        .branch => try filter.listBranches(gpa, io, &repo, .{
+        .branch => try filter.listBranches(gpa, io, &ours.writer, &repo, .{
             .which = p.which,
             .patterns = p.patterns.items,
             .verbose = p.verbose,
@@ -242,8 +242,8 @@ fn compare(gpa: Allocator, io: Io, git: *testgit.Repo, command: Command, args: [
             .omit_empty = p.omit_empty,
             .colors = if (branch_colors) |*c| c else null,
             .context = context,
-        }, &ours.writer),
-        .tag => try filter.listTags(gpa, io, &repo, .{
+        }),
+        .tag => try filter.listTags(gpa, io, &ours.writer, &repo, .{
             .patterns = p.patterns.items,
             .lines = p.lines,
             .sort = p.sort.items,
@@ -261,7 +261,7 @@ fn compare(gpa: Allocator, io: Io, git: *testgit.Repo, command: Command, args: [
                 c.color = try color.wanted(repo.configuration(), &.{}, output);
                 break :ctx c;
             },
-        }, &ours.writer),
+        }),
     }
     if (!std.mem.eql(u8, theirs, ours.written())) {
         std.debug.print("git {s}", .{argv.items[0]});

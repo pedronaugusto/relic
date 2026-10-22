@@ -1264,7 +1264,7 @@ pub const FormatNoteError = Error || Io.Writer.Error;
 /// with no note.
 pub const FormatOptions = struct { raw: bool = false };
 
-pub fn formatNote(io: Io, t: *Notes, obj: Oid, w: *Io.Writer, options: FormatOptions) FormatNoteError!void {
+pub fn formatNote(io: Io, w: *Io.Writer, t: *Notes, obj: Oid, options: FormatOptions) FormatNoteError!void {
     const raw = options.raw;
     const note = (try t.get(io, obj)) orelse return;
     const found = t.repo.objectDatabase().read(io, note) catch return;
@@ -1355,7 +1355,7 @@ pub const DisplayNotes = struct {
     /// git's `format_display_notes`: `obj`'s note in each tree, in order,
     /// as `formatNote` writes one.
     pub fn format(d: *DisplayNotes, io: Io, obj: Oid, w: *Io.Writer, options: FormatOptions) FormatNoteError!void {
-        for (d.trees) |*t| try formatNote(io, t, obj, w, options);
+        for (d.trees) |*t| try formatNote(io, w, t, obj, options);
     }
 
     pub fn deinit(d: *DisplayNotes) void {
@@ -1938,7 +1938,7 @@ test "notes added, appended, copied and removed are git's commits, trees and log
             for ([_][]const u8{ "refs/notes/commits", "refs/notes/other" }) |ref| {
                 var n = try Notes.open(gpa, io, &repo, ref, .concatenate);
                 defer n.deinit();
-                try formatNote(io, &n, try Oid.parse(.sha1, commit_hex), &out.writer, .{});
+                try formatNote(io, &out.writer, &n, try Oid.parse(.sha1, commit_hex), .{});
             }
             try std.testing.expect(std.mem.endsWith(u8, shown, out.written()));
         }

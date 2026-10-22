@@ -35,7 +35,7 @@ fn compare(gpa: Allocator, io: Io, git: *testgit.Repo, args: []const []const u8,
     defer repo.deinit(io);
     var ours: Io.Writer.Allocating = .init(gpa);
     defer ours.deinit();
-    try range_diff.write(gpa, io, .{ .repo = &repo, .old = old, .new = new }, &ours.writer, options);
+    try range_diff.write(gpa, io, &ours.writer, .{ .repo = &repo, .old = old, .new = new }, options);
     std.testing.expectEqualStrings(theirs, ours.written()) catch |err| {
         for (args) |arg| std.debug.print("{s} ", .{arg});
         std.debug.print(": range-diff differs\n", .{});
@@ -247,8 +247,8 @@ test "a cost matrix past the limit is refused, as git refuses it" {
     defer out.deinit();
     const old = try range(gpa, io, &git, "base", "old");
     const new = try range(gpa, io, &git, "base", "new");
-    try std.testing.expectError(error.RangeDiffTooLarge, range_diff.write(gpa, io, .{ .repo = &repo, .old = old, .new = new }, &out.writer, .{ .max_memory = .fromRaw(100) }));
-    try std.testing.expectError(error.LeftAndRightOnly, range_diff.write(gpa, io, .{ .repo = &repo, .old = old, .new = new }, &out.writer, .{ .left_only = true, .right_only = true }));
+    try std.testing.expectError(error.RangeDiffTooLarge, range_diff.write(gpa, io, &out.writer, .{ .repo = &repo, .old = old, .new = new }, .{ .max_memory = .fromRaw(100) }));
+    try std.testing.expectError(error.LeftAndRightOnly, range_diff.write(gpa, io, &out.writer, .{ .repo = &repo, .old = old, .new = new }, .{ .left_only = true, .right_only = true }));
 }
 
 test "a range-diff in colour is git's, in dual colour and without, under color.diff.<slot>" {

@@ -425,7 +425,7 @@ const Run = struct {
             defer out.close(run.io);
             var buf: [64 * 1024]u8 = undefined;
             var w = out.writer(run.io, &buf);
-            transport.download(run.gpa, run.io, uri, &w.interface, run.options.transport) catch |err| switch (err) {
+            transport.download(run.gpa, run.io, &w.interface, uri, run.options.transport) catch |err| switch (err) {
                 error.Canceled => return error.Canceled,
                 error.OutOfMemory => return error.OutOfMemory,
                 else => return false,

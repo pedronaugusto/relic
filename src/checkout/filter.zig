@@ -596,7 +596,7 @@ pub const Protocol = struct {
     }
 
     fn print(p: *Protocol, comptime fmt: []const u8, args: anytype) ProtocolError!void {
-        pkt_line.print(fmt, args, p.out) catch return error.FilterGone;
+        pkt_line.print(p.out, fmt, args) catch return error.FilterGone;
     }
 
     fn flushOnly(p: *Protocol) ProtocolError!void {

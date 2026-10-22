@@ -267,7 +267,7 @@ pub const Session = struct {
         const read = store.vtable.read orelse return s.status(501, &.{}, &.{"the store does not carry objects"});
         const size = (try store.size(s.io, s.repository, oid[0..64])) orelse return s.status(404, &.{}, &.{"not found"});
         try s.writeLine("status 200\n");
-        s.write(pkt_line.print("size={d}\n", .{size}, s.out)) catch return error.WriteFailed;
+        s.write(pkt_line.print(s.out, "size={d}\n", .{size})) catch return error.WriteFailed;
         s.write(pkt_line.delim(s.out)) catch return error.WriteFailed;
         var buffer: [pkt_line.max_data]u8 = undefined;
         var data: DataWriter = .init(s.out, &buffer);
@@ -386,11 +386,11 @@ pub const Session = struct {
 
     /// `status <code>`, its arguments, and after a delimiter its lines.
     pub fn status(s: *Session, code: u16, args: []const []const u8, lines: ?[]const []const u8) Error!void {
-        s.write(pkt_line.print("status {d}\n", .{code}, s.out)) catch return error.WriteFailed;
-        for (args) |a| s.write(pkt_line.print("{s}\n", .{a}, s.out)) catch return error.WriteFailed;
+        s.write(pkt_line.print(s.out, "status {d}\n", .{code})) catch return error.WriteFailed;
+        for (args) |a| s.write(pkt_line.print(s.out, "{s}\n", .{a})) catch return error.WriteFailed;
         if (lines) |ls| {
             s.write(pkt_line.delim(s.out)) catch return error.WriteFailed;
-            for (ls) |l| s.write(pkt_line.print("{s}\n", .{l}, s.out)) catch return error.WriteFailed;
+            for (ls) |l| s.write(pkt_line.print(s.out, "{s}\n", .{l})) catch return error.WriteFailed;
         }
         s.write(pkt_line.flush(s.out)) catch return error.WriteFailed;
         s.out.flush() catch return error.WriteFailed;
@@ -580,17 +580,17 @@ test "a connection is served whole: an object up, checked and down, a lock taken
     try pkt_line.flush(w);
     try pkt_line.write(w, "batch\n");
     try pkt_line.delim(w);
-    try pkt_line.print("{s} {d}\n", .{ &oid, content.len }, w);
+    try pkt_line.print(w, "{s} {d}\n", .{ &oid, content.len });
     try pkt_line.flush(w);
-    try pkt_line.print("put-object {s}\n", .{&oid}, w);
-    try pkt_line.print("size={d}\n", .{content.len}, w);
+    try pkt_line.print(w, "put-object {s}\n", .{&oid});
+    try pkt_line.print(w, "size={d}\n", .{content.len});
     try pkt_line.delim(w);
     try pkt_line.write(w, content);
     try pkt_line.flush(w);
-    try pkt_line.print("verify-object {s}\n", .{&oid}, w);
-    try pkt_line.print("size={d}\n", .{content.len}, w);
+    try pkt_line.print(w, "verify-object {s}\n", .{&oid});
+    try pkt_line.print(w, "size={d}\n", .{content.len});
     try pkt_line.flush(w);
-    try pkt_line.print("get-object {s}\n", .{&oid}, w);
+    try pkt_line.print(w, "get-object {s}\n", .{&oid});
     try pkt_line.flush(w);
     try pkt_line.write(w, "lock\n");
     try pkt_line.write(w, "path=a.bin\n");

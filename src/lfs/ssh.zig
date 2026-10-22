@@ -146,7 +146,7 @@ pub const Connection = struct {
     pub fn sendLines(c: *Connection, io: Io, command: []const u8, args: []const []const u8, lines: []const []const u8) Self.Error!void {
         try c.writeHead(io, command, args);
         pkt_line.delim((try connection.Process.streams(c.conn, io)).writer) catch |err| return c.conn.writeFailed(err);
-        for (lines) |line| pkt_line.print("{s}\n", .{line}, (try connection.Process.streams(c.conn, io)).writer) catch |err| return c.conn.writeFailed(err);
+        for (lines) |line| pkt_line.print((try connection.Process.streams(c.conn, io)).writer, "{s}\n", .{line}) catch |err| return c.conn.writeFailed(err);
         pkt_line.flush((try connection.Process.streams(c.conn, io)).writer) catch |err| return c.conn.writeFailed(err);
     }
 
@@ -173,8 +173,8 @@ pub const Connection = struct {
     }
 
     fn writeHead(c: *Connection, io: Io, command: []const u8, args: []const []const u8) ErrorNamespace.Error!void {
-        pkt_line.print("{s}\n", .{command}, (try connection.Process.streams(c.conn, io)).writer) catch |err| return c.conn.writeFailed(err);
-        for (args) |a| pkt_line.print("{s}\n", .{a}, (try connection.Process.streams(c.conn, io)).writer) catch |err| return c.conn.writeFailed(err);
+        pkt_line.print((try connection.Process.streams(c.conn, io)).writer, "{s}\n", .{command}) catch |err| return c.conn.writeFailed(err);
+        for (args) |a| pkt_line.print((try connection.Process.streams(c.conn, io)).writer, "{s}\n", .{a}) catch |err| return c.conn.writeFailed(err);
     }
 
     fn flushOut(c: *Connection, io: Io) ErrorNamespace.Error!void {

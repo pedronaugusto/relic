@@ -2261,7 +2261,7 @@ pub const Odb = struct {
         };
         var writer = switch (target) {
             .dir => |pack_dir| try pack.Writer.open(gpa, io, pack_dir, .{ .kind = odb.backendData().kind, .object_count = @intCast(entries.len) }, write_options),
-            .stream => |out| try pack.Writer.openStream(gpa, .{ .kind = odb.backendData().kind, .object_count = @intCast(entries.len) }, out, write_options),
+            .stream => |out| try pack.Writer.openStream(gpa, out, .{ .kind = odb.backendData().kind, .object_count = @intCast(entries.len) }, write_options),
         };
         defer writer.deinit(io);
 

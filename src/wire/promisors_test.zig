@@ -103,7 +103,7 @@ test "a served repository advertises its promisor remotes as git's upload-pack d
     var in = fixed.limited(.unlimited, &buffer);
     var answer: Io.Writer.Allocating = .init(gpa);
     defer answer.deinit();
-    try s.serveRequest(&in.interface, &answer.writer);
+    try s.serveRequest(&answer.writer, &in.interface);
     try testing.expect(s.promisor_taken);
 }
 

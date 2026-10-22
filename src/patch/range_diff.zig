@@ -152,7 +152,7 @@ pub fn compute(gpa: Allocator, io: Io, repo: *Repository, inputs: Inputs, option
 /// the new range, an old commit with no partner once those before it have
 /// been shown, and under a pair whose patches differ, the diff between
 /// them; in `Options.colors` where there are.
-pub fn write(gpa: Allocator, io: Io, inputs: WriteInputs, w: *Io.Writer, options: Options) Self.Error!void {
+pub fn write(gpa: Allocator, io: Io, w: *Io.Writer, inputs: WriteInputs, options: Options) Self.Error!void {
     const repo = inputs.repo;
     const old = inputs.old;
     const new = inputs.new;
@@ -249,7 +249,7 @@ const Reader = struct {
         try appendMessage(a, &text, commit.message);
         if (r.notes) |*n| {
             var shown: Io.Writer.Allocating = .init(a);
-            try notes_mod.formatNote(r.io, n, oid, &shown.writer, .{ .raw = false });
+            try notes_mod.formatNote(r.io, &shown.writer, n, oid, .{ .raw = false });
             var lines = std.mem.splitScalar(u8, shown.written(), '\n');
             while (lines.next()) |line| {
                 if (std.mem.startsWith(u8, line, "Notes") and std.mem.endsWith(u8, line, ":")) {

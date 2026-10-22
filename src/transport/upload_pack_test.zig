@@ -401,7 +401,7 @@ test "relic's upload-pack answers bundle-uri as git's under uploadpack.advertise
     var in = fixed.limited(.unlimited, &buffer);
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
-    try server.serveRequest(&in.interface, &out.writer);
+    try server.serveRequest(&out.writer, &in.interface);
     try testing.expectEqualStrings(theirs, out.written());
     try testing.expect(std.mem.find(u8, theirs, "bundle.One.B.uri=https://example.com/one.bundle") != null);
 
@@ -503,8 +503,8 @@ test "object-info answers each object's size as git's upload-pack does, and both
     try pkt_line.write(w, "object-format=sha1");
     try pkt_line.delim(w);
     try pkt_line.write(w, "size");
-    try pkt_line.print("oid {s}", .{commit}, w);
-    try pkt_line.print("oid {s}", .{tree}, w);
+    try pkt_line.print(w, "oid {s}", .{commit});
+    try pkt_line.print(w, "oid {s}", .{tree});
     try pkt_line.write(w, "oid 0123456789012345678901234567890123456789");
     try pkt_line.write(w, "oid nothing");
     try pkt_line.write(w, "bogus");

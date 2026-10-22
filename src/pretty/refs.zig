@@ -2150,7 +2150,7 @@ pub const Listing = struct {
     /// `omit_empty`.
     pub const WriteOptions = struct { count: usize = 0, omit_empty: bool = false };
 
-    pub fn write(l: *Listing, format: Format, writer: *Io.Writer, options: WriteOptions) WriteError!void {
+    pub fn write(l: *Listing, writer: *Io.Writer, format: Format, options: WriteOptions) WriteError!void {
         const count = options.count;
         const total = if (count == 0 or l.items.items.len < count) l.items.items.len else count;
         var line: std.ArrayList(u8) = .empty;
@@ -2729,13 +2729,13 @@ pub fn branchFormat(gpa: Allocator, l: *Listing, options: BranchOptions) Error![
 pub const ListRefsError = Error || Io.Writer.Error;
 
 /// Filter, sort and write as `git for-each-ref` does.
-pub fn listRefs(gpa: Allocator, io: Io, repo: *Repository, options: Options, writer: *Io.Writer) ListRefsError!void {
+pub fn listRefs(gpa: Allocator, io: Io, writer: *Io.Writer, repo: *Repository, options: Options) ListRefsError!void {
     var l = Listing.init(gpa, io, repo, options.context);
     defer l.deinit();
     const format = try l.parseFormat(options.format orelse for_each_ref_format, options.quote);
     try l.collect(options.filter);
     try l.sort(options.sort, options.sort_options);
-    try l.write(format, writer, .{ .count = options.count, .omit_empty = options.omit_empty });
+    try l.write(writer, format, .{ .count = options.count, .omit_empty = options.omit_empty });
 }
 
 /// Which branches `listBranches` lists: `git branch`, `-r` or `-a`.
@@ -2775,7 +2775,7 @@ pub const BranchListOptions = struct {
 pub const ListBranchesError = Error || Io.Writer.Error;
 
 /// List branches as `git branch --list` does.
-pub fn listBranches(gpa: Allocator, io: Io, repo: *Repository, options: BranchListOptions, writer: *Io.Writer) ListBranchesError!void {
+pub fn listBranches(gpa: Allocator, io: Io, writer: *Io.Writer, repo: *Repository, options: BranchListOptions) ListBranchesError!void {
     var context = options.context;
     context.color = options.colors != null;
     var l = Listing.init(gpa, io, repo, context);
@@ -2819,7 +2819,7 @@ pub fn listBranches(gpa: Allocator, io: Io, repo: *Repository, options: BranchLi
         try keys.appendSlice(l.a(), options.sort);
         try l.sort(keys.items, .{ .ignore_case = options.ignore_case, .detached_head_first = true });
     }
-    try l.write(format, writer, .{ .count = 0, .omit_empty = options.omit_empty });
+    try l.write(writer, format, .{ .count = 0, .omit_empty = options.omit_empty });
 }
 
 /// What `listTags` is asked: `git tag --list`'s options.
@@ -2846,7 +2846,7 @@ pub const TagListOptions = struct {
 pub const ListTagsError = Error || Io.Writer.Error;
 
 /// List tags as `git tag --list` does.
-pub fn listTags(gpa: Allocator, io: Io, repo: *Repository, options: TagListOptions, writer: *Io.Writer) ListTagsError!void {
+pub fn listTags(gpa: Allocator, io: Io, writer: *Io.Writer, repo: *Repository, options: TagListOptions) ListTagsError!void {
     var l = Listing.init(gpa, io, repo, options.context);
     defer l.deinit();
     const text = options.format orelse try tagFormat(l.a(), options.lines);
@@ -2870,7 +2870,7 @@ pub fn listTags(gpa: Allocator, io: Io, repo: *Repository, options: TagListOptio
         try keys.appendSlice(l.a(), options.sort);
         try l.sort(keys.items, .{ .ignore_case = options.ignore_case });
     }
-    try l.write(format, writer, .{ .count = 0, .omit_empty = options.omit_empty });
+    try l.write(writer, format, .{ .count = 0, .omit_empty = options.omit_empty });
 }
 
 test "version sort orders numbers by value and prerelease suffixes before their release" {

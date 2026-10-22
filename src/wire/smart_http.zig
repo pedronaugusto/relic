@@ -207,7 +207,7 @@ pub fn connect(gpa: Allocator, io: Io, url: url_mod.Url, service: Service, optio
 /// redirect is followed only under `http.followRedirects=true`, since
 /// `initial` follows a conversation's first request and a download is
 /// none. Any status but 200 is `HttpStatus`, as the helper's `get` fails.
-pub fn download(gpa: Allocator, io: Io, url: url_mod.Url, w: *Io.Writer, options: Options) (Self.Error || Io.Writer.Error)!void {
+pub fn download(gpa: Allocator, io: Io, w: *Io.Writer, url: url_mod.Url, options: Options) (Self.Error || Io.Writer.Error)!void {
     if (comptime !http_enabled) return error.HttpUnavailable;
     var plain = options;
     plain.protocol_v2 = false;

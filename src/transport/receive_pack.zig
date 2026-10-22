@@ -377,15 +377,15 @@ pub const Server = struct {
         if (first) try s.showRef(w, &first, "capabilities^{}", .zero(s.kind()), caps.items);
         const boundary = try sortedShallow(s.gpa, s.db());
         defer s.gpa.free(boundary);
-        for (boundary) |oid| try pkt_line.print("shallow {f}\n", .{oid}, w);
+        for (boundary) |oid| try pkt_line.print(w, "shallow {f}\n", .{oid});
         try pkt_line.flush(w);
     }
 
     fn showRef(_: *Server, w: *Io.Writer, first: *bool, name: []const u8, oid: Oid, caps: []const u8) pkt_line.WriteError!void {
         if (first.*) {
             first.* = false;
-            try pkt_line.print("{f} {s}\x00{s}\n", .{ oid, name, caps }, w);
-        } else try pkt_line.print("{f} {s}\n", .{ oid, name }, w);
+            try pkt_line.print(w, "{f} {s}\x00{s}\n", .{ oid, name, caps });
+        } else try pkt_line.print(w, "{f} {s}\n", .{ oid, name });
     }
 
     /// The tips of the repositories this one borrows objects from, as
@@ -402,14 +402,14 @@ pub const Server = struct {
     }
 
     /// A whole conversation over a pipe: the advertisement, then one push.
-    pub fn serve(s: *Server, in: *Io.Reader, out: *Io.Writer) Self.Error!void {
+    pub fn serve(s: *Server, out: *Io.Writer, in: *Io.Reader) Self.Error!void {
         try s.advertise(out);
         out.flush() catch return error.WriteFailed;
-        try s.serveRequest(in, out);
+        try s.serveRequest(out, in);
     }
 
     /// One push, its commands to its report and its last hooks.
-    pub fn serveRequest(s: *Server, in: *Io.Reader, out: *Io.Writer) Self.Error!void {
+    pub fn serveRequest(s: *Server, out: *Io.Writer, in: *Io.Reader) Self.Error!void {
         var arena_state: std.heap.ArenaAllocator = .init(s.gpa);
         defer arena_state.deinit();
         const arena = arena_state.allocator();
@@ -1171,7 +1171,7 @@ pub const Server = struct {
                 "\x00push-options"
             else
                 "";
-            pkt_line.print("version=1{s}\n", .{caps}, w) catch break :negotiate false;
+            pkt_line.print(w, "version=1{s}\n", .{caps}) catch break :negotiate false;
             pkt_line.flush(w) catch break :negotiate false;
             w.flush() catch break :negotiate false;
             while (true) {
@@ -1199,7 +1199,7 @@ pub const Server = struct {
         const sent = send: {
             for (commands) |cmd| {
                 if (!cmd.proc_receive or !cmd.processed()) continue;
-                pkt_line.print("{f} {f} {s}", .{ cmd.old, cmd.new, cmd.name }, w) catch break :send false;
+                pkt_line.print(w, "{f} {f} {s}", .{ cmd.old, cmd.new, cmd.name }) catch break :send false;
             }
             pkt_line.flush(w) catch break :send false;
             w.flush() catch break :send false;
@@ -1796,20 +1796,20 @@ pub const Server = struct {
         defer buf.deinit();
         const w = &buf.writer;
         (write: {
-            pkt_line.print("unpack {s}\n", .{unpack_status orelse "ok"}, w) catch |e| break :write e;
+            pkt_line.print(w, "unpack {s}\n", .{unpack_status orelse "ok"}) catch |e| break :write e;
             for (commands) |cmd| {
                 if (cmd.error_string) |why| {
-                    pkt_line.print("ng {s} {s}\n", .{ cmd.name, why }, w) catch |e| break :write e;
+                    pkt_line.print(w, "ng {s} {s}\n", .{ cmd.name, why }) catch |e| break :write e;
                     continue;
                 }
-                pkt_line.print("ok {s}\n", .{cmd.name}, w) catch |e| break :write e;
+                pkt_line.print(w, "ok {s}\n", .{cmd.name}) catch |e| break :write e;
                 // What a proc-receive hook made of it, in v2 alone.
                 if (!s.asked.report_status_v2) continue;
                 for (cmd.reports.items, 0..) |r, i| {
-                    if (i > 0) pkt_line.print("ok {s}\n", .{cmd.name}, w) catch |e| break :write e;
-                    if (r.name) |name| pkt_line.print("option refname {s}\n", .{name}, w) catch |e| break :write e;
-                    if (r.old) |oid| pkt_line.print("option old-oid {f}\n", .{oid}, w) catch |e| break :write e;
-                    if (r.new) |oid| pkt_line.print("option new-oid {f}\n", .{oid}, w) catch |e| break :write e;
+                    if (i > 0) pkt_line.print(w, "ok {s}\n", .{cmd.name}) catch |e| break :write e;
+                    if (r.name) |name| pkt_line.print(w, "option refname {s}\n", .{name}) catch |e| break :write e;
+                    if (r.old) |oid| pkt_line.print(w, "option old-oid {f}\n", .{oid}) catch |e| break :write e;
+                    if (r.new) |oid| pkt_line.print(w, "option new-oid {f}\n", .{oid}) catch |e| break :write e;
                     if (r.forced) pkt_line.write(w, "option forced-update\n") catch |e| break :write e;
                 }
             }
@@ -2194,5 +2194,5 @@ fn fuzzServe(remote: *local.Remote, case: *shakedown.Case) anyerror!void {
     var out: Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
     // glint-ignore: Z026 -- refusing a malformed request is the expected outcome; only a crash or a leak fails the fuzzer
-    server.serveRequest(&limited.interface, &out.writer) catch {};
+    server.serveRequest(&out.writer, &limited.interface) catch {};
 }

@@ -730,10 +730,10 @@ fn row6() !void {
         repo: *repo_mod.Repository,
         fn pass(l: @This()) !void {
             var sink: std.Io.Writer.Discarding = .init(&.{});
-            try relic.pretty.refs.listRefs(std.heap.smp_allocator, benchmark_io, l.repo, .{
+            try relic.pretty.refs.listRefs(std.heap.smp_allocator, benchmark_io, &sink.writer, l.repo, .{
                 .filter = .{ .patterns = &.{ "refs/heads/f*/1[0-9].*", "refs/tags/v*" }, .exclude = &.{"refs/tags/v1?.*"} },
                 .format = "%(refname)",
-            }, &sink.writer);
+            });
             std.mem.doNotOptimizeAway(sink.count);
         }
     };

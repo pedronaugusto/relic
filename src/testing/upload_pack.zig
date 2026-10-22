@@ -64,7 +64,7 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
     if (stateless) {
-        try server.serveRequest(&in.interface, &out.interface);
-    } else try server.serve(&in.interface, &out.interface);
+        try server.serveRequest(&out.interface, &in.interface);
+    } else try server.serve(&out.interface, &in.interface);
     try out.interface.flush();
 }

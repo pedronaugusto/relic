@@ -2012,7 +2012,7 @@ pub const Writer = struct {
 
     /// Begin a pack of a known count streamed to out, without a file or index.
     /// finish emits the checksum; flushing out belongs to the caller.
-    pub fn openStream(gpa: Allocator, inputs: StreamInputs, out: *Io.Writer, options: WriteOptions) Self.WriteError!*Writer {
+    pub fn openStream(gpa: Allocator, out: *Io.Writer, inputs: StreamInputs, options: WriteOptions) Self.WriteError!*Writer {
         const kind = inputs.kind;
         const object_count = inputs.object_count;
         const w = try gpa.create(Writer);
@@ -2699,7 +2699,7 @@ test "a pack written to a stream is byte for byte the pack written to a file" {
 
     var stream: Io.Writer.Allocating = .init(gpa);
     defer stream.deinit();
-    var stream_writer = try Writer.openStream(gpa, .{ .kind = .sha1, .object_count = 2 }, &stream.writer, .{});
+    var stream_writer = try Writer.openStream(gpa, &stream.writer, .{ .kind = .sha1, .object_count = 2 }, .{});
     defer stream_writer.deinit(io);
     const stream_at = try stream_writer.add(base_oid, .blob, base_bytes);
     _ = try stream_writer.addOfsDelta(target_oid, stream_at, patch);

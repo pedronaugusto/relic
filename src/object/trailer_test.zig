@@ -312,7 +312,7 @@ test "%(trailers) and %(contents:trailers) in a ref format write what git for-ea
         defer gpa.free(theirs);
         var ours: Io.Writer.Allocating = .init(gpa);
         defer ours.deinit();
-        try refs_filter.listRefs(gpa, io, &repo, .{ .format = full }, &ours.writer);
+        try refs_filter.listRefs(gpa, io, &ours.writer, &repo, .{ .format = full });
         std.testing.expectEqualStrings(theirs, ours.written()) catch |err| {
             std.debug.print("{s}\n", .{full});
             return err;

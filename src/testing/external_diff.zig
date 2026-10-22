@@ -97,7 +97,7 @@ fn ours(gpa: Allocator, io: Io, pair: *history.Pair, cached: bool, out: *Io.Writ
     var changes = try diff.tree(gpa, io, db, .{ .old = old, .new = new }, .{ .renames = .{} });
     defer changes.deinit();
     const drivers: driver.Drivers = .{ .attrs = &attrs, .work_dir = wt, .config = repo.configuration() };
-    try diff.unified(gpa, io, .{ .db = db, .changes = changes.items, .drivers = drivers, .external = &ext }, out, options);
+    try diff.unified(gpa, io, out, .{ .db = db, .changes = changes.items, .drivers = drivers, .external = &ext }, options);
 }
 
 fn expectSame(gpa: Allocator, io: Io, pair: *history.Pair) !void {

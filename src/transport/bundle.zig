@@ -477,12 +477,12 @@ pub fn create(gpa: Allocator, io: Io, repo: *Repository, target: Target, request
     var buffer: [64 * 1024]u8 = undefined;
     var lock = try fs.LockFile.open(gpa, io, dir, .{ .sub_path = path, .buffer = &buffer }, .{ .sync = .none });
     defer lock.deinit(io);
-    try write(gpa, io, repo, lock.writer(), request);
+    try write(gpa, io, lock.writer(), repo, request);
     try lock.commit(io);
 }
 
 /// Write the bundle `request` asks for to `w`: `git bundle create -`.
-pub fn write(gpa: Allocator, io: Io, repo: *Repository, w: *Io.Writer, request: CreateRequest) Self.CreateError!void {
+pub fn write(gpa: Allocator, io: Io, w: *Io.Writer, repo: *Repository, request: CreateRequest) Self.CreateError!void {
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
     const a = arena_state.allocator();

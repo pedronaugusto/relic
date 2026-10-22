@@ -163,7 +163,7 @@ fn converse(gpa: Allocator, io: Io, repo: *repo_mod.Repository, in: *Io.Reader, 
     // A filter's words go on channel two, as git's archiver's own do.
     var said: Io.Writer.Allocating = .init(arena);
     parsed.options.filter_messages = &said.writer;
-    const made = archive.archive(gpa, io, .{ .repo = repo, .treeish = oid }, band, parsed.options);
+    const made = archive.archive(gpa, io, band, .{ .repo = repo, .treeish = oid }, parsed.options);
     if (said.written().len != 0) side_band.send(out, .large, 2, said.written()) catch return error.WriteFailed;
     made catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -369,7 +369,7 @@ pub const Request = struct {
 
 /// git's `git archive --remote=<url> [<args>]`: the arguments sent as
 /// git's client sends them, and the archive written to `out`.
-pub fn fetch(gpa: Allocator, io: Io, request: Request, out: *Io.Writer, options: FetchOptions) FetchError!void {
+pub fn fetch(gpa: Allocator, io: Io, out: *Io.Writer, request: Request, options: FetchOptions) FetchError!void {
     const url = request.url;
     const parsed = try url_mod.Url.parse(url);
     const conn: *Connection = switch (parsed.scheme) {
@@ -401,7 +401,7 @@ pub fn fetch(gpa: Allocator, io: Io, request: Request, out: *Io.Writer, options:
     errdefer if (options.said) |said| said.keep(conn.message());
 
     const w = try conn.request();
-    for (request.args) |arg| pkt_line.print("argument {s}\n", .{arg}, w) catch |err| return conn.writeFailed(err);
+    for (request.args) |arg| pkt_line.print(w, "argument {s}\n", .{arg}) catch |err| return conn.writeFailed(err);
     pkt_line.flush(w) catch |err| return conn.writeFailed(err);
     const in = try conn.response();
     const first = pkt_line.read(in) catch return error.ProtocolError;
@@ -446,12 +446,12 @@ pub const Server = struct {
     pub fn advertise(_: *Server, _: *Io.Writer) ServeError!void {}
 
     /// One client, over `in` and `out`.
-    pub fn serve(s: *Server, in: *Io.Reader, out: *Io.Writer) ServeError!Served {
+    pub fn serve(s: *Server, out: *Io.Writer, in: *Io.Reader) ServeError!Served {
         return converse(s.gpa, s.io, s.repo, in, out, s.options);
     }
 
-    pub fn serveRequest(s: *Server, in: *Io.Reader, out: *Io.Writer) ServeError!void {
-        _ = try s.serve(in, out);
+    pub fn serveRequest(s: *Server, out: *Io.Writer, in: *Io.Reader) ServeError!void {
+        _ = try s.serve(out, in);
     }
 };
 

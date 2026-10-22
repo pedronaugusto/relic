@@ -333,7 +333,7 @@ pub fn listRefs(gpa: Allocator, conn: *Connection, adv: *const Advertisement, op
             try pkt_line.write(out, "peel\n");
             try pkt_line.write(out, "symrefs\n");
             if (want_unborn) try pkt_line.write(out, "unborn\n");
-            for (prefixes) |prefix| try pkt_line.print("ref-prefix {s}\n", .{prefix}, out);
+            for (prefixes) |prefix| try pkt_line.print(out, "ref-prefix {s}\n", .{prefix});
             try pkt_line.flush(out);
         }
     }).args(w, options.prefixes, unborn) catch |err| return conn.writeFailed(err);
@@ -412,14 +412,14 @@ pub fn writeCommand(w: *Io.Writer, adv: *const Advertisement, command: []const u
     const bundle_uri = std.mem.eql(u8, command, "bundle-uri");
     const fetch = std.mem.eql(u8, command, "fetch");
     if (std.mem.eql(u8, command, "ls-refs")) {
-        try pkt_line.print("command={s}\n", .{command}, w);
-    } else if (!bundle_uri) try pkt_line.print("command={s}", .{command}, w);
-    if (adv.has("agent")) try pkt_line.print("agent={s}", .{agent}, w);
-    if (extras.session_id) |sid| if (adv.has("session-id")) try pkt_line.print("session-id={s}", .{sid}, w);
-    if (fetch) for (extras.server_options) |option| try pkt_line.print("server-option={s}", .{option}, w);
-    if (adv.has("object-format")) try pkt_line.print("object-format={s}", .{adv.kind.name()}, w);
-    if (adv.promisor_reply) |names| try pkt_line.print("promisor-remote={s}", .{names}, w);
-    if (!fetch) for (extras.server_options) |option| try pkt_line.print("server-option={s}", .{option}, w);
+        try pkt_line.print(w, "command={s}\n", .{command});
+    } else if (!bundle_uri) try pkt_line.print(w, "command={s}", .{command});
+    if (adv.has("agent")) try pkt_line.print(w, "agent={s}", .{agent});
+    if (extras.session_id) |sid| if (adv.has("session-id")) try pkt_line.print(w, "session-id={s}", .{sid});
+    if (fetch) for (extras.server_options) |option| try pkt_line.print(w, "server-option={s}", .{option});
+    if (adv.has("object-format")) try pkt_line.print(w, "object-format={s}", .{adv.kind.name()});
+    if (adv.promisor_reply) |names| try pkt_line.print(w, "promisor-remote={s}", .{names});
+    if (!fetch) for (extras.server_options) |option| try pkt_line.print(w, "server-option={s}", .{option});
     if (bundle_uri) try pkt_line.write(w, "command=bundle-uri\n");
     try pkt_line.delim(w);
 }
@@ -457,10 +457,10 @@ test "a v0 advertisement reads its refs, peels and symbolic refs" {
     defer wire.deinit();
     const a = "1111111111111111111111111111111111111111";
     const b = "2222222222222222222222222222222222222222";
-    try pkt_line.print("{s} HEAD\x00multi_ack thin-pack side-band-64k symref=HEAD:refs/heads/main agent=git/2\n", .{a}, &wire.writer);
-    try pkt_line.print("{s} refs/heads/main\n", .{a}, &wire.writer);
-    try pkt_line.print("{s} refs/tags/v1\n", .{b}, &wire.writer);
-    try pkt_line.print("{s} refs/tags/v1^{{}}\n", .{a}, &wire.writer);
+    try pkt_line.print(&wire.writer, "{s} HEAD\x00multi_ack thin-pack side-band-64k symref=HEAD:refs/heads/main agent=git/2\n", .{a});
+    try pkt_line.print(&wire.writer, "{s} refs/heads/main\n", .{a});
+    try pkt_line.print(&wire.writer, "{s} refs/tags/v1\n", .{b});
+    try pkt_line.print(&wire.writer, "{s} refs/tags/v1^{{}}\n", .{a});
     try pkt_line.flush(&wire.writer);
 
     var fake: Fake = .init(wire.written());
@@ -482,7 +482,7 @@ test "an empty v0 repository advertises capabilities and no refs" {
     const gpa = testing.allocator;
     var wire: Io.Writer.Allocating = .init(gpa);
     defer wire.deinit();
-    try pkt_line.print("{s} capabilities^{{}}\x00report-status delete-refs object-format=sha1\n", .{&@as([40]u8, @splat('0'))}, &wire.writer);
+    try pkt_line.print(&wire.writer, "{s} capabilities^{{}}\x00report-status delete-refs object-format=sha1\n", .{&@as([40]u8, @splat('0'))});
     try pkt_line.flush(&wire.writer);
     var fake: Fake = .init(wire.written());
     var adv = try readAdvertisement(gpa, &fake.connection, .sha1);

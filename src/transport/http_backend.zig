@@ -122,7 +122,7 @@ pub const Backend = struct {
                 try response.header("Content-Type", try arena.print("application/x-git-{s}-advertisement", .{service.name()}));
                 const w = try response.writer(io);
                 if (version != .v2) {
-                    try pkt_line.print("# service=git-{s}\n", .{service.name()}, w);
+                    try pkt_line.print(w, "# service=git-{s}\n", .{service.name()});
                     try pkt_line.flush(w);
                 }
                 try b.run(io, &remote, service, version, user, request, w, .advertise);
@@ -227,7 +227,7 @@ pub const Backend = struct {
                 var server: upload_pack.Server = .init(b.gpa, io, remote, version, .{ .stateless = true });
                 switch (step) {
                     .advertise => try server.advertise(w),
-                    .request => try server.serveRequest(&body.interface, w),
+                    .request => try server.serveRequest(w, &body.interface),
                 }
             },
             .receive_pack => {
@@ -245,7 +245,7 @@ pub const Backend = struct {
                 defer server.deinit();
                 switch (step) {
                     .advertise => try server.advertise(w),
-                    .request => try server.serveRequest(&body.interface, w),
+                    .request => try server.serveRequest(w, &body.interface),
                 }
             },
         }

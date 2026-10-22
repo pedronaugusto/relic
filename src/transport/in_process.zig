@@ -209,7 +209,7 @@ pub fn InProcess(comptime Server: type, comptime told: fn (ServerError(Server)) 
         /// What the server's task does: the request served, its answer
         /// ended, and whatever is left of the request taken.
         fn serve(c: *Self, x: *Exchange) Failure!void {
-            const served = c.server.serveRequest(&x.request.reader, &x.response.writer);
+            const served = c.server.serveRequest(&x.response.writer, &x.request.reader);
             if (served) |_| {
                 x.response.writer.flush() catch {}; // glint-ignore: Z026 -- a client that stopped reading has its answer as far as it read; the request's own outcome is the one returned
             } else |err| if (!told(err)) {
@@ -228,7 +228,7 @@ pub fn InProcess(comptime Server: type, comptime told: fn (ServerError(Server)) 
             if (x.whole) |*whole| {
                 whole.request_fixed = .fixed(whole.request.written());
                 whole.request_limited = whole.request_fixed.limited(.unlimited, &whole.request_buffer);
-                c.server.serveRequest(&whole.request_limited.interface, &whole.response.writer) catch |err| {
+                c.server.serveRequest(&whole.response.writer, &whole.request_limited.interface) catch |err| {
                     if (!told(err)) return fail(conn, err);
                 };
                 whole.response_fixed = .fixed(whole.response.written());

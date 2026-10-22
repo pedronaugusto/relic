@@ -99,7 +99,7 @@ fn expectSame(gpa: Allocator, io: Io, git: *testgit.Repo, v: Variant) !void {
     defer changes.deinit();
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
-    try diff.unified(gpa, io, .{ .db = db, .changes = changes.items, .drivers = drivers }, &out.writer, options);
+    try diff.unified(gpa, io, &out.writer, .{ .db = db, .changes = changes.items, .drivers = drivers }, options);
     std.testing.expectEqualStrings(theirs, out.written()) catch |err| {
         for (argv.items) |arg| std.debug.print("{s} ", .{arg});
         std.debug.print(": differs\n", .{});

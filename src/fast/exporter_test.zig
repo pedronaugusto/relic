@@ -146,7 +146,7 @@ fn compare(gpa: Allocator, io: Io, git: *testgit.Repo, args: []const []const u8,
     errdefer mine.deinit();
     var opts = options;
     opts.cwd = git.dir;
-    try fast_export.write(gpa, io, &repo, &mine.writer, opts);
+    try fast_export.write(gpa, io, &mine.writer, &repo, opts);
     std.testing.expectEqualStrings(theirs, mine.written()) catch |err| {
         std.debug.print("git fast-export {any}\n", .{args});
         return err;
@@ -280,8 +280,8 @@ test "options shape the stream as git's do" {
 
     // What git refuses by default is refused by name.
     var sink: Io.Writer.Discarding = .init(&.{});
-    try std.testing.expectError(error.EncodedCommit, fast_export.write(gpa, io, &repo, &sink.writer, .{ .tips = &tips }));
-    if (signatures) try std.testing.expectError(error.SignedObject, fast_export.write(gpa, io, &repo, &sink.writer, .{ .tips = &tips, .reencode = .no, .signed_commits = .abort }));
+    try std.testing.expectError(error.EncodedCommit, fast_export.write(gpa, io, &sink.writer, &repo, .{ .tips = &tips }));
+    if (signatures) try std.testing.expectError(error.SignedObject, fast_export.write(gpa, io, &sink.writer, &repo, .{ .tips = &tips, .reencode = .no, .signed_commits = .abort }));
 }
 
 test "marks carry an export on from where the last one stopped" {

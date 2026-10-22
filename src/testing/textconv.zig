@@ -88,7 +88,7 @@ fn ourPatches(gpa: Allocator, io: Io, pair: *Pair, repo: *repo_mod.Repository, s
         const tree = try repo.commitTree(io, try history.oidOf(gpa, io, &pair.ours, rev));
         var changes = try diff.tree(gpa, io, repo.objectDatabase(), .{ .old = previous, .new = tree }, .{ .renames = .{} });
         defer changes.deinit();
-        try diff.unified(gpa, io, .{ .db = repo.objectDatabase(), .changes = changes.items, .drivers = setup.drivers, .textconv = setup.textconv }, &out.writer, .{});
+        try diff.unified(gpa, io, &out.writer, .{ .db = repo.objectDatabase(), .changes = changes.items, .drivers = setup.drivers, .textconv = setup.textconv }, .{});
         previous = tree;
     }
     return out.toOwnedSlice();

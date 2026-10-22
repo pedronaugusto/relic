@@ -95,7 +95,7 @@ fn ours(gpa: Allocator, io: Io, git: *testgit.Repo, env: *const std.process.Envi
     defer changes.deinit();
     var out: Io.Writer.Allocating = .init(gpa);
     errdefer out.deinit();
-    try diff.unified(gpa, io, .{ .db = db, .changes = changes.items, .drivers = drivers, .textconv = &tc }, &out.writer, .{});
+    try diff.unified(gpa, io, &out.writer, .{ .db = db, .changes = changes.items, .drivers = drivers, .textconv = &tc }, .{});
     return out.toOwnedSlice();
 }
 
@@ -156,6 +156,6 @@ test "range-diff's patches carry the function lines and the converted text git l
     const new: range_diff.Range = .{ .base = base, .tip = try oidOf(gpa, io, &git, "new") };
     var mine: Io.Writer.Allocating = .init(gpa);
     defer mine.deinit();
-    try range_diff.write(gpa, io, .{ .repo = &repo, .old = old, .new = new }, &mine.writer, .{ .textconv = &tc });
+    try range_diff.write(gpa, io, &mine.writer, .{ .repo = &repo, .old = old, .new = new }, .{ .textconv = &tc });
     try std.testing.expectEqualStrings(theirs, mine.written());
 }

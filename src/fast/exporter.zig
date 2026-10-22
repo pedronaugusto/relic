@@ -135,7 +135,7 @@ pub const Options = struct {
 };
 
 /// Write the stream for `options.tips` to `w`.
-pub fn write(gpa: Allocator, io: Io, repo: *Repository, w: *Io.Writer, options: Options) Self.Error!void {
+pub fn write(gpa: Allocator, io: Io, w: *Io.Writer, repo: *Repository, options: Options) Self.Error!void {
     var ex: Exporter = .{
         .gpa = gpa,
         .io = io,

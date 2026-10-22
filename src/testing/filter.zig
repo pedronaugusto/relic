@@ -151,7 +151,7 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn status(w: *Io.Writer, value: []const u8) !void {
-    try pkt_line.print("status={s}\n", .{value}, w);
+    try pkt_line.print(w, "status={s}\n", .{value});
     try pkt_line.flush(w);
     try w.flush();
 }
@@ -210,7 +210,7 @@ fn listAvailable(gpa: Allocator, w: *Io.Writer, ready: *std.ArrayList([]const u8
     if (ready.items.len == 0) {
         for (delayed.keys()) |key| try ready.append(gpa, key);
     }
-    if (ready.pop()) |next| try pkt_line.print("pathname={s}\n", .{next}, w);
+    if (ready.pop()) |next| try pkt_line.print(w, "pathname={s}\n", .{next});
     try pkt_line.flush(w);
     try pkt_line.write(w, "status=success\n");
     try pkt_line.flush(w);

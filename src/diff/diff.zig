@@ -1106,8 +1106,8 @@ pub const UnifiedInputs = struct {
 pub fn unified(
     gpa: Allocator,
     io: Io,
-    inputs: UnifiedInputs,
     w: *Io.Writer,
+    inputs: UnifiedInputs,
     options: Options,
 ) UnifiedError!void {
     var recorder: ?paint.Recorder = if (movedWanted(options)) .init(gpa, options.color_moved, options.color_moved_ws) else null;

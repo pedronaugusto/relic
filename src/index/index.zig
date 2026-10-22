@@ -2025,7 +2025,7 @@ pub const Index = struct {
         if (index.untracked) |*cache| {
             var untracked_body: Io.Writer.Allocating = .init(index.gpa);
             defer untracked_body.deinit();
-            try cache.write(index.gpa, index.kind, &untracked_body.writer);
+            try cache.write(index.gpa, &untracked_body.writer, index.kind);
             try writeExtension(out, "UNTR", untracked_body.written());
             hashExtensionHeader(ext_hasher, "UNTR", untracked_body.written().len);
         }

@@ -186,10 +186,10 @@ pub fn wantsV2(config: ?*const config_mod.Config) bool {
 /// `remote_url`'s body written to `w` with the transfer settings `options`
 /// hold: one `GET` over http or https (`smart_http.download`), what a
 /// bundle URI is fetched with. Any other scheme is `UnsupportedTransport`.
-pub fn download(gpa: Allocator, io: Io, remote_url: []const u8, w: *Io.Writer, options: Options) (Error || Io.Writer.Error)!void {
+pub fn download(gpa: Allocator, io: Io, w: *Io.Writer, remote_url: []const u8, options: Options) (Error || Io.Writer.Error)!void {
     const parsed = try url.Url.parse(remote_url);
     if (parsed.scheme != .http and parsed.scheme != .https) return error.UnsupportedTransport;
-    return smart_http.download(gpa, io, parsed, w, Session.httpOptions(options));
+    return smart_http.download(gpa, io, w, parsed, Session.httpOptions(options));
 }
 
 pub const Session = struct {

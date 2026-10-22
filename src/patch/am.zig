@@ -638,11 +638,11 @@ fn writeCommitPatch(s: *Session, parents: []const Oid, tree: Oid) Error!void {
     defer attrs.deinit();
     defer attrs.leave();
     var out: Io.Writer.Allocating = .init(s.a);
-    diff.unified(s.gpa, s.io, .{
+    diff.unified(s.gpa, s.io, &out.writer, .{
         .db = db,
         .changes = changes.items,
         .drivers = .{ .attrs = &attrs, .work_dir = s.repo.workDirectory(), .config = s.repo.configuration() },
-    }, &out.writer, .{
+    }, .{
         .full_index = true,
         .binary_patches = true,
         .quote_path = s.repo.configuration().getBool("core.quotepath", true) catch true,
