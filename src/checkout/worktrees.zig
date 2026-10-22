@@ -17,7 +17,6 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
-const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -213,7 +212,7 @@ fn namedTree(arena: Allocator, io: Io, admin: Io.Dir) Self.Error!?Named {
     if (written.len == 0) return null;
     const dot_git = if (std.Io.Dir.path.isAbsolute(written)) written else blk: {
         var buf: [4096]u8 = undefined;
-        break :blk try std.Io.Dir.path.resolveAllocPosix(arena, &.{ try absolutePath(io, admin, &buf), written });
+        break :blk try std.Io.Dir.path.resolveAllocPosix(arena, &.{ try fs.realPath(io, admin, &buf), written });
     };
     // The `gitdir` file names the destination's `.git` *file*; the
     // working tree is its parent.
@@ -235,7 +234,7 @@ fn pointsBack(arena: Allocator, io: Io, admin: Io.Dir, named: Named) Self.Error!
     defer target_dir.close(io);
     var target_buf: [4096]u8 = undefined;
     var admin_buf: [4096]u8 = undefined;
-    return std.mem.eql(u8, try absolutePath(io, target_dir, &target_buf), try absolutePath(io, admin, &admin_buf));
+    return std.mem.eql(u8, try fs.realPath(io, target_dir, &target_buf), try fs.realPath(io, admin, &admin_buf));
 }
 
 /// What `add` is asked to create.
@@ -321,7 +320,7 @@ pub fn add(
     try writeLine(io, admin, "commondir", "../..");
 
     var abs_buf: [4096]u8 = undefined;
-    const dest_abs = try absolutePath(io, dest_dir, &abs_buf);
+    const dest_abs = try fs.realPath(io, dest_dir, &abs_buf);
     var gitdir_buf: [4200]u8 = undefined;
     const gitfile_path = std.mem.print(&gitdir_buf, "{s}/.git", .{dest_abs}) catch
         return error.InvalidWorktreeName;
@@ -357,7 +356,7 @@ pub fn add(
     // And the `.git` file in the destination, which is what makes the
     // directory a worktree at all.
     var admin_abs_buf: [4096]u8 = undefined;
-    const admin_abs = try absolutePath(io, admin, &admin_abs_buf);
+    const admin_abs = try fs.realPath(io, admin, &admin_abs_buf);
     try gitfile.write(io, dest_dir, admin_abs, options.hide_dot_files);
 
     return .{ .name = owned_name, .admin_dir = admin, .work_dir = opened_work_dir };
@@ -370,21 +369,6 @@ fn writeLine(io: Io, dir: Io.Dir, name: []const u8, text: []const u8) Error!void
     var buf: [4300]u8 = undefined;
     const line = std.mem.print(&buf, "{s}\n", .{text}) catch return error.InvalidWorktreeName;
     try dir.writeFile(io, .{ .sub_path = name, .data = line });
-}
-
-/// The absolute path of `dir`, written the way git writes a path: with `/`
-/// between the components whatever the platform underneath.
-///
-/// Windows hands back `D:\a\tree`, and a `gitdir` file holding that is one
-/// git prints back with the backslashes still in it and one another
-/// implementation has to guess about. git itself stores `D:/a/tree`. The
-/// separator is only rewritten there, because on a POSIX filesystem a
-/// backslash is an ordinary character in a name.
-fn absolutePath(io: Io, dir: Io.Dir, buf: []u8) Error![]const u8 {
-    const len = try dir.realPath(io, buf);
-    const out = buf[0..len];
-    if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, out, '\\', '/');
-    return out;
 }
 
 /// How `remove` behaves.
@@ -526,7 +510,7 @@ pub fn prune(gpa: Allocator, io: Io, refs: *const refs_mod.Store, options: Prune
     // the main one first, its id `null`.
     var kept: std.ArrayList(Kept) = .empty;
     var common_buf: [4096]u8 = undefined;
-    try kept.append(arena, .{ .path = try arena.dupe(u8, try absolutePath(io, common_dir, &common_buf)), .id = null });
+    try kept.append(arena, .{ .path = try arena.dupe(u8, try fs.realPath(io, common_dir, &common_buf)), .id = null });
     var it: fs.Names = .init(worktrees_dir, refs.precomposeUnicode());
     while (try it.next(io)) |entry| {
         const id = try arena.dupe(u8, entry.name);
@@ -603,7 +587,7 @@ fn judge(arena: Allocator, io: Io, worktrees_dir: Io.Dir, name: []const u8, expi
     if (written.len == 0) return .{ .prune = .invalid_gitdir };
     const dot_git = if (std.Io.Dir.path.isAbsolute(written)) written else blk: {
         var buf: [4096]u8 = undefined;
-        break :blk try std.Io.Dir.path.resolveAllocPosix(arena, &.{ try absolutePath(io, admin, &buf), written });
+        break :blk try std.Io.Dir.path.resolveAllocPosix(arena, &.{ try fs.realPath(io, admin, &buf), written });
     };
     if (std.Io.Dir.accessAbsolute(io, dot_git, .{})) |_| {} else |_| {
         const stat = admin.statFile(io, "index", .{}) catch return .{ .prune = .gone };
@@ -665,14 +649,14 @@ pub fn repair(
     defer admin.close(io);
 
     var abs_buf: [4096]u8 = undefined;
-    const dest_abs = try absolutePath(io, dest_dir, &abs_buf);
+    const dest_abs = try fs.realPath(io, dest_dir, &abs_buf);
     var gitdir_buf: [4200]u8 = undefined;
     const gitfile_path = std.mem.print(&gitdir_buf, "{s}/.git", .{dest_abs}) catch
         return error.InvalidWorktreeName;
     try writeLine(io, admin, "gitdir", gitfile_path);
 
     var admin_abs_buf: [4096]u8 = undefined;
-    const admin_abs = try absolutePath(io, admin, &admin_abs_buf);
+    const admin_abs = try fs.realPath(io, admin, &admin_abs_buf);
     try gitfile.write(io, dest_dir, admin_abs, hide);
 }
 

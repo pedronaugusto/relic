@@ -17,7 +17,9 @@
 //! program, so a path with a space in it works and a pipeline does not, and
 //! `gpg.ssh.defaultKeyCommand` is split into words with no shell at all. A
 //! hook is a file and runs directly. Running a command line needs `sh`,
-//! which is every Unix's and which git for Windows installs.
+//! which is every Unix's and which git for Windows installs. On Windows a
+//! program run directly that is a script is started as git for Windows
+//! starts one: through the interpreter its `#!` line names.
 
 const ErrorNamespace = @This();
 const Self = @This();
@@ -232,6 +234,16 @@ pub fn start(gpa: Allocator, io: Io, programs: Programs, invocation: Invocation)
         line.program = try lookupOnPath(gpa, io, pathOf(&environ), line.argv[0]) orelse return error.FileNotFound;
         line.argv[0] = line.program;
     }
+    // git for Windows' `mingw_spawnvpe`: a script, which Windows cannot
+    // start, is handed to the interpreter its `#!` line names, looked for
+    // on `PATH` by its base name, as that interpreter's first argument.
+    if (builtin.target.os.tag == .windows) {
+        var head: [100]u8 = undefined;
+        if (interpreterOf(io, line.argv[0], &head)) |name| {
+            const found = try lookupOnPath(gpa, io, pathOf(&environ), name) orelse return error.FileNotFound;
+            try line.runThrough(gpa, found);
+        }
+    }
 
     var cwd_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const cwd: ?[]const u8 = switch (invocation.cwd) {
@@ -275,6 +287,8 @@ const CommandLine = struct {
     owned: []const u8 = "",
     /// The program `argv[0]` was found at, when it was looked up here.
     program: []const u8 = "",
+    /// The interpreter a script runs through, when it was looked up here.
+    interpreter: []const u8 = "",
 
     fn init(gpa: Allocator, invocation: Invocation) Allocator.Error!CommandLine {
         const argv = invocation.argv;
@@ -290,12 +304,47 @@ const CommandLine = struct {
         return .{ .argv = out, .owned = owned };
     }
 
+    /// The argv run through `interpreter`, which becomes the line's.
+    fn runThrough(line: *CommandLine, gpa: Allocator, interpreter: []u8) Allocator.Error!void {
+        errdefer gpa.free(interpreter);
+        const argv = try gpa.alloc([]const u8, line.argv.len + 1);
+        argv[0] = interpreter;
+        @memcpy(argv[1..], line.argv);
+        gpa.free(line.argv);
+        line.argv = argv;
+        line.interpreter = interpreter;
+    }
+
     fn deinit(line: CommandLine, gpa: Allocator) void {
         gpa.free(line.argv);
         gpa.free(line.owned);
         gpa.free(line.program);
+        gpa.free(line.interpreter);
     }
 };
+
+/// git for Windows' `parse_interpreter`: the interpreter the `#!` line of
+/// the file at `path` names, by its base name and without its options, read
+/// from its first bytes into `head`; `null` for a `.exe`, a file that cannot
+/// be read, or anything else.
+fn interpreterOf(io: Io, path: []const u8, head: *[100]u8) ?[]const u8 {
+    if (std.ascii.endsWithIgnoreCase(path, ".exe")) return null;
+    const file = Io.Dir.cwd().openFile(io, path, .{}) catch return null;
+    defer file.close(io);
+    const n = file.readPositionalAll(io, head[0 .. head.len - 1], 0) catch return null;
+    return parseInterpreter(head[0..n]);
+}
+
+fn parseInterpreter(head: []const u8) ?[]const u8 {
+    if (head.len < 4 or head[0] != '#' or head[1] != '!') return null;
+    const end = std.mem.findAny(u8, head, "\r\n") orelse return null;
+    const line = head[2..end];
+    // The last `/`, else the last `\\`.
+    const slash = std.mem.findScalarLast(u8, line, '/') orelse std.mem.findScalarLast(u8, line, '\\') orelse return null;
+    const rest = line[slash + 1 ..];
+    const space = std.mem.findScalar(u8, rest, ' ') orelse rest.len;
+    return rest[0..space];
+}
 
 /// Whether `name` is a program to be looked for rather than a path: no
 /// separator of either kind and no drive.
@@ -367,6 +416,16 @@ pub fn needsShell(line: []const u8) bool {
 
 const testing = std.testing;
 const testgit = @import("../testing/git.zig");
+
+test "a #! line names its interpreter by base name, as git for Windows reads it" {
+    try testing.expectEqualStrings("sh", parseInterpreter("#!/bin/sh\necho\n").?);
+    try testing.expectEqualStrings("env", parseInterpreter("#!/usr/bin/env python3\n").?);
+    try testing.expectEqualStrings("bash", parseInterpreter("#!C:\\tools\\bash -e\r\n").?);
+    try testing.expectEqualStrings("x\\bash", parseInterpreter("#!C:\\tools/x\\bash\n").?);
+    try testing.expect(parseInterpreter("#!sh\n") == null);
+    try testing.expect(parseInterpreter("echo\n") == null);
+    try testing.expect(parseInterpreter("#!/bin/sh") == null);
+}
 
 fn testEnviron() !Environ.Map {
     var map = try testgit.programEnviron(testing.allocator);

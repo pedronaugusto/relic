@@ -456,9 +456,8 @@ pub const Settings = struct {
 /// system <the kernel's name>", which an untracked cache carries and is
 /// trusted by.
 fn untrackedIdent(gpa: Allocator, io: Io, work: Io.Dir) (Allocator.Error || Io.Dir.RealPathFileAllocError)![]u8 {
-    const real = try work.realPathFileAlloc(io, ".", gpa);
+    const real = try fs.realPathAlloc(gpa, io, work, ".");
     defer gpa.free(real);
-    if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, real, '\\', '/');
     if (builtin.target.os.tag == .windows) return gpa.print("Location {s}, system Windows", .{real});
     const uts = std.posix.uname();
     return gpa.print("Location {s}, system {s}", .{ real, std.mem.sliceTo(&uts.sysname, 0) });
@@ -706,7 +705,7 @@ pub const Repository = struct {
         var path: []const u8 = "";
         var ceiling: ?usize = null;
         if (options.discover and options.ceiling_directories.len != 0) {
-            path = try absolutePath(io, start, &path_buf);
+            path = try fs.realPath(io, start, &path_buf);
             ceiling = nearestCeiling(path, options.ceiling_directories);
         }
         const device = if (fs.statAt(io, start, ".") catch null) |found| found.stat.dev else 0;
@@ -902,9 +901,9 @@ pub const Repository = struct {
         // are and which branch `HEAD` is on, so all three are known before
         // the first file is read.
         var path_buffer: [4096]u8 = undefined;
-        const git_dir_path = try absolutePath(io, repo.data().git_dir, &path_buffer);
+        const git_dir_path = try fs.realPath(io, repo.data().git_dir, &path_buffer);
         var work_buffer: [4096]u8 = undefined;
-        const work_tree_path = if (repo.data().work_dir) |work| try absolutePath(io, work, &work_buffer) else null;
+        const work_tree_path = if (repo.data().work_dir) |work| try fs.realPath(io, work, &work_buffer) else null;
         // The format is the repository's own file's to say, read alone, as
         // git's `read_repository_format` reads it: no include, no other
         // file and no `-c` decides which hash a repository's objects are
@@ -1010,15 +1009,6 @@ pub const Repository = struct {
         errdefer fresh.deinit();
         try repo.publishConfig(fresh, format, diagnostic);
         return true;
-    }
-
-    /// A directory's path as git matches it in a `gitdir:` or `worktree:`
-    /// condition: absolute, symbolic links resolved, `/`-separated.
-    fn absolutePath(io: Io, dir: Io.Dir, buffer: []u8) ErrorNamespace.Error![]const u8 {
-        const len = try dir.realPath(io, buffer);
-        const path = buffer[0..len];
-        if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, path, '\\', '/');
-        return path;
     }
 
     /// The branch `HEAD` is on, without `refs/heads/` and the caller's, or

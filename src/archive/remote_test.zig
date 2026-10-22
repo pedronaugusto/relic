@@ -102,7 +102,9 @@ test "relic's upload-archive gives git's client what git's gives: archives, list
     try git.exec(io, &.{ "config", "tar.fail.remote", "true" });
     const path = try testremote.absolutePath(gpa, io, git.dir);
     defer gpa.free(path);
-    const helper = suite.path(.upload_archive_helper);
+    // git runs `--exec` through a shell, which reads a backslash.
+    const helper = try testgit.fixtureCommand(gpa, suite.path(.upload_archive_helper), "");
+    defer gpa.free(helper);
     const head = try git.line(io, &.{ "rev-parse", "HEAD" });
     defer gpa.free(head);
     const cases = [_][]const []const u8{

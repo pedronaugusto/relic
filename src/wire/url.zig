@@ -101,13 +101,15 @@ pub const Url = struct {
         if (builtin.target.os.tag == .windows and win32.dosDrivePrefixLen(rest) != 0) {
             return .{ .scheme = .file, .path = rest, .raw = text };
         }
-        // git for Windows keeps an authority as a UNC path.
+        // git for Windows keeps an authority as a UNC path, `//` and all,
+        // once a separator of either kind follows it anywhere, brackets or
+        // none: `parse_connect_url` by `offset_1st_component`.
+        if (builtin.target.os.tag == .windows and rest.len != 0 and rest[0] != '/') {
+            const end = std.mem.findAny(u8, rest, "/\\") orelse return error.MalformedUrl;
+            return .{ .scheme = .file, .host = rest[0..end], .path = text[sep + 1 ..], .raw = text };
+        }
         // On Unix only the path after the authority is used.
         const slash = std.mem.findScalarPos(u8, rest, bracketEnd(rest), '/') orelse return error.MalformedUrl;
-        const host = rest[0..slash];
-        if (builtin.target.os.tag == .windows and host.len != 0) {
-            return .{ .scheme = .file, .host = host, .path = text[sep + 1 ..], .raw = text };
-        }
         return .{ .scheme = .file, .path = rest[slash..], .raw = text };
     }
 
@@ -558,6 +560,12 @@ test "file and local URL identities follow git path and scheme boundaries" {
     try testing.expectEqualStrings(if (builtin.target.os.tag == .windows) "//server/share/repo.git" else "/share/repo.git", remote_file.path);
     const local_file = try Url.parse("file://localhost/srv/repo.git");
     try testing.expectEqualStrings(if (builtin.target.os.tag == .windows) "//localhost/srv/repo.git" else "/srv/repo.git", local_file.path);
+    // A bracketed host is no host to git for Windows: the UNC path runs to
+    // the end. Elsewhere the path begins at the `/` after the brackets, and
+    // there is none.
+    if (builtin.target.os.tag == .windows) {
+        try testing.expectEqualStrings("//[a???//]:2-a@", (try Url.parse("file://[a???//]:2-a@")).path);
+    } else try testing.expectError(error.MalformedUrl, Url.parse("file://[a???//]:2-a@"));
     // git's `parse_connect_url` reads a scheme before any `://`.
     try testing.expectError(error.UnsupportedTransport, Url.parse("./folder/ssh://host/repo"));
     const helper_path = try Url.parse("./ext::repo");

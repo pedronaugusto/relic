@@ -523,7 +523,7 @@ pub const Runner = struct {
             const gpa = w.runner.gpa;
             var prepared: Prepared = .{};
             defer prepared.deinit(gpa);
-            const invocation = try w.runner.prepare(w.io, &prepared, w.request, p.command, p.shell, .capture);
+            const invocation = try w.runner.prepare(&prepared, w.request, p.command, p.shell, .capture);
             return .{ .outcome = try program.run(gpa, w.io, w.runner.programs, invocation, .{ .input = w.request.input }) };
         }
     };
@@ -581,7 +581,7 @@ pub const Runner = struct {
         };
         var prepared: Prepared = .{};
         defer prepared.deinit(runner.gpa);
-        var invocation = try runner.prepare(io, &prepared, request, path, false, runner.options.output);
+        var invocation = try runner.prepare(&prepared, request, path, false, runner.options.output);
         invocation.stdout = .capture;
         invocation.stderr = switch (stderr) {
             .pipe => .capture,
@@ -597,7 +597,6 @@ pub const Runner = struct {
     const Prepared = struct {
         argv: std.ArrayList([]const u8) = .empty,
         set: std.ArrayList(program.Var) = .empty,
-        interpreter_buf: [100]u8 = undefined,
 
         fn deinit(prepared: *Prepared, gpa: Allocator) void {
             prepared.argv.deinit(gpa);
@@ -608,16 +607,8 @@ pub const Runner = struct {
     /// How `command` runs for `request`: in the hooks' directory, with
     /// `GIT_PREFIX` and git's repository variables cleared, its output
     /// where `Options.output` sends it.
-    fn prepare(runner: *Runner, io: Io, prepared: *Prepared, request: Request, command: []const u8, shell: bool, output: Output) Allocator.Error!program.Invocation {
+    fn prepare(runner: *Runner, prepared: *Prepared, request: Request, command: []const u8, shell: bool, output: Output) Allocator.Error!program.Invocation {
         const gpa = runner.gpa;
-        if (!shell and builtin.target.os.tag == .windows) {
-            // git for Windows reads the `#!` line itself and starts the
-            // interpreter it names, by its base name, with the script as its
-            // first argument.
-            if (windowsInterpreter(io, command, &prepared.interpreter_buf)) |interpreter| {
-                try prepared.argv.append(gpa, interpreter);
-            }
-        }
         try prepared.argv.append(gpa, command);
         try prepared.argv.appendSlice(gpa, request.args);
         try prepared.set.append(gpa, .{ .name = "GIT_PREFIX", .value = runner.options.prefix });
@@ -654,7 +645,7 @@ pub const Runner = struct {
         var prepared: Prepared = .{};
         defer prepared.deinit(gpa);
         const capture = runner.options.output == .capture;
-        var outcome = program.run(gpa, io, runner.programs, try runner.prepare(io, &prepared, request, command, shell, runner.options.output), .{
+        var outcome = program.run(gpa, io, runner.programs, try runner.prepare(&prepared, request, command, shell, runner.options.output), .{
             .input = request.input,
         }) catch |err| {
             if (err == error.OutOfMemory) return error.OutOfMemory;
@@ -1105,41 +1096,12 @@ fn runsOnWindows(io: Io, path: []const u8) bool {
     return n == 2 and head[0] == '#' and head[1] == '!';
 }
 
-/// The interpreter a `#!` line names, by its base name and without its
-/// options, as git for Windows reads it; `null` for anything else.
-fn windowsInterpreter(io: Io, path: []const u8, buf: *[100]u8) ?[]const u8 {
-    if (std.ascii.endsWithIgnoreCase(path, ".exe")) return null;
-    const file = Io.Dir.openFileAbsolute(io, path, .{}) catch return null;
-    defer file.close(io);
-    const n = file.readPositionalAll(io, buf[0 .. buf.len - 1], 0) catch return null;
-    return parseInterpreter(buf[0..n]);
-}
-
-fn parseInterpreter(head: []const u8) ?[]const u8 {
-    if (head.len < 4 or head[0] != '#' or head[1] != '!') return null;
-    const end = std.mem.findAny(u8, head, "\r\n") orelse return null;
-    const line = head[2..end];
-    const slash = std.mem.findLastAny(u8, line, "/\\") orelse return null;
-    const rest = line[slash + 1 ..];
-    const space = std.mem.findScalar(u8, rest, ' ') orelse rest.len;
-    return rest[0..space];
-}
-
 //=========================================================================
 // Tests
 //=========================================================================
 
 const testing = std.testing;
 const testgit = @import("../testing/git.zig");
-
-test "a #! line names its interpreter by base name, as git for Windows reads it" {
-    try testing.expectEqualStrings("sh", parseInterpreter("#!/bin/sh\necho\n").?);
-    try testing.expectEqualStrings("env", parseInterpreter("#!/usr/bin/env python3\n").?);
-    try testing.expectEqualStrings("bash", parseInterpreter("#!C:\\tools\\bash -e\r\n").?);
-    try testing.expect(parseInterpreter("#!sh\n") == null);
-    try testing.expect(parseInterpreter("echo\n") == null);
-    try testing.expect(parseInterpreter("#!/bin/sh") == null);
-}
 
 /// An environment for a hook: the machine's `PATH`, and a `GIT_DIR` and
 /// `GIT_INDEX_FILE` planted to prove the runner takes them away.

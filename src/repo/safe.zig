@@ -17,6 +17,7 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const config_mod = @import("../config/config.zig");
+const fs = @import("../fs/fs.zig");
 
 /// What is checked of who owns a repository that is discovered.
 pub const Ownership = enum {
@@ -44,14 +45,13 @@ pub fn normalize(gpa: Allocator, path: []const u8) Allocator.Error![]u8 {
 /// not to exist, as git's `real_pathdup` resolves it; `null` when it cannot
 /// be.
 fn realPath(gpa: Allocator, io: Io, path: []const u8) Allocator.Error!?[]u8 {
-    if (Io.Dir.cwd().realPathFileAlloc(io, path, gpa)) |real| {
+    if (fs.realPathAlloc(gpa, io, Io.Dir.cwd(), path)) |real| {
         defer gpa.free(real);
-        const value = try normalize(gpa, real);
-        return value;
+        return try gpa.dupe(u8, real);
     } else |_| {}
     const parent = std.Io.Dir.path.dirname(path) orelse return null;
     const base = std.Io.Dir.path.basename(path);
-    const real_parent = Io.Dir.cwd().realPathFileAlloc(io, parent, gpa) catch return null;
+    const real_parent = fs.realPathAlloc(gpa, io, Io.Dir.cwd(), parent) catch return null;
     defer gpa.free(real_parent);
     const joined = try std.Io.Dir.path.join(gpa, &.{ real_parent, base });
     defer gpa.free(joined);
