@@ -8,7 +8,6 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const Io = std.Io;
 
 const submodule = @import("../../submodule/submodule.zig");
 const repo_mod = @import("../../repo/repo.zig");

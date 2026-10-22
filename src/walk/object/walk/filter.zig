@@ -1,6 +1,5 @@
 const std = @import("std");
 const aegis = @import("aegis");
-const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const object = @import("../../../object/object.zig");
 const odb_mod = @import("../../../odb/odb.zig");

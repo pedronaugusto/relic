@@ -4,7 +4,6 @@
 //! applied to the same entries in the same order, must pick the same one.
 
 const std = @import("std");
-const Allocator = std.mem.Allocator;
 const testing = std.testing;
 
 const testgit = @import("../testing/git.zig");

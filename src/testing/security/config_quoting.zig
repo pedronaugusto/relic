@@ -7,7 +7,6 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const Io = std.Io;
 
 const config_mod = @import("../../config/config.zig");
 const clone_mod = @import("../../transport/clone.zig");

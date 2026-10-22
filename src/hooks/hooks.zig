@@ -34,7 +34,6 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
-const Child = std.process.Child;
 
 const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");

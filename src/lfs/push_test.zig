@@ -9,7 +9,6 @@
 
 const std = @import("std");
 const Io = std.Io;
-const Allocator = std.mem.Allocator;
 const testing = std.testing;
 
 const repo_mod = @import("../repo/repo.zig");

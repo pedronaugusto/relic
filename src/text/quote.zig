@@ -2,7 +2,6 @@
 //! and command line that holds it: `author-script`, `sequencer/opts`,
 //! `BISECT_NAMES`, `GIT_CONFIG_PARAMETERS`, `am`'s saved options.
 
-const ErrorNamespace = @This();
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const ctype = @import("ctype.zig");

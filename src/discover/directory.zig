@@ -3,7 +3,6 @@
 //! `refs` are there, in the common directory a linked worktree's
 //! `commondir` names. One reader of `commondir` for every caller.
 
-const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");

@@ -5,7 +5,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const testing = std.testing;
-const Io = std.Io;
 
 const clone_mod = @import("../transport/clone.zig");
 const object = @import("../object/object.zig");

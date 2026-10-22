@@ -23,8 +23,6 @@
 //! no. Actions may carry an id and a token the caller makes and checks
 //! (`Tokens`), which the client sends back with the object.
 
-const ErrorNamespace = @This();
-
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;

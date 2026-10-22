@@ -31,7 +31,6 @@ const Self = @This();
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
-const Environ = std.process.Environ;
 
 const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");

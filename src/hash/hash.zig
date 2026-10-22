@@ -10,7 +10,6 @@ const sha1 = @import("sha1.zig");
 const sha1dc = @import("sha1dc.zig");
 
 const std = @import("std");
-const Allocator = std.mem.Allocator;
 
 /// A repository's hash function.
 ///

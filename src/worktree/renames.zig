@@ -9,7 +9,6 @@
 //! holds as an intent to add, whose bytes the status kept
 //! (`StatusOptions.added_content`) and the engine reads from memory.
 
-const ErrorNamespace = @This();
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;

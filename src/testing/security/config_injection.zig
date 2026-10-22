@@ -6,7 +6,6 @@
 //! edits the lines it parsed rather than reading them again.
 
 const std = @import("std");
-const Io = std.Io;
 
 const gitmodules = @import("../../config/gitmodules.zig");
 const submodule = @import("../../submodule/submodule.zig");

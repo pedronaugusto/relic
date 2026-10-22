@@ -13,7 +13,6 @@ const testgit = @import("git.zig");
 const platstat = @import("../fs/stat.zig");
 
 const Repository = relic.repo.Repository;
-const Oid = relic.hash.Oid;
 
 const who: relic.object.Signature = .{ .name = "Fixture", .email = "fixture@example.com", .when_secs = testgit.fixture_date, .offset_minutes = 0 };
 

@@ -3,7 +3,6 @@
 //! whether it refused.
 
 const std = @import("std");
-const Io = std.Io;
 const testgit = @import("../testing/git.zig");
 const repo_mod = @import("../repo/repo.zig");
 const remove_mod = @import("remove.zig");

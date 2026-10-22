@@ -770,14 +770,6 @@ const Indexer = struct {
         return err;
     }
 
-    fn seek(x: *Indexer, offset: u64) Error!void {
-        x.reader.seekTo(offset) catch |err| switch (err) {
-            error.EndOfStream => return error.TruncatedPack,
-            error.ReadFailed => return x.reader.err orelse error.ReadFailed,
-            else => return error.TruncatedPack,
-        };
-    }
-
     fn takeByte(x: *Indexer) Error!u8 {
         return x.input().takeByte() catch |err| switch (err) {
             error.EndOfStream => error.TruncatedPack,

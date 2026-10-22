@@ -112,11 +112,6 @@ pub const Kinds = packed struct {
     /// Every ref under `refs/`: what `for-each-ref` lists.
     pub const regular: Kinds = .{ .branches = true, .remotes = true, .tags = true, .others = true };
 
-    fn any(k: Kinds, other: Kinds) bool {
-        return (k.branches and other.branches) or (k.remotes and other.remotes) or (k.tags and other.tags) or
-            (k.others and other.others) or (k.detached_head and other.detached_head) or (k.root_refs and other.root_refs);
-    }
-
     fn onlyOne(k: Kinds) ?Kind {
         const as_int: u6 = @bitCast(k);
         if (as_int == @as(u6, @bitCast(Kinds{ .branches = true }))) return .branch;
@@ -2165,10 +2160,6 @@ pub const Listing = struct {
         }
     }
 };
-
-fn lessString(_: void, x: []const u8, y: []const u8) bool {
-    return std.mem.order(u8, x, y) == .lt;
-}
 
 fn orderInt(o: std.math.Order) i32 {
     return switch (o) {

@@ -4,7 +4,6 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const hash = @import("../hash/hash.zig");
 const Oid = hash.Oid;
-const Kind = hash.Kind;
 const object = @import("../object/object.zig");
 const fs = @import("../fs/fs.zig");
 const reftable = @import("reftable/table.zig");

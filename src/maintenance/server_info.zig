@@ -9,7 +9,6 @@ const std = @import("std");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const hash = @import("../hash/hash.zig");
-const Oid = hash.Oid;
 const object = @import("../object/object.zig");
 const fs = @import("../fs/fs.zig");
 const odb_mod = @import("../odb/odb.zig");

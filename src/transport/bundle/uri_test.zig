@@ -3,7 +3,6 @@
 //! under `transfer.bundleURI` over http.
 
 const std = @import("std");
-const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const testing = std.testing;
 

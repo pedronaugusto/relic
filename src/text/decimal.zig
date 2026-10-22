@@ -9,7 +9,6 @@
 //!   when the number must be all of the text (git's `strtol_i`,
 //!   `strtoul_ui`).
 
-const ErrorNamespace = @This();
 const std = @import("std");
 
 /// All errors reported by this namespace: none, a text that is no number

@@ -45,8 +45,6 @@ const config_mod = @import("../config/config.zig");
 const program = @import("../process.zig").program;
 const fs = @import("../fs/fs.zig");
 
-const Oid = hash.Oid;
-
 /// Errors from signing and verifying.
 pub const Error = error{
     /// A program or key path whose `~` names no home.

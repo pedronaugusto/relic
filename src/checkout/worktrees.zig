@@ -16,7 +16,6 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
-const assert = std.debug.assert;
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;

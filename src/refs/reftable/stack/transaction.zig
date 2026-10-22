@@ -1,5 +1,3 @@
-const Self = @This();
-
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -15,22 +13,16 @@ pub const Options = @import("policy.zig").Options;
 pub const Error = @import("policy.zig").Error;
 const state_mod = @import("../../state.zig");
 const ref_names = @import("../../../names.zig").ref;
-const assert = std.debug.assert;
 const Stack = cache.Stack;
 const Cache = cache.Cache;
-const max_reload_attempts = cache.internal.max_reload_attempts;
 const mergedRefs = cache.internal.mergedRefs;
 const allLogs = cache.internal.allLogs;
-const copyLog = cache.internal.copyLog;
 const lessThanRef = cache.internal.lessThanRef;
-const newerFirst = cache.internal.newerFirst;
 const logOrder = cache.internal.logOrder;
 const isTableName = cache.internal.isTableName;
 const tableName = cache.internal.tableName;
-const Validity = cache.internal.Validity;
 const Stacks = cache.internal.Stacks;
 const loadIn = cache.internal.loadIn;
-const reloadIn = cache.internal.reloadIn;
 const isLinked = cache.internal.isLinked;
 const View = struct {
     guard: ?Cache.Guard,

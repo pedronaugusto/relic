@@ -3762,11 +3762,6 @@ fn TaskSet(comptime Context: type, comptime work: fn (Io, Context, usize, usize)
             try set.group.await(set.io);
             for (set.failures) |failure| if (failure) |err| return err;
         }
-
-        /// Stop the tasks and wait for them: the caller failed meanwhile.
-        fn abandon(set: *Self) void {
-            set.group.cancel(set.io);
-        }
     };
 }
 

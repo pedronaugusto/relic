@@ -2,7 +2,6 @@
 //! under way (`MERGE_MSG`, `rebase-merge/`, `sequencer/`, `BISECT_LOG`, …):
 //! one owner for writing, reading and removing them.
 
-const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");

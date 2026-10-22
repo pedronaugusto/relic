@@ -43,11 +43,6 @@ const Pair = struct {
         try p.git.writeFile(io, path, bytes);
         try p.ours.writeFile(io, path, bytes);
     }
-
-    fn remove(p: *Pair, io: Io, path: []const u8) !void {
-        try p.git.dir.deleteFile(io, path);
-        try p.ours.dir.deleteFile(io, path);
-    }
 };
 
 /// What a repository holds: every file the index or the working tree has,

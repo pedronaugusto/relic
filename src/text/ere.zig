@@ -5,7 +5,6 @@
 //! searches have bounded work and recursion and fail explicitly at the limit.
 
 const ErrorNamespace = @This();
-const Self = @This();
 
 const std = @import("std");
 const shakedown_mod = @import("shakedown");
