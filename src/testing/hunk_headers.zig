@@ -1,10 +1,10 @@
-//! The function lines on a patch's `@@` lines against git 2.55's `git
+//! The function lines on a patch's `@@` lines against git 2.56's `git
 //! diff`: a driver's `xfuncname` and `funcname` from the configuration, a
 //! negated line, a group or the whole match, git's built-in drivers (one
-//! blind to case), the old side's driver before the new one's across a
-//! rename, a symbolic link under `default`'s, the converted text a
-//! `textconv` makes, and `diff.default.xfuncname` over the files without
-//! a driver; then range-diff's patches, which carry the same.
+//! blind to case, and 2.56's `swift`), the old side's driver before the
+//! new one's across a rename, a symbolic link under `default`'s, the
+//! converted text a `textconv` makes, and `diff.default.xfuncname` over the
+//! files without a driver; then range-diff's patches, which carry the same.
 
 const std = @import("std");
 const Io = std.Io;
@@ -38,6 +38,7 @@ const chapters = "chapter opening\n  a = 1\nprologue\n" ++ filler;
 const ada = "package Stack is\n   PROCEDURE Push (X : Integer) IS\n" ++ filler;
 const c_code = "int main(void)\n{\n" ++ filler ++ "}\n";
 const lower = "section lowered\n  a = 1\n" ++ filler;
+const swift = "@MainActor public final class Box<T> {\n    @inlinable func value() -> T {\n        a = 1\n" ++ filler ++ "        return a\n    }\n}\n";
 
 fn setup(io: Io, repo: *testgit.Repo) anyerror!void {
     const command = try testgit.fixtureCommand(repo.gpa, suite.path(.process_fixture), "upper-file");
@@ -46,13 +47,14 @@ fn setup(io: Io, repo: *testgit.Repo) anyerror!void {
     try repo.exec(io, &.{ "config", "diff.chapters.funcname", "^chapter \\([a-z]*\\)" });
     try repo.exec(io, &.{ "config", "diff.upfn.textconv", command });
     try repo.exec(io, &.{ "config", "diff.upfn.xfuncname", "^SECTION (.*)" });
-    try repo.writeFile(io, ".gitattributes", "*.py diff=python\n*.cfg diff=sections\n*.txt diff=chapters\n*.adb diff=ada\n*.up diff=upfn\n");
+    try repo.writeFile(io, ".gitattributes", "*.py diff=python\n*.cfg diff=sections\n*.txt diff=chapters\n*.adb diff=ada\n*.up diff=upfn\n*.swift diff=swift\n");
     try repo.writeFile(io, "code.py", python);
     try repo.writeFile(io, "conf.cfg", sections);
     try repo.writeFile(io, "book.txt", chapters);
     try repo.writeFile(io, "stack.adb", ada);
     try repo.writeFile(io, "main.c", c_code);
     try repo.writeFile(io, "conv.up", lower);
+    try repo.writeFile(io, "box.swift", swift);
     try repo.writeFile(io, "moved.py", python);
     const link = try repo.runInput(io, &.{ "hash-object", "-w", "--stdin" }, python);
     defer repo.gpa.free(link);
@@ -68,6 +70,7 @@ fn setup(io: Io, repo: *testgit.Repo) anyerror!void {
     try repo.writeFile(io, "stack.adb", comptime edited(ada));
     try repo.writeFile(io, "main.c", comptime edited(c_code));
     try repo.writeFile(io, "conv.up", comptime edited(lower));
+    try repo.writeFile(io, "box.swift", comptime edited(swift));
     // Renamed to a name another driver takes: the old side's decides.
     try repo.exec(io, &.{ "mv", "moved.py", "moved.cfg" });
     try repo.writeFile(io, "moved.cfg", comptime edited(python));

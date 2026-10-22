@@ -42,10 +42,11 @@ fn repeated(comptime n: usize) []const u8 {
 
 fn setup(io: Io, repo: *testgit.Repo) anyerror!void {
     try repo.exec(io, &.{ "config", "diff.letters.wordRegex", "[a-z]+" });
-    try repo.writeFile(io, ".gitattributes", "*.py diff=python\n*.let diff=letters\n");
+    try repo.writeFile(io, ".gitattributes", "*.py diff=python\n*.let diff=letters\n*.swift diff=swift\n");
     try repo.writeFile(io, "prose.txt", "The quick brown fox\njumps over the lazy dog.\n\nA second paragraph here,\nwith words that stay.\nkeep one\nkeep two\nkeep three\nkeep four\nAnd a third one\n");
     try repo.writeFile(io, "code.py", "def f(x):\n    return x+1  # inc\n\nvalue = f(41)\n");
     try repo.writeFile(io, "only.let", "abc123def ghi\n");
+    try repo.writeFile(io, "range.swift", "let r = 0..<n ?? 0x1F_FF + 1_000.5e3\nflag &&= a->b\n");
     try repo.writeFile(io, "gone.txt", "these lines\nare removed\nentirely\n");
     try repo.writeFile(io, "noeol.txt", "last line without end");
     try repo.writeFile(io, "crlf.txt", "one two\r\nthree four\r\n");
@@ -55,6 +56,7 @@ fn setup(io: Io, repo: *testgit.Repo) anyerror!void {
     try repo.writeFile(io, "prose.txt", "The quick red fox\njumps over the lazy cat!\n\nA second paragraph there,\nwith words that stay.\nkeep one\nkeep two\nkeep three\nkeep four\nAnd a 3rd one\nadded at the end\n");
     try repo.writeFile(io, "code.py", "def f(y):\n    return y+2  # inc\n\nvalue = f(41)\n");
     try repo.writeFile(io, "only.let", "abc456xyz ghi\n");
+    try repo.writeFile(io, "range.swift", "let r = 0...n ?? 0o17_7 + 1_000.25e3\nflag ||= a->c\n");
     try repo.writeFile(io, "gone.txt", "");
     try repo.writeFile(io, "noeol.txt", "last line still without end");
     try repo.writeFile(io, "crlf.txt", "one 2\r\nthree four\r\n");
