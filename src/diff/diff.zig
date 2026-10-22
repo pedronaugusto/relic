@@ -688,6 +688,9 @@ pub const Options = struct {
     /// file past `core.bigFileThreshold` is then binary for its size, as
     /// the stat decided it before the patch read the file.
     after_stat: bool = false,
+    /// How a change between two commits of a submodule is written:
+    /// `--submodule`, `diff.submodule`.
+    submodule: SubmoduleFormat = .short,
 
     /// The line diff these options ask for, as parallax takes it.
     pub fn lines(options: Options) parallax.Options {
@@ -812,7 +815,7 @@ pub const ConfigError = error{
 /// as it was given.
 pub fn configured(config: *const config_mod.Config, options: Options) ConfigError!Options {
     var out = options;
-    var it = config.iterate(&.{ "diff.algorithm", "diff.context", "diff.interhunkcontext", "diff.indentheuristic", "diff.suppressblankempty", "diff.suppress-blank-empty", "diff.wserrorhighlight", "diff.colormoved", "diff.colormovedws", "diff.wordregex", "core.whitespace", "core.quotepath" });
+    var it = config.iterate(&.{ "diff.algorithm", "diff.context", "diff.interhunkcontext", "diff.indentheuristic", "diff.suppressblankempty", "diff.suppress-blank-empty", "diff.wserrorhighlight", "diff.colormoved", "diff.colormovedws", "diff.wordregex", "diff.submodule", "core.whitespace", "core.quotepath" });
     while (it.next()) |entry| {
         if (std.ascii.eqlIgnoreCase(entry.name, "wordregex")) {
             out.configured_word_regex = entry.value orelse return error.InvalidDiffSetting;
@@ -834,6 +837,9 @@ pub fn configured(config: *const config_mod.Config, options: Options) ConfigErro
             out.context = try configCount(entry.value);
         } else if (std.ascii.eqlIgnoreCase(entry.name, "interhunkcontext")) {
             out.inter_hunk_context = try configCount(entry.value);
+        } else if (std.ascii.eqlIgnoreCase(entry.name, "submodule")) {
+            // git warns of a format it does not know and keeps the last
+            out.submodule = SubmoduleFormat.parse(entry.value orelse return error.InvalidDiffSetting) orelse out.submodule;
         } else if (std.ascii.eqlIgnoreCase(entry.name, "indentheuristic")) {
             out.indent_heuristic = if (entry.value) |v| config_mod.parseBool(v) catch return error.InvalidDiffSetting else true;
         } else {
@@ -1082,7 +1088,54 @@ pub fn numstat(gpa: Allocator, io: Io, inputs: NumstatInputs, options: Options) 
 }
 
 /// Errors from `unified`.
-pub const UnifiedError = Self.Error || Self.TextError || Io.Writer.Error || attributes.Error || textconv_mod.Error || driver_mod.Error || WordDiffError || external_mod.Error;
+pub const UnifiedError = Self.Error || Self.TextError || Io.Writer.Error || attributes.Error || textconv_mod.Error || driver_mod.Error || WordDiffError || external_mod.Error || error{
+    /// `Options.submodule` asks for a submodule's log or diff, and the
+    /// inputs bring no `submodules` to write it.
+    NoSubmoduleWriter,
+};
+
+/// How a gitlink's change is written, as git's `--submodule=<format>`.
+pub const SubmoduleFormat = enum {
+    /// The two commits as `Subproject commit` lines, git's default.
+    short,
+    /// `Submodule <path> <old>..<new>:` and the commits between, as git's
+    /// `show_submodule_diff_summary` lists them.
+    log,
+    /// That line and the submodule's own diff between the two, as git's
+    /// `show_submodule_inline_diff` runs it.
+    diff,
+
+    /// git's `parse_submodule_params`: `null` for a value it does not know.
+    pub fn parse(value: []const u8) ?SubmoduleFormat {
+        return std.meta.stringToEnum(SubmoduleFormat, value);
+    }
+};
+
+/// One gitlink's side of a change, for `SubmoduleWriter`: either commit
+/// may be missing, for a submodule added or removed.
+pub const SubmoduleChange = struct {
+    path: []const u8,
+    old: ?Oid,
+    new: ?Oid,
+    /// The options the diff is written with: the format, colours and
+    /// prefixes.
+    options: *const Options,
+};
+
+/// What writes a submodule's log or diff for `Options.submodule`. This
+/// layer cannot open another repository, so the change goes through here:
+/// `submodule.DiffWriter` writes it as git does.
+pub const SubmoduleWriter = struct {
+    pub const Error = Io.Writer.Error || Allocator.Error;
+
+    context: *anyopaque,
+    writeFn: *const fn (io: Io, context: *anyopaque, w: *Io.Writer, change: SubmoduleChange) SubmoduleWriter.Error!void,
+
+    /// Write `change` to `w`.
+    pub fn write(s: SubmoduleWriter, io: Io, w: *Io.Writer, change: SubmoduleChange) SubmoduleWriter.Error!void {
+        return s.writeFn(io, s.context, w, change);
+    }
+};
 
 /// The borrowed object store, the changes whose patch is written, and the
 /// drivers their files take.
@@ -1105,6 +1158,9 @@ pub const UnifiedInputs = struct {
     /// `External.command`, is the program's output instead of a patch.
     /// `null` writes every patch.
     external: ?*const external_mod.External = null,
+    /// What writes a gitlink's change where `Options.submodule` is `log`
+    /// or `diff`.
+    submodules: ?SubmoduleWriter = null,
     /// Lines a path's patch carries among its headers, after any rename
     /// lines and before its `index` line: git's `additional_path_headers`,
     /// which `git log --remerge-diff` fills with the conflicts its merge
@@ -1300,10 +1356,26 @@ fn writeMetainfo(gpa: Allocator, io: Io, inputs: UnifiedInputs, change: Change, 
 fn writeChange(gpa: Allocator, io: Io, inputs: UnifiedInputs, change: Change, w: *Io.Writer, options: Options, r: ?*paint.Recorder) UnifiedError!void {
     const file: FileInputs = .{ .db = inputs.db, .drivers = inputs.drivers, .textconv = inputs.textconv, .change = change, .recorder = r, .headers = inputs.headers orelse &.{} };
     if (change.old != null and change.new != null and typeChanged(change.old.?.mode, change.new.?.mode)) {
-        try writeFilePatch(gpa, io, file, w, options, change.old, null);
-        return writeFilePatch(gpa, io, file, w, options, null, change.new);
+        try writeSide(gpa, io, inputs, file, w, options, change.old, null);
+        return writeSide(gpa, io, inputs, file, w, options, null, change.new);
     }
-    return writeFilePatch(gpa, io, file, w, options, change.old, change.new);
+    return writeSide(gpa, io, inputs, file, w, options, change.old, change.new);
+}
+
+/// One side pair of a change: a submodule's log or diff where both are
+/// gitlinks or missing and `Options.submodule` asks for one, as git's
+/// `builtin_diff` turns to `show_submodule_diff_summary` and
+/// `show_submodule_inline_diff`; else its patch.
+fn writeSide(gpa: Allocator, io: Io, inputs: UnifiedInputs, file: FileInputs, w: *Io.Writer, options: Options, old: ?Entry, new: ?Entry) UnifiedError!void {
+    const gitlinks = (old == null or old.?.mode == .gitlink) and (new == null or new.?.mode == .gitlink) and (old != null or new != null);
+    if (options.submodule == .short or !gitlinks) return writeFilePatch(gpa, io, file, w, options, old, new);
+    const writer = inputs.submodules orelse return error.NoSubmoduleWriter;
+    return writer.write(io, w, .{
+        .path = (old orelse new.?).path,
+        .old = if (old) |e| e.oid else null,
+        .new = if (new) |e| e.oid else null,
+        .options = &options,
+    });
 }
 
 /// One change's patch: what `writeFilePatch` reads it from, and where its

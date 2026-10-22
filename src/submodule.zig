@@ -6,6 +6,7 @@ pub const max_depth = @import("submodule/submodule.zig").max_depth;
 pub const Error = @import("submodule/submodule.zig").Error;
 pub const Refusal = @import("submodule/submodule.zig").Refusal;
 pub const loadGitmodules = @import("submodule/submodule.zig").loadGitmodules;
+pub const DiffWriter = @import("submodule/diff.zig").DiffWriter;
 pub const Entry = @import("submodule/submodule.zig").Entry;
 pub const Listing = @import("submodule/submodule.zig").Listing;
 pub const list = @import("submodule/submodule.zig").list;
