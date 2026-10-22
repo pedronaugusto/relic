@@ -16,6 +16,10 @@ const driver = @import("../diff/driver.zig");
 const repack_mod = @import("../maintenance/repack.zig");
 const worktree = @import("../checkout/checkout.zig");
 const hash = @import("../hash/hash.zig");
+const fs = @import("../fs/fs.zig");
+const stash = @import("../commit/stash.zig");
+const sparse = @import("../patterns.zig").sparse;
+const Counting = @import("shakedown").alloc.Counting;
 
 fn oidOf(gpa: Allocator, io: Io, git: *testgit.Repo, rev: []const u8) !hash.Oid {
     const text = try git.line(io, &.{ "rev-parse", rev });
@@ -460,4 +464,165 @@ test "a checkout reads a file past core.bigFileThreshold whole where its convers
     try checkoutAsGit(gpa, io, .{ .attributes = "plain.txt ident\n", .files = &.{"plain.txt"}, .config = &.{"core.autocrlf=true"} });
     // Past the cap, such a file is refused.
     try std.testing.expectError(error.ObjectTooLarge, checkoutAsGit(gpa, io, .{ .attributes = "auto.txt text=auto ident\n", .files = &.{"auto.txt"}, .config = &.{"core.autocrlf=true"}, .max_object_bytes = 1024 }));
+}
+
+/// How long the tracked file past the threshold is: hashed as git's
+/// `index_fd` hashes it, in pieces, it is never held, and the bound below
+/// half of it is above what a deflater, an inflater and a pack writer hold
+/// whatever the length.
+const tracked_len = 4 << 20;
+
+/// `tracked_len` bytes of lines, `changed` altering one byte; the caller's.
+fn trackedText(gpa: Allocator, changed: bool) ![]u8 {
+    const line = "a line of a tracked file past the threshold\n";
+    const text = try gpa.alloc(u8, tracked_len);
+    for (text, 0..) |*byte, i| byte.* = line[i % line.len];
+    if (changed) text[100] = 'X';
+    return text;
+}
+
+/// `big.txt` committed past a 1 KiB `core.bigFileThreshold`.
+fn trackedBig(gpa: Allocator, io: Io, git: *testgit.Repo) !void {
+    try git.exec(io, &.{ "config", "core.bigFileThreshold", "1k" });
+    const text = try trackedText(gpa, false);
+    defer gpa.free(text);
+    try git.writeFile(io, "big.txt", text);
+    try git.writeFile(io, "small.txt", "small\n");
+    try git.exec(io, &.{ "add", "big.txt", "small.txt" });
+    try git.exec(io, &.{ "commit", "-q", "-m", "big" });
+}
+
+/// `big.txt` written again, one line changed or not, its time set to
+/// `secs`: the stat no longer vouches for it.
+fn rewriteBig(gpa: Allocator, io: Io, git: *testgit.Repo, changed: bool, secs: i64) !void {
+    const text = try trackedText(gpa, changed);
+    defer gpa.free(text);
+    try git.writeFile(io, "big.txt", text);
+    try fs.setTimestamps(io, git.dir, "big.txt", .{ .modify_timestamp = .{ .new = .{ .nanoseconds = @as(i96, secs) * std.time.ns_per_s } } });
+}
+
+test "status and a working-tree comparison name a tracked file past core.bigFileThreshold as git's index_fd does, reading it in pieces" {
+    try testgit.requireGitVersion(std.testing.allocator, std.testing.io, 2, 56);
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    try trackedBig(gpa, io, &git);
+
+    // On one task, so the peak is counted.
+    var single: Io.Threaded = .init_single_threaded;
+    const one = single.io();
+    var counting: Counting = .init(gpa);
+    const counted = counting.allocator();
+    var repo = try repo_mod.Repository.open(counted, one, git.dir, .{});
+    defer repo.deinit(one);
+    var index = try repo.openIndex(one);
+    defer index.deinit();
+    const rules = try repo.worktreeRules();
+    const entry = index.find("big.txt").?.*;
+
+    for ([_]bool{ false, true }, 0..) |changed, i| {
+        try rewriteBig(gpa, io, &git, changed, 1_000_000_000 + @as(i64, @intCast(i)));
+        counting.resetPeak();
+        const before = counting.live_bytes;
+        const differs = try worktree.differsFromIndex(counted, one, git.dir, .{ .index = &index, .entry = entry }, rules);
+        var status = try worktree.status(counted, one, git.dir, .{ .index = &index, .db = repo.objectDatabase() }, .{ .rules = rules });
+        defer status.deinit();
+        try std.testing.expect(counting.peak_bytes - before < tracked_len / 2);
+        try std.testing.expectEqual(changed, differs);
+        var ours: worktree.Change = .unmodified;
+        for (status.entries) |e| {
+            if (std.mem.eql(u8, e.path, "big.txt")) ours = e.unstaged;
+        }
+        try std.testing.expectEqual(if (changed) worktree.Change.modified else .unmodified, ours);
+        const theirs = try git.run(io, &.{ "status", "--porcelain" });
+        defer gpa.free(theirs);
+        try std.testing.expectEqualStrings(if (changed) " M big.txt\n" else "", theirs);
+    }
+}
+
+test "a sparse checkout compares a racy file past core.bigFileThreshold as it reads it before it removes it, as git's verify_uptodate" {
+    try testgit.requireGitVersion(std.testing.allocator, std.testing.io, 2, 56);
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    for ([_]bool{ false, true }) |changed| {
+        var git = try testgit.Repo.init(gpa, io, &.{});
+        defer git.deinit();
+        try trackedBig(gpa, io, &git);
+        // The stat compared by its size and whole-second time alone, so a
+        // file changed in place keeps a stat that matches.
+        try git.exec(io, &.{ "config", "core.checkStat", "minimal" });
+        try git.exec(io, &.{ "config", "core.trustCtime", "false" });
+
+        var single: Io.Threaded = .init_single_threaded;
+        const one = single.io();
+        var counting: Counting = .init(gpa);
+        const counted = counting.allocator();
+        var repo = try repo_mod.Repository.open(counted, one, git.dir, .{});
+        defer repo.deinit(one);
+        var index = try repo.openIndex(one);
+        defer index.deinit();
+        const entry = index.find("big.txt").?.*;
+        if (changed) {
+            try rewriteBig(gpa, io, &git, true, entry.stat.mtime_sec);
+        }
+        // Every entry racy: only the content can say the file is the index's.
+        index.racy_cutoff_sec = 1;
+        index.racy_cutoff_nsec = 0;
+        var patterns = try sparse.Patterns.fromText(counted, "/*\n!/big.txt\n", .{ .case_fold = false });
+        defer patterns.deinit();
+        counting.resetPeak();
+        const before = counting.live_bytes;
+        const outcome = try worktree.applySparse(counted, one, git.dir, .{ .index = &index, .db = repo.objectDatabase(), .patterns = &patterns }, .{ .rules = try repo.worktreeRules() });
+        try std.testing.expect(counting.peak_bytes - before < tracked_len / 2);
+        // Unchanged, it goes; changed, it stays, the work in it kept.
+        try std.testing.expectEqual(@as(u32, if (changed) 1 else 0), outcome.kept_dirty);
+        try std.testing.expectEqual(@as(u32, if (changed) 0 else 1), outcome.skipped);
+        try std.testing.expectEqual(changed, if (git.dir.access(io, "big.txt", .{})) |_| true else |_| false);
+    }
+}
+
+test "stash writes a file past core.bigFileThreshold that nothing converts into a pack as it reads it, as git's stash adds it" {
+    try testgit.requireGitVersion(std.testing.allocator, std.testing.io, 2, 56);
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var theirs = try testgit.Repo.init(gpa, io, &.{});
+    defer theirs.deinit();
+    var ours = try testgit.Repo.init(gpa, io, &.{});
+    defer ours.deinit();
+    const untracked = try trackedText(gpa, true);
+    defer gpa.free(untracked);
+    for ([_]*testgit.Repo{ &theirs, &ours }) |r| {
+        try trackedBig(gpa, io, r);
+        try rewriteBig(gpa, io, r, true, 1_000_000_000);
+        try r.writeFile(io, "new.txt", untracked);
+    }
+    try theirs.exec(io, &.{ "stash", "push", "-q", "-u" });
+
+    var single: Io.Threaded = .init_single_threaded;
+    const one = single.io();
+    var counting: Counting = .init(gpa);
+    const counted = counting.allocator();
+    var repo = try repo_mod.Repository.open(counted, one, ours.dir, .{});
+    defer repo.deinit(one);
+    const who: @import("../object/object.zig").Signature = .{ .name = "Fixture", .email = "fixture@example.com", .when_secs = testgit.fixture_date, .offset_minutes = 0 };
+    counting.resetPeak();
+    const before = counting.live_bytes;
+    _ = (try stash.push(one, &repo, .{ .who = who, .untracked = .include })).?;
+    try std.testing.expect(counting.peak_bytes - before < tracked_len / 2);
+
+    // The working tree's and the untracked files' trees are git's.
+    for ([_][]const u8{ "stash^{tree}", "stash^3^{tree}" }) |rev| {
+        const want = try theirs.line(io, &.{ "rev-parse", rev });
+        defer gpa.free(want);
+        const got = try ours.line(io, &.{ "rev-parse", rev });
+        defer gpa.free(got);
+        try std.testing.expectEqualStrings(want, got);
+    }
+    const checked = try ours.run(io, &.{ "fsck", "--full", "--strict", "--no-dangling" });
+    gpa.free(checked);
+    // Written into a pack, as git's are.
+    const counted_objects = try ours.run(io, &.{ "count-objects", "-v" });
+    defer gpa.free(counted_objects);
+    try std.testing.expect(std.mem.find(u8, counted_objects, "packs: 0\n") == null);
 }

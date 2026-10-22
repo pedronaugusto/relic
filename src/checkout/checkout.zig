@@ -128,6 +128,11 @@ pub const Rules = struct {
     /// measured at open; the default believes every nanosecond, which is
     /// what this package assumed before it measured.
     timestamp_resolution: fs.Resolution = .nanosecond,
+    /// `core.bigFileThreshold`: past it, a regular file that nothing
+    /// converts is read in pieces to be stored or named, never whole
+    /// (`streamsIn`). `Repository.worktreeRules` fills it in from the object
+    /// database's settings; the default is git's.
+    big_file_bytes: aegis.units.Bytes(u64) = (odb_mod.PackOptions{}).big_file_bytes,
     /// Whether the filesystem records an executable bit, from
     /// `core.fileMode`. When false the index's mode is preserved rather
     /// than taken from the disk.
@@ -694,10 +699,8 @@ const Walker = struct {
     }
 
     /// A file's blob as it is stored, or, where git streams it into a pack
-    /// (a regular file past `core.bigFileThreshold`, which the database's
-    /// pack settings carry, that nothing would convert), the file's length
-    /// to read it in pieces as it is stored.
-    const Read = union(enum) { bytes: []const u8, streamed: u64 };
+    /// (`streamsIn`), that it is read in pieces as it is stored.
+    const Read = union(enum) { bytes: []const u8, streamed };
 
     fn readForAdd(w: *Walker, path: []const u8, found: fs.Entry) Error!Read {
         _ = w.scratch.reset(.retain_capacity);
@@ -709,10 +712,9 @@ const Walker = struct {
             return .{ .bytes = try a.dupe(u8, buf[0..len]) };
         }
 
-        const big = aegis.units.Bytes(u64).fromRaw(found.size).compare(w.db.packOptions().big_file_bytes) == .gt;
         if (w.options.rules.attrs) |attrs| {
             const applied = try attrs.lookup(a, path, .file);
-            if (big and !try w.conv.wouldConvertToGit(path, applied)) return .{ .streamed = found.size };
+            if (try streamsIn(w.options.rules.big_file_bytes, found, .{ .session = w.conv, .path = path, .applied = applied })) return .streamed;
             const converted = try w.conv.toGitFile(a, .{ .path = path, .size = found.size, .applied = applied }, .{ .storing = .store });
             if (converted.irreversible) switch (w.options.rules.core.safecrlf) {
                 .false => {},
@@ -721,7 +723,7 @@ const Walker = struct {
             };
             return .{ .bytes = converted.bytes };
         }
-        if (big) return .{ .streamed = found.size };
+        if (try streamsIn(w.options.rules.big_file_bytes, found, null)) return .streamed;
         return .{ .bytes = try fs.readFileSized(a, w.io, w.wt, path, .{ .size = found.size, .max_bytes = 1 << 31 }) };
     }
 
@@ -730,19 +732,12 @@ const Walker = struct {
     fn store(w: *Walker, path: []const u8, read: Read) Error!Oid {
         const bytes = switch (read) {
             .bytes => |bytes| bytes,
-            .streamed => |size| {
+            .streamed => {
                 const open = w.filling.* orelse blk: {
                     if (w.streamed.* == null) w.streamed.* = try w.db.beginPack(w.io, streamedPackOptions(w.db));
                     break :blk w.streamed.*.?;
                 };
-                const file = try w.wt.openFile(w.io, path, .{});
-                defer file.close(w.io);
-                var buffer: [64 * 1024]u8 = undefined;
-                var reader = file.reader(w.io, &buffer);
-                return w.db.writeIntoFrom(w.io, open, &reader.interface, .{ .type = .blob, .size = size }) catch |err| switch (err) {
-                    error.ReadFailed => reader.err.?,
-                    else => |e| e,
-                };
+                return writeFileInto(w.io, w.wt, w.db, open, path);
             },
         };
         if (w.filling.*) |open| return w.db.writeInto(w.io, open, .blob, bytes);
@@ -756,10 +751,66 @@ const Walker = struct {
     }
 };
 
+/// The conversion a file would meet on its way in: its path, its
+/// attributes, and the session that knows the drivers and settings.
+pub const Conversion = struct { session: *convert.Session, path: []const u8, applied: attributes.Attributes };
+
+/// Whether git reads the file `found` in pieces to store or name it, never
+/// whole (`index_fd`): a regular file past `threshold`
+/// (`core.bigFileThreshold`) that nothing converts on its way in.
+/// `conversion` is null where the caller reads no attributes.
+pub fn streamsIn(threshold: aegis.units.Bytes(u64), found: fs.Entry, conversion: ?Conversion) Error!bool {
+    if (found.kind != .file) return false;
+    if (aegis.units.Bytes(u64).fromRaw(found.size).compare(threshold) != .gt) return false;
+    const c = conversion orelse return true;
+    return !try c.session.wouldConvertToGit(c.path, c.applied);
+}
+
+/// The name the file at `path` has as a blob, hashed as it is read, as
+/// git's `index_fd` names a file it streams: its length the opened file's,
+/// so a file that changes as it is read is named as no blob.
+pub fn hashFile(io: Io, wt: Io.Dir, kind: hash.Kind, path: []const u8) Error!Oid {
+    const file = try wt.openFile(io, path, .{});
+    defer file.close(io);
+    const size = (try file.stat(io)).size;
+    var buffer: [64 * 1024]u8 = undefined;
+    var reader = file.reader(io, &buffer);
+    var hasher: hash.Hasher = .init(kind);
+    hasher.updateHeader("blob", size);
+    var left = size;
+    while (left != 0) {
+        const piece = reader.interface.peekGreedy(1) catch |err| switch (err) {
+            error.EndOfStream => break,
+            error.ReadFailed => return reader.err.?,
+        };
+        const n: usize = @intCast(@min(piece.len, left));
+        hasher.update(piece[0..n]);
+        reader.interface.toss(n);
+        left -= n;
+    }
+    return hasher.final();
+}
+
+/// Write the file at `path` into `filling` as a blob read in pieces, as
+/// git's add streams a file past `core.bigFileThreshold` into a pack
+/// (`index_blob_bulk_checkin`): its length the opened file's, and taken
+/// back out where the database or the pack holds it already.
+pub fn writeFileInto(io: Io, wt: Io.Dir, db: *Odb, filling: Odb.OpenPack, path: []const u8) Error!Oid {
+    const file = try wt.openFile(io, path, .{});
+    defer file.close(io);
+    const size = (try file.stat(io)).size;
+    var buffer: [64 * 1024]u8 = undefined;
+    var reader = file.reader(io, &buffer);
+    return db.writeIntoFrom(io, filling, &reader.interface, .{ .type = .blob, .size = size }) catch |err| switch (err) {
+        error.ReadFailed => reader.err.?,
+        else => |e| e,
+    };
+}
+
 /// How git's add writes the pack it streams big files into
 /// (`stream_blob_to_pack`): each object whole, deflated at the pack's
 /// compression, with a version 2 index and no reverse index.
-fn streamedPackOptions(db: *Odb) odb_mod.PackOptions {
+pub fn streamedPackOptions(db: *Odb) odb_mod.PackOptions {
     var options = db.packOptions();
     options.delta = .none;
     options.index_version = 2;
@@ -800,6 +851,8 @@ pub const Tracked = struct {
         if (!t.index.isRacy(entry) and entry.stat.matches(found.stat, t.rules.statCompare())) return true;
         // The stat says it may have changed; the content says whether it
         // did. This is the racy rule doing its work.
+        const conversion: ?Conversion = if (t.rules.attrs) |attrs| .{ .session = t.conv, .path = path, .applied = try attrs.lookup(a, path, .file) } else null;
+        if (try streamsIn(t.rules.big_file_bytes, found, conversion)) return (try hashFile(t.io, t.wt, t.db.objectFormat(), path)).eql(entry.oid);
         const content = try t.storedBytes(a, path, found);
         return hash.Hasher.object(t.db.objectFormat(), "blob", content).eql(entry.oid);
     }
@@ -3526,43 +3579,58 @@ pub fn differsFromIndex(
     var scratch: std.heap.ArenaAllocator = .init(gpa);
     defer scratch.deinit();
     const a = scratch.allocator();
-    const bytes = if (found.kind == .sym_link) blk: {
+    if (found.kind == .sym_link) {
         var buf: [4096]u8 = undefined;
         const len = try wt.readLink(io, entry.path, &buf);
-        break :blk try a.dupe(u8, buf[0..len]);
-    } else wt.readFileAlloc(io, entry.path, a, .limited(1 << 31)) catch |err| switch (err) {
+        return !hash.Hasher.object(index.kind, "blob", buf[0..len]).eql(entry.oid);
+    }
+    const attrs = rules.attrs orelse {
+        if (try streamsIn(rules.big_file_bytes, found, null)) return !try namedAs(io, wt, entry);
+        const bytes = wt.readFileAlloc(io, entry.path, a, .limited(1 << 31)) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return true,
+        };
+        return !hash.Hasher.object(index.kind, "blob", bytes).eql(entry.oid);
+    };
+    // The whole way in, as the file would be added: the filter, line
+    // endings and `ident`, under the attributes the working tree gives it.
+    // Anything less takes a checked-out `$Id: ... $` or CRLF for a change
+    // whenever the stat stops matching, which a touch does, and which a
+    // filesystem whose clock is coarser than the time between writing a
+    // file and the index does to them all.
+    var conv: convert.Session = .open(gpa, io, .{
+        .wt = wt,
+        .kind = index.kind,
+        .core = rules.core,
+        .required_filters = rules.required_filters,
+        .drivers = rules.filters,
+        .index = index,
+    });
+    defer conv.deinit(io);
+    // The `.gitattributes` on the way down to the file, which a lookup
+    // alone does not read. What this enters, it leaves; a caller already
+    // going path by path keeps what it entered.
+    const entered = attrs.entered_any;
+    try attrs.enter(io, wt, entry.path);
+    defer if (!entered) attrs.leave();
+    const applied = try attrs.lookup(a, entry.path, .file);
+    if (try streamsIn(rules.big_file_bytes, found, .{ .session = &conv, .path = entry.path, .applied = applied })) return !try namedAs(io, wt, entry);
+    const bytes = wt.readFileAlloc(io, entry.path, a, .limited(1 << 31)) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return true,
     };
-    var content: []const u8 = bytes;
-    if (rules.attrs) |attrs| {
-        if (found.kind != .sym_link) {
-            // The whole way in, as the file would be added: the filter,
-            // line endings and `ident`, under the attributes the working
-            // tree gives it. Anything less takes a checked-out `$Id: ... $`
-            // or CRLF for a change whenever the stat stops matching, which a
-            // touch does, and which a filesystem whose clock is coarser than
-            // the time between writing a file and the index does to them all.
-            var conv: convert.Session = .open(gpa, io, .{
-                .wt = wt,
-                .kind = index.kind,
-                .core = rules.core,
-                .required_filters = rules.required_filters,
-                .drivers = rules.filters,
-                .index = index,
-            });
-            defer conv.deinit(io);
-            // The `.gitattributes` on the way down to the file, which a
-            // lookup alone does not read. What this enters, it leaves; a
-            // caller already going path by path keeps what it entered.
-            const entered = attrs.entered_any;
-            try attrs.enter(io, wt, entry.path);
-            defer if (!entered) attrs.leave();
-            const applied = try attrs.lookup(a, entry.path, .file);
-            content = (try conv.toGit(a, .{ .path = entry.path, .bytes = bytes, .applied = applied }, .{ .storing = .hash_only })).bytes;
-        }
-    }
+    const content = (try conv.toGit(a, .{ .path = entry.path, .bytes = bytes, .applied = applied }, .{ .storing = .hash_only })).bytes;
     return !hash.Hasher.object(index.kind, "blob", content).eql(entry.oid);
+}
+
+/// Whether the file at `entry.path`, read in pieces, is the blob `entry`
+/// names; one that cannot be read is not.
+fn namedAs(io: Io, wt: Io.Dir, entry: index_mod.Entry) Error!bool {
+    const oid = hashFile(io, wt, entry.oid.kind, entry.path) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return false,
+    };
+    return oid.eql(entry.oid);
 }
 
 fn directoryIsReplaceable(
@@ -3814,20 +3882,24 @@ pub fn applySparse(
                 if (index.isRacy(entry.*)) {
                     _ = scratch.reset(.retain_capacity);
                     const a = scratch.allocator();
-                    const raw = if (found.kind == .sym_link) blk: {
-                        var buf: [4096]u8 = undefined;
-                        const len = try wt.readLink(io, entry.path, &buf);
-                        break :blk try a.dupe(u8, buf[0..len]);
-                    } else try fs.readFileSized(a, io, wt, entry.path, .{ .size = found.size, .max_bytes = 1 << 31 });
-                    var content: []const u8 = raw;
-                    if (options.rules.attrs) |attrs| {
-                        if (found.kind != .sym_link) {
-                            try attrs.enter(io, wt, entry.path);
-                            const applied = try attrs.lookup(a, entry.path, .file);
-                            content = (try conv.toGit(a, .{ .path = entry.path, .bytes = raw, .applied = applied }, .{ .storing = .hash_only })).bytes;
-                        }
-                    }
-                    if (!hash.Hasher.object(db.objectFormat(), "blob", content).eql(entry.oid)) {
+                    var applied: ?attributes.Attributes = null;
+                    if (options.rules.attrs) |attrs| if (found.kind != .sym_link) {
+                        try attrs.enter(io, wt, entry.path);
+                        applied = try attrs.lookup(a, entry.path, .file);
+                    };
+                    const conversion: ?Conversion = if (applied) |each| .{ .session = &conv, .path = entry.path, .applied = each } else null;
+                    const oid = if (try streamsIn(options.rules.big_file_bytes, found, conversion))
+                        try hashFile(io, wt, db.objectFormat(), entry.path)
+                    else blk: {
+                        const raw = if (found.kind == .sym_link) link: {
+                            var buf: [4096]u8 = undefined;
+                            const len = try wt.readLink(io, entry.path, &buf);
+                            break :link try a.dupe(u8, buf[0..len]);
+                        } else try fs.readFileSized(a, io, wt, entry.path, .{ .size = found.size, .max_bytes = 1 << 31 });
+                        const content = if (applied) |each| (try conv.toGit(a, .{ .path = entry.path, .bytes = raw, .applied = each }, .{ .storing = .hash_only })).bytes else raw;
+                        break :blk hash.Hasher.object(db.objectFormat(), "blob", content);
+                    };
+                    if (!oid.eql(entry.oid)) {
                         outcome.kept_dirty += 1;
                         continue;
                     }

@@ -301,6 +301,10 @@ const Ctx = struct {
     /// What a file in the working tree is stored as: line endings, clean
     /// filters and LFS, as `addAll` stores it.
     conv: convert.Session,
+    /// The pack the files past `core.bigFileThreshold` that nothing
+    /// converts are written into as they are read, as `addAll` writes them;
+    /// begun by the first and finished with the tree they are in.
+    streamed: ?odb_mod.Odb.OpenPack = null,
 
     fn init(
         ctx: *Ctx,
@@ -352,6 +356,7 @@ const Ctx = struct {
     }
 
     fn deinit(ctx: *Ctx) void {
+        if (ctx.streamed) |open| ctx.repo.objectDatabase().abortPack(ctx.io, open);
         ctx.conv.deinit(ctx.io);
         ctx.locked.deinit(ctx.io);
         ctx.attrs.deinit();
@@ -393,22 +398,43 @@ const Ctx = struct {
         var scratch: std.heap.ArenaAllocator = .init(ctx.gpa);
         defer scratch.deinit();
         const a = scratch.allocator();
+        var applied: ?attributes.Attributes = null;
+        if (mode != .symlink) {
+            try ctx.attrs.enter(ctx.io, ctx.wt, path);
+            applied = try ctx.attrs.lookup(a, path, .file);
+        }
+        // Past the threshold with nothing to convert it, read in pieces.
+        const conversion: ?worktree.Conversion = if (applied) |each| .{ .session = &ctx.conv, .path = path, .applied = each } else null;
+        if (try worktree.streamsIn(ctx.rules.big_file_bytes, found, conversion)) {
+            if (!write) return .{ .mode = mode, .oid = try worktree.hashFile(ctx.io, ctx.wt, ctx.repo.objectFormat(), path) };
+            const db = ctx.repo.objectDatabase();
+            const filling = ctx.streamed orelse blk: {
+                ctx.streamed = try db.beginPack(ctx.io, worktree.streamedPackOptions(db));
+                break :blk ctx.streamed.?;
+            };
+            return .{ .mode = mode, .oid = try worktree.writeFileInto(ctx.io, ctx.wt, db, filling, path) };
+        }
         const raw = if (found.kind == .sym_link) blk: {
             var buf: [4096]u8 = undefined;
             const len = try ctx.wt.readLink(ctx.io, path, &buf);
             break :blk try a.dupe(u8, buf[0..len]);
         } else try fs.readFileSized(a, ctx.io, ctx.wt, path, .{ .size = found.size, .max_bytes = 1 << 31 });
-        var content: []const u8 = raw;
-        if (mode != .symlink) {
-            try ctx.attrs.enter(ctx.io, ctx.wt, path);
-            const applied = try ctx.attrs.lookup(a, path, .file);
-            content = (try ctx.conv.toGit(a, .{ .path = path, .bytes = raw, .applied = applied }, .{ .storing = if (write) .store else .hash_only })).bytes;
-        }
+        const content = if (applied) |each|
+            (try ctx.conv.toGit(a, .{ .path = path, .bytes = raw, .applied = each }, .{ .storing = if (write) .store else .hash_only })).bytes
+        else
+            raw;
         const oid = if (write)
             try ctx.repo.objectDatabase().write(ctx.io, .blob, content)
         else
             hash.Hasher.object(ctx.repo.objectFormat(), "blob", content);
         return .{ .mode = mode, .oid = oid };
+    }
+
+    /// Finish the pack the streamed files went into, if any did.
+    fn finishStreamed(ctx: *Ctx) Error!void {
+        const open = ctx.streamed orelse return;
+        ctx.streamed = null;
+        _ = try ctx.repo.objectDatabase().finishPack(ctx.io, open);
     }
 
     fn stage0(ctx: *Ctx, path: []const u8) ?*index_mod.Entry {
@@ -644,6 +670,7 @@ fn untrackedTree(ctx: *Ctx, paths: []const []const u8) Error!Oid {
         const s = (try ctx.side(path, null, true)) orelse continue;
         try temp.add(.{ .path = path, .oid = s.oid, .mode = s.mode });
     }
+    try ctx.finishStreamed();
     return worktree.writeTree(ctx.gpa, ctx.io, &temp, ctx.repo.objectDatabase());
 }
 
@@ -662,6 +689,7 @@ fn workTree(ctx: *Ctx, updates: []const Update) Error!Oid {
         const s = (try ctx.side(u.path, ctx.stage0(u.path), true)).?;
         try temp.add(.{ .path = u.path, .oid = s.oid, .mode = s.mode });
     }
+    try ctx.finishStreamed();
     return worktree.writeTree(ctx.gpa, ctx.io, &temp, ctx.repo.objectDatabase());
 }
 

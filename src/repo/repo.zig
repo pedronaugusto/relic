@@ -1767,6 +1767,7 @@ pub const Repository = struct {
             .ignore_stat = repo.data().settings.ignore_stat,
             .hide_dot_files = repo.data().settings.hide_dot_files,
             .timestamp_resolution = repo.data().odb.timestamp_resolution,
+            .big_file_bytes = repo.data().odb.packOptions().big_file_bytes,
             .file_mode = repo.data().settings.file_mode,
             .symlinks = repo.data().settings.symlinks,
             .protect = repo.data().settings.protect,
