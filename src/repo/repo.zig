@@ -1021,7 +1021,8 @@ pub const Repository = struct {
     /// `pack.windowMemory` (0 is no bound), `pack.compression` and
     /// `core.looseCompression`, each falling back to `core.compression`
     /// (-1 is zlib's default; anything else outside 0 to 9 refused, as git
-    /// dies), `pack.indexVersion` (past 2 refused) and `core.multiPackIndex`.
+    /// dies), `pack.indexVersion` (past 2 refused), `core.multiPackIndex` and
+    /// `core.bigFileThreshold` (`odb_policy.bigFileThreshold`).
     fn packingOf(config: *const config_mod.Config) ErrorNamespace.Error!odb_policy.Packing {
         var packing: odb_policy.Packing = .{};
         if (config.has("pack.window")) packing.window = std.math.cast(u32, @max(try config.getInt("pack.window", 10), 0)) orelse std.math.maxInt(u32);
@@ -1045,6 +1046,7 @@ pub const Repository = struct {
             packing.index_version = @intCast(@max(version, 1));
         }
         packing.multi_pack_index = try config.getBool("core.multipackindex", true);
+        packing.big_file_bytes = try odb_policy.bigFileThreshold(config);
         return packing;
     }
 

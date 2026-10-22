@@ -35,6 +35,9 @@ pub const Error = diff.Error || diff.TextError || object.ParseError || attribute
     /// A `diff.<name>.binary` that is neither a boolean nor `auto`, which
     /// git dies on.
     InvalidDriverBinary,
+    /// A `core.bigFileThreshold` that is no unsigned number, which git dies
+    /// on.
+    InvalidBigFileThreshold,
 };
 
 /// The patch id of `commit` against its parent, or against nothing for a
@@ -220,6 +223,7 @@ fn addLine(gpa: Allocator, h: *hash.Hasher, scratch: *std.ArrayList(u8), marker:
 //=========================================================================
 
 const testgit = @import("../testing/git.zig");
+const config_mod = @import("../config/config.zig");
 
 test "patch ids are the ones git patch-id --stable reads from the same diff" {
     const gpa = std.testing.allocator;
@@ -260,10 +264,11 @@ test "patch ids are the ones git patch-id --stable reads from the same diff" {
     }
 }
 
-test "a file the attributes call binary is hashed by its names, so git cherry and the patch id agree on what is upstream" {
+test "a file the attributes call binary, or past core.bigFileThreshold, is hashed by its names, so git cherry and the patch id agree on what is upstream" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    for ([_]bool{ false, true }) |binary_attribute| {
+    for ([_]enum { text, attribute, big }{ .text, .attribute, .big }) |kind| {
+        const binary_attribute = kind == .attribute;
         var repo = try testgit.Repo.init(gpa, io, &.{});
         defer repo.deinit();
         var lines: [20][]const u8 = undefined;
@@ -292,10 +297,14 @@ test "a file the attributes call binary is hashed by its names, so git cherry an
         try repo.writeFile(io, "f", topic);
         try repo.exec(io, &.{ "commit", "-q", "-am", "t1" });
 
+        // The file is 150 bytes.
+        if (kind == .big) try repo.exec(io, &.{ "config", "core.bigFileThreshold", "100" });
         const cherry = try repo.run(io, &.{ "cherry", "main", "topic" });
         defer gpa.free(cherry);
         const git_equal = cherry[0] == '-';
-        try std.testing.expectEqual(!binary_attribute, git_equal);
+        try std.testing.expectEqual(kind == .text, git_equal);
+        var config = try config_mod.Config.parseText(gpa, if (kind == .big) "[core]\n\tbigFileThreshold = 100\n" else "", .local);
+        defer config.deinit();
 
         const git_dir = try repo.gitDir(io);
         defer git_dir.close(io);
@@ -304,7 +313,7 @@ test "a file the attributes call binary is hashed by its names, so git cherry an
         var attrs: attributes.Attrs = try .init(gpa, .{});
         defer attrs.deinit();
         defer attrs.leave();
-        const rule: driver.Drivers = .{ .attrs = &attrs, .work_dir = repo.dir };
+        const rule: driver.Drivers = .{ .attrs = &attrs, .work_dir = repo.dir, .config = &config };
         const upstream_text = try repo.line(io, &.{ "rev-parse", "main" });
         defer gpa.free(upstream_text);
         const topic_text = try repo.line(io, &.{ "rev-parse", "topic" });

@@ -794,6 +794,7 @@ pub fn format(gpa: Allocator, io: Io, repo: *Repository, range: Range, given: Op
     diff_options.abbrev = abbrev.defaultLength(config, db);
     diff_options.relative_to = relative_to;
     diff_options.binary_patches = options.binary;
+    diff_options.after_stat = options.stat;
 
     var ctx: Ctx = .{
         .gpa = gpa,

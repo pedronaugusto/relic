@@ -22,6 +22,7 @@ const dir_scan = @import("dir_scan.zig");
 const safe_path = @import("../names.zig").path;
 
 const std = @import("std");
+const aegis = @import("aegis");
 const assert = std.debug.assert;
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
@@ -174,6 +175,10 @@ pub const AddOutcome = struct {
     /// The pack the new blobs went into, when `AddOptions.new_blobs` asked
     /// for one and there was anything to write.
     pack: ?pack_mod.WriteReport = null,
+    /// The pack the files past `core.bigFileThreshold` that nothing
+    /// converts went into, as git's add streams such a file into a pack
+    /// (`index_fd`): one for the call, where new blobs go loose.
+    streamed_pack: ?pack_mod.WriteReport = null,
     /// Repositories inside the working tree that the index had nothing for,
     /// staged as gitlinks to the commit each has checked out. Counted in
     /// `added` too. git stages them the same way and warns about each, since
@@ -352,6 +357,8 @@ pub fn addAll(
     errdefer if (filling) |open| db.abortPack(io, open);
     if (options.new_blobs == .pack) filling = try db.beginPack(io, options.pack);
     // `.auto` opens it on the way, once enough new blobs have gone loose.
+    var streamed: ?Odb.OpenPack = null;
+    errdefer if (streamed) |open| db.abortPack(io, open);
 
     var conv: convert.Session = .open(gpa, io, .{
         .wt = wt,
@@ -380,6 +387,7 @@ pub fn addAll(
         .seen = &seen,
         .fresh = &fresh,
         .filling = &filling,
+        .streamed = &streamed,
     };
     try walker.walkFrom(options.prefix);
     if (filling) |open| {
@@ -387,6 +395,10 @@ pub fn addAll(
         // it releases it whether it succeeded or not.
         filling = null;
         outcome.pack = try db.finishPack(io, open);
+    }
+    if (streamed) |open| {
+        streamed = null;
+        outcome.streamed_pack = try db.finishPack(io, open);
     }
     // New entries go in once, sorted once. A walk produces paths in tree
     // order and the index is in path order, so inserting them one at a time
@@ -451,6 +463,8 @@ const Walker = struct {
     /// The pack the blobs go into, where the caller asked for one.
     /// The pack new blobs go into, once there is one; `addAll` finishes it.
     filling: *?Odb.OpenPack,
+    /// The pack git streams big files into, opened at the first one.
+    streamed: *?Odb.OpenPack,
     /// New blobs this pass has written loose, for `NewBlobs.auto`.
     loose_new: u32 = 0,
 
@@ -623,11 +637,11 @@ const Walker = struct {
             if (racy) w.outcome.racy_checked += 1;
         }
 
-        const bytes = w.readForAdd(path, found) catch |err| {
+        const read = w.readForAdd(path, found) catch |err| {
             try w.skipFile(path, err);
             return;
         };
-        const blob = w.store(bytes) catch |err| switch (err) {
+        const blob = w.store(read) catch |err| switch (err) {
             error.CollisionAttack => {
                 try w.skipFile(path, err);
                 return;
@@ -677,32 +691,47 @@ const Walker = struct {
         w.outcome.skipped_errors += 1;
     }
 
-    fn readForAdd(w: *Walker, path: []const u8, found: fs.Entry) Error![]const u8 {
+    /// A file's blob as it is stored, and whether git streams it into a
+    /// pack: a regular file past `core.bigFileThreshold` (the database's
+    /// pack settings carry it) that nothing would convert.
+    const Read = struct { bytes: []const u8, streamed: bool = false };
+
+    fn readForAdd(w: *Walker, path: []const u8, found: fs.Entry) Error!Read {
         _ = w.scratch.reset(.retain_capacity);
         const a = w.scratch.allocator();
 
         if (found.kind == .sym_link) {
             var buf: [4096]u8 = undefined;
             const len = try w.wt.readLink(w.io, path, &buf);
-            return a.dupe(u8, buf[0..len]);
+            return .{ .bytes = try a.dupe(u8, buf[0..len]) };
         }
 
+        const big = aegis.units.Bytes(u64).fromRaw(found.stat.size).compare(w.db.packOptions().big_file_bytes) == .gt;
         if (w.options.rules.attrs) |attrs| {
             const applied = try attrs.lookup(a, path, .file);
+            if (big and !try w.conv.wouldConvertToGit(path, applied)) {
+                return .{ .bytes = try fs.readFileSized(a, w.io, w.wt, path, .{ .size = found.stat.size, .max_bytes = 1 << 31 }), .streamed = true };
+            }
             const converted = try w.conv.toGitFile(a, .{ .path = path, .size = found.stat.size, .applied = applied }, .{ .storing = .store });
             if (converted.irreversible) switch (w.options.rules.core.safecrlf) {
                 .false => {},
                 .true => return error.IrreversibleConversion,
                 .warn => w.outcome.safecrlf_warnings += 1,
             };
-            return converted.bytes;
+            return .{ .bytes = converted.bytes };
         }
-        return fs.readFileSized(a, w.io, w.wt, path, .{ .size = found.stat.size, .max_bytes = 1 << 31 });
+        return .{ .bytes = try fs.readFileSized(a, w.io, w.wt, path, .{ .size = found.stat.size, .max_bytes = 1 << 31 }), .streamed = big };
     }
 
-    /// Put a blob where this pass puts them.
-    fn store(w: *Walker, bytes: []const u8) Error!Oid {
+    /// Put a blob where this pass puts them: a streamed one into the pack
+    /// for those, unless every blob goes into one.
+    fn store(w: *Walker, read: Read) Error!Oid {
+        const bytes = read.bytes;
         if (w.filling.*) |open| return w.db.writeInto(w.io, open, .blob, bytes);
+        if (read.streamed) {
+            if (w.streamed.* == null) w.streamed.* = try w.db.beginPack(w.io, streamedPackOptions(w.db));
+            return w.db.writeInto(w.io, w.streamed.*.?, .blob, bytes);
+        }
         const written = w.db.stats.loose_written;
         const oid = try w.db.write(w.io, .blob, bytes);
         if (w.db.stats.loose_written != written) w.loose_new += 1;
@@ -712,6 +741,17 @@ const Walker = struct {
         return oid;
     }
 };
+
+/// How git's add writes the pack it streams big files into
+/// (`stream_blob_to_pack`): each object whole, deflated at the pack's
+/// compression, with a version 2 index and no reverse index.
+fn streamedPackOptions(db: *Odb) odb_mod.PackOptions {
+    var options = db.packOptions();
+    options.delta = .none;
+    options.index_version = 2;
+    options.reverse_index = false;
+    return options;
+}
 
 /// The mode a file on the disk is staged with, as git's `ce_mode_from_stat`
 /// gives it: without `core.symlinks` a file where the index has a link is

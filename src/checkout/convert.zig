@@ -215,6 +215,19 @@ pub const Session = struct {
         return s.convertToGit(a, path, bytes, applied, resolved, storing);
     }
 
+    /// Whether storing a file at `path` would change it, as git's
+    /// `would_convert_to_git` answers without reading it: a filter driver
+    /// the configuration defines (relic's own LFS too), a
+    /// `working-tree-encoding`, any end-of-line conversion, or `ident`. git
+    /// streams a file past `core.bigFileThreshold` into a pack only where
+    /// nothing would.
+    pub fn wouldConvertToGit(s: *Session, path: []const u8, applied: attributes.Attributes) ErrorNamespace.Error!bool {
+        if (try s.resolve(path, applied) != .none) return true;
+        if (try encodingOf(applied) != null) return true;
+        if (attributes.crlfAction(applied, s.options.core) != .binary) return true;
+        return identOn(applied);
+    }
+
     /// Convert bytes already in memory for storage.
     pub fn toGit(s: *Session, a: Allocator, inputs: GitInputs, options: ToGitOptions) ErrorNamespace.Error!ToGit {
         const path = inputs.path;

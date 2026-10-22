@@ -191,7 +191,7 @@ test "a stored zip is git's byte for byte, and a deflated one holds the same fil
     }
 }
 
-const CdEntry = struct { name: []const u8, crc: u32, size: u32, external: u32, internal: u16 };
+const CdEntry = struct { name: []const u8, crc: u32, size: u32, external: u32, internal: u16, flags: u16, method: u16, version_needed: u16 };
 
 fn centralDirectory(gpa: Allocator, zip: []const u8) !std.ArrayList(CdEntry) {
     var out: std.ArrayList(CdEntry) = .empty;
@@ -210,6 +210,9 @@ fn centralDirectory(gpa: Allocator, zip: []const u8) !std.ArrayList(CdEntry) {
             .size = std.mem.readInt(u32, zip[at + 24 ..][0..4], .little),
             .internal = std.mem.readInt(u16, zip[at + 36 ..][0..2], .little),
             .external = std.mem.readInt(u32, zip[at + 38 ..][0..4], .little),
+            .flags = std.mem.readInt(u16, zip[at + 8 ..][0..2], .little),
+            .method = std.mem.readInt(u16, zip[at + 10 ..][0..2], .little),
+            .version_needed = std.mem.readInt(u16, zip[at + 6 ..][0..2], .little),
         });
         at += 46 + name_len + extra_len;
     }
@@ -346,4 +349,51 @@ test "a zip marks an entry text or binary by its diff driver, as git's entry_is_
     var repo = try Repository.open(gpa, io, git.dir, .{});
     defer repo.deinit(io);
     try std.testing.expectError(error.InvalidDriverBinary, ours(gpa, io, &repo, head, .{ .format = .zip, .level = 0 }));
+}
+
+test "a file past core.bigFileThreshold is archived as git streams it: its blob as stored, a zip's entry deflated with a data descriptor" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    try git.isolated.?.put("TZ", "UTC");
+    try git.exec(io, &.{ "config", "core.bigFileThreshold", "100" });
+    // Streamed: unconverted, though `eol=crlf` asks; not streamed: the
+    // small file, converted, and the large one `export-subst` formats.
+    try git.writeFile(io, ".gitattributes", "*.txt eol=crlf\nsubst.txt export-subst\n");
+    try git.writeFile(io, "big.txt", repeat("a line of text\n", 10));
+    try git.writeFile(io, "small.txt", "one\ntwo\n");
+    try git.writeFile(io, "subst.txt", "$Format:%H$\n" ++ repeat("padding past the threshold\n", 5));
+    try git.writeFile(io, "data.bin", repeat("\x00\x01\x02 binary ", 20));
+    // Larger deflated than stored: a stream keeps it deflated.
+    try git.writeFile(io, "noise.dat", repeat("\x9f\x12\xe4\x07\x88\x3c\xd1\x5a\x6b\xf0\x21\x9e\x44\xb7\x0c\x73", 8));
+    try git.exec(io, &.{ "add", "-A" });
+    try git.exec(io, &.{ "commit", "-q", "-m", "big files" });
+    var repo = try Repository.open(gpa, io, git.dir, .{});
+    defer repo.deinit(io);
+    const head = try oidOf(gpa, io, &git, "HEAD");
+    try compare(gpa, io, &git, &repo, &.{ "--format=tar", "HEAD" }, head, .{ .format = .tar });
+    try compare(gpa, io, &git, &repo, &.{ "--format=zip", "-0", "HEAD" }, head, .{ .format = .zip, .level = 0 });
+
+    const theirs = try git.run(io, &.{ "archive", "--format=zip", "HEAD" });
+    defer gpa.free(theirs);
+    const mine = try ours(gpa, io, &repo, head, .{ .format = .zip });
+    defer gpa.free(mine);
+    var a_entries = try centralDirectory(gpa, theirs);
+    defer a_entries.deinit(gpa);
+    var b_entries = try centralDirectory(gpa, mine);
+    defer b_entries.deinit(gpa);
+    try std.testing.expectEqual(a_entries.items.len, b_entries.items.len);
+    var streamed: usize = 0;
+    for (a_entries.items, b_entries.items) |x, y| {
+        try std.testing.expectEqualStrings(x.name, y.name);
+        try std.testing.expectEqual(x.flags, y.flags);
+        try std.testing.expectEqual(x.method, y.method);
+        try std.testing.expectEqual(x.version_needed, y.version_needed);
+        try std.testing.expectEqual(x.crc, y.crc);
+        try std.testing.expectEqual(x.size, y.size);
+        try std.testing.expectEqual(x.internal, y.internal);
+        if (x.flags & 8 != 0) streamed += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 3), streamed);
 }

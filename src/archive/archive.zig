@@ -46,6 +46,7 @@ const pathspec_mod = @import("../patterns.zig").pathspec;
 const pretty = @import("../pretty/pretty.zig");
 const message = @import("../object/message.zig");
 const abbrev = @import("../odb/abbrev.zig");
+const odb_policy = @import("../odb/policy.zig");
 const mailfmt = @import("../mail/format.zig");
 const program = @import("../process.zig").program;
 const fs = @import("../fs/fs.zig");
@@ -468,8 +469,20 @@ fn deflateRaw(gpa: Allocator, data: []const u8, level: ?u4) Allocator.Error![]u8
     return gpa.realloc(out, n);
 }
 
-fn zipEntry(z: *Zip, path: []const u8, mode: u32, content: []const u8, is_binary: bool) Error!void {
-    const a = z.a;
+/// An entry's content, as the formats write it.
+const Body = struct {
+    content: []const u8 = "",
+    /// For a zip's text flag: whether the content is binary.
+    is_binary: bool = false,
+    /// A file git streams (`core.bigFileThreshold`): a zip writes it as
+    /// git's `write_zip_entry` writes a stream, its sizes and checksum in
+    /// a data descriptor after it, deflated whatever the deflating gives.
+    streamed: bool = false,
+};
+
+fn zipEntry(z: *Zip, path: []const u8, mode: u32, body: Body) Error!void {
+    const content = body.content;
+    const is_binary = body.is_binary;
     var flags: u16 = 0;
     for (path) |c| {
         if (c >= 0x80) {
@@ -500,7 +513,8 @@ fn zipEntry(z: *Zip, path: []const u8, mode: u32, content: []const u8, is_binary
         if (kind == 0o100000 and (z.level == null or z.level.? != 0) and content.len > 0) {
             method = 8;
             deflated = try deflateRaw(z.gpa, content, z.level);
-            if (deflated.?.len >= content.len) {
+            // A stream is written deflated, larger or not.
+            if (deflated.?.len >= content.len and !body.streamed) {
                 method = 0;
             } else {
                 out = deflated.?;
@@ -508,26 +522,33 @@ fn zipEntry(z: *Zip, path: []const u8, mode: u32, content: []const u8, is_binary
             }
         }
     }
+    if (body.streamed) flags |= 1 << 3;
     if (creator_version > z.max_creator_version) z.max_creator_version = creator_version;
     const offset = z.offset;
     const size: u64 = content.len;
+    // What the local header knows before the content: a stream's checksum
+    // and deflated size only come after it, in its data descriptor.
+    const header_crc: u32 = if (body.streamed) 0 else crc;
+    const header_compressed: u64 = if (body.streamed and method == 8) 0 else compressed_size;
     var extra: [9]u8 = undefined;
     std.mem.writeInt(u16, extra[0..2], 0x5455, .little);
     std.mem.writeInt(u16, extra[2..4], 5, .little);
     extra[4] = 1;
     std.mem.writeInt(u32, extra[5..9], @truncate(z.time), .little);
     // Past four gigabytes the sizes go in a zip64 extra field, as git's
-    // `write_zip_entry` puts them, and the header says 0xffffffff.
-    const zip64 = size > 0xffffffff or compressed_size > 0xffffffff;
+    // `write_zip_entry` puts them, and the header says 0xffffffff; a
+    // stream past two gigabytes takes one too.
+    const zip64 = size > 0xffffffff or header_compressed > 0xffffffff or (body.streamed and size > 0x7fffffff);
+    const version_needed: u16 = if (zip64) 45 else 10;
     var header: std.ArrayList(u8) = .empty;
     try z.le(&header, 4, 0x04034b50);
-    try z.le(&header, 2, if (zip64) 45 else 10);
+    try z.le(&header, 2, version_needed);
     try z.le(&header, 2, flags);
     try z.le(&header, 2, method);
     try z.le(&header, 2, z.dos_time);
     try z.le(&header, 2, z.dos_date);
-    try z.le(&header, 4, crc);
-    try z.le(&header, 4, if (zip64) 0xffffffff else compressed_size);
+    try z.le(&header, 4, header_crc);
+    try z.le(&header, 4, if (zip64) 0xffffffff else header_compressed);
     try z.le(&header, 4, if (zip64) 0xffffffff else size);
     try z.le(&header, 2, path.len);
     try z.le(&header, 2, extra.len + if (zip64) @as(usize, 20) else 0);
@@ -537,53 +558,97 @@ fn zipEntry(z: *Zip, path: []const u8, mode: u32, content: []const u8, is_binary
         try z.le(&header, 2, 0x0001);
         try z.le(&header, 2, 16);
         try z.le(&header, 8, size);
-        try z.le(&header, 8, compressed_size);
+        try z.le(&header, 8, header_compressed);
     }
     try z.write(header.items[0..30]);
     try z.write(path);
     try z.write(&extra);
     try z.write(header.items[30..]);
     if (compressed_size > 0) try z.write(out);
+    if (body.streamed) {
+        // git's `write_zip_data_desc`.
+        var desc: std.ArrayList(u8) = .empty;
+        try z.le(&desc, 4, 0x08074b50);
+        try z.le(&desc, 4, crc);
+        const wide = size >= 0xffffffff or compressed_size >= 0xffffffff;
+        try z.le(&desc, if (wide) 8 else 4, compressed_size);
+        try z.le(&desc, if (wide) 8 else 4, size);
+        try z.write(desc.items);
+    }
 
+    try zipDirectoryEntry(z, .{
+        .path = path,
+        .extra = &extra,
+        .creator_version = creator_version,
+        .version_needed = version_needed,
+        .flags = flags,
+        .method = method,
+        .crc = crc,
+        .compressed_size = compressed_size,
+        .size = size,
+        .offset = offset,
+        .text = text,
+        .attr2 = attr2,
+    });
+}
+
+/// A zip entry's record in the central directory, and what it says.
+const DirEntry = struct {
+    path: []const u8,
+    extra: []const u8,
+    creator_version: u16,
+    version_needed: u16,
+    flags: u16,
+    method: u16,
+    crc: u32,
+    compressed_size: u64,
+    size: u64,
+    offset: u64,
+    text: bool,
+    attr2: u32,
+};
+
+fn zipDirectoryEntry(z: *Zip, e: DirEntry) Error!void {
+    const a = z.a;
     // The directory holds each of the three that does not fit in four
     // bytes as 0xffffffff, and its value in a zip64 extra field.
     var zip64_payload: u16 = 0;
-    if (compressed_size > 0xffffffff or size > 0xffffffff or offset > 0xffffffff) {
-        if (compressed_size >= 0xffffffff) zip64_payload += 8;
-        if (size >= 0xffffffff) zip64_payload += 8;
-        if (offset >= 0xffffffff) zip64_payload += 8;
+    if (e.compressed_size > 0xffffffff or e.size > 0xffffffff or e.offset > 0xffffffff) {
+        if (e.compressed_size >= 0xffffffff) zip64_payload += 8;
+        if (e.size >= 0xffffffff) zip64_payload += 8;
+        if (e.offset >= 0xffffffff) zip64_payload += 8;
     }
-    const dir_extra_len = extra.len + if (zip64_payload != 0) 4 + @as(usize, zip64_payload) else 0;
+    const dir_extra_len = e.extra.len + if (zip64_payload != 0) 4 + @as(usize, zip64_payload) else 0;
     const dir_start = z.dir.items.len;
     try z.le(&z.dir, 4, 0x02014b50);
-    try z.le(&z.dir, 2, creator_version);
-    try z.le(&z.dir, 2, 10);
-    try z.le(&z.dir, 2, flags);
-    try z.le(&z.dir, 2, method);
+    try z.le(&z.dir, 2, e.creator_version);
+    try z.le(&z.dir, 2, e.version_needed);
+    try z.le(&z.dir, 2, e.flags);
+    try z.le(&z.dir, 2, e.method);
     try z.le(&z.dir, 2, z.dos_time);
     try z.le(&z.dir, 2, z.dos_date);
-    try z.le(&z.dir, 4, crc);
-    try z.le(&z.dir, 4, @min(compressed_size, 0xffffffff));
-    try z.le(&z.dir, 4, @min(size, 0xffffffff));
-    try z.le(&z.dir, 2, path.len);
+    try z.le(&z.dir, 4, e.crc);
+    try z.le(&z.dir, 4, @min(e.compressed_size, 0xffffffff));
+    try z.le(&z.dir, 4, @min(e.size, 0xffffffff));
+    try z.le(&z.dir, 2, e.path.len);
     try z.le(&z.dir, 2, dir_extra_len);
     try z.le(&z.dir, 2, 0);
     try z.le(&z.dir, 2, 0);
-    try z.le(&z.dir, 2, @intFromBool(text));
-    try z.le(&z.dir, 4, attr2);
-    try z.le(&z.dir, 4, @min(offset, 0xffffffff));
-    try z.dir.appendSlice(a, path);
-    try z.dir.appendSlice(a, &extra);
+    try z.le(&z.dir, 2, @intFromBool(e.text));
+    try z.le(&z.dir, 4, e.attr2);
+    try z.le(&z.dir, 4, @min(e.offset, 0xffffffff));
+    try z.dir.appendSlice(a, e.path);
+    try z.dir.appendSlice(a, e.extra);
     if (zip64_payload != 0) {
         try z.le(&z.dir, 2, 0x0001);
         try z.le(&z.dir, 2, zip64_payload);
-        if (size >= 0xffffffff) try z.le(&z.dir, 8, size);
-        if (compressed_size >= 0xffffffff) try z.le(&z.dir, 8, compressed_size);
-        if (offset >= 0xffffffff) try z.le(&z.dir, 8, offset);
+        if (e.size >= 0xffffffff) try z.le(&z.dir, 8, e.size);
+        if (e.compressed_size >= 0xffffffff) try z.le(&z.dir, 8, e.compressed_size);
+        if (e.offset >= 0xffffffff) try z.le(&z.dir, 8, e.offset);
     }
     // A central directory record is forty-six bytes, then the name and the
     // extra fields; the trailer counts the directory by these.
-    assert(z.dir.items.len - dir_start == 46 + path.len + dir_extra_len);
+    assert(z.dir.items.len - dir_start == 46 + e.path.len + dir_extra_len);
     z.entries += 1;
 }
 
@@ -646,6 +711,9 @@ const Walk = struct {
     commit: ?Oid,
     abbrev_len: usize,
     format: Format,
+    /// `core.bigFileThreshold`: a regular file larger than this is
+    /// streamed as git streams it, its blob as stored.
+    big_file_bytes: u64,
     tar: ?*Tar = null,
     zip: ?*Zip = null,
     /// Directories queued, written only when something under them is.
@@ -689,14 +757,14 @@ const Walk = struct {
         return wk.attrs.lookup(wk.a, path, if (is_dir) .dir else .file);
     }
 
-    fn emit(wk: *Walk, oid: Oid, path: []const u8, mode: u32, content: []const u8, is_binary: bool) Error!void {
-        if (wk.tar) |t| try tarEntry(t, wk.a, oid, path, mode, content) else try zipEntry(wk.zip.?, path, mode, content, is_binary);
+    fn emit(wk: *Walk, oid: Oid, path: []const u8, mode: u32, body: Body) Error!void {
+        if (wk.tar) |t| try tarEntry(t, wk.a, oid, path, mode, body.content) else try zipEntry(wk.zip.?, path, mode, body);
     }
 
     fn writeQueued(wk: *Walk) Error!void {
         while (wk.written_dirs < wk.queued.items.len) : (wk.written_dirs += 1) {
             const d = wk.queued.items[wk.written_dirs];
-            try wk.emit(d.oid, d.path, d.mode, "", false);
+            try wk.emit(d.oid, d.path, d.mode, .{});
         }
     }
 
@@ -737,13 +805,16 @@ const Walk = struct {
             else
                 try std.mem.concat(wk.a, u8, &.{ wk.options.prefix, path });
             if (entry.mode == .gitlink) {
-                try wk.emit(entry.oid, out_path, mode, "", false);
+                try wk.emit(entry.oid, out_path, mode, .{});
                 continue;
             }
             const blob = try db.read(wk.io, entry.oid);
             defer db.allocator().free(blob.bytes);
             var content: []const u8 = blob.bytes;
-            if (entry.mode != .symlink) {
+            // git streams a regular file past `core.bigFileThreshold` that
+            // `export-subst` does not ask to format, as its blob: unconverted.
+            const streamed = entry.mode != .symlink and !applied.isTrue("export-subst") and blob.bytes.len > wk.big_file_bytes;
+            if (entry.mode != .symlink and !streamed) {
                 const smudged = try wk.conv.toWorktree(wk.a, .{ .path = path, .blob = content, .applied = applied }, .{ .blob = entry.oid, .treeish = wk.commit });
                 content = switch (smudged) {
                     .bytes => |b| b,
@@ -759,7 +830,7 @@ const Walk = struct {
                 const config = wk.repo.configuration();
                 is_binary = try driver_mod.Driver.of(config, applied.get("diff")).isBinary(config, content);
             }
-            try wk.emit(entry.oid, out_path, mode, content, is_binary);
+            try wk.emit(entry.oid, out_path, mode, .{ .content = content, .is_binary = is_binary, .streamed = streamed });
         }
     }
 };
@@ -913,6 +984,7 @@ pub fn archive(gpa: Allocator, io: Io, w: *Io.Writer, inputs: Inputs, options: O
         .spec = &spec,
         .commit = commit,
         .abbrev_len = abbrev.defaultLength(repo.configuration(), db),
+        .big_file_bytes = try odb_policy.bigFileThreshold(repo.configuration()),
         .format = options.format,
     };
     defer wk.deinit();
@@ -949,7 +1021,7 @@ pub fn archive(gpa: Allocator, io: Io, w: *Io.Writer, inputs: Inputs, options: O
     if (options.prefix.len > 0 and options.prefix[options.prefix.len - 1] == '/') {
         var len = options.prefix.len;
         while (len > 1 and options.prefix[len - 2] == '/') len -= 1;
-        try wk.emit(tree, options.prefix[0..len], 0o040777, "", false);
+        try wk.emit(tree, options.prefix[0..len], 0o040777, .{});
     }
     try wk.walk(tree, "");
     switch (options.format) {

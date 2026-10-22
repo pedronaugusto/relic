@@ -683,6 +683,11 @@ pub const Options = struct {
     /// What the headers put before each side's path: `--src-prefix` and
     /// `--dst-prefix`, which `Prefixes.configured` reads as git does.
     prefixes: Prefixes = .{},
+    /// Whether the patch follows a stat of the same diff, as `git diff
+    /// --stat -p` and format-patch write one: under `binary_patches` a
+    /// file past `core.bigFileThreshold` is then binary for its size, as
+    /// the stat decided it before the patch read the file.
+    after_stat: bool = false,
 
     /// The line diff these options ask for, as parallax takes it.
     pub fn lines(options: Options) parallax.Options {
@@ -1262,7 +1267,7 @@ fn writeMetainfo(gpa: Allocator, io: Io, inputs: UnifiedInputs, change: Change, 
     var full = options.full_index;
     if (options.binary_patches and !full) {
         var pair: FilePair = undefined;
-        try pair.init(gpa, io, .{ .db = inputs.db, .drivers = inputs.drivers }, .{ .old = old, .new = new });
+        try pair.init(gpa, io, .{ .db = inputs.db, .drivers = inputs.drivers, .by_size = bySize(options) }, .{ .old = old, .new = new });
         defer pair.deinit();
         full = pair.binary;
     }
@@ -1296,6 +1301,14 @@ const FileInputs = struct {
     recorder: ?*paint.Recorder,
     headers: []const PathHeader,
 };
+
+/// Whether a patch decides a side past `core.bigFileThreshold` binary for
+/// its size: yes, but under `binary_patches`, where git reads both sides
+/// for the `index` line before it asks, unless a stat of the diff asked
+/// first (`Options.after_stat`).
+fn bySize(options: Options) bool {
+    return !options.binary_patches or options.after_stat;
+}
 
 /// One file pair of a diff as git's `builtin_diff` compares it: each
 /// side's bytes (a gitlink's commit as git's `Subproject commit` line), the
@@ -1335,6 +1348,11 @@ pub const FilePair = struct {
         db: *odb_mod.Odb,
         drivers: driver_mod.Drivers = .{},
         textconv: ?*const textconv_mod.Textconv = null,
+        /// Whether a side past `core.bigFileThreshold` is binary for its
+        /// size (`Drivers.binary`), as git decides it before reading the
+        /// side; `false` decides by the bytes, as git does once it has
+        /// read both sides for a binary patch's `index` line.
+        by_size: bool = true,
     };
 
     /// Old and new, either absent for a creation or a deletion.
@@ -1368,7 +1386,9 @@ pub const FilePair = struct {
             pair.converted[i] = true;
         }
         for (0..2) |i| {
-            if (!pair.converted[i] and try pair.drivers[i].isBinary(pair.config, pair.bytes[i])) pair.binary = true;
+            if (pair.converted[i]) continue;
+            const binary = if (sources.by_size) try sources.drivers.binary(pair.drivers[i], pair.bytes[i]) else try pair.drivers[i].isBinary(pair.config, pair.bytes[i]);
+            if (binary) pair.binary = true;
         }
     }
 
@@ -1453,7 +1473,7 @@ fn writeFilePatch(gpa: Allocator, io: Io, inputs: FileInputs, w: *Io.Writer, opt
     }
 
     var pair: FilePair = undefined;
-    try pair.init(gpa, io, .{ .db = db, .drivers = inputs.drivers, .textconv = inputs.textconv }, .{ .old = old, .new = new });
+    try pair.init(gpa, io, .{ .db = db, .drivers = inputs.drivers, .textconv = inputs.textconv, .by_size = bySize(options) }, .{ .old = old, .new = new });
     defer pair.deinit();
     if (pair.silent(change.status) and !hasHeaders(inputs.headers, change)) return;
     try writeHeader(gpa, w, colors, header);

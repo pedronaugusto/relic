@@ -6,6 +6,7 @@ const Allocator = std.mem.Allocator;
 const object = @import("../object/object.zig");
 const pack = @import("pack.zig");
 const fs = @import("../fs/fs.zig");
+const config_mod = @import("../config/config.zig");
 /// How the object database behaves. The only caches in this package are
 /// named here.
 pub const Options = struct {
@@ -88,7 +89,7 @@ pub const Options = struct {
 /// The settings git's pack-objects and object writer read: `pack.window`,
 /// `pack.depth`, `pack.windowMemory`, `pack.compression` (else
 /// `core.compression`), `pack.indexVersion`, `core.looseCompression` (else
-/// `core.compression`), and `core.multiPackIndex`.
+/// `core.compression`), `core.multiPackIndex` and `core.bigFileThreshold`.
 pub const Packing = struct {
     window: u32 = 10,
     /// At most 4095, as git forces it.
@@ -101,7 +102,25 @@ pub const Packing = struct {
     loose_compression: pack.Compression = .fast,
     /// `core.multiPackIndex`: off, no multi-pack index is read.
     multi_pack_index: bool = true,
+    /// `core.bigFileThreshold`: a blob larger than this is never a delta's
+    /// target or base when a pack is written (`bigFileThreshold`).
+    big_file_bytes: u64 = default_big_file_bytes,
 };
+
+/// git's default `core.bigFileThreshold`: 512 MiB.
+pub const default_big_file_bytes: u64 = 512 << 20;
+
+/// `core.bigFileThreshold` as git's `repo_settings_get_big_file_threshold`
+/// reads it: the last value, an unsigned number with a `k`, `m` or `g`
+/// suffix (`git_config_ulong`), 512 MiB where it is not set, and a value
+/// git dies on -- none at all, a sign, anything else after the digits --
+/// refused. Larger than it, a blob is not deltified in a pack, is binary
+/// to a diff, and is streamed as git streams it: into a pack of its own
+/// when it is added, and through an archive unconverted.
+pub fn bigFileThreshold(config: *const config_mod.Config) config_mod.ValueError!u64 {
+    const entry = config.find("core.bigfilethreshold") orelse return default_big_file_bytes;
+    return config_mod.parseNonNegative(entry.value orelse return error.NotAnInteger, std.math.maxInt(u64));
+}
 
 /// `core.createObject`'s two ways.
 pub const CreateObject = enum { link, rename };

@@ -14,6 +14,7 @@ const ere = @import("../text.zig").ere;
 const config_mod = @import("../config/config.zig");
 const attributes = @import("../patterns.zig").attributes;
 const object = @import("../object/object.zig");
+const odb_policy = @import("../odb/policy.zig");
 
 /// Errors from reading a driver's patterns.
 pub const Error = error{
@@ -27,6 +28,9 @@ pub const Error = error{
     InvalidDriverCache,
     /// A `diff.<name>.trustExitCode` that is no boolean, which git dies on.
     InvalidDriverTrust,
+    /// A `core.bigFileThreshold` that is no unsigned number, which git dies
+    /// on.
+    InvalidBigFileThreshold,
     /// A function pattern's search took more work than the matcher's
     /// budget allows.
     PatternTooComplex,
@@ -217,10 +221,24 @@ pub const Drivers = struct {
         };
     }
 
+    /// Errors from deciding whether a side is binary.
+    pub const BinaryError = error{ InvalidDriverBinary, InvalidBigFileThreshold };
+
     /// Whether `side`, holding `bytes`, is binary, as git's
     /// `diff_filespec_is_binary` decides it. `a` holds the lookup.
-    pub fn isBinary(d: Drivers, a: Allocator, io: Io, side: ?File, bytes: []const u8) (attributes.Error || error{InvalidDriverBinary})!bool {
-        return (try d.of(a, io, side)).isBinary(d.config, bytes);
+    pub fn isBinary(d: Drivers, a: Allocator, io: Io, side: ?File, bytes: []const u8) (attributes.Error || BinaryError)!bool {
+        return d.binary(try d.of(a, io, side), bytes);
+    }
+
+    /// Whether a side `driver` takes, holding `bytes`, is binary to a diff,
+    /// as git's `diff_filespec_is_binary` decides it: as the driver says,
+    /// where it says; otherwise where it is larger than
+    /// `core.bigFileThreshold` or has a NUL near its start. A grep and an
+    /// archive ask the driver alone (`Driver.isBinary`).
+    pub fn binary(d: Drivers, driver: Driver, bytes: []const u8) BinaryError!bool {
+        if (try driver.says(d.config)) |says| return says;
+        const threshold = if (d.config) |c| odb_policy.bigFileThreshold(c) catch return error.InvalidBigFileThreshold else odb_policy.default_big_file_bytes;
+        return bytes.len > threshold or attributes.isBinaryForDiff(bytes);
     }
 };
 

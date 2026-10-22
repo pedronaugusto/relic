@@ -247,7 +247,7 @@ pub const Odb = struct {
     /// its caller says otherwise.
     pub fn packOptions(db: *const Odb) PackOptions {
         const p = db.backendData().options.packing;
-        return .{ .window = p.window, .depth = p.depth, .window_bytes = p.window_bytes, .compression = p.compression, .index_version = p.index_version };
+        return .{ .window = p.window, .depth = p.depth, .window_bytes = p.window_bytes, .compression = p.compression, .index_version = p.index_version, .big_file_bytes = .fromRaw(p.big_file_bytes) };
     }
 
     /// The allocator that owns returned object bytes.
@@ -2416,7 +2416,9 @@ pub const Odb = struct {
                 .ref_delta => |oid| oid,
                 .ofs_delta => |back| order.nameAt(at.pack, at.offset -| back) orelse continue,
             };
-            if (options.delta == .none or aegis.units.Bytes(u64).fromRaw(item.size).compare(options.big_file_bytes) != .lt) continue;
+            // A delta its pack holds is reused whatever the object's size,
+            // as git's `check_object` reuses it.
+            if (options.delta == .none) continue;
             if (options.islands) |islands| if (!islands.allows(item.oid, base_oid)) continue;
             const base = positions.get(base_oid) orelse continue;
             if (base >= pos) continue;
@@ -3635,9 +3637,11 @@ pub const PackOptions = struct {
     /// read and deflated straight into the pack, on the calling task, one
     /// such object at a time.
     batch_bytes: aegis.units.Bytes(usize) = .fromRaw(64 << 20),
-    /// An object this large or larger is written whole and never enters the
-    /// window. git's `core.bigFileThreshold`, and the same default.
-    big_file_bytes: aegis.units.Bytes(u64) = .fromRaw(512 << 20),
+    /// An object larger than this is never searched for a delta nor kept
+    /// in the window as a base, as git's `no_try_delta`; a delta a pack
+    /// already holds for it is still reused. git's `core.bigFileThreshold`,
+    /// which `Odb.packOptions` reads, and the same default.
+    big_file_bytes: aegis.units.Bytes(u64) = .fromRaw(policy_mod.default_big_file_bytes),
     /// How hard the entries are compressed.
     compression: pack.Compression = .default,
     /// Write the pack's reverse index too: `pack.WriteOptions.reverse_index`.
@@ -3859,7 +3863,7 @@ const Window = struct {
         var options = pack_options;
         options.depth = max_depth;
         const deltifiable = options.delta != .none and options.window != 0 and
-            aegis.units.Bytes(u64).fromRaw(bytes.len).compare(options.big_file_bytes) == .lt;
+            aegis.units.Bytes(u64).fromRaw(bytes.len).compare(options.big_file_bytes) != .gt;
         var choice: Build.Choice = .{};
         var depth: u32 = 0;
         if (deltifiable) {
