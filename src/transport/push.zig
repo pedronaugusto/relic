@@ -722,7 +722,7 @@ fn pushCheck(gpa: Allocator, io: Io, sub: *Repository, c: PushCheck) Error!void 
         var strong: usize = 0;
         var weak: usize = 0;
         for (refs.entries) |ref| {
-            if (refnameMatch(spec.src, ref.name) == 0) continue;
+            if (ref_names.refnameMatch(spec.src, ref.name) == 0) continue;
             // git's `count_refspec_match`: a match outside heads and tags,
             // named neither in full nor from below `refs/`, is weak.
             const full = ref.name.len == spec.src.len or spec.src.len + 5 == ref.name.len;
@@ -1086,37 +1086,13 @@ fn upstreamRef(branch: *const remote_mod.Branch, branch_ref: []const u8, auto: b
     return branch.merge[0];
 }
 
-/// git's `ref_rev_parse_rules`, used to find what a short name names.
-const rev_parse_rules = [_][]const u8{
-    "{s}",
-    "refs/{s}",
-    "refs/tags/{s}",
-    "refs/heads/{s}",
-    "refs/remotes/{s}",
-    "refs/remotes/{s}/HEAD",
-};
-
-fn refnameMatch(abbrev: []const u8, full: []const u8) usize {
-    for (rev_parse_rules, 0..) |rule, i| {
-        const star = std.mem.find(u8, rule, "{s}").?;
-        const before = rule[0..star];
-        const after = rule[star + 3 ..];
-        if (full.len != before.len + abbrev.len + after.len) continue;
-        if (!std.mem.startsWith(u8, full, before)) continue;
-        if (!std.mem.endsWith(u8, full, after)) continue;
-        if (!std.mem.eql(u8, full[before.len .. before.len + abbrev.len], abbrev)) continue;
-        return rev_parse_rules.len - i;
-    }
-    return 0;
-}
-
 /// The one name among `names` that `abbrev` names best, or `null`.
 fn bestMatch(abbrev: []const u8, names: []const []const u8) Error!?[]const u8 {
     var best: ?[]const u8 = null;
     var best_score: usize = 0;
     var tied = false;
     for (names) |name| {
-        const score = refnameMatch(abbrev, name);
+        const score = ref_names.refnameMatch(abbrev, name);
         if (score == 0) continue;
         if (score > best_score) {
             best = name;

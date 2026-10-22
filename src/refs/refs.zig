@@ -388,6 +388,18 @@ pub const Store = struct {
         return .{ .direct = oid };
     }
 
+    /// The first ref of `names.rev_parse_rules` that `name` names, followed
+    /// to an object: git's `repo_dwim_ref` without its branch substitution
+    /// and ambiguity count, which are the revision parser's.
+    pub fn resolveShort(store: *const Store, gpa: Allocator, io: Io, name: []const u8) ReadError!?Resolved {
+        for (names.rev_parse_rules) |rule| {
+            const full = try names.expandRule(gpa, rule, name);
+            defer gpa.free(full);
+            if (try store.resolve(gpa, io, full)) |found| return found;
+        }
+        return null;
+    }
+
     /// Follow a ref until it points at an object.
     ///
     /// Returns `null` when the chain ends at a name that does not exist,

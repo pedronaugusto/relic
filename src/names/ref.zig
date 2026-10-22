@@ -385,5 +385,37 @@ fn fuzzOne(_: void, case: *shakedown.Case) anyerror!void {
 /// The ref whose log records the stash stack.
 pub const stash = "refs/stash";
 
+/// git's `ref_rev_parse_rules`: the refs a short name is tried as, in
+/// order, `{s}` standing for the name.
+pub const rev_parse_rules = [_][]const u8{ "{s}", "refs/{s}", "refs/tags/{s}", "refs/heads/{s}", "refs/remotes/{s}", "refs/remotes/{s}/HEAD" };
+
+/// `rule` with `name` in place of its `{s}`, in `gpa`.
+pub fn expandRule(gpa: std.mem.Allocator, rule: []const u8, name: []const u8) std.mem.Allocator.Error![]const u8 {
+    const at = std.mem.find(u8, rule, "{s}").?;
+    return std.mem.concat(gpa, u8, &.{ rule[0..at], name, rule[at + 3 ..] });
+}
+
+/// The name `rule` makes `full` from, or `null` when it makes no name of
+/// it: git's `match_parse_rule`.
+pub fn matchRule(full: []const u8, rule: []const u8) ?[]const u8 {
+    const at = std.mem.find(u8, rule, "{s}").?;
+    const before = rule[0..at];
+    const after = rule[at + 3 ..];
+    if (full.len < before.len + after.len) return null;
+    if (!std.mem.startsWith(u8, full, before) or !std.mem.endsWith(u8, full, after)) return null;
+    const short = full[before.len .. full.len - after.len];
+    return if (short.len == 0) null else short;
+}
+
+/// git's `refname_match`: how well `abbrev` names `full`, as the number of
+/// rules from the end of the list; zero when it does not.
+pub fn refnameMatch(abbrev: []const u8, full: []const u8) usize {
+    for (rev_parse_rules, 0..) |rule, i| {
+        const short = matchRule(full, rule) orelse continue;
+        if (std.mem.eql(u8, short, abbrev)) return rev_parse_rules.len - i;
+    }
+    return 0;
+}
+
 /// All errors reported by this namespace.
 pub const Error = error{};

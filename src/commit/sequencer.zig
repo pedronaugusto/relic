@@ -867,20 +867,10 @@ pub const ResolverContext = struct {
         const gpa = c.repo.allocator();
         var oid: ?Oid = null;
         if (text.len == c.repo.objectFormat().hexLen()) oid = Oid.parse(c.repo.objectFormat(), text) catch null;
-        if (oid == null) {
-            const rules = [_][]const u8{ "{s}", "refs/{s}", "refs/tags/{s}", "refs/heads/{s}", "refs/remotes/{s}", "refs/remotes/{s}/HEAD" };
-            inline for (rules) |rule| {
-                if (oid == null) {
-                    if (gpa.print(rule, .{text})) |full| {
-                        defer gpa.free(full);
-                        if (c.repo.refStore().resolve(gpa, c.io, full) catch null) |resolved| {
-                            gpa.free(resolved.name);
-                            oid = resolved.oid;
-                        }
-                    } else |_| {}
-                }
-            }
-        }
+        if (oid == null) if (c.repo.refStore().resolveShort(gpa, c.io, text) catch null) |resolved| {
+            gpa.free(resolved.name);
+            oid = resolved.oid;
+        };
         if (oid == null) oid = c.repo.objectDatabase().findPrefix(c.io, text) catch null;
         const found = oid orelse return null;
         const peeled = c.repo.peel(c.io, found) catch return null;

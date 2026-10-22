@@ -96,7 +96,7 @@ pub fn dwimRef(arena: Allocator, io: Io, repo: *Repository, name: []const u8) Se
     const full = try r.substituteBranch(name);
     const warn = repo.configuration().getBool("core.warnambiguousrefs", true) catch true;
     var found: ?Dwim = null;
-    const rules = [_][]const u8{ "{s}", "refs/{s}", "refs/tags/{s}", "refs/heads/{s}", "refs/remotes/{s}", "refs/remotes/{s}/HEAD" };
+    const rules = ref_names.rev_parse_rules;
     inline for (rules) |rule| {
         if (try r.resolvedRef(try arena.print(rule, .{full}))) |got| {
             if (found) |*f| f.count += 1 else found = .{ .count = 1, .ref = got.name, .oid = got.oid };
@@ -220,7 +220,7 @@ const Resolver = struct {
 
     /// git's `ref_rev_parse_rules`, in order: the first that names a ref.
     fn dwim(r: *Resolver, name: []const u8) Error!?Oid {
-        const rules = [_][]const u8{ "{s}", "refs/{s}", "refs/tags/{s}", "refs/heads/{s}", "refs/remotes/{s}", "refs/remotes/{s}/HEAD" };
+        const rules = ref_names.rev_parse_rules;
         inline for (rules) |rule| {
             const full = try r.a.print(rule, .{name});
             if (try r.refMaybe(full)) |oid| return oid;
@@ -230,7 +230,7 @@ const Resolver = struct {
 
     /// The full ref name `name` resolves to, by the same rules.
     fn dwimName(r: *Resolver, name: []const u8) Error!?[]const u8 {
-        const rules = [_][]const u8{ "{s}", "refs/{s}", "refs/tags/{s}", "refs/heads/{s}", "refs/remotes/{s}", "refs/remotes/{s}/HEAD" };
+        const rules = ref_names.rev_parse_rules;
         inline for (rules) |rule| {
             const full = try r.a.print(rule, .{name});
             if (try r.refMaybe(full) != null) return full;

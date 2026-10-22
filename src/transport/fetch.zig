@@ -1312,7 +1312,7 @@ fn refMap(
         for (asked.branch_merge) |merge| {
             var found = false;
             for (map.items) |*entry| {
-                if (refnameMatch(merge, entry.name) != 0) {
+                if (ref_names.refnameMatch(merge, entry.name) != 0) {
                     entry.status = .merge;
                     found = true;
                     break;
@@ -1777,34 +1777,8 @@ fn followRemoteHead(config: *const config_mod.Config, name: []const u8) bool {
     return !std.ascii.eqlIgnoreCase(value, "never");
 }
 
-/// git's `ref_rev_parse_rules`, in order.
-const rev_parse_rules = [_][]const u8{
-    "{s}",
-    "refs/{s}",
-    "refs/tags/{s}",
-    "refs/heads/{s}",
-    "refs/remotes/{s}",
-    "refs/remotes/{s}/HEAD",
-};
-
-/// git's `refname_match`: how well `abbrev` names `full`, as the number of
-/// rules from the end of the list; zero when it does not.
-fn refnameMatch(abbrev: []const u8, full: []const u8) usize {
-    for (rev_parse_rules, 0..) |rule, i| {
-        const star = std.mem.find(u8, rule, "{s}").?;
-        const before = rule[0..star];
-        const after = rule[star + 3 ..];
-        if (full.len != before.len + abbrev.len + after.len) continue;
-        if (!std.mem.startsWith(u8, full, before)) continue;
-        if (!std.mem.endsWith(u8, full, after)) continue;
-        if (!std.mem.eql(u8, full[before.len .. before.len + abbrev.len], abbrev)) continue;
-        return rev_parse_rules.len - i;
-    }
-    return 0;
-}
-
 fn expandPrefix(arena: Allocator, prefixes: *std.ArrayList([]const u8), name: []const u8) Allocator.Error!void {
-    for (rev_parse_rules) |rule| {
+    for (ref_names.rev_parse_rules) |rule| {
         const star = std.mem.find(u8, rule, "{s}").?;
         try prefixes.append(arena, try std.mem.concat(arena, u8, &.{ rule[0..star], name, rule[star + 3 ..] }));
     }
@@ -1849,7 +1823,7 @@ fn fetchMap(
         var best_score: usize = 0;
         for (remote_refs) |ref| {
             if (ref.unborn) continue;
-            const score = refnameMatch(name, ref.name);
+            const score = ref_names.refnameMatch(name, ref.name);
             if (score > best_score) {
                 best = ref;
                 best_score = score;

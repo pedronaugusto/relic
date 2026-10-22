@@ -20,6 +20,7 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const hash = @import("../hash/hash.zig");
+const ref_names = @import("../names.zig").ref;
 const object = @import("../object/object.zig");
 const merge = @import("../merge/merge.zig");
 const diff = @import("../diff/diff.zig");
@@ -218,7 +219,7 @@ fn describedTarget(description: []const u8) Error!Target {
 /// `refs/remotes/<name>` and `refs/remotes/<name>/HEAD`, and otherwise an
 /// object name or a unique prefix of one. `name` is borrowed by the result.
 pub fn resolve(gpa: Allocator, io: Io, repo: *Repository, name: []const u8) Self.Error!Target {
-    const rules = [_][]const u8{ "{s}", "refs/{s}", "refs/tags/{s}", "refs/heads/{s}", "refs/remotes/{s}", "refs/remotes/{s}/HEAD" };
+    const rules = ref_names.rev_parse_rules;
     inline for (rules) |rule| {
         const full = try gpa.print(rule, .{name});
         defer gpa.free(full);

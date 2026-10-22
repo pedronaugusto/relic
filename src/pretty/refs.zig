@@ -1784,14 +1784,14 @@ pub const Listing = struct {
     /// `core.warnAmbiguousRefs` (on unless set off) makes it.
     pub fn shortenUnambiguous(l: *Listing, name: []const u8) ErrorNamespace.Error![]const u8 {
         const strict = l.repo.configuration().getBool("core.warnambiguousrefs", true) catch true;
-        var i: usize = rev_parse_rules.len - 1;
+        var i: usize = ref_names.rev_parse_rules.len - 1;
         while (i > 0) : (i -= 1) {
-            const short = matchParseRule(name, rev_parse_rules[i]) orelse continue;
-            const to_fail = if (strict) rev_parse_rules.len else i;
+            const short = ref_names.matchRule(name, ref_names.rev_parse_rules[i]) orelse continue;
+            const to_fail = if (strict) ref_names.rev_parse_rules.len else i;
             var j: usize = 0;
             while (j < to_fail) : (j += 1) {
                 if (i == j) continue;
-                const candidate = try expandRule(l.a(), rev_parse_rules[j], short);
+                const candidate = try ref_names.expandRule(l.a(), ref_names.rev_parse_rules[j], short);
                 if (try l.refExists(candidate)) break;
             }
             if (j == to_fail) return short;
@@ -2207,33 +2207,6 @@ fn applyRefspecs(gpa: Allocator, specs: []const refspec.Refspec, name: []const u
         if (try spec.mapSource(gpa, name)) |mapped| return mapped;
     }
     return null;
-}
-
-const rev_parse_rules = [_][]const u8{
-    "%s",
-    "refs/%s",
-    "refs/tags/%s",
-    "refs/heads/%s",
-    "refs/remotes/%s",
-    "refs/remotes/%s/HEAD",
-};
-
-fn expandRule(gpa: Allocator, rule: []const u8, name: []const u8) Allocator.Error![]const u8 {
-    const at = std.mem.find(u8, rule, "%s").?;
-    return std.mem.concat(gpa, u8, &.{ rule[0..at], name, rule[at + 2 ..] });
-}
-
-/// git's `match_parse_rule`: the part of `name` a rule's `%s` stands for.
-fn matchParseRule(name: []const u8, rule: []const u8) ?[]const u8 {
-    const at = std.mem.find(u8, rule, "%s").?;
-    const before = rule[0..at];
-    const after = rule[at + 2 ..];
-    if (!std.mem.startsWith(u8, name, before)) return null;
-    if (!std.mem.endsWith(u8, name, after)) return null;
-    if (name.len < before.len + after.len) return null;
-    const short = name[before.len .. name.len - after.len];
-    if (short.len == 0) return null;
-    return short;
 }
 
 fn componentCount(name: []const u8, len: i32) i64 {

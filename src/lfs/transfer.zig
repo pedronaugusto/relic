@@ -2399,11 +2399,7 @@ const Resolved = struct { oid: Oid, ref: ?[]const u8 };
 /// A name as git's rev-parse reads a ref: `HEAD`, a full ref, a short one
 /// by git's rules, or an object name.
 fn resolve(arena: Allocator, io: Io, repo: *Repository, name: []const u8) FetchError!Resolved {
-    const rules = [_][]const u8{ "{s}", "refs/{s}", "refs/tags/{s}", "refs/heads/{s}", "refs/remotes/{s}", "refs/remotes/{s}/HEAD" };
-    inline for (rules) |rule| {
-        const full = try arena.print(rule, .{name});
-        if (try repo.refStore().resolve(arena, io, full)) |found| return .{ .oid = found.oid, .ref = found.name };
-    }
+    if (try repo.refStore().resolveShort(arena, io, name)) |found| return .{ .oid = found.oid, .ref = found.name };
     if (name.len == repo.objectFormat().hexLen()) {
         if (Oid.parse(repo.objectFormat(), name)) |oid| {
             if (try repo.objectDatabase().exists(io, oid)) return .{ .oid = oid, .ref = null };
