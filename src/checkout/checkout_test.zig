@@ -1067,15 +1067,11 @@ test "a directory that staging cannot open is not reported as deleted" {
     var staged = index_mod.Index.initEmpty(gpa, .sha1);
     defer staged.deinit();
     _ = try worktree.addAll(gpa, io, folder.dir, .{ .index = &staged, .db = &db }, .{});
-    const Refused = struct {
-        fn openDir(context: ?*anyopaque, dir: Io.Dir, path: []const u8, options: Io.Dir.OpenOptions) Io.Dir.OpenError!Io.Dir {
-            if (std.mem.eql(u8, path, "blocked")) return error.AccessDenied;
-            return std.testing.io.vtable.dirOpenDir(context, dir, path, options);
-        }
-    };
-    var vtable = io.vtable.*;
-    vtable.dirOpenDir = Refused.openDir;
-    const refused: Io = .{ .userdata = io.userdata, .vtable = &vtable };
+    // `blocked` cannot be opened, as the walk names it.
+    const plan = [_]shakedown.IoPlan.Entry{.{ .at = .{ .nth = .{ .call = .dirOpenDir, .n = 1, .path = .{ .exact = "blocked" } } }, .fault = .{ .fail = error.AccessDenied }, .times = 0 }};
+    const faults = try shakedown.FaultIo.init(gpa, io, .{ .plan = &plan, .track_paths = false });
+    defer faults.deinit();
+    const refused = faults.io();
     try std.testing.expectError(error.AccessDenied, worktree.addAll(gpa, refused, folder.dir, .{ .index = &staged, .db = &db }, .{}));
     try std.testing.expect(staged.find("blocked/file") != null);
 }
@@ -1114,15 +1110,11 @@ test "status and listing refuse a directory they could not read" {
     defer db.deinit(io);
     var staged = index_mod.Index.initEmpty(gpa, .sha1);
     defer staged.deinit();
-    const Refused = struct {
-        fn openDir(context: ?*anyopaque, dir: Io.Dir, path: []const u8, options: Io.Dir.OpenOptions) Io.Dir.OpenError!Io.Dir {
-            if (std.mem.eql(u8, path, "blocked")) return error.AccessDenied;
-            return std.testing.io.vtable.dirOpenDir(context, dir, path, options);
-        }
-    };
-    var vtable = io.vtable.*;
-    vtable.dirOpenDir = Refused.openDir;
-    const refused: Io = .{ .userdata = io.userdata, .vtable = &vtable };
+    // `blocked` cannot be opened, as the walk names it.
+    const plan = [_]shakedown.IoPlan.Entry{.{ .at = .{ .nth = .{ .call = .dirOpenDir, .n = 1, .path = .{ .exact = "blocked" } } }, .fault = .{ .fail = error.AccessDenied }, .times = 0 }};
+    const faults = try shakedown.FaultIo.init(gpa, io, .{ .plan = &plan, .track_paths = false });
+    defer faults.deinit();
+    const refused = faults.io();
     try std.testing.expectError(error.AccessDenied, worktree.status(gpa, refused, folder.dir, .{ .index = &staged, .db = &db }, .{}));
     try std.testing.expectError(error.AccessDenied, worktree.list(gpa, refused, folder.dir, &staged, .{}));
 }

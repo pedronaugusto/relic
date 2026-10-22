@@ -1424,7 +1424,6 @@ test "a clone from a local repository is the clone git makes, checked out, bare,
 
 test "a local clone writes its pack on the tasks pack.threads asks for, as git's pack-objects does" {
     const gpa = testing.allocator;
-    const tasks = io_mod;
     const io = testing.io;
     var single: Io.Threaded = .init_single_threaded;
 
@@ -1456,9 +1455,10 @@ test "a local clone writes its pack on the tasks pack.threads asks for, as git's
     };
     var serial_target = try Twin.init(gpa, io);
     defer serial_target.deinit(gpa, io);
-    var serial = try clone(gpa, tasks.wrap(io), source_path, serial_target.dir, .{ .who = test_who, .checkout = false, .user_config = .{ .pairs = &.{.{ .name = "pack.threads", .value = "1" }} } });
+    var serial_tasks: io_mod.Tasks = .init(io, .{});
+    var serial = try clone(gpa, serial_tasks.io(), source_path, serial_target.dir, .{ .who = test_who, .checkout = false, .user_config = .{ .pairs = &.{.{ .name = "pack.threads", .value = "1" }} } });
     defer serial.deinit(io);
-    try tasks.expect(0, 0);
+    try serial_tasks.state.expect(0, 0);
     var serial_packs = try serial.gitDirectory().openDir(io, "objects/pack", .{ .iterate = true });
     defer serial_packs.close(io);
     const serial_name = try PackFile.only(gpa, io, serial_packs);
@@ -1481,13 +1481,14 @@ test "a local clone writes its pack on the tasks pack.threads asks for, as git's
         for (cases) |case| {
             var target = try Twin.init(gpa, io);
             defer target.deinit(gpa, io);
-            var repo = try clone(gpa, tasks.wrap(each_io), source_path, target.dir, .{ .who = test_who, .checkout = false, .user_config = .{ .pairs = case.pairs } });
+            var tasks: io_mod.Tasks = .init(each_io, .{});
+            var repo = try clone(gpa, tasks.io(), source_path, target.dir, .{ .who = test_who, .checkout = false, .user_config = .{ .pairs = case.pairs } });
             defer repo.deinit(io);
             // Headers and bodies on at most six tasks, one search group,
             // then deflation on all tasks, each including the caller.
             const readers: usize = @min(case.workers, 6);
             const spawned = if (case.workers == 1) 0 else 2 * (readers - 1) + case.workers - 1;
-            try tasks.expect(spawned, 0);
+            try tasks.state.expect(spawned, 0);
             var packs = try repo.gitDirectory().openDir(io, "objects/pack", .{ .iterate = true });
             defer packs.close(io);
             const name = try PackFile.only(gpa, io, packs);

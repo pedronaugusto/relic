@@ -12,6 +12,8 @@ const pack_mod = @import("../odb/pack.zig");
 const fs = @import("../fs/fs.zig");
 const worktree = @import("../checkout/checkout.zig");
 const repo_mod = @import("../repo/repo.zig");
+const io_mod = @import("io.zig");
+const shakedown = @import("shakedown");
 
 /// How many files the generated tree holds.
 ///
@@ -102,22 +104,6 @@ test "staging and cache-tree reuse count only the work they need" {
     try std.testing.expect(result.entries.len >= file_count / 10);
 }
 
-const ReadWork = struct {
-    threadlocal var calls: usize = 0;
-    threadlocal var bytes: usize = 0;
-
-    fn reset() void {
-        calls = 0;
-        bytes = 0;
-    }
-    fn read(userdata: ?*anyopaque, file: Io.File, data: []const []u8, offset: u64) Io.File.ReadPositionalError!usize {
-        calls += 1;
-        const n = try std.testing.io.vtable.fileReadPositional(userdata, file, data, offset);
-        bytes += n;
-        return n;
-    }
-};
-
 /// What two passes over every object of a deep delta chain read: the
 /// objects and their bytes, the positional reads and the bytes those
 /// returned, and the bases the delta cache holds after each pass.
@@ -144,9 +130,9 @@ pub const ChainScan = struct {
 /// gives, counting the positional reads of each pass.
 fn scanColdWarm(gpa: std.mem.Allocator, git_dir: Io.Dir, options: odb_mod.Options) !ChainScan {
     const io = std.testing.io;
-    var vtable = io.vtable.*;
-    vtable.fileReadPositional = ReadWork.read;
-    const counted: Io = .{ .userdata = io.userdata, .vtable = &vtable };
+    const faults = try shakedown.FaultIo.init(gpa, io, .{ .trace = .all });
+    defer faults.deinit();
+    const counted = faults.io();
     var db = try odb_mod.Odb.open(gpa, counted, git_dir, .sha1, options);
     defer db.deinit(io);
 
@@ -154,7 +140,7 @@ fn scanColdWarm(gpa: std.mem.Allocator, git_dir: Io.Dir, options: odb_mod.Option
     defer names.deinit(gpa);
 
     var scan: ChainScan = .{};
-    ReadWork.reset();
+    faults.reset();
     var it = names.keyIterator();
     while (it.next()) |oid| {
         const found = try db.read(counted, oid.*);
@@ -162,12 +148,12 @@ fn scanColdWarm(gpa: std.mem.Allocator, git_dir: Io.Dir, options: odb_mod.Option
         scan.cold_object_bytes += found.bytes.len;
         scan.cold_objects += 1;
     }
-    scan.cold_reads = ReadWork.calls;
-    scan.cold_read_bytes = ReadWork.bytes;
+    scan.cold_reads = faults.count(.fileReadPositional);
+    scan.cold_read_bytes = io_mod.moved(faults, .fileReadPositional);
     scan.cold_bases = odb_state.get(db.state).cache.entries.count();
 
     // A second pass over the same objects, with the delta base cache warm.
-    ReadWork.reset();
+    faults.reset();
     var warm_it = names.keyIterator();
     while (warm_it.next()) |oid| {
         const found = try db.read(counted, oid.*);
@@ -175,8 +161,8 @@ fn scanColdWarm(gpa: std.mem.Allocator, git_dir: Io.Dir, options: odb_mod.Option
         scan.warm_object_bytes += found.bytes.len;
         scan.warm_objects += 1;
     }
-    scan.warm_reads = ReadWork.calls;
-    scan.warm_read_bytes = ReadWork.bytes;
+    scan.warm_reads = faults.count(.fileReadPositional);
+    scan.warm_read_bytes = io_mod.moved(faults, .fileReadPositional);
     scan.warm_bases = odb_state.get(db.state).cache.entries.count();
     return scan;
 }

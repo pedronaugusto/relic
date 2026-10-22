@@ -1,5 +1,6 @@
 //! Accelerator files are held to git's writer and git's verifier.
 const std = @import("std");
+const shakedown = @import("shakedown");
 const testgit = @import("../testing/git.zig");
 const repack_mod = @import("repack.zig");
 const ops = @import("maintenance.zig");
@@ -531,17 +532,12 @@ test "MIDX bitmap discovery preserves filesystem refusals for its packs" {
     try repo.exec(io, &.{ "multi-pack-index", "write", "--bitmap" });
     const objects = try repo.dir.openDir(io, ".git/objects", .{ .iterate = true });
     defer objects.close(io);
-    const Probe = struct {
-        var refusal: std.Io.Dir.AccessError = error.AccessDenied;
-        fn access(_: ?*anyopaque, _: std.Io.Dir, _: []const u8, _: std.Io.Dir.AccessOptions) std.Io.Dir.AccessError!void {
-            return refusal;
-        }
-    };
-    var vtable = io.vtable.*;
-    vtable.dirAccess = Probe.access;
-    const refused_io: std.Io = .{ .userdata = io.userdata, .vtable = &vtable };
+    const faults = try shakedown.FaultIo.init(gpa, io, .{});
+    defer faults.deinit();
+    const refused_io = faults.io();
     for ([_]std.Io.Dir.AccessError{ error.AccessDenied, error.InputOutput, error.Canceled }) |err| {
-        Probe.refusal = err;
+        const plan = [_]shakedown.IoPlan.Entry{.{ .at = .{ .nth = .{ .call = .dirAccess, .n = 1 } }, .fault = .{ .fail = err }, .times = 0 }};
+        try faults.setPlan(&plan);
         try std.testing.expectError(err, bitmap_store.Store.open(gpa, refused_io, objects, .sha1));
     }
 }

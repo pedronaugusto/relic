@@ -8,7 +8,8 @@ const hash = @import("../hash/hash.zig");
 const odb_mod = @import("../odb/odb.zig");
 const pack_mod = @import("../odb/pack.zig");
 const testgit = @import("git.zig");
-const Tasks = @import("io.zig");
+const Tasks = @import("io.zig").Tasks;
+const shakedown = @import("shakedown");
 
 const Oid = hash.Oid;
 
@@ -80,8 +81,9 @@ test "a pack submits several tasks to the caller's Io by default, none when aske
     defer corpus.deinit(gpa, io);
     var single: Io.Threaded = .init_single_threaded;
 
-    const serial = try corpus.write(gpa, Tasks.wrap(io), .{ .threads = 1 });
-    try Tasks.expect(0, 0);
+    var serial_tasks: Tasks = .init(io, .{});
+    const serial = try corpus.write(gpa, serial_tasks.io(), .{ .threads = 1 });
+    try serial_tasks.state.expect(0, 0);
     try std.testing.expect(serial.deltas > 0);
     const workers = @min(std.Thread.getCpuCount() catch 1, corpus.entries.items.len);
     // One batch: headers and bodies on at most six tasks, one search group
@@ -89,8 +91,9 @@ test "a pack submits several tasks to the caller's Io by default, none when aske
     const readers: usize = @min(workers, 6);
     const spawned = if (workers == 1) 0 else 2 * (readers - 1) + workers - 1;
     for ([_]Io{ io, single.io() }) |each_io| {
-        const parallel = try corpus.write(gpa, Tasks.wrap(each_io), .{});
-        try Tasks.expect(spawned, 0);
+        var tasks: Tasks = .init(each_io, .{});
+        const parallel = try corpus.write(gpa, tasks.io(), .{});
+        try tasks.state.expect(spawned, 0);
         try std.testing.expect(parallel.name.eql(serial.name));
         try std.testing.expectEqual(serial.deltas, parallel.deltas);
     }
@@ -228,41 +231,11 @@ test "the tasks allocate nothing, and a batch holds no more than its budget" {
     try std.testing.expect(runs[1].peak > fixed + 48 * 64 * 1024);
 }
 
-/// A loose-object open that, once armed, parks on its `at`-th call until
-/// the task it runs on is canceled, or fails with `failure`.
-const Interrupt = struct {
-    var mutex: std.atomic.Mutex = .unlocked;
-    var opens: usize = 0;
-    var at: usize = std.math.maxInt(usize);
-    var failure: ?Io.File.OpenError = null;
-    var parked: std.atomic.Value(bool) = .init(false);
-    var base: Io = undefined;
-
-    fn arm(n: usize, err: ?Io.File.OpenError) void {
-        opens = 0;
-        at = n;
-        failure = err;
-        parked.store(false, .release);
-    }
-
-    fn open(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, options: Io.Dir.OpenFileOptions) Io.File.OpenError!Io.File {
-        const n = blk: {
-            while (!mutex.tryLock()) {}
-            defer mutex.unlock();
-            opens += 1;
-            break :blk opens;
-        };
-        if (n == at) {
-            if (failure) |err| return err;
-            parked.store(true, .release);
-            // Until canceled, a short sleep at a time, since a sleep may
-            // also end early; a minute is a hang, not a pass.
-            for (0..6000) |_| try base.sleep(.fromMilliseconds(10), .awake);
-            return error.Unexpected;
-        }
-        return base.vtable.dirOpenFile(userdata, dir, sub_path, options);
-    }
-};
+/// Notes that the planned open was reached, before it stalls.
+fn noteParked(_: Io, context: *anyopaque) void {
+    const parked: *std.atomic.Value(bool) = @ptrCast(@alignCast(context)); // safe: the plan hands a *std.atomic.Value(bool) as the context
+    parked.store(true, .release);
+}
 
 fn writeWith(corpus: *Corpus, gpa: std.mem.Allocator, io: Io, options: odb_mod.PackOptions) anyerror!pack_mod.WriteReport {
     return corpus.write(gpa, io, options);
@@ -286,28 +259,34 @@ test "a pack write canceled or failed part way leaves nothing behind" {
     var threaded: Io.Threaded = .init(gpa, .{ .async_limit = .limited(2) });
     defer threaded.deinit();
     const io = threaded.io();
-    Interrupt.base = io;
     var corpus = try Corpus.init(gpa, io, 6, 6, 40);
     defer corpus.deinit(gpa, io);
 
-    var vtable = io.vtable.*;
-    vtable.dirOpenFile = Interrupt.open;
-    const interrupted: Io = .{ .userdata = io.userdata, .vtable = &vtable };
+    const faults = try shakedown.FaultIo.init(gpa, io, .{});
+    defer faults.deinit();
+    const interrupted = faults.io();
+    // The thirtieth open, on whichever task makes it.
+    const at: shakedown.IoPlan.At = .{ .nth = .{ .call = .dirOpenFile, .n = 30 } };
+    var parked: std.atomic.Value(bool) = .init(false);
+    const stall: shakedown.IoFault = .stall;
+    const parks = [_]shakedown.IoPlan.Entry{.{ .at = at, .fault = .{ .call = .{ .ctx = &parked, .f = noteParked, .then = &stall } } }};
+    const fails = [_]shakedown.IoPlan.Entry{.{ .at = at, .fault = .{ .fail = error.AccessDenied } }};
 
     for ([_]u16{ 4, 3, 1 }) |threads| {
         // Canceled while a read waits: the write returns `Canceled`.
-        Interrupt.arm(30, null);
+        parked.store(false, .release);
+        try faults.setPlan(&parks);
         var future = try io.concurrent(writeWith, .{ &corpus, gpa, interrupted, .{ .threads = threads } });
-        while (!Interrupt.parked.load(.acquire)) try io.sleep(.fromMilliseconds(1), .awake);
+        while (!parked.load(.acquire)) try io.sleep(.fromMilliseconds(1), .awake);
         try std.testing.expectError(error.Canceled, future.cancel(io));
         try std.testing.expectEqual(@as(usize, 0), try leftovers(&corpus, io));
 
         // A read that fails: the write returns why.
-        Interrupt.arm(30, error.AccessDenied);
+        try faults.setPlan(&fails);
         try std.testing.expectError(error.AccessDenied, corpus.write(gpa, interrupted, .{ .threads = threads }));
         try std.testing.expectEqual(@as(usize, 0), try leftovers(&corpus, io));
     }
-    Interrupt.arm(std.math.maxInt(usize), null);
+    try faults.setPlan(&.{});
     _ = try corpus.write(gpa, interrupted, .{});
 }
 
@@ -319,12 +298,13 @@ test "a pack of fewer objects than tasks asks for no more tasks than it has obje
         var corpus = try Corpus.init(gpa, io, 1, objects, 0);
         defer corpus.deinit(gpa, io);
         const serial = try corpus.write(gpa, io, .{ .threads = 1 });
-        const report = try corpus.write(gpa, Tasks.wrap(io), .{ .threads = 8 });
+        var serial_tasks: Tasks = .init(io, .{});
+        const report = try corpus.write(gpa, serial_tasks.io(), .{ .threads = 8 });
         try std.testing.expect(report.name.eql(serial.name));
         // Each of the write's stages — headers, bodies, deflating — shares
         // its objects among the calling task and at most one task for each
         // other object.
-        const spawned = Tasks.group_async.load(.monotonic);
+        const spawned = serial_tasks.state.group_async.load(.monotonic);
         if (spawned > 3 * (objects - 1)) {
             std.debug.print("{d} objects: {d} tasks\n", .{ objects, spawned });
             return error.TestUnexpectedResult;
@@ -359,14 +339,16 @@ test "objects repacked from packs are read by several tasks, and the pack is the
             return db.writePack(read, out, collected.entries, .{ .threads = threads });
         }
     };
-    const serial = try Repack.write(&corpus, gpa, io, Tasks.wrap(io), 1);
-    try Tasks.expect(0, 0);
+    var serial_tasks: Tasks = .init(io, .{});
+    const serial = try Repack.write(&corpus, gpa, io, serial_tasks.io(), 1);
+    try serial_tasks.state.expect(0, 0);
     try std.testing.expect(serial.deltas > 0);
     for ([_]Io{ io, single.io() }) |each_io| {
-        const parallel = try Repack.write(&corpus, gpa, io, Tasks.wrap(each_io), 4);
+        var tasks: Tasks = .init(each_io, .{});
+        const parallel = try Repack.write(&corpus, gpa, io, tasks.io(), 4);
         // Headers, packed bodies and deflation, three submissions each,
         // plus one submission for the second search group.
-        try Tasks.expect(10, 0);
+        try tasks.state.expect(10, 0);
         try std.testing.expect(parallel.name.eql(serial.name));
         try std.testing.expectEqual(serial.deltas, parallel.deltas);
     }
@@ -377,50 +359,50 @@ test "objects repacked from packs are read by several tasks, and the pack is the
 /// the delta search makes once the bodies are being read, and pack bytes
 /// handed to the output.
 const Phases = struct {
-    var mutex: std.atomic.Mutex = .unlocked;
+    mutex: std.atomic.Mutex = .unlocked,
     /// 0 before the first body is opened, 1 once one is, 2 once the
     /// search has begun, 3 once an entry is written after that.
-    var phase: u8 = 0;
+    phase: u8 = 0,
     /// Whether an object was opened in phase 2: while a batch was being
     /// searched or before the batch before it was written.
-    var opened_while_searching: bool = false;
+    opened_while_searching: bool = false,
 
-    fn reset() void {
-        phase = 0;
-        opened_while_searching = false;
-    }
-
-    fn event(kind: enum { open, search_alloc, write }) void {
-        while (!mutex.tryLock()) {}
-        defer mutex.unlock();
+    fn event(p: *Phases, kind: enum { open, search_alloc, write }) void {
+        while (!p.mutex.tryLock()) {}
+        defer p.mutex.unlock();
         switch (kind) {
-            .open => switch (phase) {
-                0 => phase = 1,
-                2 => opened_while_searching = true,
+            .open => switch (p.phase) {
+                0 => p.phase = 1,
+                2 => p.opened_while_searching = true,
                 else => {},
             },
-            .search_alloc => if (phase == 1) {
-                phase = 2;
+            .search_alloc => if (p.phase == 1) {
+                p.phase = 2;
             },
-            .write => if (phase == 2) {
-                phase = 3;
+            .write => if (p.phase == 2) {
+                p.phase = 3;
             },
         }
     }
 
+    /// An `Io` that notes each loose body opened.
+    const Watch = shakedown.Layer(struct { phases: *Phases }, .{ .dirOpenFile = open });
+
     fn open(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, options: Io.Dir.OpenFileOptions) Io.File.OpenError!Io.File {
-        if (sub_path.len == 41 and sub_path[2] == '/') event(.open);
-        return std.testing.io.vtable.dirOpenFile(userdata, dir, sub_path, options);
+        const l = Watch.of(userdata);
+        if (sub_path.len == 41 and sub_path[2] == '/') l.state.phases.event(.open);
+        return l.base.vtable.dirOpenFile(l.base.userdata, dir, sub_path, options);
     }
 
     const Spy = struct {
         child: std.mem.Allocator,
+        phases: *Phases,
         fn allocator(s: *Spy) std.mem.Allocator {
             return .{ .ptr = s, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
         }
         fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
             const s: *Spy = @ptrCast(@alignCast(ctx)); // safe: allocator() stores the original aligned owner pointer as its callback context.
-            if (len >= 16 * 1024) event(.search_alloc);
+            if (len >= 16 * 1024) s.phases.event(.search_alloc);
             return s.child.rawAlloc(len, alignment, ret);
         }
         fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret: usize) bool {
@@ -437,13 +419,19 @@ const Phases = struct {
         }
     };
 
-    fn drain(w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
-        _ = w;
-        event(.write);
-        var n: usize = 0;
-        for (data[0 .. data.len - 1]) |slice| n += slice.len;
-        return n + data[data.len - 1].len * splat;
-    }
+    /// A writer that notes each write and keeps nothing.
+    const Sink = struct {
+        phases: *Phases,
+        writer: Io.Writer = .{ .buffer = &.{}, .vtable = &.{ .drain = drain } },
+
+        fn drain(w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
+            const sink: *Sink = @alignCast(@fieldParentPtr("writer", w)); // safe: a Sink's writer is the only one drain is given
+            sink.phases.event(.write);
+            var n: usize = 0;
+            for (data[0 .. data.len - 1]) |slice| n += slice.len;
+            return n + data[data.len - 1].len * splat;
+        }
+    };
 };
 
 test "the tasks read the next batch while one is searched, and the pack is the serial writer's" {
@@ -461,22 +449,17 @@ test "the tasks read the next batch while one is searched, and the pack is the s
     const options: odb_mod.PackOptions = .{ .threads = 4, .batch_bytes = .fromRaw(96 * 1024) };
     const serial = try corpus.write(gpa, io, .{ .threads = 1 });
 
-    var vtable = io.vtable.*;
-    vtable.dirOpenFile = Phases.open;
-    const watched: Io = .{ .userdata = io.userdata, .vtable = &vtable };
     var single: Io.Threaded = .init_single_threaded;
-    var single_vtable = single.io().vtable.*;
-    single_vtable.dirOpenFile = Phases.open;
-    const single_watched: Io = .{ .userdata = single.io().userdata, .vtable = &single_vtable };
-    for ([_]Io{ watched, single_watched }) |each_io| {
-        var spy: Phases.Spy = .{ .child = gpa };
+    for ([_]Io{ io, single.io() }) |base| {
+        var phases: Phases = .{};
+        var watch: Phases.Watch = .init(base, .{ .phases = &phases });
+        var spy: Phases.Spy = .{ .child = gpa, .phases = &phases };
         var db = try odb_mod.Odb.openAt(spy.allocator(), io, corpus.objects, .sha1, .{ .probe_timestamp_resolution = false });
         defer db.deinit(io);
-        var out: Io.Writer = .{ .buffer = &.{}, .vtable = &.{ .drain = Phases.drain } };
-        Phases.reset();
-        const report = try db.writePackTo(each_io, &out, corpus.entries.items, options);
+        var sink: Phases.Sink = .{ .phases = &phases };
+        const report = try db.writePackTo(watch.io(), &sink.writer, corpus.entries.items, options);
         try std.testing.expect(report.name.eql(serial.name));
-        if (!Phases.opened_while_searching) {
+        if (!phases.opened_while_searching) {
             std.debug.print("no object was read between the start of the delta search and the first entry written\n", .{});
             return error.TestUnexpectedResult;
         }
@@ -508,15 +491,17 @@ test "collecting loose objects reads their trees on several tasks and hints as o
     var single: Io.Threaded = .init_single_threaded;
     var db = try odb_mod.Odb.openAt(gpa, io, corpus.objects, .sha1, .{ .probe_timestamp_resolution = false });
     defer db.deinit(io);
-    var serial = try db.collectLoose(Tasks.wrap(io), .{ .threads = 1 });
+    var serial_tasks: Tasks = .init(io, .{});
+    var serial = try db.collectLoose(serial_tasks.io(), .{ .threads = 1 });
     defer serial.deinit();
-    try Tasks.expect(0, 0);
+    try serial_tasks.state.expect(0, 0);
     for ([_]Io{ io, single.io() }) |each_io| {
-        var parallel = try db.collectLoose(Tasks.wrap(each_io), .{ .threads = 4 });
+        var tasks: Tasks = .init(each_io, .{});
+        var parallel = try db.collectLoose(tasks.io(), .{ .threads = 4 });
         defer parallel.deinit();
         // Headers and the six tree bodies, each on four tasks including
         // the caller, even when the executor runs every submission inline.
-        try Tasks.expect(6, 0);
+        try tasks.state.expect(6, 0);
         try std.testing.expectEqual(serial.entries.len, parallel.entries.len);
         var hinted: usize = 0;
         for (serial.entries, parallel.entries) |a, b| {
@@ -540,16 +525,18 @@ test "the delta search runs on several tasks, a group on each, and the pack is t
     const gpa = std.testing.allocator;
     var corpus = try groupedCorpus(gpa, io);
     defer corpus.deinit(gpa, io);
-    const serial = try corpus.write(gpa, Tasks.wrap(io), .{ .threads = 1 });
-    try Tasks.expect(0, 0);
+    var serial_tasks: Tasks = .init(io, .{});
+    const serial = try corpus.write(gpa, serial_tasks.io(), .{ .threads = 1 });
+    try serial_tasks.state.expect(0, 0);
     try std.testing.expect(serial.deltas > 0);
 
     var single: Io.Threaded = .init_single_threaded;
     for ([_]Io{ io, single.io() }) |each_io| {
-        const parallel = try corpus.write(gpa, Tasks.wrap(each_io), .{ .threads = 4 });
+        var tasks: Tasks = .init(each_io, .{});
+        const parallel = try corpus.write(gpa, tasks.io(), .{ .threads = 4 });
         // Headers, bodies, four search groups and deflation: four stages
         // with three submissions each, in addition to the calling task.
-        try Tasks.expect(12, 0);
+        try tasks.state.expect(12, 0);
         try std.testing.expect(parallel.name.eql(serial.name));
         try std.testing.expectEqual(serial.deltas, parallel.deltas);
     }
@@ -879,17 +866,19 @@ test "verifying a database checks its packs' entries on several tasks" {
     defer gpa.free(base);
     var p = try pack_mod.Pack.open(gpa, io, pack_dir, .{ .base = base, .kind = .sha1 }, .{});
     defer p.deinit(io);
-    const serial = try p.verify(Tasks.wrap(io), .{});
-    try Tasks.expect(0, 0);
+    var serial_tasks: Tasks = .init(io, .{});
+    const serial = try p.verify(serial_tasks.io(), .{});
+    try serial_tasks.state.expect(0, 0);
     var single: Io.Threaded = .init_single_threaded;
     for ([_]Io{ io, single.io() }) |each_io| {
-        const report = try db.verify(Tasks.wrap(each_io));
+        var tasks: Tasks = .init(each_io, .{});
+        const report = try db.verify(tasks.io());
         try std.testing.expect(report.packed_objects > 100);
         try std.testing.expectEqual(@as(u32, 1), report.packs);
         try std.testing.expectEqual(@as(u32, 0), report.loose);
         try std.testing.expectEqual(serial.objects, report.packed_objects);
         try std.testing.expectEqual(serial.bytes, report.bytes);
         // One batch's entries and checksum, shared with the caller.
-        try Tasks.expect(@min(std.Thread.getCpuCount() catch 1, report.packed_objects + 1) - 1, 0);
+        try tasks.state.expect(@min(std.Thread.getCpuCount() catch 1, report.packed_objects + 1) - 1, 0);
     }
 }

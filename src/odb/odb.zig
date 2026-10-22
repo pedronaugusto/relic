@@ -152,6 +152,7 @@ const deflate_output_buffer_len = 64 * 1024;
 /// accelerator is being used and that a batch of writes stayed cheap.
 pub const Stats = policy_mod.Stats;
 const testgit = @import("../testing/git.zig");
+const io_mod = @import("../testing/io.zig");
 
 /// The object database.
 pub const Odb = struct {
@@ -6086,12 +6087,6 @@ test "loose inflate distinguishes policy resource failures from corruption" {
 }
 
 test "loose reads preserve I/O and cancellation resource failures" {
-    const Fault = struct {
-        threadlocal var failure: Io.File.ReadPositionalError = error.InputOutput;
-        fn read(_: ?*anyopaque, _: Io.File, _: []const []u8, _: u64) Io.File.ReadPositionalError!usize {
-            return failure;
-        }
-    };
     const io = std.testing.io;
     const gpa = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
@@ -6102,11 +6097,12 @@ test "loose reads preserve I/O and cancellation resource failures" {
     var odb = try Odb.openAt(gpa, io, objects, .sha1, .{});
     defer odb.deinit(io);
     const oid = try odb.write(io, .blob, "hello\n");
-    var vtable = io.vtable.*;
-    vtable.fileReadPositional = Fault.read;
-    const failing_io: Io = .{ .userdata = io.userdata, .vtable = &vtable };
+    const faults = try shakedown.FaultIo.init(gpa, io, .{});
+    defer faults.deinit();
+    const failing_io = faults.io();
     for ([_]Io.File.ReadPositionalError{ error.InputOutput, error.Canceled }) |failure| {
-        Fault.failure = failure;
+        const plan = [_]shakedown.IoPlan.Entry{.{ .at = .{ .nth = .{ .call = .fileReadPositional, .n = 1 } }, .fault = .{ .fail = failure }, .times = 0 }};
+        try faults.setPlan(&plan);
         try std.testing.expectError(failure, odb.read(failing_io, oid));
         try std.testing.expectError(failure, odb.readHeader(failing_io, oid));
         try std.testing.expectError(failure, odb.readHeaderForPack(failing_io, oid, 100));
@@ -6114,15 +6110,6 @@ test "loose reads preserve I/O and cancellation resource failures" {
 }
 
 test "a loose object's header is read without inflating its body" {
-    // What the file reads return: a loose object is read positionally.
-    const Counting = struct {
-        threadlocal var bytes: usize = 0;
-        fn positional(userdata: ?*anyopaque, file: Io.File, data: []const []u8, offset: u64) Io.File.ReadPositionalError!usize {
-            const n = try std.testing.io.vtable.fileReadPositional(userdata, file, data, offset);
-            bytes += n;
-            return n;
-        }
-    };
     const io = std.testing.io;
     const gpa = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
@@ -6139,16 +6126,18 @@ test "a loose object's header is read without inflating its body" {
     prng.random().bytes(body);
     const oid = try odb.write(io, .blob, body);
 
-    var vtable = io.vtable.*;
-    vtable.fileReadPositional = Counting.positional;
-    const counted: Io = .{ .userdata = io.userdata, .vtable = &vtable };
-    Counting.bytes = 0;
-    const header = try odb.readHeader(counted, oid);
+    // What the file reads return, from the trace: a loose object is read
+    // positionally.
+    const faults = try shakedown.FaultIo.init(gpa, io, .{ .trace = .all });
+    defer faults.deinit();
+    const header = try odb.readHeader(faults.io(), oid);
     try std.testing.expectEqual(object.Header{ .type = .blob, .size = body.len }, header);
+    const bytes = io_mod.moved(faults, .fileReadPositional);
     // The zlib header, the first block's and the object's own: well under
     // a kilobyte, against the whole inflate window a full read fills.
-    if (Counting.bytes > 1024) {
-        std.debug.print("a header read read {d} bytes of a {d}-byte object\n", .{ Counting.bytes, body.len });
+    try std.testing.expect(bytes != 0);
+    if (bytes > 1024) {
+        std.debug.print("a header read read {d} bytes of a {d}-byte object\n", .{ bytes, body.len });
         return error.TestUnexpectedResult;
     }
 }
@@ -6179,12 +6168,13 @@ test "packed source registration owns its files and names when allocation stops"
 
 test "openAt borrows its directory on success and every allocation failure" {
     const Check = struct {
-        var original: Io.Dir = undefined;
-        var closed_original: bool = false;
-        fn close(context: ?*anyopaque, dirs: []const Io.Dir) void {
-            _ = context;
+        /// Whether the directory handed in was closed: a close of it is
+        /// noted and not made, every other made.
+        const Borrow = shakedown.Layer(struct { original: Io.Dir, closed: bool = false }, .{ .dirClose = close });
+        fn close(userdata: ?*anyopaque, dirs: []const Io.Dir) void {
+            const l = Borrow.of(userdata);
             for (dirs) |dir| {
-                if (dir.handle == original.handle) closed_original = true else dir.close(std.testing.io);
+                if (dir.handle == l.state.original.handle) l.state.closed = true else dir.close(l.base);
             }
         }
         fn run(gpa: Allocator) !void {
@@ -6192,17 +6182,14 @@ test "openAt borrows its directory on success and every allocation failure" {
             var tmp = std.testing.tmpDir(.{ .iterate = true });
             defer tmp.cleanup();
             try tmp.dir.createDirPath(base, "pack");
-            original = tmp.dir;
-            closed_original = false;
-            var vtable = base.vtable.*;
-            vtable.dirClose = close;
-            const io: Io = .{ .userdata = base.userdata, .vtable = &vtable };
+            var borrow: Borrow = .init(base, .{ .original = tmp.dir });
+            const io = borrow.io();
             var db = Odb.openAt(gpa, io, tmp.dir, .sha1, .{ .probe_timestamp_resolution = false }) catch |err| {
-                try std.testing.expect(!closed_original);
+                try std.testing.expect(!borrow.state.closed);
                 return err;
             };
             db.deinit(io);
-            try std.testing.expect(!closed_original);
+            try std.testing.expect(!borrow.state.closed);
             try tmp.dir.access(base, "pack", .{});
         }
     };
@@ -6222,19 +6209,6 @@ test "selected object durability names a foreign object format" {
 }
 
 test "object discovery refuses unreadable loose state instead of partial answers" {
-    const Probe = struct {
-        var failure: Io.Dir.OpenError = error.AccessDenied;
-        fn openDir(_: ?*anyopaque, dir: Io.Dir, path: []const u8, options: Io.Dir.OpenOptions) Io.Dir.OpenError!Io.Dir {
-            if (path.len == 2) return failure;
-            return dir.openDir(std.testing.io, path, options);
-        }
-        fn access(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: Io.Dir.AccessOptions) Io.Dir.AccessError!void {
-            return error.InputOutput;
-        }
-        fn next(_: ?*anyopaque, _: *Io.Dir.Reader, _: []Io.Dir.Entry) Io.Dir.Reader.Error!usize {
-            return error.Canceled;
-        }
-    };
     const gpa = std.testing.allocator;
     const base = std.testing.io;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
@@ -6242,36 +6216,32 @@ test "object discovery refuses unreadable loose state instead of partial answers
     var db = try Odb.openAt(gpa, base, tmp.dir, .sha1, .{ .probe_timestamp_resolution = false });
     defer db.deinit(base);
     const oid = try db.write(base, .blob, "a");
-    var vtable = base.vtable.*;
-    vtable.dirOpenDir = Probe.openDir;
-    var io: Io = .{ .userdata = base.userdata, .vtable = &vtable };
     var hex: [hash.max_hex_len]u8 = undefined;
+    const fan_out = oid.hex(&hex)[0..2].*;
+    // The paths as the calls name them, relative to the objects directory.
+    const faults = try shakedown.FaultIo.init(gpa, base, .{ .track_paths = false });
+    defer faults.deinit();
+    const io = faults.io();
     for ([_]Io.Dir.OpenError{ error.AccessDenied, error.ProcessFdQuotaExceeded, error.Canceled }) |err| {
-        Probe.failure = err;
+        const plan = [_]shakedown.IoPlan.Entry{.{ .at = .{ .nth = .{ .call = .dirOpenDir, .n = 1, .path = .{ .exact = &fan_out } } }, .fault = .{ .fail = err }, .times = 0 }};
+        try faults.setPlan(&plan);
         try std.testing.expectError(err, db.verify(io));
         try std.testing.expectError(err, db.listObjects(io));
         try std.testing.expectError(err, db.collectLoose(io, .{}));
         try std.testing.expectError(err, db.collectAll(io, .{}));
         try std.testing.expectError(err, db.findPrefix(io, oid.hex(&hex)[0..8]));
     }
-    vtable = base.vtable.*;
-    vtable.dirAccess = Probe.access;
-    io.vtable = &vtable;
+    const refused_access = [_]shakedown.IoPlan.Entry{.{ .at = .{ .nth = .{ .call = .dirAccess, .n = 1 } }, .fault = .{ .fail = error.InputOutput }, .times = 0 }};
+    try faults.setPlan(&refused_access);
     try std.testing.expectError(error.InputOutput, db.exists(io, oid));
     try std.testing.expectError(error.InputOutput, db.existsOwn(io, oid));
     // Iteration itself must not turn a failed prefix search into a miss.
-    vtable = base.vtable.*;
-    vtable.dirRead = Probe.next;
+    const refused_read = [_]shakedown.IoPlan.Entry{.{ .at = .{ .nth = .{ .call = .dirRead, .n = 1 } }, .fault = .{ .fail = error.Canceled }, .times = 0 }};
+    try faults.setPlan(&refused_read);
     try std.testing.expectError(error.Canceled, db.findPrefix(io, oid.hex(&hex)[0..8]));
 }
 
 test "object source discovery keeps alternate and pack read refusals" {
-    const Probe = struct {
-        fn openDir(_: ?*anyopaque, dir: Io.Dir, path: []const u8, options: Io.Dir.OpenOptions) Io.Dir.OpenError!Io.Dir {
-            if (std.mem.eql(u8, path, "../other")) return error.ProcessFdQuotaExceeded;
-            return dir.openDir(std.testing.io, path, options);
-        }
-    };
     const gpa = std.testing.allocator;
     const base = std.testing.io;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
@@ -6279,9 +6249,10 @@ test "object source discovery keeps alternate and pack read refusals" {
     try tmp.dir.createDirPath(base, "objects/info");
     try tmp.dir.createDirPath(base, "objects/pack");
     try tmp.dir.writeFile(base, .{ .sub_path = "objects/info/alternates", .data = "../other\n" });
-    var vtable = base.vtable.*;
-    vtable.dirOpenDir = Probe.openDir;
-    const io: Io = .{ .userdata = base.userdata, .vtable = &vtable };
+    const plan = [_]shakedown.IoPlan.Entry{.{ .at = .{ .nth = .{ .call = .dirOpenDir, .n = 1, .path = .{ .exact = "../other" } } }, .fault = .{ .fail = error.ProcessFdQuotaExceeded }, .times = 0 }};
+    const faults = try shakedown.FaultIo.init(gpa, base, .{ .plan = &plan, .track_paths = false });
+    defer faults.deinit();
+    const io = faults.io();
     if (Odb.open(gpa, io, tmp.dir, .sha1, .{ .probe_timestamp_resolution = false })) |value| {
         var unexpected = value;
         unexpected.deinit(base);
@@ -6306,10 +6277,6 @@ test "object source discovery keeps alternate and pack read refusals" {
 
 test "object discovery preserves optional index and hint read resources" {
     const Probe = struct {
-        fn openFile(_: ?*anyopaque, dir: Io.Dir, path: []const u8, options: Io.Dir.OpenFileOptions) Io.File.OpenError!Io.File {
-            if (std.mem.eql(u8, path, "multi-pack-index") or (path.len > 2 and path[2] == '/')) return error.SystemResources;
-            return dir.openFile(std.testing.io, path, options);
-        }
         fn open(io: Io, dir: Io.Dir) !void {
             var db = try Odb.openAt(std.testing.allocator, io, dir, .sha1, .{ .probe_timestamp_resolution = false });
             defer db.deinit(std.testing.io);
@@ -6323,25 +6290,25 @@ test "object discovery preserves optional index and hint read resources" {
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     try tmp.dir.createDirPath(base, "pack");
-    var vtable = base.vtable.*;
-    vtable.dirOpenFile = Probe.openFile;
-    const io: Io = .{ .userdata = base.userdata, .vtable = &vtable };
+    const faults = try shakedown.FaultIo.init(std.testing.allocator, base, .{ .track_paths = false });
+    defer faults.deinit();
+    const io = faults.io();
+    const no_index = [_]shakedown.IoPlan.Entry{.{ .at = .{ .nth = .{ .call = .dirOpenFile, .n = 1, .path = .{ .exact = "multi-pack-index" } } }, .fault = .{ .fail = error.SystemResources }, .times = 0 }};
+    try faults.setPlan(&no_index);
     try std.testing.expectError(error.SystemResources, Probe.open(io, tmp.dir));
     var db = try Odb.openAt(std.testing.allocator, base, tmp.dir, .sha1, .{ .probe_timestamp_resolution = false });
     defer db.deinit(base);
-    _ = try db.write(base, .tree, "");
+    const tree = try db.write(base, .tree, "");
+    // The loose object's own file, `<fan-out>/<rest>`.
+    var hex: [hash.max_hex_len]u8 = undefined;
+    var loose_buf: [4]u8 = undefined;
+    const loose = try std.mem.print(&loose_buf, "{s}/", .{tree.hex(&hex)[0..2]});
+    const no_loose = [_]shakedown.IoPlan.Entry{.{ .at = .{ .nth = .{ .call = .dirOpenFile, .n = 1, .path = .{ .prefix = loose } } }, .fault = .{ .fail = error.SystemResources }, .times = 0 }};
+    try faults.setPlan(&no_loose);
     try std.testing.expectError(error.SystemResources, Probe.collect(&db, io));
 }
 
 test "a cached loose body fits one buffered read and an end check" {
-    const Counter = struct {
-        threadlocal var reads: usize = 0;
-        fn read(userdata: ?*anyopaque, file: Io.File, buffers: []const []u8, offset: u64) Io.File.ReadPositionalError!usize {
-            reads += 1;
-            const io = std.testing.io;
-            return io.vtable.fileReadPositional(userdata, file, buffers, offset);
-        }
-    };
     const io = std.testing.io;
     const gpa = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
@@ -6355,15 +6322,13 @@ test "a cached loose body fits one buffered read and an end check" {
     var prng: std.Random.DefaultPrng = .init(1950);
     prng.random().bytes(&bytes);
     const oid = try odb.write(io, .blob, &bytes);
-    var vtable = io.vtable.*;
-    vtable.fileReadPositional = Counter.read;
-    const counted: Io = .{ .userdata = io.userdata, .vtable = &vtable };
-    Counter.reads = 0;
-    const found = try odb.readHeaderForPack(counted, oid, bytes.len);
+    const faults = try shakedown.FaultIo.init(gpa, io, .{});
+    defer faults.deinit();
+    const found = try odb.readHeaderForPack(faults.io(), oid, bytes.len);
     defer gpa.free(found.bytes.?);
     try std.testing.expectEqual(object.Type.blob, found.header.type);
     try std.testing.expectEqualSlices(u8, &bytes, found.bytes.?);
-    try std.testing.expect(Counter.reads <= 2);
+    try std.testing.expect(faults.count(.fileReadPositional) >= 1 and faults.count(.fileReadPositional) <= 2);
 }
 
 test "an object read into a kept buffer is the object read, and borrows the buffer" {
