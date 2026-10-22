@@ -89,6 +89,10 @@ pub const Error = errors: {
         DateNeedsClock,
         /// A signature atom for a signed commit, with no `signer`.
         SignatureNeedsSigner,
+        /// `git tag --contains` met a commit already on its walk: replace
+        /// refs made the ancestry loop, which git 2.56 dies on ("commit
+        /// ancestry contains a cycle").
+        CommitAncestryCycle,
     } || Allocator.Error || refs_mod.ReadError || odb_mod.Error || object.ParseError ||
         rev_walk.Error || signing.Error || remote_mod.Error || worktrees.Error || mailmap_mod.LoadError || describe_mod.Error;
 };
@@ -186,6 +190,10 @@ pub const Filter = struct {
     forked: []const []const u8 = &.{},
     /// Only refs that peel to a commit: what `git branch -v` lists.
     commits_only: bool = false,
+    /// `contains` and `no_contains` asked by git's memoized walk
+    /// (`with_commit_tag_algo`), as `git tag` asks them: the same answers,
+    /// and `error.CommitAncestryCycle` where the ancestry loops.
+    tag_walk: bool = false,
     /// `--start-after`: only refs that sort after this name.
     start_after: ?[]const u8 = null,
 };
@@ -621,6 +629,9 @@ pub const Format = struct {
     };
 };
 
+/// What git's `contains_cache` holds of a commit.
+const Reach = enum { unknown, no, yes, in_progress };
+
 /// Refs gathered by a filter, sorted and formatted: git's `ref_array` and
 /// the atoms its format and sort keys use.
 pub const Listing = struct {
@@ -641,6 +652,9 @@ pub const Listing = struct {
     worktree_map: ?std.StringHashMapUnmanaged([]const u8) = null,
     describers: std.ArrayList(?*describe_mod.Describer) = .empty,
     commits: Oid.Map(CommitNode) = .empty,
+    /// What the memoized walk has found of `contains` and of
+    /// `no_contains`: git's two `contains_cache`s.
+    contains_found: [2]Oid.Map(Reach) = .{ .empty, .empty },
     head_description: ?[]const u8 = null,
     trailer_settings: ?trailer.Settings = null,
 
@@ -770,8 +784,8 @@ pub const Listing = struct {
             filter.no_contains.len != 0 or filter.commits_only)
         {
             commit = (try l.peelToCommit(oid)) orelse return;
-            if (filter.contains.len != 0 and !try l.containsAny(commit.?, filter.contains)) return;
-            if (filter.no_contains.len != 0 and try l.containsAny(commit.?, filter.no_contains)) return;
+            if (filter.contains.len != 0 and !try l.contains(filter, 0, commit.?)) return;
+            if (filter.no_contains.len != 0 and try l.contains(filter, 1, commit.?)) return;
         }
         const item = try l.a().create(Item);
         item.* = .{
@@ -825,6 +839,64 @@ pub const Listing = struct {
             }
         }
         return null;
+    }
+
+    /// git's `commit_contains`: whether `commit` reaches one of
+    /// `filter.contains` (`which` 0) or of `filter.no_contains` (1).
+    fn contains(l: *Listing, filter: Filter, which: usize, commit: Oid) ErrorNamespace.Error!bool {
+        const wanted = if (which == 0) filter.contains else filter.no_contains;
+        if (filter.tag_walk) return l.containsByTagWalk(&l.contains_found[which], commit, wanted);
+        return l.containsAny(commit, wanted);
+    }
+
+    /// git's `contains_tag_algo`: a walk down the parents, each commit's
+    /// answer kept for the next ref, and a commit met again while its own
+    /// answer is pending a cycle.
+    fn containsByTagWalk(l: *Listing, found: *Oid.Map(Reach), candidate: Oid, wanted: []const Oid) ErrorNamespace.Error!bool {
+        switch (try l.reachTest(found, candidate, wanted)) {
+            .yes => return true,
+            .no => return false,
+            .in_progress => return error.CommitAncestryCycle,
+            .unknown => {},
+        }
+        const Pending = struct { oid: Oid, parents: []const Oid };
+        var stack: std.ArrayList(Pending) = .empty;
+        defer stack.deinit(l.gpa);
+        try found.put(l.a(), candidate, .in_progress);
+        try stack.append(l.gpa, .{ .oid = candidate, .parents = try l.parentsOf(candidate) });
+        while (stack.items.len != 0) {
+            const top = &stack.items[stack.items.len - 1];
+            if (top.parents.len == 0) {
+                try found.put(l.a(), top.oid, .no);
+                _ = stack.pop();
+                continue;
+            }
+            const parent = top.parents[0];
+            switch (try l.reachTest(found, parent, wanted)) {
+                .yes => {
+                    try found.put(l.a(), top.oid, .yes);
+                    _ = stack.pop();
+                },
+                .no => top.parents = top.parents[1..],
+                .in_progress => return error.CommitAncestryCycle,
+                .unknown => {
+                    try found.put(l.a(), parent, .in_progress);
+                    try stack.append(l.gpa, .{ .oid = parent, .parents = try l.parentsOf(parent) });
+                },
+            }
+        }
+        return found.get(candidate).? == .yes;
+    }
+
+    /// git's `contains_test`: the answer kept for `commit`, `yes` where it
+    /// is one of `wanted`, else not yet known.
+    fn reachTest(l: *Listing, found: *Oid.Map(Reach), commit: Oid, wanted: []const Oid) Allocator.Error!Reach {
+        if (found.get(commit)) |known| return known;
+        for (wanted) |w| if (w.eql(commit)) {
+            try found.put(l.a(), commit, .yes);
+            return .yes;
+        };
+        return .unknown;
     }
 
     fn containsAny(l: *Listing, commit: Oid, wanted: []const Oid) ErrorNamespace.Error!bool {
@@ -2890,6 +2962,7 @@ pub fn listTags(gpa: Allocator, io: Io, writer: *Io.Writer, repo: *Repository, o
         .no_contains = options.no_contains,
         .merged = options.merged,
         .no_merged = options.no_merged,
+        .tag_walk = true,
     });
     if (!options.no_sort) {
         const configured = try configuredSort(gpa, repo.configuration(), "tag.sort");

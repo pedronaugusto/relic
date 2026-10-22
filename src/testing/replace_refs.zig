@@ -6,7 +6,9 @@
 //! and what git runs with replace refs off reading the objects as stored:
 //! the commit-graph left aside while they are in use, a repack and prune
 //! that keep the history only the stored parents reach, and a clone served
-//! from relic's upload-pack that holds it.
+//! from relic's upload-pack that holds it; and an ancestry that loops
+//! through a replacement, on which `git tag --contains` dies and `git
+//! branch --contains` answers.
 
 const std = @import("std");
 const Io = std.Io;
@@ -21,6 +23,7 @@ const rev_walk = @import("../walk/walk.zig");
 const repack = @import("../maintenance/repack.zig");
 const prune = @import("../maintenance/prune.zig");
 const date = @import("../text.zig").date;
+const ref_listing = @import("../pretty/refs.zig");
 const hash = @import("../hash/hash.zig");
 
 const Oid = hash.Oid;
@@ -276,4 +279,52 @@ test "what git runs with replace refs off reads the stored objects: the commit-g
     try std.testing.expectEqualStrings("3\n", count);
     const clone_checked = try testremote.gitInputEnv(gpa, io, clone, &env, &.{ "fsck", "--full", "--no-dangling" }, "", true);
     gpa.free(clone_checked);
+}
+
+/// relic's tag or branch listing of what contains `wanted`.
+fn listContaining(gpa: Allocator, io: Io, git: *testgit.Repo, tags: bool, wanted: Oid) ![]u8 {
+    var repo = try repo_mod.Repository.open(gpa, io, git.dir, .{});
+    defer repo.deinit(io);
+    var out: Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    if (tags)
+        try ref_listing.listTags(gpa, io, &out.writer, &repo, .{ .contains = &.{wanted} })
+    else
+        try ref_listing.listBranches(gpa, io, &out.writer, &repo, .{ .contains = &.{wanted} });
+    return gpa.dupe(u8, out.written());
+}
+
+test "an ancestry a replacement makes loop: git tag --contains dies on it as git 2.56 does, git branch --contains answers" {
+    try testgit.requireGitVersion(std.testing.allocator, std.testing.io, 2, 56);
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    for ([_][]const u8{ "one", "two", "three" }) |subject| {
+        try git.writeFile(io, "f.txt", subject);
+        try git.exec(io, &.{ "add", "-A" });
+        try git.exec(io, &.{ "commit", "-q", "-m", subject });
+    }
+    try git.exec(io, &.{ "tag", "middle", "HEAD~1" });
+    try git.exec(io, &.{ "branch", "side", "HEAD~2" });
+    try git.exec(io, &.{ "switch", "-q", "side" });
+    try git.writeFile(io, "side.txt", "side\n");
+    try git.exec(io, &.{ "add", "-A" });
+    try git.exec(io, &.{ "commit", "-q", "-m", "side" });
+    const elsewhere = try oidOf(gpa, io, &git, "HEAD");
+    try git.exec(io, &.{ "switch", "-q", "main" });
+    // The first commit now has the last for its parent.
+    try git.exec(io, &.{ "replace", "--graft", "main~2", "main" });
+    var hex: [hash.max_hex_len]u8 = undefined;
+
+    git.report_failures = false;
+    try std.testing.expectError(error.GitFailed, git.run(io, &.{ "tag", "--contains", elsewhere.hex(&hex) }));
+    try std.testing.expectError(error.CommitAncestryCycle, listContaining(gpa, io, &git, true, elsewhere));
+    git.report_failures = true;
+
+    const theirs = try git.run(io, &.{ "branch", "--contains", elsewhere.hex(&hex) });
+    defer gpa.free(theirs);
+    const ours = try listContaining(gpa, io, &git, false, elsewhere);
+    defer gpa.free(ours);
+    try std.testing.expectEqualStrings(theirs, ours);
 }
