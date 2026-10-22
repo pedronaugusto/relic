@@ -843,9 +843,7 @@ pub const Config = struct {
     /// The directory of `sub_path` under `dir`, absolute, links resolved,
     /// `/`-separated; `null` when it cannot be found.
     fn absoluteDirOf(io: Io, dir: Io.Dir, sub_path: []const u8, buf: []u8) ?[]const u8 {
-        const len = dir.realPathFile(io, sub_path, buf) catch return null;
-        const path = buf[0..len];
-        if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, path, '\\', '/');
+        const path = fs.realPathFile(io, dir, sub_path, buf) catch return null;
         return std.Io.Dir.path.dirnamePosix(path);
     }
 

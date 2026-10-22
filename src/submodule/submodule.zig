@@ -367,7 +367,7 @@ fn superprojectUrl(arena: Allocator, io: Io, repo: *Repository) Error![]const u8
     if (try configString(arena, repo.configuration(), key)) |url| {
         if (url.len > 0) return url;
     }
-    return absolutePath(arena, io, repo.workDirectory() orelse return error.BareRepository);
+    return try fs.realPathAlloc(arena, io, repo.workDirectory() orelse return error.BareRepository, ".");
 }
 
 /// `../` for every component of `path`, which is what a url relative to a
@@ -444,15 +444,6 @@ fn setCoreWorktree(io: Io, repo: *const Repository, dir: Io.Dir, value: ?[]const
 //=========================================================================
 // Layout
 //=========================================================================
-
-/// The absolute path of `dir`, `/`-separated, which is how git writes one.
-fn absolutePath(arena: Allocator, io: Io, dir: Io.Dir) Error![]u8 {
-    var buf: [4096]u8 = undefined;
-    const len = try dir.realPath(io, &buf);
-    const out = try arena.dupe(u8, buf[0..len]);
-    if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, out, '\\', '/');
-    return out;
-}
 
 /// `target` relative to the directory `base`, both absolute and
 /// `/`-separated: `../` for each component of `base` below what the two
@@ -1194,7 +1185,7 @@ const ModuleDir = struct {
 
     fn absolute(m: ModuleDir, arena: Allocator, io: Io) Error![]const u8 {
         if (std.Io.Dir.path.isAbsolute(m.path)) return m.path;
-        const base = try absolutePath(arena, io, m.base);
+        const base = try fs.realPathAlloc(arena, io, m.base, ".");
         return arena.print("{s}/{s}", .{ base, m.path });
     }
 };
@@ -1297,8 +1288,8 @@ fn setDefaultGitDir(arena: Allocator, io: Io, repo: *Repository, name: []const u
 /// The superproject's git directory as git names it from the top of its
 /// working tree: `.git` where it is there, its absolute path otherwise.
 fn gitDirText(arena: Allocator, io: Io, repo: *Repository) Error![]const u8 {
-    const git_dir = try absolutePath(arena, io, repo.gitDirectory());
-    const top = try absolutePath(arena, io, repo.topDirectory());
+    const git_dir = try fs.realPathAlloc(arena, io, repo.gitDirectory(), ".");
+    const top = try fs.realPathAlloc(arena, io, repo.topDirectory(), ".");
     const local = try arena.print("{s}/.git", .{top});
     return if (std.mem.eql(u8, git_dir, local)) ".git" else git_dir;
 }
@@ -1432,7 +1423,7 @@ fn absorbIn(
             if (!discover.directory.isGitDirectory(io, module_dir)) continue;
             var work = try wt.openDir(io, entry.path, .{});
             defer work.close(io);
-            try connect(arena, io, repo, work, try absolutePath(arena, io, work), module_dir, try absolutePath(arena, io, module_dir));
+            try connect(arena, io, repo, work, try fs.realPathAlloc(arena, io, work, "."), module_dir, try fs.realPathAlloc(arena, io, module_dir, "."));
             outcome.reconnected += 1;
         }
 
@@ -1470,7 +1461,7 @@ fn relocate(
     defer work.close(io);
     var module_dir = try where.base.openDir(io, target, .{});
     defer module_dir.close(io);
-    try connect(arena, io, repo, work, try absolutePath(arena, io, work), module_dir, try absolutePath(arena, io, module_dir));
+    try connect(arena, io, repo, work, try fs.realPathAlloc(arena, io, work, "."), module_dir, try fs.realPathAlloc(arena, io, module_dir, "."));
 }
 
 //=========================================================================
@@ -1535,7 +1526,7 @@ pub fn gitDirOf(arena: Allocator, io: Io, repo: *Repository, path: []const u8) S
     const named = (try gitfile.read(arena, io, work, ".git")) orelse return null;
     var git_dir = try gitfile.open(io, work, named, .{});
     defer git_dir.close(io);
-    return try absolutePath(arena, io, git_dir);
+    return try fs.realPathAlloc(arena, io, git_dir, ".");
 }
 
 /// Connect the working tree at `path` and the git directory `git_dir`, an
@@ -1558,7 +1549,7 @@ fn connectAt(gpa: Allocator, io: Io, repo: *Repository, wt: Io.Dir, path: []cons
     defer work.close(io);
     var module_dir = try Io.Dir.openDirAbsolute(io, git_dir, .{});
     defer module_dir.close(io);
-    try connect(arena, io, repo, work, try absolutePath(arena, io, work), module_dir, try absolutePath(arena, io, module_dir));
+    try connect(arena, io, repo, work, try fs.realPathAlloc(arena, io, work, "."), module_dir, try fs.realPathAlloc(arena, io, module_dir, "."));
 
     // `connect_wt_gitdir_in_nested`: a working tree no repository opens at
     // has nothing nested to connect.
@@ -1863,7 +1854,7 @@ fn populate(
     try wt.createDirPath(io, path);
     var work = try wt.openDir(io, path, .{});
     defer work.close(io);
-    try connect(arena, io, repo, work, try absolutePath(arena, io, work), module_dir, try absolutePath(arena, io, module_dir));
+    try connect(arena, io, repo, work, try fs.realPathAlloc(arena, io, work, "."), module_dir, try fs.realPathAlloc(arena, io, module_dir, "."));
 }
 
 /// Whether `path` is not there, or is a directory with nothing in it.
@@ -1891,7 +1882,7 @@ fn correctCoreWorktree(arena: Allocator, gpa: Allocator, io: Io, repo: *const Re
     if (config.get("core.worktree") == null) return;
     var work = try wt.openDir(io, path, .{});
     defer work.close(io);
-    const wanted = try relativePath(arena, try absolutePath(arena, io, work), try absolutePath(arena, io, found.git_dir));
+    const wanted = try relativePath(arena, try fs.realPathAlloc(arena, io, work, "."), try fs.realPathAlloc(arena, io, found.git_dir, "."));
     const now = try configString(arena, &config, "core.worktree");
     if (now != null and std.mem.eql(u8, now.?, wanted)) return;
     try setCoreWorktree(io, repo, found.common_dir, wanted);
@@ -2182,7 +2173,7 @@ pub const Mover = struct {
         try fs.makeDirs(io, wt, request.path, m.repo.sharedPermissions());
         var work = try wt.openDir(io, request.path, .{});
         defer work.close(io);
-        try connect(arena, io, m.repo, work, try absolutePath(arena, io, work), module_dir, try absolutePath(arena, io, module_dir));
+        try connect(arena, io, m.repo, work, try fs.realPathAlloc(arena, io, work, "."), module_dir, try fs.realPathAlloc(arena, io, module_dir, "."));
         // git's `submodule_reset_index`: whatever index the repository
         // kept from an earlier checkout is not this one's.
         module_dir.deleteFile(io, "index") catch |err| switch (err) {

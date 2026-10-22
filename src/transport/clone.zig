@@ -57,6 +57,7 @@ const bundle_uri = @import("bundle/uri.zig");
 
 const progress_mod = @import("../report.zig").progress;
 const config_mod = @import("../config/config.zig");
+const fs = @import("../fs/fs.zig");
 const fsck = @import("../object/fsck.zig");
 const promisors = @import("../wire.zig").promisors;
 const odb_mod = @import("../odb/odb.zig");
@@ -1113,8 +1114,7 @@ fn checkOut(gpa: Allocator, io: Io, repo: *Repository, commit: Oid, options: Opt
 /// on Windows is written with forward slashes.
 fn absolutePathAsGit(arena: Allocator, io: Io, path: []const u8) ![]const u8 {
     if (std.Io.Dir.path.isAbsolute(path)) return path;
-    const cwd = try Io.Dir.cwd().realPathFileAlloc(io, ".", arena);
-    if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, cwd, '\\', '/');
+    const cwd = try fs.realPathAlloc(arena, io, Io.Dir.cwd(), ".");
     const sep: []const u8 = if (cwd.len != 0 and (cwd[cwd.len - 1] == '/' or cwd[cwd.len - 1] == '\\')) "" else "/";
     return std.mem.concat(arena, u8, &.{ cwd, sep, path });
 }
