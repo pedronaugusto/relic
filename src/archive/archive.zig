@@ -252,6 +252,11 @@ const Tar = struct {
         try t.writeIfNeeded();
     }
 
+    /// A piece of an entry's content, the record finished after the last.
+    fn writePiece(t: *Tar, data: []const u8) Error!void {
+        try t.doWriteBlocked(data);
+    }
+
     fn writeBlocked(t: *Tar, data: []const u8) Io.Writer.Error!void {
         try t.doWriteBlocked(data);
         try t.finishRecord();
@@ -356,7 +361,9 @@ fn getPathPrefix(path: []const u8, maxlen: usize) usize {
 
 const ustar_max_size: u64 = 0o77777777777;
 
-fn tarEntry(t: *Tar, a: Allocator, oid: Oid, path: []const u8, mode_in: u32, content: []const u8) Error!void {
+fn tarEntry(t: *Tar, a: Allocator, oid: Oid, path: []const u8, mode_in: u32, body: Body) Error!void {
+    const content = body.content;
+    const size = body.size();
     var h: Header = std.mem.zeroes(Header);
     var ext: std.ArrayList(u8) = .empty;
     var mode = mode_in;
@@ -392,10 +399,10 @@ fn tarEntry(t: *Tar, a: Allocator, oid: Oid, path: []const u8, mode_in: u32, con
             try appendExtHeader(a, &ext, "linkpath", content);
         } else @memcpy(h.linkname[0..content.len], content);
     }
-    var size_in_header: u64 = content.len;
-    if (kind == 0o100000 and content.len > ustar_max_size) {
+    var size_in_header: u64 = size;
+    if (kind == 0o100000 and size > ustar_max_size) {
         size_in_header = 0;
-        try appendExtHeader(a, &ext, "size", try a.print("{d}", .{content.len}));
+        try appendExtHeader(a, &ext, "size", try a.print("{d}", .{size}));
     }
     prepareHeader(&h, mode, size_in_header, t.time);
     if (ext.items.len > 0) {
@@ -408,7 +415,10 @@ fn tarEntry(t: *Tar, a: Allocator, oid: Oid, path: []const u8, mode_in: u32, con
         try t.writeBlocked(ext.items);
     }
     try t.writeBlocked(std.mem.asBytes(&h));
-    if (kind == 0o100000 and content.len > 0) try t.writeBlocked(content);
+    if (kind == 0o100000 and size > 0) {
+        try body.pump(t, Tar.writePiece);
+        try t.finishRecord();
+    }
 }
 
 fn tarGlobalHeader(t: *Tar, a: Allocator, commit: ?Oid) Error!void {
@@ -469,19 +479,46 @@ fn deflateRaw(gpa: Allocator, data: []const u8, level: ?u4) Allocator.Error![]u8
     return gpa.realloc(out, n);
 }
 
+/// What git's `write_zip_entry` reads of a stream at a time
+/// (`STREAM_BUFFER_SIZE`), the first of which says whether it is binary.
+const zip_stream_piece = 16 * 1024;
+
 /// An entry's content, as the formats write it.
 const Body = struct {
     content: []const u8 = "",
+    /// The content read from the object database as it is written, in
+    /// place of `content`.
+    stream: ?*odb_mod.Odb.Stream = null,
     /// For a zip's text flag: whether the content is binary.
     is_binary: bool = false,
     /// A file git streams (`core.bigFileThreshold`): a zip writes it as
     /// git's `write_zip_entry` writes a stream, its sizes and checksum in
     /// a data descriptor after it, deflated whatever the deflating gives.
     streamed: bool = false,
+
+    fn size(b: Body) u64 {
+        return if (b.stream) |s| s.size else b.content.len;
+    }
+
+    /// Each next piece of the content, to `each`, whose error is the
+    /// write's.
+    fn pump(b: Body, context: anytype, comptime each: fn (@TypeOf(context), []const u8) Error!void) Error!void {
+        const stream = b.stream orelse return each(context, b.content);
+        const r = stream.reader();
+        while (true) {
+            const chunk = r.peekGreedy(1) catch |err| switch (err) {
+                error.EndOfStream => return,
+                error.ReadFailed => return stream.err().?,
+            };
+            try each(context, chunk);
+            r.toss(chunk.len);
+        }
+    }
 };
 
 fn zipEntry(z: *Zip, path: []const u8, mode: u32, body: Body) Error!void {
     const content = body.content;
+    const size = body.size();
     const is_binary = body.is_binary;
     var flags: u16 = 0;
     for (path) |c| {
@@ -506,11 +543,18 @@ fn zipEntry(z: *Zip, path: []const u8, mode: u32, body: Body) Error!void {
     } else {
         attr2 = if (kind == 0o120000) (mode | 0o777) << 16 else if (mode & 0o111 != 0) mode << 16 else 0;
         if (kind == 0o120000 or mode & 0o111 != 0) creator_version = 0x0317;
-        crc = warp.Crc32.hash(content);
         text = !is_binary;
-        out = content;
-        compressed_size = content.len;
-        if (kind == 0o100000 and (z.level == null or z.level.? != 0) and content.len > 0) {
+        if (body.stream != null) {
+            // Read as it is written: its checksum and deflated size are
+            // known after it.
+            method = if (z.level == null or z.level.? != 0) 8 else 0;
+            compressed_size = if (method == 8) 0 else size;
+        } else {
+            crc = warp.Crc32.hash(content);
+            out = content;
+            compressed_size = content.len;
+        }
+        if (body.stream == null and kind == 0o100000 and (z.level == null or z.level.? != 0) and content.len > 0) {
             method = 8;
             deflated = try deflateRaw(z.gpa, content, z.level);
             // A stream is written deflated, larger or not.
@@ -525,7 +569,6 @@ fn zipEntry(z: *Zip, path: []const u8, mode: u32, body: Body) Error!void {
     if (body.streamed) flags |= 1 << 3;
     if (creator_version > z.max_creator_version) z.max_creator_version = creator_version;
     const offset = z.offset;
-    const size: u64 = content.len;
     // What the local header knows before the content: a stream's checksum
     // and deflated size only come after it, in its data descriptor.
     const header_crc: u32 = if (body.streamed) 0 else crc;
@@ -564,17 +607,12 @@ fn zipEntry(z: *Zip, path: []const u8, mode: u32, body: Body) Error!void {
     try z.write(path);
     try z.write(&extra);
     try z.write(header.items[30..]);
-    if (compressed_size > 0) try z.write(out);
-    if (body.streamed) {
-        // git's `write_zip_data_desc`.
-        var desc: std.ArrayList(u8) = .empty;
-        try z.le(&desc, 4, 0x08074b50);
-        try z.le(&desc, 4, crc);
-        const wide = size >= 0xffffffff or compressed_size >= 0xffffffff;
-        try z.le(&desc, if (wide) 8 else 4, compressed_size);
-        try z.le(&desc, if (wide) 8 else 4, size);
-        try z.write(desc.items);
-    }
+    if (body.stream != null) {
+        const data = try zipStreamData(z, body, method == 8);
+        crc = data.crc;
+        compressed_size = data.written;
+    } else if (compressed_size > 0) try z.write(out);
+    if (body.streamed) try zipDataDescriptor(z, crc, compressed_size, size);
 
     try zipDirectoryEntry(z, .{
         .path = path,
@@ -591,6 +629,77 @@ fn zipEntry(z: *Zip, path: []const u8, mode: u32, body: Body) Error!void {
         .attr2 = attr2,
     });
 }
+
+/// git's `write_zip_data_desc`: a streamed entry's checksum and sizes,
+/// after it.
+fn zipDataDescriptor(z: *Zip, crc: u32, compressed_size: u64, size: u64) Error!void {
+    var desc: std.ArrayList(u8) = .empty;
+    try z.le(&desc, 4, 0x08074b50);
+    try z.le(&desc, 4, crc);
+    const wide = size >= 0xffffffff or compressed_size >= 0xffffffff;
+    try z.le(&desc, if (wide) 8 else 4, compressed_size);
+    try z.le(&desc, if (wide) 8 else 4, size);
+    try z.write(desc.items);
+}
+
+/// A streamed entry's content, written as it is read: stored, or deflated
+/// raw as git's `write_zip_entry` deflates a stream. Its checksum, and the
+/// bytes written.
+fn zipStreamData(z: *Zip, body: Body, deflate: bool) Error!struct { crc: u32, written: u64 } {
+    var crc: warp.Crc32 = .init;
+    if (!deflate) {
+        const Store = struct {
+            z: *Zip,
+            crc: *warp.Crc32,
+            fn each(c: @This(), piece: []const u8) Error!void {
+                c.crc.update(piece);
+                try c.z.write(piece);
+            }
+        };
+        try body.pump(Store{ .z = z, .crc = &crc }, Store.each);
+        return .{ .crc = crc.final(), .written = body.size() };
+    }
+    var state = try warp.Deflate.init(z.gpa, .{ .level = z.level orelse 6, .container = .raw });
+    defer state.deinit();
+    var sink_buffer: [16 * 1024]u8 = undefined;
+    var sink: ZipSink = .{ .z = z, .writer = .{ .buffer = &sink_buffer, .vtable = &.{ .drain = ZipSink.drain } } };
+    var in_buffer: [16 * 1024]u8 = undefined;
+    var deflating: warp.Deflate.Writer = .init(&state, &sink.writer, &in_buffer);
+    const before = z.offset;
+    const Deflate = struct {
+        w: *Io.Writer,
+        crc: *warp.Crc32,
+        fn each(c: @This(), piece: []const u8) Error!void {
+            c.crc.update(piece);
+            try c.w.writeAll(piece);
+        }
+    };
+    try body.pump(Deflate{ .w = &deflating.interface, .crc = &crc }, Deflate.each);
+    try deflating.finish();
+    try sink.writer.flush();
+    return .{ .crc = crc.final(), .written = z.offset - before };
+}
+
+/// The archive's writer through `Zip.write`, which counts its offset: what a
+/// stream is deflated into.
+const ZipSink = struct {
+    z: *Zip,
+    writer: Io.Writer,
+
+    fn drain(w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
+        const sink: *ZipSink = @alignCast(@fieldParentPtr("writer", w)); // safe: the vtable is installed only on a ZipSink's writer
+        try sink.z.write(w.buffered());
+        w.end = 0;
+        var n: usize = 0;
+        for (data[0 .. data.len - 1]) |piece| {
+            try sink.z.write(piece);
+            n += piece.len;
+        }
+        const pattern = data[data.len - 1];
+        for (0..splat) |_| try sink.z.write(pattern);
+        return n + splat * pattern.len;
+    }
+};
 
 /// A zip entry's record in the central directory, and what it says.
 const DirEntry = struct {
@@ -757,8 +866,21 @@ const Walk = struct {
         return wk.attrs.lookup(wk.a, path, if (is_dir) .dir else .file);
     }
 
+    /// A zip's text flag for a stream, as git's `write_zip_entry` asks
+    /// `entry_is_binary` of the first piece it reads.
+    fn headIsBinary(wk: *Walk, stream: *odb_mod.Odb.Stream, applied: attributes.Attributes) Error!bool {
+        if (wk.format != .zip) return false;
+        const config = wk.repo.configuration();
+        const head = stream.reader().peek(@intCast(@min(stream.size, zip_stream_piece))) catch |err| switch (err) {
+            error.ReadFailed => return stream.err().?,
+            // unreachable: a stream gives its length's bytes or fails
+            error.EndOfStream => unreachable,
+        };
+        return driver_mod.Driver.of(config, applied.get("diff")).isBinary(config, head);
+    }
+
     fn emit(wk: *Walk, oid: Oid, path: []const u8, mode: u32, body: Body) Error!void {
-        if (wk.tar) |t| try tarEntry(t, wk.a, oid, path, mode, body.content) else try zipEntry(wk.zip.?, path, mode, body);
+        if (wk.tar) |t| try tarEntry(t, wk.a, oid, path, mode, body) else try zipEntry(wk.zip.?, path, mode, body);
     }
 
     fn writeQueued(wk: *Walk) Error!void {
@@ -808,12 +930,22 @@ const Walk = struct {
                 try wk.emit(entry.oid, out_path, mode, .{});
                 continue;
             }
-            const blob = try db.read(wk.io, entry.oid);
+            // git streams a regular file past `core.bigFileThreshold` that
+            // `export-subst` does not ask to format, as its blob: unconverted,
+            // from the object database's stream where it is stored whole.
+            const may_stream = entry.mode != .symlink and !applied.isTrue("export-subst");
+            const opened = try db.readOrStream(wk.io, entry.oid, if (may_stream) wk.big_file_bytes else std.math.maxInt(u64));
+            const blob = switch (opened) {
+                .whole => |whole| whole,
+                .stream => |stream| {
+                    defer stream.close(wk.io);
+                    try wk.emit(entry.oid, out_path, mode, .{ .stream = stream, .is_binary = try wk.headIsBinary(stream, applied), .streamed = true });
+                    continue;
+                },
+            };
             defer db.allocator().free(blob.bytes);
             var content: []const u8 = blob.bytes;
-            // git streams a regular file past `core.bigFileThreshold` that
-            // `export-subst` does not ask to format, as its blob: unconverted.
-            const streamed = entry.mode != .symlink and !applied.isTrue("export-subst") and blob.bytes.len > wk.big_file_bytes;
+            const streamed = may_stream and blob.bytes.len > wk.big_file_bytes;
             if (entry.mode != .symlink and !streamed) {
                 const smudged = try wk.conv.toWorktree(wk.a, .{ .path = path, .blob = content, .applied = applied }, .{ .blob = entry.oid, .treeish = wk.commit });
                 content = switch (smudged) {
