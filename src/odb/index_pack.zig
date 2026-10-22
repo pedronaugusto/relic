@@ -720,7 +720,7 @@ const Indexer = struct {
     fn init(gpa: Allocator, io: Io, db: Database, file: Io.File, options: Options) Allocator.Error!Indexer {
         const read_buffer = try gpa.alloc(u8, 64 * 1024);
         errdefer gpa.free(read_buffer);
-        const inflater: Inflater = try .init(gpa);
+        const inflater: Inflater = try .init(gpa, db.big_file_bytes);
         return .{
             .gpa = gpa,
             .io = io,
@@ -1345,18 +1345,23 @@ const Inflater = struct {
     /// Where an entry whose bytes are not kept is decoded: a blob being
     /// named, a delta being measured.
     scratch: std.ArrayList(u8) = .empty,
+    /// The most bytes such an entry is decoded whole for: `scratch_limit`,
+    /// or `core.bigFileThreshold` when lower, past which git's index-pack
+    /// streams a blob too (`unpack_entry_data`).
+    whole_limit: u64,
     /// Warp's reader buffer, for an entry too large to hold,
     /// made when one comes.
     window: ?[]u8 = null,
 
     /// The most bytes an entry whose bytes are not kept is decoded whole
-    /// for; a larger one streams through Warp's bounded reader.
+    /// for, whatever the threshold; a larger one streams through Warp's
+    /// bounded reader.
     const scratch_limit = 16 << 20;
 
-    fn init(gpa: Allocator) Allocator.Error!Inflater {
+    fn init(gpa: Allocator, big_file_bytes: u64) Allocator.Error!Inflater {
         const decoder = try gpa.create(warp.Decompressor);
         decoder.* = .{};
-        return .{ .gpa = gpa, .decoder = decoder };
+        return .{ .gpa = gpa, .decoder = decoder, .whole_limit = @min(scratch_limit, big_file_bytes) };
     }
 
     fn deinit(f: *Inflater) void {
@@ -1371,7 +1376,7 @@ const Inflater = struct {
     fn run(f: *Inflater, source: Source, size: u64, sink: Sink, hasher: ?*hash.Hasher) Error!void {
         const out: ?[]u8 = switch (sink) {
             .buffer => |b| b,
-            .discard, .hash => if (size <= scratch_limit) blk: {
+            .discard, .hash => if (size <= f.whole_limit) blk: {
                 try f.scratch.resize(f.gpa, @intCast(size));
                 break :blk f.scratch.items;
             } else null,
@@ -1444,7 +1449,7 @@ const Worker = struct {
             .x = x,
             .read_buffer = read_buffer,
             .reader = x.file.reader(x.io, read_buffer),
-            .inflater = try .init(x.gpa),
+            .inflater = try .init(x.gpa, x.db.big_file_bytes),
         };
     }
 

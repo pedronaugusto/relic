@@ -141,6 +141,7 @@ test {
         _ = @import("testing/combined_diff.zig");
         _ = @import("testing/commit_diff.zig");
         _ = @import("testing/big_files.zig");
+        _ = @import("testing/streamed_objects.zig");
         _ = @import("testing/external_diff.zig");
         _ = @import("testing/diff_prefixes.zig");
         _ = @import("testing/diff_stat.zig");

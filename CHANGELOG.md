@@ -190,6 +190,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- index-pack names a blob past `core.bigFileThreshold` as it inflates it, holding none of it, as git's `unpack_entry_data` does; it held any blob up to 16 MiB whole whatever the threshold. A pack of objects of any size is received in memory bounded by the threshold.
 - `diff.numstat` decides binary as git's `--numstat` does (`diff_filespec_is_binary`): a driver's `binary`, a `-diff` and `core.bigFileThreshold` make a file binary or text, where a NUL alone did. A `textconv` changes nothing, as in git, which counts a stat in the bytes.
 - Remotes fetched at once by `transport.fetch.fetchMany` shared the caller's warning list and credential report across tasks, which neither locks; each fetch now keeps its own and hands them over when all are done, and runs without the progress and prompt callbacks, which answer on the caller's task.
 - A clone of an empty remote sets its unborn branch to track the remote's (`branch.<name>.remote` and `.merge`), as git's `update_head` does; relic left it untracked.

@@ -13,6 +13,9 @@ pub const Database = struct {
     gpa: Allocator,
     kind: hash.Kind,
     detect_collisions: bool,
+    /// `core.bigFileThreshold`: a blob past it is named as it is inflated,
+    /// never held.
+    big_file_bytes: u64,
     read_fn: *const fn (Io, *anyopaque, hash.Oid) policy.Error!Read,
     header_fn: *const fn (Io, *anyopaque, hash.Oid) policy.Error!object.Header,
     exists_fn: *const fn (Io, *anyopaque, hash.Oid) policy.Error!bool,
@@ -39,6 +42,7 @@ pub const Database = struct {
             .gpa = db.allocator(),
             .kind = db.objectFormat(),
             .detect_collisions = db.settings().detect_sha1_collisions,
+            .big_file_bytes = db.settings().packing.big_file_bytes,
             .read_fn = Adapter.read,
             .header_fn = Adapter.header,
             .exists_fn = Adapter.exists,
