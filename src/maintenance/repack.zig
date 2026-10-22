@@ -27,6 +27,8 @@ const ops = @import("maintenance.zig");
 const server_info = @import("server_info.zig");
 const islands_mod = @import("islands.zig");
 const islands_odb = @import("../odb/islands.zig");
+const promisors = @import("../wire.zig").promisors;
+const in_progress = @import("../repo/in_progress.zig");
 const Repository = repo_mod.Repository;
 const Odb = odb_mod.Odb;
 
@@ -111,6 +113,15 @@ pub const Options = struct {
     /// `--filter-to`: that pack in `dir`, named `<prefix>-<name>.pack`, in
     /// place of beside the others.
     filter_to: ?struct { dir: Io.Dir, prefix: []const u8 = "pack" } = null,
+    /// `--drop-filtered`, git 2.56's, with `-a` or `-A` and a `blob_limit`
+    /// `filter`: the promisor blobs that filter leaves out
+    /// (`dropCandidates`, refused as it refuses) are dropped where they
+    /// would be packed apart, and the packs they were in go (`delete` is
+    /// implied), for the promisor remote to send again. What the filter
+    /// leaves out that is no promisor object is still packed apart, where
+    /// git 2.56's loses it. Not with `filter_to` or `write_bitmaps`;
+    /// bitmaps the configuration asks for are not written.
+    drop_filtered: bool = false,
     /// `-n` is `false`; `null` takes `repack.updateServerInfo`, true.
     update_server_info: ?bool = null,
     /// How each pack is built. `repack.cruftWindow`, `cruftDepth` and
@@ -137,6 +148,8 @@ pub const Report = struct {
     loosened: u32 = 0,
     /// Loose objects a pack holds, taken away by `prune-packed`.
     loose_removed: u32 = 0,
+    /// Promisor blobs `drop_filtered` dropped.
+    dropped: u32 = 0,
     /// Commits taken out of `.git/shallow` that are gone.
     shallow_removed: u32 = 0,
     /// The multi-pack index written, by its checksum.
@@ -154,7 +167,69 @@ pub const Error = reach.Error || ops.BitmapError || ops.MidxError || islands_mod
     /// Bitmaps asked for without `-a`: git's "Incremental repacks are
     /// incompatible with bitmap indexes".
     IncrementalBitmaps,
+    /// `--drop-filtered` without a filter, or with one other than
+    /// `blob:limit=<n>`: "--drop-filtered requires --filter", "only
+    /// supports --filter=blob:limit=<n> for now".
+    DropNeedsBlobLimit,
+    /// `--drop-filtered` without `-a` or `-A`, or with `--filter-to` or
+    /// `-b`: git refuses them.
+    DropIncompatible,
+    /// `--drop-filtered` with no promisor remote to fetch what it drops
+    /// again: "--drop-filtered requires a promisor remote".
+    NoPromisorRemote,
+    /// `--drop-filtered` in a worktree a merge, rebase, `am`, cherry-pick,
+    /// revert or bisect is in the middle of (`commit.in_progress`).
+    OperationInProgress,
+    /// `--drop-filtered` would drop a blob the index names: "cannot drop
+    /// '<path>' (<oid>): it is referenced by the current index".
+    DroppedBlobInIndex,
 };
+
+/// git 2.56's `enumerate_promisor_blobs` and the checks `--drop-filtered`
+/// makes first: the blobs of the promisor packs of at least `filter`'s
+/// `blob_limit` bytes, sorted, which `--drop-filtered --dry-run` lists.
+/// Refused without a promisor remote, and in a worktree that is in the
+/// middle of an operation or whose index names one of them; a bare
+/// repository has neither. The result is the caller's.
+pub fn dropCandidates(gpa: Allocator, io: Io, repo: *Repository, filter: object_walk.Filter) Self.Error![]Oid {
+    const limit = switch (filter) {
+        .blob_limit => |n| n.raw(),
+        else => return error.DropNeedsBlobLimit,
+    };
+    var arena_instance: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_instance.deinit();
+    if ((try promisors.remotes(arena_instance.allocator(), repo.configuration())).len == 0) return error.NoPromisorRemote;
+    if (!repo.isBare() and !in_progress.read(io, repo).none()) return error.OperationInProgress;
+    const db = repo.objectDatabase();
+    var found: Oid.Set = .empty;
+    defer found.deinit(gpa);
+    const listed = try db.listPacks(gpa, io, .all);
+    defer gpa.free(listed);
+    for (listed) |listing| {
+        if (!listing.promisor) continue;
+        const p = db.packNamed(listing.name) orelse continue;
+        for (0..p.index.count) |i| {
+            const oid = p.index.nameAt(@intCast(i));
+            if (found.contains(oid)) continue;
+            const header = db.readHeader(io, oid) catch |err| switch (err) {
+                error.ObjectNotFound => continue,
+                else => |e| return e,
+            };
+            if (header.type == .blob and header.size >= limit) try found.put(gpa, oid, {});
+        }
+    }
+    if (!repo.isBare() and found.count() != 0) {
+        var index = try repo.openIndex(io);
+        defer index.deinit();
+        for (index.entries.items) |entry| if (found.contains(entry.oid)) return error.DroppedBlobInIndex;
+    }
+    const out = try gpa.alloc(Oid, found.count());
+    var it = found.keyIterator();
+    var at: usize = 0;
+    while (it.next()) |oid| : (at += 1) out[at] = oid.*;
+    std.mem.sort(Oid, out, {}, oidBefore);
+    return out;
+}
 
 /// The local packs as `existing_packs_collect` sorts them.
 const Existing = struct {
@@ -168,18 +243,35 @@ const Existing = struct {
 };
 
 /// git's `repack`, as `options` asks.
-pub fn repack(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Error!Report {
+pub fn repack(gpa: Allocator, io: Io, repo: *Repository, asked: Options) Self.Error!Report {
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
     const arena = arena_instance.allocator();
     const config = repo.configuration();
     const db = repo.objectDatabase();
 
+    var options = asked;
     var mode = options.mode;
     const loosen = mode == .all_loosen or options.unpack_unreachable != null;
     if (@as(u2, @intFromBool(loosen)) + @intFromBool(options.keep_unreachable) + @intFromBool(mode == .cruft) > 1) return error.IncompatibleOptions;
     if (loosen and mode != .loose) mode = .all_loosen;
     if (options.geometric != 0 and mode != .loose) return error.IncompatibleOptions;
+    // `--drop-filtered`: refused as git refuses it, before any pack is
+    // written, and `-d` with it.
+    var drop: Oid.Set = .empty;
+    defer drop.deinit(gpa);
+    if (options.drop_filtered) {
+        if (options.filter_to != null) return error.DropIncompatible;
+        if (options.filter == .none) return error.DropNeedsBlobLimit;
+        if (mode != .all and mode != .all_loosen) return error.DropIncompatible;
+        if (options.filter != .blob_limit) return error.DropNeedsBlobLimit;
+        if (options.write_bitmaps == true) return error.DropIncompatible;
+        const candidates = try dropCandidates(gpa, io, repo, options.filter);
+        defer gpa.free(candidates);
+        for (candidates) |oid| try drop.put(gpa, oid, {});
+        options.delete = true;
+        options.write_bitmaps = false;
+    }
     if (options.delete and try config.getBool("extensions.preciousobjects", false)) return error.PreciousObjects;
 
     var bitmaps: ?bool = options.write_bitmaps orelse try lastBool(config, &.{ "repack.writebitmaps", "pack.writebitmaps" });
@@ -209,8 +301,10 @@ pub fn repack(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.
         .max_pack = if (options.max_pack_bytes orelse try sizeSetting(config, "pack.packsizelimit")) |limit| @max(limit, 1 << 20) else null,
         .pack_dir = pack_dir,
         .existing = try collectExisting(gpa, arena, io, db, options.keep_packs),
+        .drop = &drop,
     };
     defer run.deinit();
+    run.report.dropped = drop.count();
     // `--delta-islands` goes to the pack of what is reachable alone.
     if (islands) |*i| run.main_options.islands = i;
     for (run.existing.promisor.items) |name| try addPackObjects(gpa, db, name, &run.promised);
@@ -287,6 +381,8 @@ const Run = struct {
     /// What a promisor pack holds, and what a kept pack holds.
     promised: Oid.Set = .empty,
     kept_objects: Oid.Set = .empty,
+    /// What `drop_filtered` drops: in no pack this writes.
+    drop: *const Oid.Set,
     /// Whether a reachable object was left to a kept pack, so the new pack
     /// cannot carry a bitmap.
     kept_skipped: bool = false,
@@ -306,7 +402,7 @@ const Run = struct {
             const p = run.db.packNamed(name) orelse continue;
             for (0..p.index.count) |i| {
                 const oid = p.index.nameAt(@intCast(i));
-                if (run.kept_objects.contains(oid)) continue;
+                if (run.kept_objects.contains(oid) or run.drop.contains(oid)) continue;
                 try entries.append(run.arena, .{ .oid = oid, .in_pack = true });
             }
         }
@@ -381,6 +477,7 @@ const Run = struct {
             const p = db.packNamed(name) orelse continue;
             for (0..p.index.count) |i| {
                 const oid = p.index.nameAt(@intCast(i));
+                if (run.drop.contains(oid)) continue;
                 if ((try skip.fetchPut(gpa, oid, {})) != null) continue;
                 try entries.append(run.arena, .{ .oid = oid, .in_pack = true });
             }
@@ -911,4 +1008,8 @@ fn writeLimited(db: *Odb, io: Io, pack_dir: Io.Dir, entries: []const odb_mod.Pac
 fn addFresh(gpa: Allocator, db: *Odb, name: []const u8, fresh: *Oid.Map(?i64), time: ?i64) Allocator.Error!void {
     const p = db.packNamed(name) orelse return;
     for (0..p.index.count) |i| try fresh.put(gpa, p.index.nameAt(@intCast(i)), time);
+}
+
+fn oidBefore(_: void, l: Oid, r: Oid) bool {
+    return l.order(r) == .lt;
 }

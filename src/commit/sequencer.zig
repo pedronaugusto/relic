@@ -18,6 +18,7 @@ const Self = @This();
 
 const std = @import("std");
 const state_file = @import("../repo/state.zig");
+const in_progress = @import("../repo/in_progress.zig");
 const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -279,23 +280,12 @@ const opts_path = "sequencer/opts";
 
 /// The action the first line of `.git/sequencer/todo` names: the command a
 /// stopped sequence of picks or reverts last ran, as git's
-/// `sequencer_get_last_command` reads it.
+/// `sequencer_get_last_command` reads it (`in_progress.lastSequenced`).
 pub fn lastCommand(gpa: Allocator, io: Io, repo: *Repository) ?Action {
-    const text = (state_file.read(gpa, io, repo.gitDirectory(), todo_path) catch return null) orelse return null;
-    defer gpa.free(text);
-    var at: usize = 0;
-    while (at < text.len and (text[at] == ' ' or text[at] == '\t' or text[at] == '\r' or text[at] == '\n')) at += 1;
-    const rest = text[at..];
-    for ([_]Action{ .pick, .revert }) |action| {
-        const word = action.command().name();
-        const letter = action.command().letter();
-        var after: ?[]const u8 = null;
-        if (std.mem.startsWith(u8, rest, word)) after = rest[word.len..] else if (letter != null and rest.len != 0 and rest[0] == letter.?) after = rest[1..];
-        if (after) |a| {
-            if (a.len != 0 and (a[0] == ' ' or a[0] == '\t')) return action;
-        }
-    }
-    return null;
+    return switch (in_progress.lastSequenced(gpa, io, repo) orelse return null) {
+        .pick => .pick,
+        .revert => .revert,
+    };
 }
 
 /// The options git records in `.git/sequencer/opts`, in git's order.

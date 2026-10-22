@@ -169,7 +169,7 @@ test {
         _ = @import("patch/apply_test.zig");
         _ = @import("patch/format_test.zig");
         _ = @import("patch/am_test.zig");
-        _ = @import("commit/in_progress_test.zig");
+        _ = @import("repo/in_progress_test.zig");
         _ = @import("grep_test.zig");
         _ = @import("archive/archive_test.zig");
         _ = @import("archive/remote_test.zig");

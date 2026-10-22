@@ -917,3 +917,203 @@ test "repack --filter puts what the filter leaves out into a pack of its own, as
         };
     }
 }
+
+/// t7706's: a partial clone of `origin` with a commit, a blob of `big`
+/// bytes and one of `small` that its promisor remote sent, each in a
+/// promisor pack of its own and nowhere else.
+fn dropFixture(now: i64) !struct { repo: testgit.Repo, big: [64]u8, small: [64]u8, hex_len: usize } {
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    errdefer repo.deinit();
+    try commitAt(&repo, now - 10 * day, "base");
+    for ([_][2][]const u8{
+        .{ "core.repositoryformatversion", "1" },
+        .{ "extensions.partialclone", "origin" },
+        .{ "remote.origin.promisor", "true" },
+        .{ "remote.origin.url", "." },
+    }) |kv| try repo.exec(io, &.{ "config", kv[0], kv[1] });
+    var big: [64]u8 = undefined;
+    var small: [64]u8 = undefined;
+    var len: usize = 0;
+    for ([_]struct { size: usize, into: *[64]u8 }{ .{ .size = 3072, .into = &big }, .{ .size = 512, .into = &small } }, 0..) |wanted, n| {
+        const oid = try promisorBlob(&repo, wanted.size, @intCast(n + 1));
+        defer gpa.free(oid);
+        @memcpy(wanted.into[0..oid.len], oid);
+        len = oid.len;
+    }
+    return .{ .repo = repo, .big = big, .small = small, .hex_len = len };
+}
+
+/// Bytes no delta or compression makes small: the same for the same seed.
+fn noise(buf: []u8, seed: u64) void {
+    var state_value: u64 = seed *% 0x9e3779b97f4a7c15 +% 1;
+    for (buf) |*b| {
+        state_value ^= state_value << 13;
+        state_value ^= state_value >> 7;
+        state_value ^= state_value << 17;
+        b.* = @truncate(state_value);
+    }
+}
+
+/// A blob of `size` bytes in a promisor pack of its own, its loose copy
+/// gone: t7706's `promisor_blob`. Its name, the caller's.
+fn promisorBlob(repo: *testgit.Repo, size: usize, seed: u64) ![]u8 {
+    const bytes = try gpa.alloc(u8, size);
+    defer gpa.free(bytes);
+    noise(bytes, seed);
+    const oid = try repo.runInput(io, &.{ "hash-object", "-w", "--stdin" }, bytes);
+    errdefer gpa.free(oid);
+    const name = std.mem.trimEnd(u8, oid, "\n");
+    const line = try std.mem.concat(gpa, u8, &.{ name, "\n" });
+    defer gpa.free(line);
+    const packed_name = try repo.runInput(io, &.{ "pack-objects", "-q", ".git/objects/pack/pack" }, line);
+    defer gpa.free(packed_name);
+    var path_buf: [128]u8 = undefined;
+    try repo.dir.writeFile(io, .{ .sub_path = try std.mem.print(&path_buf, ".git/objects/pack/pack-{s}.promisor", .{std.mem.trimEnd(u8, packed_name, "\n")}), .data = "" });
+    try repo.dir.deleteFile(io, try std.mem.print(&path_buf, ".git/objects/{s}/{s}", .{ name[0..2], name[2..] }));
+    return gpa.realloc(oid, name.len);
+}
+
+test "repack --drop-filtered drops the promisor blobs git 2.56's does, and lists them as its --dry-run does" {
+    try testgit.requireGitVersion(gpa, io, 2, 56);
+    const now = std.Io.Clock.real.now(io).toSeconds();
+    var theirs = try dropFixture(now);
+    defer theirs.repo.deinit();
+    var ours = try dropFixture(now);
+    defer ours.repo.deinit();
+    // a blob made here, which no promisor remote has, is never one
+    for ([_]*testgit.Repo{ &theirs.repo, &ours.repo }) |r| {
+        const bytes = try gpa.alloc(u8, 4096);
+        defer gpa.free(bytes);
+        noise(bytes, 9);
+        gpa.free(try r.runInput(io, &.{ "hash-object", "-w", "--stdin" }, bytes));
+    }
+    const listed = try theirs.repo.run(io, &.{ "-c", "repack.writeBitmaps=false", "repack", "--drop-filtered", "--filter=blob:limit=1k", "--dry-run", "-a" });
+    defer gpa.free(listed);
+    var native = try repo_mod.Repository.open(gpa, io, ours.repo.dir, .{});
+    defer native.deinit(io);
+    const filter: @FieldType(repack_mod.Options, "filter") = .{ .blob_limit = .fromRaw(1024) };
+    const candidates = try repack_mod.dropCandidates(gpa, io, &native, filter);
+    defer gpa.free(candidates);
+    var ours_listed: std.ArrayList(u8) = .empty;
+    defer ours_listed.deinit(gpa);
+    for (candidates) |oid| {
+        var hex_buf: [64]u8 = undefined;
+        try ours_listed.appendSlice(gpa, oid.hex(&hex_buf));
+        try ours_listed.append(gpa, '\n');
+    }
+    try std.testing.expectEqualStrings(listed, ours_listed.items);
+    try std.testing.expectEqualStrings(theirs.big[0..theirs.hex_len], ours_listed.items[0..ours.hex_len]);
+
+    try theirs.repo.exec(io, &.{ "-c", "repack.writeBitmaps=false", "repack", "-q", "--drop-filtered", "--filter=blob:limit=1k", "-a" });
+    var pack_options = native.objectDatabase().packOptions();
+    pack_options.threads = 1;
+    const report = try repack_mod.repack(gpa, io, &native, .{ .mode = .all, .filter = filter, .drop_filtered = true, .pack = pack_options });
+    try std.testing.expectEqual(@as(u32, 1), report.dropped);
+    const expected = try state(&theirs.repo);
+    defer gpa.free(expected);
+    const actual = try state(&ours.repo);
+    defer gpa.free(actual);
+    try std.testing.expectEqualStrings(expected, actual);
+    ours.repo.report_failures = false;
+    try std.testing.expectError(error.GitFailed, ours.repo.exec(io, &.{ "cat-file", "-e", ours.big[0..ours.hex_len] }));
+    try ours.repo.exec(io, &.{ "cat-file", "-e", ours.small[0..ours.hex_len] });
+}
+
+test "repack --drop-filtered refuses what git 2.56's refuses: no blob:limit filter, no -a, -b, no promisor remote, an operation under way, a blob the index names" {
+    try testgit.requireGitVersion(gpa, io, 2, 56);
+    const now = std.Io.Clock.real.now(io).toSeconds();
+    var f = try dropFixture(now);
+    defer f.repo.deinit();
+    const repo = &f.repo;
+    const filter: @FieldType(repack_mod.Options, "filter") = .{ .blob_limit = .fromRaw(1024) };
+    const Refusal = struct { args: []const []const u8, options: repack_mod.Options, err: anyerror };
+    const refusals = [_]Refusal{
+        .{ .args = &.{ "--drop-filtered", "-a" }, .options = .{ .mode = .all, .drop_filtered = true }, .err = error.DropNeedsBlobLimit },
+        .{ .args = &.{ "--drop-filtered", "--filter=blob:limit=1k" }, .options = .{ .filter = filter, .drop_filtered = true }, .err = error.DropIncompatible },
+        .{ .args = &.{ "--drop-filtered", "--filter=blob:none", "-a" }, .options = .{ .mode = .all, .filter = .blob_none, .drop_filtered = true }, .err = error.DropNeedsBlobLimit },
+        .{ .args = &.{ "--drop-filtered", "--filter=blob:limit=1k", "-a", "-b" }, .options = .{ .mode = .all, .filter = filter, .drop_filtered = true, .write_bitmaps = true }, .err = error.DropIncompatible },
+    };
+    const Check = struct {
+        fn refused(r: *testgit.Repo, args: []const []const u8, options: repack_mod.Options, want: anyerror) !void {
+            var argv: std.ArrayList([]const u8) = .empty;
+            defer argv.deinit(gpa);
+            try argv.appendSlice(gpa, &.{ "repack", "-q" });
+            try argv.appendSlice(gpa, args);
+            r.report_failures = false;
+            defer r.report_failures = true;
+            std.testing.expectError(error.GitFailed, r.exec(io, argv.items)) catch |err| {
+                for (args) |arg| std.debug.print("{s} ", .{arg});
+                std.debug.print(": git took it\n", .{});
+                return err;
+            };
+            var native = try repo_mod.Repository.open(gpa, io, r.dir, .{});
+            defer native.deinit(io);
+            try std.testing.expectError(want, repack_mod.repack(gpa, io, &native, options));
+        }
+    };
+    for (refusals) |refusal| try Check.refused(repo, refusal.args, refusal.options, refusal.err);
+    const dropping: repack_mod.Options = .{ .mode = .all, .filter = filter, .drop_filtered = true };
+    const args: []const []const u8 = &.{ "--drop-filtered", "--filter=blob:limit=1k", "-a", "--dry-run" };
+
+    // a merge under way
+    const head = try repo.line(io, &.{ "rev-parse", "HEAD" });
+    defer gpa.free(head);
+    try repo.dir.writeFile(io, .{ .sub_path = ".git/MERGE_HEAD", .data = head });
+    try Check.refused(repo, args, dropping, error.OperationInProgress);
+    try repo.dir.deleteFile(io, ".git/MERGE_HEAD");
+
+    // a blob the index names that only the promisor pack holds
+    const bytes = try gpa.alloc(u8, 4096);
+    defer gpa.free(bytes);
+    noise(bytes, 7);
+    try repo.writeFile(io, "tracked-big.bin", bytes);
+    try repo.exec(io, &.{ "add", "tracked-big.bin" });
+    const tracked = try repo.line(io, &.{ "rev-parse", ":tracked-big.bin" });
+    defer gpa.free(tracked);
+    const line = try std.mem.concat(gpa, u8, &.{ tracked, "\n" });
+    defer gpa.free(line);
+    const packed_name = try repo.runInput(io, &.{ "pack-objects", "-q", ".git/objects/pack/pack" }, line);
+    defer gpa.free(packed_name);
+    var path_buf: [128]u8 = undefined;
+    try repo.dir.writeFile(io, .{ .sub_path = try std.mem.print(&path_buf, ".git/objects/pack/pack-{s}.promisor", .{std.mem.trimEnd(u8, packed_name, "\n")}), .data = "" });
+    try repo.dir.deleteFile(io, try std.mem.print(&path_buf, ".git/objects/{s}/{s}", .{ tracked[0..2], tracked[2..] }));
+    try Check.refused(repo, args, dropping, error.DroppedBlobInIndex);
+    try repo.exec(io, &.{ "rm", "-q", "--cached", "tracked-big.bin" });
+
+    // no promisor remote
+    try repo.exec(io, &.{ "config", "--unset", "extensions.partialclone" });
+    try repo.exec(io, &.{ "config", "--unset", "remote.origin.promisor" });
+    try Check.refused(repo, args, dropping, error.NoPromisorRemote);
+}
+
+test "repack --drop-filtered keeps a large blob made here, which no promisor remote can send again" {
+    // git 2.56's loses it: its `--filter` leaves the blob out of the pack
+    // of what is reachable, and `--drop-filtered` writes no pack of what
+    // the filter left out before the old packs go.
+    const now = std.Io.Clock.real.now(io).toSeconds();
+    var f = try dropFixture(now);
+    defer f.repo.deinit();
+    const repo = &f.repo;
+    const bytes = try gpa.alloc(u8, 4096);
+    defer gpa.free(bytes);
+    noise(bytes, 11);
+    try repo.writeFile(io, "big.bin", bytes);
+    try repo.exec(io, &.{ "add", "big.bin" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "big" });
+    const local = try repo.line(io, &.{ "rev-parse", "HEAD:big.bin" });
+    defer gpa.free(local);
+    try repo.exec(io, &.{ "rm", "-q", "--cached", "big.bin" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "gone" });
+    try repo.exec(io, &.{ "repack", "-q", "-a", "-d" });
+
+    var native = try repo_mod.Repository.open(gpa, io, repo.dir, .{});
+    defer native.deinit(io);
+    var pack_options = native.objectDatabase().packOptions();
+    pack_options.threads = 1;
+    const report = try repack_mod.repack(gpa, io, &native, .{ .mode = .all, .filter = .{ .blob_limit = .fromRaw(1024) }, .drop_filtered = true, .pack = pack_options });
+    try std.testing.expectEqual(@as(u32, 1), report.dropped);
+    try repo.exec(io, &.{ "cat-file", "-e", local });
+    try repo.exec(io, &.{ "fsck", "--no-progress", "--connectivity-only" });
+    repo.report_failures = false;
+    try std.testing.expectError(error.GitFailed, repo.exec(io, &.{ "cat-file", "-e", f.big[0..f.hex_len] }));
+}

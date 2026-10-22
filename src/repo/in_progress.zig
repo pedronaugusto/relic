@@ -2,11 +2,11 @@
 //! git's `wt_status_get_state` over the state files and refs they keep.
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const repo_mod = @import("../repo/repo.zig");
-const state = @import("../repo/state.zig");
-const sequencer = @import("sequencer.zig");
+const repo_mod = @import("repo.zig");
+const state = @import("state.zig");
 
 const Repository = repo_mod.Repository;
 
@@ -58,9 +58,33 @@ pub fn read(io: Io, repo: *Repository) InProgress {
     if (root.exists(repo.allocator(), io, .cherry_pick_head)) p.cherry_pick = true;
     if (state.exists(io, dir, "BISECT_START")) p.bisect = true;
     if (root.exists(repo.allocator(), io, .revert_head)) p.revert = true;
-    if (sequencer.lastCommand(repo.allocator(), io, repo)) |last| switch (last) {
+    if (lastSequenced(repo.allocator(), io, repo)) |last| switch (last) {
         .pick => p.cherry_pick = true,
         .revert => p.revert = true,
     };
     return p;
+}
+
+/// What a stopped sequence of picks or reverts runs.
+pub const Sequenced = enum { pick, revert };
+
+/// The command the first line of `.git/sequencer/todo` names, `pick` (or
+/// `p`) or `revert`, then a space or tab: what a stopped sequence last
+/// ran, as git's `sequencer_get_last_command` reads it. `null` with no
+/// such line.
+pub fn lastSequenced(gpa: Allocator, io: Io, repo: *Repository) ?Sequenced {
+    const text = (state.read(gpa, io, repo.gitDirectory(), "sequencer/todo") catch return null) orelse return null;
+    defer gpa.free(text);
+    const rest = std.mem.trimStart(u8, text, " \t\r\n");
+    const words = [_]struct { Sequenced, []const u8, ?u8 }{ .{ .pick, "pick", 'p' }, .{ .revert, "revert", null } };
+    for (words) |w| {
+        const after = if (std.mem.startsWith(u8, rest, w[1]))
+            rest[w[1].len..]
+        else if (w[2] != null and rest.len != 0 and rest[0] == w[2].?)
+            rest[1..]
+        else
+            continue;
+        if (after.len != 0 and (after[0] == ' ' or after[0] == '\t')) return w[0];
+    }
+    return null;
 }

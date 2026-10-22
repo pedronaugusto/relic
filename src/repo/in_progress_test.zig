@@ -1,7 +1,7 @@
 const std = @import("std");
 const testgit = @import("../testing/git.zig");
 const in_progress = @import("in_progress.zig");
-const Repository = @import("../repo/repo.zig").Repository;
+const Repository = @import("repo.zig").Repository;
 
 /// A repository whose `main` and `side` both change `f`, so merging,
 /// rebasing or picking one onto the other stops on a conflict.
