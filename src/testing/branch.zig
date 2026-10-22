@@ -1,4 +1,4 @@
-//! `branch` against git 2.55's `git branch`: a branch made at a start
+//! `branch` against git 2.56's `git branch`: a branch made at a start
 //! point, from a remote-tracking branch, a local one or a tag, sets up the
 //! upstream git's does under each `branch.autoSetupMerge` and
 //! `branch.autoSetupRebase`, writes git's reflog line, and refuses what git
@@ -262,5 +262,44 @@ test "a branch no local ref has is guessed from the one remote that has it, or c
                 return err;
             };
         }
+    }
+}
+
+test "a branch a bisection started from is named with its worktree, as git 2.56's branch -d reports it" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const repo_mod = @import("../repo/repo.zig");
+    const head = @import("../repo/head.zig");
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+    try script(io, &repo);
+    try repo.exec(io, &.{ "worktree", "add", "-q", "-b", "wt", "linked", "topic" });
+    var linked = try repo.dir.openDir(io, "linked", .{ .iterate = true });
+    defer linked.close(io);
+    var in_linked: testgit.Repo = .{ .gpa = gpa, .tmp = undefined, .dir = linked };
+    try in_linked.exec(io, &.{ "bisect", "start", "HEAD", "HEAD~1" });
+    try repo.exec(io, &.{ "bisect", "start", "HEAD", "HEAD~1" });
+
+    var native = try repo_mod.Repository.open(gpa, io, repo.dir, .{});
+    defer native.deinit(io);
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    for ([_][]const u8{ "wt", "main", "topic" }) |name| {
+        const ours = try head.bisectingBranch(arena, io, &native, try arena.print("refs/heads/{s}", .{name}));
+        repo.report_failures = false;
+        var ran = try repo.capture(io, &.{ "branch", "-d", name });
+        repo.report_failures = true;
+        defer ran.deinit(gpa);
+        // git: "cannot delete branch '<name>' used by worktree at '<path>' for bisect"
+        const marker = "' for bisect";
+        const theirs: ?[]const u8 = if (std.mem.find(u8, ran.stderr, marker)) |end| blk: {
+            const start = std.mem.findLast(u8, ran.stderr[0..end], "'").? + 1;
+            break :blk ran.stderr[start..end];
+        } else null;
+        std.testing.expectEqualStrings(theirs orelse "", ours orelse "") catch |err| {
+            std.debug.print("{s}: git said {s}\n", .{ name, ran.stderr });
+            return err;
+        };
     }
 }

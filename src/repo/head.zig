@@ -179,6 +179,41 @@ pub fn checkedOutBranches(arena: Allocator, io: Io, repo: *Repository) CheckedOu
 /// Errors from `checkedOutBranches`.
 pub const CheckedOutError = refs_mod.ReadError || worktrees.Error || Io.Dir.ReadFileAllocError;
 
+/// Where the worktree is whose bisection started from `ref`, a branch's
+/// full name, or `null` when none did: git's `branch_bisecting`, which
+/// `git branch -d` reports apart from a branch held otherwise. The path is
+/// `arena`'s.
+pub fn bisectingBranch(arena: Allocator, io: Io, repo: *Repository, ref: []const u8) CheckedOutError!?[]const u8 {
+    const bare = repo.configuration().getBool("core.bare", false) catch false;
+    if (!bare) main: {
+        const from = (try bisectedFrom(arena, io, repo, repo.commonDirectory())) orelse break :main;
+        if (!std.mem.eql(u8, from, ref)) break :main;
+        var buf: [4096]u8 = undefined;
+        const len = repo.commonDirectory().realPath(io, &buf) catch break :main;
+        const common = buf[0..len];
+        return try arena.dupe(u8, if (std.mem.endsWith(u8, common, "/.git")) common[0 .. common.len - "/.git".len] else common);
+    }
+    const listing = try worktrees.list(arena, io, repo.refStore());
+    for (listing.entries) |entry| {
+        var admin = repo.commonDirectory().openDir(io, try arena.print("worktrees/{s}", .{entry.name}), .{}) catch continue;
+        defer admin.close(io);
+        const from = (try bisectedFrom(arena, io, repo, admin)) orelse continue;
+        if (std.mem.eql(u8, from, ref)) return try arena.dupe(u8, entry.path);
+    }
+    return null;
+}
+
+/// The branch a bisection in `dir` started from, its full name, or `null`
+/// when none is running or it started from a detached `HEAD`, whose
+/// `BISECT_START` names a commit.
+fn bisectedFrom(arena: Allocator, io: Io, repo: *Repository, dir: Io.Dir) CheckedOutError!?[]const u8 {
+    const text = (try state_file.read(arena, io, dir, "BISECT_START")) orelse return null;
+    const name = std.mem.trim(u8, text, " \t\r\n");
+    if (name.len == 0) return null;
+    if (Oid.parse(repo.objectFormat(), name)) |_| return null else |_| {}
+    return try arena.print("refs/heads/{s}", .{name});
+}
+
 /// The branches the worktree whose `HEAD` is `head` holds: that `HEAD`,
 /// read through the ref store, which a reftable repository keeps in its
 /// tables, and what the operation in progress in `dir` is on.
@@ -199,15 +234,7 @@ fn addWorktreeBranches(arena: Allocator, io: Io, repo: *Repository, map: *std.St
         if (std.mem.startsWith(u8, name, "refs/heads/")) try map.put(arena, name, where);
         break;
     }
-    if (try state_file.read(arena, io, dir, "BISECT_START")) |text| {
-        const name = std.mem.trim(u8, text, " \t\r\n");
-        // A bisection started from a detached `HEAD` names a commit.
-        if (name.len != 0) {
-            if (Oid.parse(repo.objectFormat(), name)) |_| {} else |_| {
-                try map.put(arena, try arena.print("refs/heads/{s}", .{name}), where);
-            }
-        }
-    }
+    if (try bisectedFrom(arena, io, repo, dir)) |ref| try map.put(arena, ref, where);
     // `sequencer_get_update_refs_state`: a ref, its value before, its
     // value after, to each record; a record that does not read ends it.
     if (try state_file.read(arena, io, dir, "rebase-merge/update-refs")) |text| {
