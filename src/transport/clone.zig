@@ -114,7 +114,12 @@ pub const Options = struct {
     /// Optional native filters supplied by the operation owner.
     native_filters: ?FilterLoader = null,
     /// The remote's name in the new configuration: git's `--origin`.
-    origin: []const u8 = "origin",
+    /// `null` takes `clone.defaultRemoteName`, else `origin`.
+    origin: ?[]const u8 = null,
+    /// git's `--reject-shallow`: a remote whose own history is shallow is
+    /// `error.ShallowSourceRefused`, unless the clone is a shallow one
+    /// itself. `null` takes `clone.rejectShallow`.
+    reject_shallow: ?bool = null,
     /// The branch to check out, or a tag to check out detached, in place of
     /// the remote's `HEAD`: git's `--branch`.
     branch: ?[]const u8 = null,
@@ -122,7 +127,9 @@ pub const Options = struct {
     /// branches.
     bare: bool = false,
     /// Where the new repository keeps its refs: git's `--ref-format`.
-    ref_format: refs_mod.Format = .files,
+    /// `null` takes `init.defaultRefFormat` from `user_config`, as
+    /// `Repository.CreateOptions.ref_format` does.
+    ref_format: ?refs_mod.Format = null,
     /// Check the branch out.
     checkout: bool = true,
     /// Clone into `dir` as the git directory of a working tree that is
@@ -133,8 +140,10 @@ pub const Options = struct {
     /// Fetch the remote's tags, and let later fetches follow them.
     tags: bool = true,
     /// The branch `HEAD` names when the remote is empty and does not say
-    /// which it would use.
-    default_branch: []const u8 = "main",
+    /// which it would use. `null` takes `init.defaultBranch` from
+    /// `user_config`, else git's `master`, as
+    /// `Repository.CreateOptions.default_branch` does.
+    default_branch: ?[]const u8 = null,
     /// Who the reflog entries are written as, and when.
     who: object.Signature,
     /// `--depth`: the history cut to this many commits from each fetched
@@ -220,6 +229,32 @@ fn rewriteUrl(arena: Allocator, settings: ?*const config_mod.Config, url: []cons
     } else null;
 }
 
+/// `asked` with what it leaves to the configuration taken from it:
+/// `--origin` beats `clone.defaultRemoteName`, as git applies it after
+/// reading the configuration, and `--[no-]reject-shallow` beats
+/// `clone.rejectShallow`.
+fn withSettings(settings: ?*const config_mod.Config, asked: Options) Error!Options {
+    var options = asked;
+    options.origin = asked.origin orelse try settingString(settings, "clone.defaultremotename") orelse "origin";
+    options.reject_shallow = asked.reject_shallow orelse try settingBool(settings, "clone.rejectshallow");
+    return options;
+}
+
+/// A `clone.*` string, which git refuses with no value.
+fn settingString(settings: ?*const config_mod.Config, name: []const u8) Error!?[]const u8 {
+    const config = settings orelse return null;
+    const entry = config.find(name) orelse return null;
+    return entry.value orelse error.MalformedValue;
+}
+
+fn settingBool(settings: ?*const config_mod.Config, name: []const u8) Error!bool {
+    const config = settings orelse return false;
+    return config.getBool(name, false) catch |err| switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => error.MalformedValue,
+    };
+}
+
 fn userConfiguration(gpa: Allocator, io: Io, options: Options) Error!?config_mod.Config {
     const user = options.user_config;
     const has_user_config = user.system != null or user.xdg != null or user.global != null or user.command.len != 0 or user.pairs.len != 0;
@@ -247,14 +282,21 @@ fn isEmpty(io: Io, dir: Io.Dir) Self.Error!bool {
 
 /// Clone `url` into `dir`, which must be empty, and return the new
 /// repository, open.
-pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Options) Self.Error!Repository {
+pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, asked: Options) Self.Error!Repository {
+    // Before the repository exists, the caller's own configuration is what
+    // git reads.
+    var user_settings = try userConfiguration(gpa, io, asked);
+    defer if (user_settings) |*c| c.deinit();
+    const settings: ?*const config_mod.Config = asked.config orelse if (user_settings) |*c| c else null;
+    const options = try withSettings(settings, asked);
+
     if (options.bundle_uri != null and (options.depth != null or options.shallow_since != null or options.shallow_exclude.len != 0)) return error.BundleUriShallow;
     var deepen: ?fetch_pack.Deepen = if (options.depth != null or options.shallow_since != null or options.shallow_exclude.len != 0)
         .{ .depth = options.depth, .since = if (options.shallow_since) |t| t.toSeconds() else null, .not = options.shallow_exclude }
     else
         null;
     const single_branch = options.single_branch orelse (deepen != null);
-    if (!refspecNameOk(options.origin)) return error.InvalidRemoteName;
+    if (!refspecNameOk(options.origin.?)) return error.InvalidRemoteName;
     if (!try isEmpty(io, dir)) return error.DestinationNotEmpty;
 
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
@@ -264,12 +306,6 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
     // remotes taken from the server's advertisement, as git's is.
     const auto_filter = if (options.filter) |spec| std.mem.eql(u8, spec, "auto") else false;
     const filter_spec: ?[]const u8 = if (options.filter) |spec| (if (auto_filter) "auto" else try partial.normalize(arena, spec)) else null;
-
-    // Before the repository exists, the caller's own configuration is what
-    // git reads.
-    var user_settings = try userConfiguration(gpa, io, options);
-    defer if (user_settings) |*c| c.deinit();
-    const settings: ?*const config_mod.Config = options.config orelse if (user_settings) |*c| c else null;
 
     // What `url.<base>.insteadOf` makes of the URL is where the clone goes;
     // the URL as given is what the new configuration records, as git's
@@ -307,7 +343,7 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
         options.default_branch;
 
     if (repo_made) {
-        try moveHelperHead(arena, io, &repo, session.objectFormat(), initial, options.default_branch);
+        try moveHelperHead(arena, gpa, io, &repo, session.objectFormat(), initial);
     } else {
         repo = try initRepository(gpa, io, dir, options, session.objectFormat(), initial);
         repo_made = true;
@@ -351,7 +387,7 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: Opti
     // The remote's own `HEAD`, where it points at a branch, whatever was
     // checked out.
     if (!options.bare) if (remote_refs.find("HEAD")) |remote_head| {
-        try followRemoteHead(arena, io, &repo, &remote_refs, remote_head, head.branch, single_branch, log, options.origin);
+        try followRemoteHead(arena, io, &repo, &remote_refs, remote_head, head.branch, single_branch, log, options.origin.?);
     };
     // The caller's configuration joins the repository's, as git reads
     // every level: the checkout's filters come from there.
@@ -378,13 +414,16 @@ fn singleTagRef(arena: Allocator, head: Head, single_branch: bool, options: Opti
 
 /// A remote helper's repository, made before the helper said where
 /// `HEAD` is: its hash must be the remote's, and `HEAD` is moved to
-/// `initial`.
-fn moveHelperHead(arena: Allocator, io: Io, repo: *Repository, remote_format: hash.Kind, initial: []const u8, default_branch: []const u8) Error!void {
+/// `initial` when that is a branch other than the one it was made on.
+fn moveHelperHead(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, remote_format: hash.Kind, initial: ?[]const u8) Error!void {
     if (remote_format != repo.objectFormat()) return error.ObjectFormatMismatch;
-    if (std.mem.eql(u8, initial, default_branch)) return;
+    const branch = initial orelse return;
+    const current = try repo.refStore().currentBranch(gpa, io);
+    defer if (current) |name| gpa.free(name);
+    if (current != null and std.mem.eql(u8, current.?, branch)) return;
     var tx = repo.beginRefs();
     defer tx.deinit(io);
-    try tx.update("HEAD", .{ .symbolic = try arena.print("refs/heads/{s}", .{initial}) }, .any);
+    try tx.update("HEAD", .{ .symbolic = try arena.print("refs/heads/{s}", .{branch}) }, .any);
     try tx.commit(io, null);
 }
 
@@ -419,7 +458,7 @@ fn receiveObjects(
     var detached = ask.detached;
     var pack_dir = try repo.objectDatabase().openPackDirectory(io);
     defer pack_dir.close(io);
-    var shallow_info: fetch_pack.ShallowInfo = .{ .gpa = gpa };
+    var shallow_info: fetch_pack.ShallowInfo = .{ .gpa = gpa, .reject = options.reject_shallow.? and ask.deepen == null };
     defer shallow_info.deinit();
     // What the pack's objects name, collected as it is indexed, so that
     // whether it is connected is asked without reading it again.
@@ -483,7 +522,9 @@ const Target = struct {
 fn localTarget(arena: Allocator, io: Io, url: []const u8, reached: []const u8, filtered: bool, options: Options) Error!Target {
     const parsed = try url_mod.Url.parse(reached);
     var target: Target = .{ .recorded = url };
-    target.local_copy = parsed.scheme == .local and !try isShallowSource(io, parsed.path);
+    const shallow_source = parsed.scheme == .local and try isShallowSource(io, parsed.path);
+    if (shallow_source and options.reject_shallow.?) return error.ShallowSourceRefused;
+    target.local_copy = parsed.scheme == .local and !shallow_source;
     if (target.local_copy) {
         if (options.depth != null) try warning.note(options.warnings, .{ .ignored_for_local = "--depth" });
         if (options.shallow_since != null) try warning.note(options.warnings, .{ .ignored_for_local = "--shallow-since" });
@@ -513,7 +554,7 @@ fn transferOptions(local_copy: bool, settings: ?*const config_mod.Config, repo: 
         .local_copy = local_copy,
         .programs = options.programs,
         .config = settings,
-        .remote_name = options.origin,
+        .remote_name = options.origin.?,
         .proxy = options.proxy,
         .progress = options.progress,
         .prompt = options.prompt,
@@ -606,7 +647,7 @@ fn configureRemote(
     single_tag: ?[]const u8,
     options: Options,
 ) Error!void {
-    const origin = options.origin;
+    const origin = options.origin.?;
     var edits: std.ArrayList(Repository.ConfigEdit) = .empty;
     try edits.append(arena, .{ .set = .{ .name = try arena.print("remote.{s}.url", .{origin}), .value = recorded } });
     if (!options.tags) try edits.append(arena, .{ .set = .{ .name = try arena.print("remote.{s}.tagopt", .{origin}), .value = "--no-tags" } });
@@ -678,7 +719,7 @@ fn chooseRefs(arena: Allocator, remote_refs: []const protocol.RemoteRef, head: H
         try c.wants.append(arena, ref.oid);
         try c.want_names.append(arena, ref.name);
         const local_name = if (is_branch and !options.bare)
-            try arena.print("refs/remotes/{s}/{s}", .{ options.origin, ref.name["refs/heads/".len..] })
+            try arena.print("refs/remotes/{s}/{s}", .{ options.origin.?, ref.name["refs/heads/".len..] })
         else
             try arena.dupe(u8, ref.name);
         if (!ref_names.checkFormat(local_name, .{})) continue;
@@ -744,20 +785,15 @@ fn pointHead(
     options: Options,
 ) Error!?Oid {
     if (head_branch) |branch| {
-        const ref = remote_refs.find(branch) orelse return detached;
+        // An unborn branch, which `HEAD` names already.
+        const ref = remote_refs.find(branch) orelse return trackUnborn(arena, io, repo, detached, options);
         const value = session.fetchedValue(branch) orelse ref.oid;
         var tx = repo.beginRefs();
         defer tx.deinit(io);
         if (!options.bare) try tx.update(branch, .{ .direct = value }, .any);
         try tx.update("HEAD", .{ .symbolic = branch }, .any);
         try tx.commit(io, log);
-        if (!options.bare) {
-            const short = branch["refs/heads/".len..];
-            _ = try repo.writeConfig(io, .local, &.{
-                .{ .set = .{ .name = try arena.print("branch.{s}.remote", .{short}), .value = options.origin } },
-                .{ .set = .{ .name = try arena.print("branch.{s}.merge", .{short}), .value = branch } },
-            }, .{});
-        }
+        if (!options.bare) try track(arena, io, repo, branch, options);
         return value;
     }
     if (detached) |oid| {
@@ -765,8 +801,28 @@ fn pointHead(
         defer tx.deinit(io);
         try tx.change("HEAD", .{ .direct = oid }, .any, .{ .no_deref = true });
         try tx.commit(io, log);
+        return detached;
     }
+    // An empty remote that names no branch: `HEAD` is on the default one.
+    return trackUnborn(arena, io, repo, null, options);
+}
+
+/// The branch `HEAD` is on, unborn, set to follow the same branch of the
+/// remote, as git's `update_head` sets it.
+fn trackUnborn(arena: Allocator, io: Io, repo: *Repository, detached: ?Oid, options: Options) Error!?Oid {
+    if (options.bare) return detached;
+    const short = try repo.refStore().currentBranch(arena, io) orelse return detached;
+    try track(arena, io, repo, try arena.print("refs/heads/{s}", .{short}), options);
     return detached;
+}
+
+/// `branch.<name>.remote` and `branch.<name>.merge` for `branch`.
+fn track(arena: Allocator, io: Io, repo: *Repository, branch: []const u8, options: Options) Error!void {
+    const short = branch["refs/heads/".len..];
+    _ = try repo.writeConfig(io, .local, &.{
+        .{ .set = .{ .name = try arena.print("branch.{s}.remote", .{short}), .value = options.origin.? } },
+        .{ .set = .{ .name = try arena.print("branch.{s}.merge", .{short}), .value = branch } },
+    }, .{});
 }
 
 /// `refs/remotes/<origin>/HEAD` at the branch the remote's `HEAD` names,
@@ -859,13 +915,22 @@ fn containsOid(list: []const Oid, oid: Oid) bool {
 
 /// The new repository, as the clone makes it: `object_format` the
 /// remote's, or the default when it is not known yet.
-fn initRepository(gpa: Allocator, io: Io, dir: Io.Dir, options: Options, object_format: ?hash.Kind, initial: []const u8) Error!Repository {
+fn initRepository(gpa: Allocator, io: Io, dir: Io.Dir, options: Options, object_format: ?hash.Kind, initial: ?[]const u8) Error!Repository {
+    // What is not given is the caller's levels' to say, as git's
+    // `init_db` reads them for a clone.
+    const user = options.user_config;
     var repo = try Repository.create(gpa, io, dir, .{
-        .object_format = object_format orelse .sha1,
+        .object_format = object_format,
         .ref_format = options.ref_format,
         .default_branch = initial,
         .bare = options.bare or options.separate_git_dir,
         .odb = options.odb,
+        .system_config = user.system,
+        .xdg_config = user.xdg,
+        .global_config = user.global,
+        .config_overrides = user.command,
+        .config_pairs = user.pairs,
+        .home = options.home,
     });
     errdefer repo.deinit(io);
     // A git directory with its working tree elsewhere is not bare, and
@@ -892,7 +957,7 @@ fn checkOut(gpa: Allocator, io: Io, repo: *Repository, commit: Oid, options: Opt
         false;
     var filters = if (options.native_filters) |loader|
         try loader.load_fn(gpa, io, loader.context, repo, .{
-            .remote = options.origin,
+            .remote = options.origin.?,
             .programs = programs,
             .prompt = options.prompt,
             .auth_failure = options.auth_failure,
@@ -1238,4 +1303,174 @@ test "a destination that is not empty and a filter git does not have are refused
     var empty = testing.tmpDir(.{ .iterate = true });
     defer empty.cleanup();
     try testing.expectError(error.InvalidFilter, clone(gpa, io, "/nowhere", empty.dir, .{ .who = test_who, .filter = "blob:some" }));
+}
+
+test "clone.defaultRemoteName names the remote unless the clone does, and clone.rejectShallow refuses a shallow source, as git's clone reads them" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var env = try testremote.environ(gpa);
+    defer env.deinit();
+    var root = testing.tmpDir(.{ .iterate = true });
+    defer root.cleanup();
+    const root_path = try testremote.absolutePath(gpa, io, root.dir);
+    defer gpa.free(root_path);
+    {
+        var source = try testremote.historyRepo(gpa, io, 3);
+        defer source.deinit();
+        const source_path = try testremote.absolutePath(gpa, io, source.dir);
+        defer gpa.free(source_path);
+        const bare = try gpa.print("{s}/repo.git", .{root_path});
+        defer gpa.free(bare);
+        try source.exec(io, &.{ "clone", "-q", "--bare", source_path, bare });
+        const from = try gpa.print("file://{s}", .{bare});
+        defer gpa.free(from);
+        const shallow = try gpa.print("{s}/shallow.git", .{root_path});
+        defer gpa.free(shallow);
+        try source.exec(io, &.{ "clone", "-q", "--bare", "--depth", "1", from, shallow });
+    }
+    const fake = try testremote.fakeSsh(gpa, io, root.dir);
+    defer gpa.free(fake);
+    const ssh_setting = try gpa.print("core.sshCommand={s}", .{fake});
+    defer gpa.free(ssh_setting);
+    const ssh_path = try gpa.dupe(u8, root_path);
+    defer gpa.free(ssh_path);
+    if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, ssh_path, '\\', '/');
+    const slash = if (builtin.target.os.tag == .windows) "/" else "";
+
+    // The configured name, and `--origin` over it.
+    const repo_path = try gpa.print("{s}/repo.git", .{root_path});
+    defer gpa.free(repo_path);
+    for ([_]?[]const u8{ null, "mine" }) |origin| {
+        var by_git = try Twin.init(gpa, io);
+        defer by_git.deinit(gpa, io);
+        var by_relic = try Twin.init(gpa, io);
+        defer by_relic.deinit(gpa, io);
+        const out = if (origin) |name|
+            try git(gpa, io, &env, by_git.tmp.dir, &.{ "-c", "clone.defaultRemoteName=upstream", "clone", "-q", "--origin", name, repo_path, by_git.path })
+        else
+            try git(gpa, io, &env, by_git.tmp.dir, &.{ "-c", "clone.defaultRemoteName=upstream", "clone", "-q", repo_path, by_git.path });
+        gpa.free(out);
+        var settings = try config_mod.Config.parseText(gpa, "[clone]\ndefaultRemoteName = upstream\n", .command);
+        defer settings.deinit();
+        var repo = try clone(gpa, io, repo_path, by_relic.dir, .{ .who = test_who, .origin = origin, .config = &settings });
+        repo.deinit(io);
+        try expectSameClone(gpa, io, &env, by_git.dir, by_relic.dir, false);
+        const remotes = try git(gpa, io, &env, by_relic.dir, &.{"remote"});
+        defer gpa.free(remotes);
+        try testing.expectEqualStrings(if (origin == null) "upstream\n" else "mine\n", remotes);
+    }
+
+    // A shallow source, refused by path, by upload-pack over both
+    // protocols, and kept when the clone is shallow itself or says so.
+    const shallow_path = try gpa.print("{s}/shallow.git", .{root_path});
+    defer gpa.free(shallow_path);
+    const ssh_url = try gpa.print("ssh://example.invalid{s}{s}/shallow.git", .{ slash, ssh_path });
+    defer gpa.free(ssh_url);
+    const Case = struct { url: []const u8, version: []const u8, depth: ?u32 = null, reject: ?bool = null, refused: bool };
+    const cases = [_]Case{
+        .{ .url = shallow_path, .version = "2", .refused = true },
+        .{ .url = ssh_url, .version = "2", .refused = true },
+        .{ .url = ssh_url, .version = "0", .refused = true },
+        .{ .url = ssh_url, .version = "2", .depth = 1, .refused = false },
+        .{ .url = ssh_url, .version = "0", .reject = false, .refused = false },
+        .{ .url = shallow_path, .version = "2", .reject = false, .refused = false },
+    };
+    for (cases) |case| {
+        var by_git = try Twin.init(gpa, io);
+        defer by_git.deinit(gpa, io);
+        var by_relic = try Twin.init(gpa, io);
+        defer by_relic.deinit(gpa, io);
+        const version = try gpa.print("protocol.version={s}", .{case.version});
+        defer gpa.free(version);
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(gpa);
+        try argv.appendSlice(gpa, &.{ "-c", ssh_setting, "-c", version, "-c", "clone.rejectShallow=true", "clone", "-q" });
+        if (case.depth != null) try argv.append(gpa, "--depth=1");
+        if (case.reject != null) try argv.append(gpa, "--no-reject-shallow");
+        try argv.appendSlice(gpa, &.{ case.url, by_git.path });
+        const by_git_ok = if (testremote.gitInputEnv(gpa, io, by_git.tmp.dir, &env, argv.items, "", false)) |out| ok: {
+            gpa.free(out);
+            break :ok true;
+        } else |err| switch (err) {
+            error.GitFailed => false,
+            else => return err,
+        };
+        try testing.expectEqual(!case.refused, by_git_ok);
+
+        const text = try gpa.print("[core]\nsshCommand = {s}\n[protocol]\nversion = {s}\n[clone]\nrejectShallow = true\n", .{ fake, case.version });
+        defer gpa.free(text);
+        var settings = try config_mod.Config.parseText(gpa, text, .command);
+        defer settings.deinit();
+        const made = clone(gpa, io, case.url, by_relic.dir, .{
+            .who = test_who,
+            .programs = .{ .environ = &env },
+            .config = &settings,
+            .depth = case.depth,
+            .reject_shallow = case.reject,
+        });
+        if (case.refused) {
+            try testing.expectError(error.ShallowSourceRefused, made);
+            continue;
+        }
+        var repo = try made;
+        repo.deinit(io);
+        try expectSameClone(gpa, io, &env, by_git.dir, by_relic.dir, false);
+    }
+}
+
+test "a clone takes init.defaultBranch for an empty remote that names no branch, and init.defaultRefFormat, from the caller's levels as git's does" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    // A reftable repository is git 2.45's to make.
+    if (!try testgit.gitAtLeast(gpa, io, 2, 45)) return error.SkipZigTest;
+    var env = try testremote.environ(gpa);
+    defer env.deinit();
+    var root = testing.tmpDir(.{ .iterate = true });
+    defer root.cleanup();
+    const root_path = try testremote.absolutePath(gpa, io, root.dir);
+    defer gpa.free(root_path);
+    const empty_path = try gpa.print("{s}/empty.git", .{root_path});
+    defer gpa.free(empty_path);
+    const made = try git(gpa, io, &env, root.dir, &.{ "init", "-q", "--bare", "--initial-branch=trunk", empty_path });
+    gpa.free(made);
+    const fake = try testremote.fakeSsh(gpa, io, root.dir);
+    defer gpa.free(fake);
+    const ssh_setting = try gpa.print("core.sshCommand={s}", .{fake});
+    defer gpa.free(ssh_setting);
+    const ssh_path = try gpa.dupe(u8, root_path);
+    defer gpa.free(ssh_path);
+    if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, ssh_path, '\\', '/');
+    const ssh_url = try gpa.print("ssh://example.invalid{s}{s}/empty.git", .{ if (builtin.target.os.tag == .windows) "/" else "", ssh_path });
+    defer gpa.free(ssh_url);
+
+    // Over protocol v0 an empty remote names no branch; v2 names its
+    // unborn one, which beats the setting.
+    for ([_][]const u8{ "0", "2" }) |version| {
+        var by_git = try Twin.init(gpa, io);
+        defer by_git.deinit(gpa, io);
+        var by_relic = try Twin.init(gpa, io);
+        defer by_relic.deinit(gpa, io);
+        const version_setting = try gpa.print("protocol.version={s}", .{version});
+        defer gpa.free(version_setting);
+        const out = try git(gpa, io, &env, by_git.tmp.dir, &.{ "-c", ssh_setting, "-c", version_setting, "-c", "init.defaultBranch=stem", "-c", "init.defaultRefFormat=" ++ @tagName(refs_mod.Format.reftable), "clone", "-q", ssh_url, by_git.path });
+        gpa.free(out);
+        const pairs = [_]config_mod.Sources.Pair{
+            .{ .name = "core.sshCommand", .value = fake },
+            .{ .name = "protocol.version", .value = version },
+            .{ .name = "init.defaultBranch", .value = "stem" },
+            .{ .name = "init.defaultRefFormat", .value = @tagName(refs_mod.Format.reftable) },
+        };
+        var repo = try clone(gpa, io, ssh_url, by_relic.dir, .{ .who = test_who, .programs = .{ .environ = &env }, .user_config = .{ .pairs = &pairs } });
+        repo.deinit(io);
+        for ([_][]const []const u8{ &.{ "symbolic-ref", "HEAD" }, &.{ "rev-parse", "--show-ref-format" }, &.{ "config", "--local", "--get-regexp", "^(remote|branch)\\." } }) |args| {
+            const theirs = try git(gpa, io, &env, by_git.dir, args);
+            defer gpa.free(theirs);
+            const ours = try git(gpa, io, &env, by_relic.dir, args);
+            defer gpa.free(ours);
+            try testing.expectEqualStrings(theirs, ours);
+        }
+        const head = try git(gpa, io, &env, by_relic.dir, &.{ "symbolic-ref", "HEAD" });
+        defer gpa.free(head);
+        try testing.expectEqualStrings(if (version[0] == '0') "refs/heads/stem\n" else "refs/heads/trunk\n", head);
+    }
 }

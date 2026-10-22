@@ -62,6 +62,9 @@ pub const Error = error{
     /// A negotiation alone asked of a server whose `fetch` does not take
     /// `wait-for-done`: git's "server does not support wait-for-done".
     WaitForDoneUnsupported,
+    /// The server's history is shallow and `ShallowInfo.reject` refuses
+    /// one: git's "source repository is shallow, reject to clone."
+    ShallowSourceRefused,
 } || protocol.Error || index_pack.Error || odb_mod.Error || object.ParseError;
 
 /// What to ask for.
@@ -135,6 +138,10 @@ pub const ShallowInfo = struct {
     gpa: Allocator,
     shallow: std.ArrayList(Oid) = .empty,
     unshallow: std.ArrayList(Oid) = .empty,
+    /// git's `--reject-shallow`, for a request that does not deepen: a
+    /// server that says its own history is shallow is
+    /// `error.ShallowSourceRefused`, before its pack is read.
+    reject: bool = false,
 
     /// Release both lists.
     pub fn deinit(info: *ShallowInfo) void {
@@ -253,6 +260,8 @@ pub fn fetch(
     const db = inputs.db;
     const request = inputs.request;
     try protocol.checkServerOptions(adv, request.server_options);
+    // A v0 server says where its history ends in its advertisement.
+    if (options.shallow_info) |info| if (info.reject and adv.shallow.len != 0) return error.ShallowSourceRefused;
     var negotiator: Negotiator = .{ .gpa = gpa, .io = io, .db = db, .arena = .init(gpa), .algorithm = request.negotiation };
     defer negotiator.deinit();
     for (request.common_tips) |tip| try negotiator.knownCommon(tip);
@@ -473,6 +482,7 @@ fn receivePackfileV2(
                 else => return error.ProtocolError,
             }
         }
+        if (is_shallow) if (shallow_info) |info| if (info.reject and info.shallow.items.len != 0) return error.ShallowSourceRefused;
     }
     return receiveSideband(io, conn, in, db, progress, receive_options);
 }

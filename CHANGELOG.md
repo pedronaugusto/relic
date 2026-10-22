@@ -8,6 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Breaking
 
+- `transport.clone.Options.origin`, `default_branch` and `ref_format` are optional: `null` takes `clone.defaultRemoteName` (else `origin`), `init.defaultBranch` (else git's `master`, where relic named `main`) and `init.defaultRefFormat` from the caller's levels, as git's clone reads them.
 - `pretty.Decorations.load` takes `LoadOptions` (`filter`, and `style`, short or full names) where it took the filter.
 - `merge.ort.emptyTree(kind)` is `hash.Kind.emptyTree()`, the one name of the empty tree; the sequencer, `am`, the stash, subtree shifting and fast-import name it there.
 - `transport.push.Options.push_options` is optional, `null` taking `push.pushOption`. A default push refuses as git's `setup_default_push_refspecs` does, with git's cases apart: `NoUpstreamBranch` (a branch with no upstream pushed to its own remote under `simple` or `upstream`, where relic pushed it to its own name), `UpstreamNameDiffers`, `MultipleUpstreams`, `NotUpstreamRemote`.
@@ -45,6 +46,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `clone.rejectShallow` and `transport.clone.Options.reject_shallow` (`--[no-]reject-shallow`): a shallow source is `error.ShallowSourceRefused` — by path, in a v0 advertisement, or in a v2 `shallow-info` (`wire.fetch_pack.ShallowInfo.reject`) before the pack is read — unless the clone deepens, as git's clone and fetch-pack refuse it.
 - Several remotes, as git's `fetch` takes them: `fetch.remotesToFetch` (`fetch.all` and `Selection.all`, `remote.<name>.skipFetchAll` beside its older name `skipDefaultUpdate`, the last deciding; `remotes.<group>`; a name neither remote nor group refused among several) and `fetch.fetchMany` (`ManyOptions`; git's `fetch_multiple`: `FETCH_HEAD` emptied first and each remote's lines added, the commit graph written once after, a failure noted and the rest fetched, `fetch.parallel` remotes at once each on its own `Repository.openAgain`). `fetch.Options.write_commit_graph`; `remote.isConfigured`. Held to git 2.55's fetch.
 - `push.negotiate`, as git's `get_commons_through_negotiation`: before the pack is made, a fetch's negotiation with the push URL from `remote.<name>.negotiationRestrict`, else each new value, with `negotiationInclude`, and what the remote acknowledges is left out of the pack; a negotiation that fails leaves nothing out. `fetch.negotiateOnly` is git's `git fetch --negotiate-only` (`fetch_pack.negotiateOnly`, `transport.Session.negotiateOnly`: `wait-for-done`, rounds until every tip reaches a commit known common; `NegotiateOnlyNeedsV2`, `WaitForDoneUnsupported`, `NegotiationRestrictNeeded`). Held to git 2.55: the same negotiation heard by git's upload-pack.
 - `push.useForceIfIncludes` and `push.Options.force_if_includes` (`--force-if-includes`), as git's `check_if_includes_upstream`: a lease that expects the remote-tracking ref's value is refused (`rejected_remote_updated`, git's "remote ref updated since checkout") unless the remote's value is in the local ref's log, or reachable from a commit an entry names, back to the tracking ref's newest entry. Held to git 2.55's push.
@@ -162,6 +164,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A clone of an empty remote sets its unborn branch to track the remote's (`branch.<name>.remote` and `.merge`), as git's `update_head` does; relic left it untracked.
 - An empty `remote.<name>.url` or `pushurl` clears the values before it, as git's `add_url` and `add_pushurl` do; relic kept them all.
 - `commit.reset.toTree` no longer deletes a populated submodule's checkout when its gitlink changes: it stays, as git leaves it without `--recurse-submodules`.
 - `index.Index.remove` reads `path` before it frees an entry, so an entry's own path may be passed.
