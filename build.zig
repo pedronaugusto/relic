@@ -243,22 +243,10 @@ pub fn dev(b: *std.Build, tools: type) void {
     build_options.addOptionPath("process_fixture_path", process_fixture.getEmittedBin());
     build_options.addOptionPath("remote_helper_path", remote_helper.getEmittedBin());
     build_options.addOptionPath("lfs_agent_path", lfs_agent.getEmittedBin());
-    // The delta search runs its candidates on the caller's executor when
-    // `PackOptions.threads` asks for more than one, and the suite writes
-    // the same repository from two processes and two tasks at once. Whether
-    // that is free of races is a claim a race detector can check and a
-    // reader cannot: `bay test -Dthread-sanitizer`.
-    const thread_sanitizer = b.option(
-        bool,
-        "thread-sanitizer",
-        "Build the tests with ThreadSanitizer",
-    ) orelse false;
-
     const test_module = b.createModule(.{
         .root_source_file = p.path("src/tests.zig"),
         .target = target,
         .optimize = optimize,
-        .sanitize_thread = if (thread_sanitizer) true else null,
         // The imports of the module a consumer gets, the options among them.
         .imports = moduleImports(p, target, optimize, http_option),
     });
@@ -357,6 +345,13 @@ pub fn dev(b: *std.Build, tools: type) void {
 
     preflight.addCi(b, p, .{
         .tests = test_step,
+        // The delta search runs its candidates on the caller's executor when
+        // `PackOptions.threads` asks for more than one, and the suite writes
+        // the same repository from two processes and two tasks at once.
+        // Whether that is free of races is a claim a race detector can check
+        // and a reader cannot: preflight's ThreadSanitizer build of the
+        // tests, `bay test -Dci-tsan=true`, each test's bound scaled for it.
+        .hardened = .{},
         // The comparisons with git run on the riscv64 machine too, with
         // Alpine's git.
         .vm_packages = &.{"git"},
