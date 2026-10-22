@@ -1464,7 +1464,7 @@ test "a deltified pack is read back by git and by this, object for object" {
     {
         var p = try pack.Pack.open(gpa, io, pack_dir, .{ .base = base, .kind = .sha1 }, .{});
         defer p.deinit(io);
-        const checked = try p.verify(io, null, 0);
+        const checked = try p.verify(io, .{});
         try std.testing.expectEqual(report.objects, checked.objects);
     }
 
@@ -1477,7 +1477,7 @@ test "a deltified pack is read back by git and by this, object for object" {
     {
         var p = try pack.Pack.open(gpa, io, pack_dir, .{ .base = ref_base, .kind = .sha1 }, .{});
         defer p.deinit(io);
-        const checked = try p.verify(io, null, 0);
+        const checked = try p.verify(io, .{});
         try std.testing.expectEqual(ref_report.objects, checked.objects);
     }
 

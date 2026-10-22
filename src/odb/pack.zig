@@ -806,6 +806,37 @@ pub const Pack = struct {
         }
     }
 
+    /// The pack's bytes from `offset` on, read through `buffer` (unused for
+    /// a pack in memory), for copying a stored entry in blocks.
+    pub fn readerAt(p: *const Pack, io: Io, offset: u64, buffer: []u8) Self.Error!Positioned {
+        if (offset > p.size) return error.TruncatedPack;
+        if (p.memory) |mem| return .{ .memory = .fixed(mem[@intCast(offset)..@intCast(p.size)]) };
+        var file_reader = p.file.reader(io, buffer);
+        try file_reader.seekTo(offset);
+        return .{ .file = file_reader };
+    }
+
+    /// What `readerAt` reads from.
+    pub const Positioned = union(enum) {
+        file: Io.File.Reader,
+        memory: Io.Reader,
+
+        pub fn reader(at: *Positioned) *Io.Reader {
+            return switch (at.*) {
+                .file => |*f| &f.interface,
+                .memory => |*m| m,
+            };
+        }
+
+        /// Why a read failed, when the reader says `ReadFailed`.
+        pub fn err(at: *const Positioned) ?Self.Error {
+            return switch (at.*) {
+                .file => |*f| f.err,
+                .memory => null,
+            };
+        }
+    };
+
     /// The header of the entry at `offset`, without inflating anything.
     pub fn entryHeaderAt(p: *Pack, io: Io, offset: u64) Self.Error!EntryHeader {
         if (offset < 12 or offset >= p.bodyEnd()) return error.TruncatedPack;
@@ -1228,12 +1259,23 @@ pub const Pack = struct {
         bytes: u64 = 0,
     };
 
+    /// How `verify` reads the pack.
+    pub const VerifyOptions = struct {
+        /// The delta-base cache deltas resolve through, and the pack's id
+        /// in it.
+        cache: ?*Cache = null,
+        pack_id: u32 = 0,
+        /// `core.bigFileThreshold`: a whole object past it is checked as it
+        /// is read, never held, as git's fsck checks a large blob.
+        stream_past: u64 = std.math.maxInt(u64),
+    };
+
     /// Rehash every object in the pack against the name the index gives it,
     /// and check every entry against the CRC the index carries.
     ///
     /// The pack's own trailing checksum is checked first, so a truncated file
     /// is one error and not thousands.
-    pub fn verify(p: *Pack, io: Io, cache: ?*Cache, pack_id: u32) Self.Error!Report {
+    pub fn verify(p: *Pack, io: Io, options: VerifyOptions) Self.Error!Report {
         try p.verifyChecksum(io);
 
         // The compressed span of an entry runs to the next entry's offset, so
@@ -1258,12 +1300,23 @@ pub const Pack = struct {
                 p.bodyEnd();
             if (end < offset or end > p.bodyEnd()) return error.TruncatedPack;
 
+            const entry = try p.entryHeaderAt(io, offset);
+            if (entry.kind == .object and entry.size > options.stream_past) {
+                var crc: warp.Crc32 = .init;
+                try p.sumStored(io, offset, end, .{ .crc = &crc });
+                if (crc.final() != p.index.crcAt(position)) return error.ChecksumMismatch;
+                if (!(try p.nameStreamed(io, offset)).eql(p.index.nameAt(position))) return error.ObjectNameMismatch;
+                report.objects += 1;
+                report.bytes += entry.size;
+                continue;
+            }
+
             const span = try p.gpa.alloc(u8, @intCast(end - offset));
             defer p.gpa.free(span);
             try p.readAtExact(io, offset, span);
             if (warp.Crc32.hash(span) != p.index.crcAt(position)) return error.ChecksumMismatch;
 
-            const obj = try p.readAt(io, offset, .{ .cache = cache, .pack_id = pack_id });
+            const obj = try p.readAt(io, offset, .{ .cache = options.cache, .pack_id = options.pack_id });
             defer p.gpa.free(obj.bytes);
             const name = hash.Hasher.object(p.kind, obj.type.name(), obj.bytes);
             if (!name.eql(p.index.nameAt(position))) return error.ObjectNameMismatch;
@@ -1271,6 +1324,67 @@ pub const Pack = struct {
             report.bytes += obj.bytes.len;
         }
         return report;
+    }
+
+    /// What `sumStored` sums into: an entry's CRC, and the pack's own
+    /// checksum running on, when given.
+    pub const Sums = struct { crc: *warp.Crc32, checksum: ?*hash.Hasher = null };
+
+    /// The stored bytes `from..to` summed in blocks, never held.
+    pub fn sumStored(p: *Pack, io: Io, from: u64, to: u64, sums: Sums) Self.Error!void {
+        var buf: [64 * 1024]u8 = undefined;
+        var at = from;
+        while (at < to) {
+            const want: usize = @intCast(@min(buf.len, to - at));
+            try p.readAtExact(io, at, buf[0..want]);
+            sums.crc.update(buf[0..want]);
+            if (sums.checksum) |h| h.update(buf[0..want]);
+            at += want;
+        }
+    }
+
+    /// The name of the whole object whose entry begins at `offset`, its
+    /// bytes inflated and hashed as they are read and never held: how
+    /// `verify` checks an object past `core.bigFileThreshold`.
+    pub fn nameStreamed(p: *Pack, io: Io, offset: u64) Self.Error!Oid {
+        const entry = try p.entryHeaderAt(io, offset);
+        const t = switch (entry.kind) {
+            .object => |t| t,
+            .ofs_delta, .ref_delta => return error.CorruptPackEntry,
+        };
+        var input: [64 * 1024]u8 = undefined;
+        var window: [(1 << 15) + 4096]u8 = undefined;
+        var file_reader: Io.File.Reader = undefined;
+        var fixed: Io.Reader = undefined;
+        const source: *Io.Reader = if (p.memory) |mem| blk: {
+            if (entry.data_at > mem.len) return error.TruncatedPack;
+            fixed = .fixed(mem[@intCast(entry.data_at)..]);
+            break :blk &fixed;
+        } else blk: {
+            file_reader = p.file.reader(io, &input);
+            try file_reader.seekTo(entry.data_at);
+            break :blk &file_reader.interface;
+        };
+        var inflating: warp.Inflate.Reader = .init(source, &window, .{});
+        var hasher: hash.Hasher = .init(p.kind);
+        hasher.updateHeader(t.name(), entry.size);
+        var chunk: [16 * 1024]u8 = undefined;
+        var left = entry.size;
+        while (left != 0) {
+            const n: usize = @intCast(@min(@as(u64, chunk.len), left));
+            inflating.interface.readSliceAll(chunk[0..n]) catch |err| return switch (err) {
+                error.ReadFailed => if (p.memory == null) file_reader.err orelse error.CorruptPackEntry else error.CorruptPackEntry,
+                error.EndOfStream => error.PackEntrySizeMismatch,
+            };
+            hasher.update(chunk[0..n]);
+            left -= n;
+        }
+        // Nothing past the stated length.
+        _ = inflating.interface.peekByte() catch |err| switch (err) {
+            error.EndOfStream => return hasher.final(),
+            error.ReadFailed => return if (p.memory == null) file_reader.err orelse error.CorruptPackEntry else error.CorruptPackEntry,
+        };
+        return error.PackEntrySizeMismatch;
     }
 
     /// Check the pack's trailing checksum, which names the pack and which the
@@ -1805,10 +1919,21 @@ pub const WriteError = error{
     /// A name this pack already holds. An index's names must rise, so a
     /// pack cannot hold one twice; `Writer.holds` says whether it does.
     DuplicateObject,
+    /// The reader an entry was added from failed; its own error says why.
+    ReadFailed,
+    /// The reader an entry was added from ended before the length it was
+    /// given.
+    ShortRead,
+    /// An object added from a reader hashed to a name other than the one
+    /// the caller gave.
+    ObjectNameMismatch,
+    /// An object added from a reader carries the signature of a SHA-1
+    /// collision attack, where the caller asked for the check.
+    CollisionAttack,
 } || retention.Error || Allocator.Error || Io.File.OpenError || Io.Writer.Error ||
     fs.SyncError || Io.Dir.RenameError || Io.Dir.DeleteFileError ||
     Io.Dir.CreateDirError || Io.File.WritePositionalError ||
-    Io.File.ReadPositionalError;
+    Io.File.ReadPositionalError || Io.File.SetLengthError || Io.File.Writer.SeekError;
 
 /// How hard a pack's entries are compressed.
 ///
@@ -1918,16 +2043,24 @@ pub const Deflater = struct {
 
     /// Write one independent zlib stream without flushing `out`.
     pub fn deflate(d: *Deflater, out: *Io.Writer, payload: []const u8, compression: Compression) Io.Writer.Error!void {
+        var buffer: [4096]u8 = undefined;
+        var writer = d.open(out, compression, &buffer);
+        try writer.interface.writeAll(payload);
+        try writer.finish();
+    }
+
+    /// Begin one independent zlib stream into `out`, through `buffer`: the
+    /// caller writes the payload in as many pieces as it has and then
+    /// `finish`es it, and the stream is the one `deflate` makes of the
+    /// whole.
+    pub fn open(d: *Deflater, out: *Io.Writer, compression: Compression, buffer: []u8) warp.Deflate.Writer {
         if (d.compression == compression) {
             d.compress.reset(.nothing);
         } else {
             d.compress = .initBuffer(d.workspace, .{ .level = compression.level() });
             d.compression = compression;
         }
-        var buffer: [4096]u8 = undefined;
-        var writer: warp.Deflate.Writer = .init(&d.compress, out, &buffer);
-        try writer.interface.writeAll(payload);
-        try writer.finish();
+        return .init(&d.compress, out, buffer);
     }
 
     /// The most bytes `deflate` is given room for ahead of the writer, for a
@@ -1970,10 +2103,19 @@ pub const Writer = struct {
 
     entries: std.ArrayList(WrittenEntry),
     deltas: u32 = 0,
+    /// Where the last `addFrom` began, for `dropLast`.
+    mark: ?Mark = null,
     finished: bool = false,
     /// Whether the pack goes to a caller's writer rather than to a file:
     /// no index, no rename, and nothing on the disk to take away.
     streaming: bool = false,
+
+    /// The pack as it was before an entry, so the entry can be taken back.
+    const Mark = struct {
+        at: u64,
+        hasher: hash.Hasher,
+        entries: usize,
+    };
 
     /// How many bytes of the file are buffered before a write.
     const file_buffer_len = 64 * 1024;
@@ -2231,6 +2373,139 @@ pub const Writer = struct {
         return w.endEntry(oid, at);
     }
 
+    /// Add an entry whose zlib stream is read from `in`, `deflated_len`
+    /// bytes, copied through in blocks and never held: a stored entry
+    /// reused as its pack has it, whatever its size. The stream must be
+    /// what `addDeflated` would be given for it. A reader that fails is
+    /// `error.ReadFailed`, one that ends early `error.ShortRead`; either
+    /// leaves the pack to be aborted. Returns the offset the entry begins
+    /// at.
+    pub fn addDeflatedFrom(w: *Writer, in: *Io.Reader, entry: DeflatedEntry) Self.WriteError!u64 {
+        var buf: [16]u8 = undefined;
+        const at = w.sink.count;
+        const oid = entry.oid;
+        const payload = entry.payload;
+        const type_bits: u3, const extra: []const u8 = switch (payload) {
+            .object => |t| .{ typeBits(t), &.{} },
+            .ofs_delta => |base_offset| blk: {
+                if (base_offset >= at) return error.DeltaBaseNotWritten;
+                break :blk .{ 6, encodeBackOffset(&buf, at - base_offset) };
+            },
+            .ref_delta => |*base| .{ 7, base.raw() },
+        };
+        try w.beginEntry(oid, type_bits, entry.payload_len, extra);
+        in.streamExact64(&w.sink.writer, entry.deflated_len) catch |err| return switch (err) {
+            error.ReadFailed => error.ReadFailed,
+            error.EndOfStream => error.ShortRead,
+            error.WriteFailed => error.WriteFailed,
+        };
+        try w.sink.writer.flush();
+        if (payload != .object) w.deltas += 1;
+        return w.endEntry(oid, at);
+    }
+
+    /// An entry `addDeflatedFrom` copies: its name, what it holds and that
+    /// payload's length inflated, and how long its zlib stream is.
+    pub const DeflatedEntry = struct {
+        oid: Oid,
+        payload: Payload,
+        payload_len: u64,
+        deflated_len: u64,
+    };
+
+    /// What `addFrom` added: the name it took over the object's bytes, and
+    /// where its entry begins.
+    pub const Added = struct { oid: Oid, offset: u64 };
+
+    /// What `addFrom` reads, and how it names it.
+    pub const From = struct {
+        /// The object's type and length: exactly that many bytes are read.
+        type: object.Type,
+        size: u64,
+        /// The name the caller knows the object by: bytes that hash to
+        /// another are `error.ObjectNameMismatch`, and leave the pack to be
+        /// aborted.
+        expect: ?Oid = null,
+        /// How the name is taken: `hash.Hasher.Options`, whose collision
+        /// detection makes an attack `error.CollisionAttack`.
+        hash: hash.Hasher.Options = .{},
+    };
+
+    /// Add a whole object of `size` bytes read from `in`, never held: each
+    /// piece is hashed into the object's name and deflated into the pack
+    /// as it comes, as git's bulk-checkin writes a large blob. A reader
+    /// that fails is `error.ReadFailed`, its own error saying why, and one
+    /// that ends before `size` is `error.ShortRead` (a file that changed
+    /// while it was read); either leaves the pack to be aborted. An object
+    /// this pack already holds is `error.DuplicateObject`: refused before a
+    /// byte is written when `From.expect` names it, else taken back
+    /// -- but from a pack streamed to a caller, which cannot take bytes
+    /// back and is then to be aborted.
+    /// `dropLast` takes the entry back when the caller finds the object
+    /// stored elsewhere.
+    pub fn addFrom(w: *Writer, io: Io, in: *Io.Reader, options: From) Self.WriteError!Added {
+        const t = options.type;
+        const size = options.size;
+        const at = w.sink.count;
+        if (w.expected) |expected| {
+            if (w.entries.items.len >= expected) return error.ObjectCountMismatch;
+        }
+        if (options.expect) |known| if (w.seen.contains(known)) return error.DuplicateObject;
+        w.mark = .{ .at = at, .hasher = w.sink.hasher, .entries = w.entries.items.len };
+        w.sink.crc = .init;
+        var head: [16]u8 = undefined;
+        try w.sink.emit(head[0..encodeTypeAndSize(&head, typeBits(t), size)]);
+
+        var hasher: hash.Hasher = .initOptions(w.kind, options.hash);
+        hasher.updateHeader(t.name(), size);
+        var deflate_buffer: [4096]u8 = undefined;
+        var deflating = w.deflater.open(&w.sink.writer, w.options.compression, &deflate_buffer);
+        var left = size;
+        while (left != 0) {
+            const piece = in.peekGreedy(1) catch |err| return switch (err) {
+                error.ReadFailed => error.ReadFailed,
+                error.EndOfStream => error.ShortRead,
+            };
+            const taken = piece[0..@intCast(@min(@as(u64, piece.len), left))];
+            hasher.update(taken);
+            try deflating.interface.writeAll(taken);
+            in.toss(taken.len);
+            left -= taken.len;
+        }
+        try deflating.finish();
+        try w.sink.writer.flush();
+
+        const oid = hasher.final();
+        if (hasher.collisionAttack()) return error.CollisionAttack;
+        if (options.expect) |expected| if (!expected.eql(oid)) return error.ObjectNameMismatch;
+        if (w.seen.contains(oid)) {
+            if (!w.streaming) try w.dropLast(io);
+            return error.DuplicateObject;
+        }
+        _ = try w.endEntry(oid, at);
+        return .{ .oid = oid, .offset = at };
+    }
+
+    /// Take back the entry the last `addFrom` added, so the next entry
+    /// begins where it began, as git's bulk-checkin truncates a pack back
+    /// when the object it just wrote is already stored. Only a pack
+    /// written to a file can take bytes back, and only the last entry,
+    /// once.
+    pub fn dropLast(w: *Writer, io: Io) Self.WriteError!void {
+        std.debug.assert(!w.streaming);
+        const mark = w.mark.?;
+        w.mark = null;
+        try w.file_writer.interface.flush();
+        try w.file.setLength(io, mark.at);
+        try w.file_writer.seekTo(mark.at);
+        w.sink.hasher = mark.hasher;
+        w.sink.count = mark.at;
+        if (w.entries.items.len > mark.entries) {
+            const dropped = w.entries.pop().?;
+            _ = w.seen.remove(dropped.oid);
+        }
+    }
+
     /// What an entry holds, for `addDeflated`.
     pub const Payload = union(enum) {
         /// A whole object of this type.
@@ -2262,6 +2537,7 @@ pub const Writer = struct {
             if (w.entries.items.len >= expected) return error.ObjectCountMismatch;
         }
         if (w.seen.contains(oid)) return error.DuplicateObject;
+        w.mark = null;
         w.sink.crc = .init;
 
         var head: [16]u8 = undefined;
@@ -2624,7 +2900,7 @@ test "a written pack and its index read back, entry kind for entry kind" {
 
     // And the pack checks out against its own trailer and every CRC.
     try p.verifyChecksum(io);
-    const checked = try p.verify(io, null, 0);
+    const checked = try p.verify(io, .{});
     try std.testing.expectEqual(@as(u32, 5), checked.objects);
 }
 
@@ -2691,7 +2967,7 @@ fn fuzzWriter(_: void, case: *shakedown.Case) anyerror!void {
     defer p.deinit(io);
     // Rehashes every object against the name the index gives it, deltas
     // resolved, and checks every CRC and the trailer.
-    const checked = try p.verify(io, null, 0);
+    const checked = try p.verify(io, .{});
     if (checked.objects != report.objects) return error.PackDidNotRoundTrip;
 }
 

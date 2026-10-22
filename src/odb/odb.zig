@@ -1450,9 +1450,7 @@ pub const Odb = struct {
     /// cannot afford to lose. An object already here is left as it is.
     pub fn own(odb: *Odb, io: Io, oid: Oid) ErrorNamespace.Error!void {
         if (try odb.existsOwn(io, oid)) return;
-        const found = try odb.read(io, oid);
-        defer odb.backendData().gpa.free(found.bytes);
-        try odb.writeLoose(io, found.type, found.bytes, oid, null);
+        try odb.copyLoose(io, oid, null);
     }
 
     /// git's `force_object_loose`: `oid`, held in a pack, written as a loose
@@ -1464,14 +1462,39 @@ pub const Odb = struct {
         var path_buf: [hash.max_hex_len + 2]u8 = undefined;
         odb.writableSource().dir.access(io, odb.loosePath(oid, &path_buf), .{}) catch |err| switch (err) {
             error.FileNotFound => {
-                const found = try odb.read(io, oid);
-                defer odb.backendData().gpa.free(found.bytes);
-                try odb.writeLoose(io, found.type, found.bytes, oid, time);
+                try odb.copyLoose(io, oid, time);
                 return true;
             },
             else => |e| return e,
         };
         return false;
+    }
+
+    /// `oid`, from wherever this database holds it, written as a loose
+    /// object of its own directory with its file time set to `time`, or
+    /// left at now when `null`: read whole, or past `core.bigFileThreshold`
+    /// read from `stream` and deflated as it comes, never held, as git's
+    /// unpack-objects writes a large blob.
+    fn copyLoose(odb: *Odb, io: Io, oid: Oid, time: ?i64) ErrorNamespace.Error!void {
+        const header = try odb.readHeader(io, oid);
+        if (header.size <= odb.backendData().options.packing.big_file_bytes) {
+            const found = try odb.read(io, oid);
+            defer odb.backendData().gpa.free(found.bytes);
+            return odb.writeLoose(io, found.type, found.bytes, oid, time);
+        }
+        const from = try odb.stream(io, oid);
+        defer from.close(io);
+        var to: ObjectStream = undefined;
+        try odb.writeStream(io, from.type, from.size, &to);
+        defer to.deinit(io);
+        to.time = time;
+        from.reader().streamExact64(to.writer(), from.size) catch |err| return switch (err) {
+            error.ReadFailed => from.err() orelse error.ReadFailed,
+            error.EndOfStream => error.CorruptLooseObject,
+            error.WriteFailed => error.WriteFailed,
+        };
+        // Bytes that hash to another name were not the object asked for.
+        if (!(try to.finish(io)).eql(oid)) return error.ObjectNameMismatch;
     }
 
     /// A pack this database holds, `pack-<name>`, stored as git's
@@ -1777,6 +1800,32 @@ pub const Odb = struct {
                     @memcpy(full[0..2], entry.name);
                     @memcpy(full[2..][0..file_entry.name.len], file_entry.name);
                     const oid = Oid.parse(odb.backendData().kind, full[0 .. 2 + file_entry.name.len]) catch continue;
+                    const header = ((try odb.readLooseFor(io, oid, .header)) orelse continue).header;
+                    if (header.size > odb.backendData().options.packing.big_file_bytes) {
+                        // Past the threshold: named as it is read.
+                        const file = (try odb.openLoose(io, oid)) orelse continue;
+                        const s = try odb.streamAt(io, .{ .loose = file });
+                        defer s.close(io);
+                        var hasher: hash.Hasher = .initOptions(odb.backendData().kind, odb.hashOptions());
+                        hasher.updateHeader(s.type.name(), s.size);
+                        var chunk: [16 * 1024]u8 = undefined;
+                        var left = s.size;
+                        while (left != 0) {
+                            const n: usize = @intCast(@min(@as(u64, chunk.len), left));
+                            s.reader().readSliceAll(chunk[0..n]) catch |err| return switch (err) {
+                                error.ReadFailed => s.err() orelse error.ReadFailed,
+                                error.EndOfStream => error.CorruptLooseObject,
+                            };
+                            hasher.update(chunk[0..n]);
+                            left -= n;
+                        }
+                        const named = hasher.final();
+                        if (hasher.collisionAttack()) return error.CollisionAttack;
+                        if (!named.eql(oid)) return error.ObjectNameMismatch;
+                        report.loose += 1;
+                        report.bytes += s.size;
+                        continue;
+                    }
                     const found = (try odb.readLoose(io, oid)) orelse continue;
                     defer odb.backendData().gpa.free(found.bytes);
                     const named = hash.Hasher.nameObject(odb.backendData().kind, odb.hashOptions(), found.type.name(), found.bytes);
@@ -1810,9 +1859,11 @@ pub const Odb = struct {
     fn verifyPack(odb: *Odb, io: Io, p: *pack.Pack, pack_id: u32) ErrorNamespace.Error!pack.Pack.Report {
         const gpa = odb.backendData().gpa;
         const workers = taskCount(0);
-        if (workers == 1 or p.count != p.index.count) return p.verify(io, &odb.backendData().cache, pack_id);
+        const big = odb.backendData().options.packing.big_file_bytes;
+        const serial: pack.Pack.VerifyOptions = .{ .cache = &odb.backendData().cache, .pack_id = pack_id, .stream_past = big };
+        if (workers == 1 or p.count != p.index.count) return p.verify(io, serial);
 
-        if (p.size >= 1 << 32) return p.verify(io, &odb.backendData().cache, pack_id);
+        if (p.size >= 1 << 32) return p.verify(io, serial);
         const items = try verifyItems(gpa, p);
         defer gpa.free(items);
         const readers = try gpa.alloc(pack.Pack.EntryReader, workers);
@@ -1833,12 +1884,34 @@ pub const Odb = struct {
         defer span.deinit(gpa);
         var start: usize = 0;
         while (start < items.len) {
+            // An entry stored past the threshold is checked alone, in
+            // blocks, the pack's checksum running on through it.
+            if (items[start].end - items[start].offset > big) {
+                const item = items[start];
+                var crc: warp.Crc32 = .init;
+                try p.sumStored(io, item.offset, item.end, .{ .crc = &crc, .checksum = &checksum });
+                if (p.index.crcAt(item.position)) |want| if (crc.final() != want) return error.ChecksumMismatch;
+                const header = try p.entryHeaderAt(io, item.offset);
+                if (header.kind == .object) {
+                    if (!(try p.nameStreamed(io, item.offset)).eql(p.index.nameAt(item.position))) return error.ObjectNameMismatch;
+                    report.bytes += header.size;
+                } else {
+                    const obj = try p.readAt(io, item.offset, .{ .cache = &odb.backendData().cache, .pack_id = pack_id });
+                    defer gpa.free(obj.bytes);
+                    if (!hash.Hasher.object(p.kind, obj.type.name(), obj.bytes).eql(p.index.nameAt(item.position))) return error.ObjectNameMismatch;
+                    report.bytes += obj.bytes.len;
+                }
+                report.objects += 1;
+                start += 1;
+                continue;
+            }
             // A batch: entries while their bytes and whole bodies fit the
             // budget, and always one; the last runs to the trailer.
             var end = start;
             var held: usize = 0;
             while (end < items.len) {
                 const item = &items[end];
+                if (item.end - item.offset > big) break;
                 const stored_len = std.math.cast(usize, item.end - item.offset) orelse return error.StreamTooLong;
                 if (end > start and held +| stored_len > budget) break;
                 held +|= stored_len;
@@ -1856,6 +1929,11 @@ pub const Odb = struct {
                 const stored = span.items[@intCast(item.offset - span_at)..@intCast(item.end - span_at)];
                 item.header = (try p.parseEntryHeader(item.offset, stored)) orelse return error.TruncatedPack;
                 if (item.header.kind != .object) continue;
+                // Small stored, large inflated: named as it is read, after.
+                if (item.header.size > big) {
+                    item.streamed = true;
+                    continue;
+                }
                 const len = std.math.cast(usize, item.header.size) orelse return error.StreamTooLong;
                 if (len > delta.max_result_bytes) return error.StreamTooLong;
                 item.body = try gpa.alloc(u8, len +| pack.Pack.inflate_slack);
@@ -1872,6 +1950,12 @@ pub const Odb = struct {
             });
             for (batch) |*item| {
                 if (item.body.len != 0) {
+                    report.objects += 1;
+                    report.bytes += item.header.size;
+                    continue;
+                }
+                if (item.streamed) {
+                    if (!(try p.nameStreamed(io, item.offset)).eql(p.index.nameAt(item.position))) return error.ObjectNameMismatch;
                     report.objects += 1;
                     report.bytes += item.header.size;
                     continue;
@@ -1897,6 +1981,9 @@ pub const Odb = struct {
         end: u64,
         header: pack.EntryHeader = undefined,
         body: []u8 = &.{},
+        /// Whether the whole object is past the threshold, and so named as
+        /// it is read rather than inflated into `body`.
+        streamed: bool = false,
     };
 
     /// The tasks of one `verifyPack` batch: an entry each, and the pack's
@@ -2650,7 +2737,10 @@ pub const Odb = struct {
                     ordered_filled += 1;
                     continue;
                 }
-                const available = options.loose_cache_bytes.raw() -| cached_bytes;
+                // An object past the threshold is written streamed, so no
+                // body of one is held here either.
+                const big = std.math.cast(usize, options.big_file_bytes.raw()) orelse std.math.maxInt(usize);
+                const available = @min(options.loose_cache_bytes.raw() -| cached_bytes, big);
                 const found = try odb.readHeaderForPack(io, entry.oid, available);
                 if (found.bytes) |bytes| cached_bytes += bytes.len;
                 ordered[i] = .{
@@ -2724,6 +2814,7 @@ pub const Odb = struct {
                 .entry_at = at.offset,
                 .len = std.math.cast(usize, order.endOf(at.pack, at.offset) - at.offset) orelse continue,
                 .data_from = @intCast(entry.data_at - at.offset),
+                .size = entry.size,
                 .crc = crc,
             };
             const base_oid = switch (entry.kind) {
@@ -3784,6 +3875,9 @@ pub const ObjectStream = struct {
     window: []u8,
     out_buffer: []u8,
     remaining: u64,
+    /// The file time the object is given, seconds past the epoch, or
+    /// `null` for now, as `Odb.loosen` sets one.
+    time: ?i64 = null,
     file_open: bool = true,
     finished: bool = false,
 
@@ -3844,9 +3938,16 @@ pub const ObjectStream = struct {
         var final_buf: [hash.max_hex_len + 2]u8 = undefined;
         // unreachable: a hex name and its slash fit max_hex_len + 2 bytes
         const final_path = std.mem.print(&final_buf, "{s}/{s}", .{ text[0..2], text[2..] }) catch unreachable;
-        fs.rename(io, s.dir, s.temp[0..s.temp_len], final_path) catch |err| {
-            // glint-ignore: Z026 -- the rename's error is the one to report; a temporary object left behind is what `git gc` prunes
-            s.dir.deleteFile(io, s.temp[0..s.temp_len]) catch {};
+        const temp = s.temp[0..s.temp_len];
+        // The time before the name, as `writeLoose` sets it.
+        if (s.time) |seconds| fs.setTimestamps(io, s.dir, temp, .{ .modify_timestamp = .{ .new = .fromNanoseconds(@as(i96, seconds) * std.time.ns_per_s) } }) catch |err| {
+            // glint-ignore: Z026 -- the error is the one to report; a temporary object left behind is what `git gc` prunes
+            s.dir.deleteFile(io, temp) catch {};
+            return err;
+        };
+        finalizeLoose(io, s.dir, temp, final_path, s.odb.backendData().options.create_object) catch |err| {
+            // glint-ignore: Z026 -- the error is the one to report; a temporary object left behind is what `git gc` prunes
+            s.dir.deleteFile(io, temp) catch {};
             return err;
         };
         s.finished = true;
@@ -4349,6 +4450,43 @@ const Build = struct {
         return if (b.reuse.depth_left.len != 0) b.reuse.depth_left[pos] else b.options.depth;
     }
 
+    /// Whether object `pos` is past `PackOptions.big_file_bytes`, and so
+    /// written without being held: `writeStreamed`.
+    fn streamed(b: *const Build, pos: usize) bool {
+        return aegis.units.Bytes(u64).fromRaw(b.ordered[pos].size).compare(b.options.big_file_bytes) == .gt;
+    }
+
+    /// Write object `pos`, past `PackOptions.big_file_bytes`, never holding
+    /// it, as git's pack-objects writes a large blob: the entry its pack
+    /// stores copied in blocks when that is reused, else its bytes read from
+    /// `Odb.stream` and deflated as they come. It was never searched for a
+    /// delta nor kept as a base.
+    fn writeStreamed(b: *Build, io: Io, pos: usize) Error!void {
+        const item = &b.ordered[pos];
+        if (item.cached) |bytes| b.gpa.free(bytes);
+        item.cached = null;
+        if (b.reusedAt(pos)) |r| {
+            const payload: pack.Writer.Payload = switch (b.options.delta) {
+                .offset => .{ .ofs_delta = b.offsets[r.base] },
+                .reference => .{ .ref_delta = b.ordered[r.base].oid },
+                .none => unreachable,
+            };
+            b.offsets[pos] = try r.stored.copy(io, b.writer, item.oid, payload);
+            return;
+        }
+        if (b.storedWhole(pos, .{})) |st| {
+            b.offsets[pos] = try st.copy(io, b.writer, item.oid, .{ .object = item.type });
+            return;
+        }
+        const opened = try b.odb.stream(io, item.oid);
+        defer opened.close(io);
+        const added = b.writer.addFrom(io, opened.reader(), .{ .type = opened.type, .size = opened.size, .expect = item.oid }) catch |err| return switch (err) {
+            error.ReadFailed => opened.err() orelse error.ReadFailed,
+            else => |e| e,
+        };
+        b.offsets[pos] = added.offset;
+    }
+
     fn reusedAt(b: *const Build, pos: usize) ?Reused {
         return if (b.reuse.reused.len != 0) b.reuse.reused[pos] else null;
     }
@@ -4397,6 +4535,10 @@ const Build = struct {
     fn writeSerially(b: *Build, io: Io) Error!void {
         for (b.ordered, 0..) |*item, pos| {
             if (b.group_starts[pos]) b.window.clear(b.gpa);
+            if (b.streamed(pos)) {
+                try b.writeStreamed(io, pos);
+                continue;
+            }
             if (b.reusedAt(pos)) |r| {
                 if (item.cached) |bytes| b.gpa.free(bytes);
                 item.cached = null;
@@ -4542,6 +4684,15 @@ const Build = struct {
         var end = start;
         var charged: usize = 0;
         while (end < b.ordered.len) {
+            // An object written streamed is a batch of its own, held by no
+            // stage.
+            if (b.streamed(end)) {
+                if (end == start) {
+                    end += 1;
+                    charged = std.math.maxInt(usize);
+                }
+                break;
+            }
             const size = std.math.cast(usize, b.ordered[end].size) orelse std.math.maxInt(usize);
             const slack: usize = if (b.ordered[end].loose) 0 else pack.Pack.inflate_slack;
             const charge = if (b.reusedAt(end)) |r| r.stored.len else size +| slack +| pack.Deflater.room(size);
@@ -4608,8 +4759,10 @@ const Build = struct {
     }
 
     /// The body of an object too large to batch, read here while no task
-    /// runs, since a read may re-scan the pack directories.
+    /// runs, since a read may re-scan the pack directories. One written
+    /// streamed is read as it is written.
     fn readAlone(b: *Build, io: Io, batch: *PackBatch) Error!void {
+        if (b.streamed(batch.start)) return;
         const p = &batch.pending.items[0];
         if (b.reusedAt(batch.start)) |r| {
             p.stored = try b.gpa.alloc(u8, r.stored.len);
@@ -4642,7 +4795,7 @@ const Build = struct {
     fn searchPart(b: *const Build, gpa: Allocator, batch: *PackBatch, part: *Part) Error!void {
         const raw_len = b.odb.backendData().kind.rawLen();
         for (part.start..part.end) |pos| {
-            if (b.reusedAt(pos) != null) continue;
+            if (b.reusedAt(pos) != null or b.streamed(pos)) continue;
             const p = &batch.pending.items[pos - batch.start];
             p.choice = try part.window.choose(gpa, b.options, b.depthFor(pos), raw_len, .{ .pos = pos, .oid = b.ordered[pos].oid }, p.type, p.bytes.?, true);
         }
@@ -4798,6 +4951,10 @@ const Build = struct {
     /// A batch's entries, in pack order.
     fn writeBatch(b: *Build, io: Io, batch: *PackBatch) Error!void {
         for (batch.pending.items, batch.start..) |*p, pos| {
+            if (b.streamed(pos)) {
+                try b.writeStreamed(io, pos);
+                continue;
+            }
             if (p.stored.len != 0) {
                 if (b.reusedAt(pos)) |r| {
                     try b.writeReused(pos, r, p.stored);
@@ -4948,6 +5105,8 @@ const Stored = struct {
     len: usize,
     /// Where in the entry its zlib stream begins.
     data_from: usize,
+    /// How long what the entry holds is inflated: the object, or the delta.
+    size: u64,
     /// The entry's CRC, from the pack's index.
     crc: u32,
 
@@ -4955,6 +5114,29 @@ const Stored = struct {
     fn read(st: Stored, io: Io, out: []u8) Error!void {
         try st.pack.readStored(io, st.entry_at, out);
         if (warp.Crc32.hash(out) != st.crc) return error.CorruptPackEntry;
+    }
+
+    /// The entry's zlib stream added to `w` as `payload`, copied in blocks
+    /// and never held, its CRC checked as the bytes go: a mismatch is found
+    /// once they are written, and fails the pack. Returns where the entry
+    /// begins in `w`.
+    fn copy(st: Stored, io: Io, w: *pack.Writer, oid: Oid, payload: pack.Writer.Payload) Error!u64 {
+        var buffer: [64 * 1024]u8 = undefined;
+        var at = try st.pack.readerAt(io, st.entry_at, &buffer);
+        // No buffer of its own, so it reads, and sums, exactly what is
+        // taken from it: the entry and nothing past it.
+        var summed = at.reader().hashed(warp.Crc32.init, &.{});
+        summed.reader.discardAll(st.data_from) catch |err| return switch (err) {
+            error.ReadFailed => at.err() orelse error.ReadFailed,
+            error.EndOfStream => error.TruncatedPack,
+        };
+        const offset = w.addDeflatedFrom(&summed.reader, .{ .oid = oid, .payload = payload, .payload_len = st.size, .deflated_len = st.len - st.data_from }) catch |err| return switch (err) {
+            error.ReadFailed => at.err() orelse error.ReadFailed,
+            error.ShortRead => error.TruncatedPack,
+            else => |e| e,
+        };
+        if (summed.hasher.final() != st.crc) return error.CorruptPackEntry;
+        return offset;
     }
 };
 
@@ -6183,8 +6365,10 @@ fn sameObjectFile(io: Io, dir: Io.Dir, a: []const u8, b: []const u8) Error!enum 
     var reader_a = first.reader(io, &.{});
     var reader_b = second.reader(io, &.{});
     while (true) {
-        const n_a = try reader_a.interface.readSliceShort(&buf_a);
-        const n_b = try reader_b.interface.readSliceShort(&buf_b);
+        // A read's failure is the file reader's to name: a directory in
+        // the object's place is `error.IsDir`.
+        const n_a = reader_a.interface.readSliceShort(&buf_a) catch return reader_a.err orelse error.ReadFailed;
+        const n_b = reader_b.interface.readSliceShort(&buf_b) catch return reader_b.err orelse error.ReadFailed;
         if (n_a != n_b or !std.mem.eql(u8, buf_a[0..n_a], buf_b[0..n_b])) return .differs;
         if (n_a < buf_a.len) return .same;
     }

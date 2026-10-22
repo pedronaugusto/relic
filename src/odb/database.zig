@@ -19,6 +19,7 @@ pub const Database = struct {
     read_fn: *const fn (Io, *anyopaque, hash.Oid) policy.Error!Read,
     header_fn: *const fn (Io, *anyopaque, hash.Oid) policy.Error!object.Header,
     exists_fn: *const fn (Io, *anyopaque, hash.Oid) policy.Error!bool,
+    same_fn: *const fn (Io, *anyopaque, hash.Oid, *Io.Reader, u64) policy.Error!bool,
 
     pub fn from(db: anytype) Database {
         const T = @TypeOf(db);
@@ -36,6 +37,27 @@ pub const Database = struct {
                 const owner: T = @ptrCast(@alignCast(raw)); // safe: from stores the adapted owner, whose type is T
                 return owner.exists(io, oid);
             }
+            fn same(io: Io, raw: *anyopaque, oid: hash.Oid, ours: *Io.Reader, size: u64) policy.Error!bool {
+                const owner: T = @ptrCast(@alignCast(raw)); // safe: from stores the adapted owner, whose type is T
+                const theirs = try owner.stream(io, oid);
+                defer theirs.close(io);
+                if (theirs.size != size) return false;
+                var held: [16 * 1024]u8 = undefined;
+                var given: [16 * 1024]u8 = undefined;
+                var left = size;
+                while (left != 0) {
+                    const n: usize = @intCast(@min(@as(u64, held.len), left));
+                    theirs.reader().readSliceAll(held[0..n]) catch |err| return switch (err) {
+                        error.ReadFailed => theirs.err() orelse error.ReadFailed,
+                        error.EndOfStream => error.CorruptLooseObject,
+                    };
+                    // The caller's reader failing is the caller's to name.
+                    ours.readSliceAll(given[0..n]) catch return error.ReadFailed;
+                    if (!std.mem.eql(u8, held[0..n], given[0..n])) return false;
+                    left -= n;
+                }
+                return true;
+            }
         };
         return .{
             .context = db,
@@ -46,6 +68,7 @@ pub const Database = struct {
             .read_fn = Adapter.read,
             .header_fn = Adapter.header,
             .exists_fn = Adapter.exists,
+            .same_fn = Adapter.same,
         };
     }
 
@@ -67,6 +90,14 @@ pub const Database = struct {
 
     pub fn exists(db: Database, io: Io, oid: hash.Oid) policy.Error!bool {
         return db.exists_fn(io, db.context, oid);
+    }
+
+    /// Whether the object named `oid` is exactly the `size` bytes `ours`
+    /// gives, both read as they come and neither held: an object past
+    /// `big_file_bytes`. A failure of `ours` is `error.ReadFailed`, for the
+    /// caller to name from its own reader.
+    pub fn same(db: Database, io: Io, oid: hash.Oid, ours: *Io.Reader, size: u64) policy.Error!bool {
+        return db.same_fn(io, db.context, oid, ours, size);
     }
 };
 

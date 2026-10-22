@@ -879,7 +879,7 @@ test "verifying a database checks its packs' entries on several tasks" {
     defer gpa.free(base);
     var p = try pack_mod.Pack.open(gpa, io, pack_dir, .{ .base = base, .kind = .sha1 }, .{});
     defer p.deinit(io);
-    const serial = try p.verify(Tasks.wrap(io), null, 0);
+    const serial = try p.verify(Tasks.wrap(io), .{});
     try Tasks.expect(0, 0);
     var single: Io.Threaded = .init_single_threaded;
     for ([_]Io{ io, single.io() }) |each_io| {

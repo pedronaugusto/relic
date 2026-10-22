@@ -1040,7 +1040,10 @@ const Indexer = struct {
             const header = try x.db.readHeader(x.io, entry.oid);
             const sized = entry.kind != .whole or header.size == entry.size;
             if (header.type != entry.type or !sized) return x.fail(error.HashCollision, .{ .oid = entry.oid, .offset = entry.offset });
-            if (x.tooLarge(header.size)) continue;
+            if (entry.kind == .whole and (x.tooLarge(header.size) or header.size > x.db.big_file_bytes)) {
+                if (!try x.sameStreamed(entry)) return x.fail(error.HashCollision, .{ .oid = entry.oid, .offset = entry.offset });
+                continue;
+            }
             if (w == null) {
                 w = try .init(x);
                 try by_name.ensureTotalCapacity(x.gpa, @intCast(x.entries.items.len));
@@ -1052,6 +1055,29 @@ const Indexer = struct {
             defer x.db.allocator().free(theirs.bytes);
             if (!std.mem.eql(u8, ours, theirs.bytes)) return x.fail(error.HashCollision, .{ .oid = entry.oid, .offset = entry.offset });
         }
+    }
+
+    /// Whether the whole entry `entry` holds what the database holds under
+    /// its name, both inflated as they are read and neither held, as git's
+    /// `check_collision` compares an object past the threshold.
+    fn sameStreamed(x: *Indexer, entry: Entry) Error!bool {
+        const buffer = try x.gpa.alloc(u8, 64 * 1024);
+        defer x.gpa.free(buffer);
+        const window = try x.gpa.alloc(u8, (1 << 15) + 4096);
+        defer x.gpa.free(window);
+        var file_reader = x.file.reader(x.io, buffer);
+        file_reader.seekTo(entry.data_at) catch |err| return switch (err) {
+            error.ReadFailed => file_reader.err orelse error.ReadFailed,
+            else => error.TruncatedPack,
+        };
+        var inflating: warp.Inflate.Reader = .init(&file_reader.interface, window, .{});
+        return x.db.same(x.io, entry.oid, &inflating.interface, entry.size) catch |err| switch (err) {
+            error.ReadFailed => if (file_reader.err) |e| e else if (inflating.err()) |e| switch (e) {
+                error.Truncated => error.TruncatedPack,
+                else => error.CorruptPackEntry,
+            } else error.CorruptPackEntry,
+            else => |e| e,
+        };
     }
 
     /// The whole object entry `at` holds, read back from the pack: a
@@ -2620,7 +2646,7 @@ fn fuzzReceive(_: void, case: *shakedown.Case) anyerror!void {
     const base = try std.mem.print(&base_buf, "pack-{s}", .{name.hex(&hex)});
     var p = try pack.Pack.open(gpa, io, pack_dir, .{ .base = base, .kind = .sha1 }, .{});
     defer p.deinit(io);
-    const checked = try p.verify(io, null, 0);
+    const checked = try p.verify(io, .{});
     if (checked.objects != result.objects) return error.PackDidNotVerify;
 }
 
