@@ -16,6 +16,7 @@ const Self = @This();
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
+const shakedown = @import("shakedown");
 
 const hash = @import("../hash/hash.zig");
 const refs_mod = @import("../refs/refs.zig");
@@ -183,10 +184,6 @@ test "a gitlink's refs are read in the format its own configuration names, whate
 
 test "a gitlink's format refusals are no commit, and its filesystem refusals are errors" {
     const Probe = struct {
-        var failure: Io.File.OpenError = error.AccessDenied;
-        fn openFile(_: ?*anyopaque, _: Io.Dir, _: []const u8, _: Io.Dir.OpenFileOptions) Io.File.OpenError!Io.File {
-            return failure;
-        }
         fn store(g: *const GitDir, io: Io) !void {
             var refs = try g.refStore(std.testing.allocator, io);
             defer refs.deinit();
@@ -194,17 +191,17 @@ test "a gitlink's format refusals are no commit, and its filesystem refusals are
     };
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var vtable = Io.failing.vtable.*;
-    vtable.dirOpenFile = Probe.openFile;
-    const io: Io = .{ .userdata = null, .vtable = &vtable };
+    // Every open refused, and every other call failing.
+    const faults = try shakedown.FaultIo.init(std.testing.allocator, Io.failing, .{});
+    defer faults.deinit();
+    const io = faults.io();
     const g: GitDir = .{ .git_dir = tmp.dir, .common_dir = tmp.dir, .common_is_separate = false, .via_file = false };
-    for ([_]Io.File.OpenError{ error.AccessDenied, error.Canceled }) |err| {
-        Probe.failure = err;
-        try std.testing.expectError(err, Probe.store(&g, io));
+    for ([_]Io.File.OpenError{ error.AccessDenied, error.Canceled, error.FileNotFound }) |err| {
+        const plan = [_]shakedown.IoPlan.Entry{.{ .at = .{ .nth = .{ .call = .dirOpenFile, .n = 1 } }, .fault = .{ .fail = err }, .times = 0 }};
+        try faults.setPlan(&plan);
+        // No configuration is a version 0 repository's.
+        if (err == error.FileNotFound) try Probe.store(&g, io) else try std.testing.expectError(err, Probe.store(&g, io));
     }
-    // No configuration is a version 0 repository's.
-    Probe.failure = error.FileNotFound;
-    try Probe.store(&g, io);
 
     const real = std.testing.io;
     try tmp.dir.writeFile(real, .{ .sub_path = "config", .data = "[core]\n\trepositoryformatversion = 1\n[extensions]\n\tunknown = yes\n" });

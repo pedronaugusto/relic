@@ -1115,17 +1115,19 @@ fn runJobs(state: *Run) Error!void {
 
 test "a transfer worker observes a fatal error under its publication lock" {
     const Controlled = struct {
-        const Self = @This();
-        held: aegis.BlockingGuarded(?Error).Guard,
-        waited: bool = false,
+        const Layer = shakedown.Layer(State, .{ .futexWaitUncancelable = wait, .futexWake = wake });
+        const State = struct {
+            held: aegis.BlockingGuarded(?Error).Guard,
+            waited: bool = false,
+        };
 
-        fn wait(raw: ?*anyopaque, _: *const u32, _: u32) void {
-            const state: *Self = @ptrCast(@alignCast(raw.?));
-            state.waited = true;
+        fn wait(userdata: ?*anyopaque, _: *const u32, _: u32) void {
+            const l = Layer.of(userdata);
+            l.state.waited = true;
             // Another worker already holds the lock, and publishes its
             // failure before handing it to this worker.
-            state.held.value().* = error.OutOfMemory;
-            state.held.deinit(std.testing.io);
+            l.state.held.value().* = error.OutOfMemory;
+            l.state.held.deinit(l.base);
         }
 
         fn wake(_: ?*anyopaque, _: *const u32, _: u32) void {}
@@ -1140,13 +1142,10 @@ test "a transfer worker observes a fatal error under its publication lock" {
         .arena = .init(std.testing.allocator),
         .jobs = &.{},
     };
-    var control: Controlled = .{ .held = state.fatal.tryAcquire().? };
-    var vtable = std.testing.io.vtable.*;
-    vtable.futexWaitUncancelable = Controlled.wait;
-    vtable.futexWake = Controlled.wake;
-    state.operation_io = .{ .userdata = &control, .vtable = &vtable };
+    var control: Controlled.Layer = .init(std.testing.io, .{ .held = state.fatal.tryAcquire().? });
+    state.operation_io = control.io();
     work(&state, 0);
-    try std.testing.expect(control.waited);
+    try std.testing.expect(control.state.waited);
     try std.testing.expectEqual(@as(usize, 0), state.next.load(.acquire));
     state.setFatal(error.Canceled);
     try std.testing.expectEqual(error.OutOfMemory, state.failure().?);

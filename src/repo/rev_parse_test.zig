@@ -287,23 +287,18 @@ test "revision parsing preserves allocation resource failures" {
 }
 
 test "revision parsing preserves I/O and cancellation resource failures" {
-    const Fault = struct {
-        threadlocal var failure: Io.File.ReadPositionalError = error.InputOutput;
-        fn read(_: ?*anyopaque, _: Io.File, _: []const []u8, _: u64) Io.File.ReadPositionalError!usize {
-            return failure;
-        }
-    };
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     var repo = try Repository.create(gpa, io, tmp.dir, .{ .default_branch = "main" });
     defer repo.deinit(io);
-    var vtable = io.vtable.*;
-    vtable.fileReadPositional = Fault.read;
-    const failing_io: Io = .{ .userdata = io.userdata, .vtable = &vtable };
+    const faults = try shakedown.FaultIo.init(gpa, io, .{});
+    defer faults.deinit();
+    const failing_io = faults.io();
     for ([_]Io.File.ReadPositionalError{ error.InputOutput, error.Canceled }) |failure| {
-        Fault.failure = failure;
+        const plan = [_]shakedown.IoPlan.Entry{.{ .at = .{ .nth = .{ .call = .fileReadPositional, .n = 1 } }, .fault = .{ .fail = failure }, .times = 0 }};
+        try faults.setPlan(&plan);
         try std.testing.expectError(failure, rev_parse.resolve(gpa, failing_io, repo.revisionSource(), "HEAD"));
         try std.testing.expectError(failure, rev_parse.resolve(gpa, failing_io, repo.revisionSource(), "@{0}"));
     }

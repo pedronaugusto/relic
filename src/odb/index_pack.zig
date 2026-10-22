@@ -1885,7 +1885,6 @@ test "a pack git wrote is received, and its index is byte for byte the one git w
 
     // git chooses the shape of the fixture above. Four independent bases
     // with one delta each give this test control over the task count.
-    const tasks = io_mod;
     var single: Io.Threaded = .init_single_threaded;
     const bases = [_][]const u8{ "base 0", "base 1", "base 2", "base 3" };
     const patch = try appendDelta(gpa, bases[0].len, "more\n");
@@ -1913,10 +1912,11 @@ test "a pack git wrote is received, and its index is byte for byte the one git w
                 var pack_dir = try tmp.dir.openDir(io, "objects/pack", .{ .iterate = true });
                 defer pack_dir.close(io);
                 var in: Io.Reader = .fixed(bytes);
-                const counted = if (executor == 0) tasks.wrap(each_io) else tasks.wrapInline(each_io);
+                var tasks: io_mod.Tasks = .init(each_io, .{ .inline_groups = executor != 0 });
+                const counted = tasks.io();
                 const result = try receive(gpa, counted, &repo, .{ .pack_dir = pack_dir, .in = &in }, .{ .threads = threads });
                 // The caller resolves too, and there are only four roots.
-                try tasks.expect(0, @min(threads, 4) - 1);
+                try tasks.state.expect(0, @min(threads, 4) - 1);
                 try testing.expectEqual(@as(u32, 8), result.objects);
                 try testing.expectEqual(@as(u32, 4), result.deltas);
                 try testing.expectEqual(@as(u32, 0), result.appended);
@@ -2444,61 +2444,67 @@ test "a pack added in front of an alternate's never reads that pack's cached del
 /// waits in a read. The calling task resolves too, and could take every
 /// object before another task starts: its read waits for one to park.
 const Park = struct {
-    var base: Io = undefined;
-    var caller: std.Thread.Id = undefined;
-    var armed: std.atomic.Value(bool) = .init(false);
-    var beside: std.atomic.Value(bool) = .init(false);
-    var on_caller: std.atomic.Value(bool) = .init(false);
-    var caller_parked: std.atomic.Value(bool) = .init(false);
-    var beside_canceled: std.atomic.Value(bool) = .init(false);
+    const Layer = shakedown.Layer(State, .{ .fileReadPositional = read });
+    const State = struct {
+        caller: std.Thread.Id = undefined,
+        armed: std.atomic.Value(bool) = .init(false),
+        beside: std.atomic.Value(bool) = .init(false),
+        on_caller: std.atomic.Value(bool) = .init(false),
+        caller_parked: std.atomic.Value(bool) = .init(false),
+        beside_canceled: std.atomic.Value(bool) = .init(false),
+    };
 
     fn read(userdata: ?*anyopaque, file: Io.File, data: []const []u8, offset: u64) Io.File.ReadPositionalError!usize {
-        if (armed.load(.acquire)) {
-            if (std.Thread.getCurrentId() != caller) {
+        const l = Layer.of(userdata);
+        const s = &l.state;
+        if (s.armed.load(.acquire)) {
+            if (std.Thread.getCurrentId() != s.caller) {
                 // Only the resolving tasks read on another thread.
-                if (beside.cmpxchgStrong(false, true, .acq_rel, .acquire) == null) {
-                    wait() catch |err| {
-                        beside_canceled.store(true, .release);
+                if (s.beside.cmpxchgStrong(false, true, .acq_rel, .acquire) == null) {
+                    wait(l.base) catch |err| {
+                        s.beside_canceled.store(true, .release);
                         return err;
                     };
                     return error.Unexpected;
                 }
-            } else if (on_caller.cmpxchgStrong(false, true, .acq_rel, .acquire) == null) {
-                try waitBeside();
-                caller_parked.store(true, .release);
-                try wait();
+            } else if (s.on_caller.cmpxchgStrong(false, true, .acq_rel, .acquire) == null) {
+                try waitBeside(s, l.base);
+                s.caller_parked.store(true, .release);
+                try wait(l.base);
                 return error.Unexpected;
             }
         }
-        return base.vtable.fileReadPositional(userdata, file, data, offset);
+        return l.base.vtable.fileReadPositional(l.base.userdata, file, data, offset);
     }
 
     /// Until canceled, a short sleep at a time, since a sleep may also end
     /// early; twenty seconds is a hang, not a pass.
-    fn wait() Io.Cancelable!void {
+    fn wait(base: Io) Io.Cancelable!void {
         for (0..2000) |_| try base.sleep(.fromMilliseconds(10), .awake);
     }
 
     /// Until a task beside the calling one parks, or twenty seconds.
-    fn waitBeside() Io.Cancelable!void {
+    fn waitBeside(s: *State, base: Io) Io.Cancelable!void {
         for (0..20_000) |_| {
-            if (beside.load(.acquire)) return;
+            if (s.beside.load(.acquire)) return;
             try base.sleep(.fromMilliseconds(1), .awake);
         }
     }
 
     fn receiveOn(gpa: Allocator, io: Io, db: *odb_mod.Odb, pack_dir: Io.Dir, bytes: []const u8) Error!Result {
-        caller = std.Thread.getCurrentId();
-        defer armed.store(false, .release);
+        const s = &Layer.of(io.userdata).state;
+        s.caller = std.Thread.getCurrentId();
+        defer s.armed.store(false, .release);
         var in: Io.Reader = .fixed(bytes);
-        return receive(gpa, io, db, .{ .pack_dir = pack_dir, .in = &in }, .{ .threads = 3, .progress = .{ .report = arm } });
+        return receive(gpa, io, db, .{ .pack_dir = pack_dir, .in = &in }, .{ .threads = 3, .progress = .{ .context = s, .report = arm } });
     }
 
     /// Armed once every entry is indexed, so that what parks is a read
     /// resolving deltas, not one of the stream's.
-    fn arm(_: ?*anyopaque, event: progress_mod.Event) void {
+    fn arm(context: ?*anyopaque, event: progress_mod.Event) void {
+        const s: *State = @ptrCast(@alignCast(context.?)); // safe: receiveOn hands its layer's state as the context
         switch (event) {
-            .indexed => |n| if (n.done == n.total) armed.store(true, .release),
+            .indexed => |n| if (n.done == n.total) s.armed.store(true, .release),
             else => {},
         }
     }
@@ -2511,7 +2517,6 @@ test "a receive canceled while it resolves stops every resolving task, even one 
     var threaded: Io.Threaded = .init(gpa, .{ .async_limit = .limited(2) });
     defer threaded.deinit();
     const io = threaded.io();
-    Park.base = io;
     var tmp = testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     var repo = try emptyDatabase(gpa, io, tmp.dir);
@@ -2541,28 +2546,22 @@ test "a receive canceled while it resolves stops every resolving task, even one 
     const bytes = try buildPack(gpa, .sha1, &entries);
     defer gpa.free(bytes);
 
-    var vtable = io.vtable.*;
-    vtable.fileReadPositional = Park.read;
-    const parked: Io = .{ .userdata = io.userdata, .vtable = &vtable };
-
-    Park.beside.store(false, .release);
-    Park.on_caller.store(false, .release);
-    Park.caller_parked.store(false, .release);
-    Park.beside_canceled.store(false, .release);
-    var future = try io.concurrent(Park.receiveOn, .{ gpa, parked, &repo, pack_dir, bytes });
+    var park: Park.Layer = .init(io, .{});
+    const s = &park.state;
+    var future = try io.concurrent(Park.receiveOn, .{ gpa, park.io(), &repo, pack_dir, bytes });
     for (0..20_000) |_| {
-        if (Park.caller_parked.load(.acquire)) break;
+        if (s.caller_parked.load(.acquire)) break;
         try io.sleep(.fromMilliseconds(1), .awake);
     } else {
         // glint-ignore: Z026 -- the test fails next; a task that will not cancel is reported by the leak check
         _ = future.cancel(io) catch {};
-        std.debug.print("the calling task did not park after another (beside: {}, caller read: {})\n", .{ Park.beside.load(.acquire), Park.on_caller.load(.acquire) });
+        std.debug.print("the calling task did not park after another (beside: {}, caller read: {})\n", .{ s.beside.load(.acquire), s.on_caller.load(.acquire) });
         return error.TestUnexpectedResult;
     }
     const started = Io.Clock.awake.now(io);
     try testing.expectError(error.Canceled, future.cancel(io));
     // The task that waited was canceled too, rather than left to its wait.
-    if (!Park.beside_canceled.load(.acquire)) {
+    if (!s.beside_canceled.load(.acquire)) {
         const waited = started.durationTo(Io.Clock.awake.now(io));
         std.debug.print("the task waiting in a read was left to its wait: the cancel took {d} ms\n", .{waited.toMilliseconds()});
         return error.TestUnexpectedResult;

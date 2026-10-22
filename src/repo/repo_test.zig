@@ -1121,56 +1121,28 @@ test "a malformed signing policy is refused before an unsigned object is written
 }
 
 test "discovery closes its git directory when the worktree handle cannot be opened" {
+    // The second directory opened is refused; the first is the one closed.
     const Recorder = struct {
-        const Self = @This();
+        const Layer = shakedown.Layer(State, .{ .dirOpenDir = openDir, .dirClose = close });
+        const State = struct { opened: ?Io.Dir = null, closed: usize = 0 };
 
-        opened: ?Io.Dir = null,
-        closed: usize = 0,
-
-        fn openDir(context: ?*anyopaque, dir: Io.Dir, path: []const u8, options: Io.Dir.OpenOptions) Io.Dir.OpenError!Io.Dir {
-            const r: *Self = @ptrCast(@alignCast(context.?));
-            if (r.opened != null) return error.ProcessFdQuotaExceeded;
-            const opened = try dir.openDir(std.testing.io, path, options);
-            r.opened = opened;
+        fn openDir(userdata: ?*anyopaque, dir: Io.Dir, path: []const u8, options: Io.Dir.OpenOptions) Io.Dir.OpenError!Io.Dir {
+            const l = Layer.of(userdata);
+            if (l.state.opened != null) return error.ProcessFdQuotaExceeded;
+            const opened = try dir.openDir(l.base, path, options);
+            l.state.opened = opened;
             return opened;
         }
 
-        fn close(context: ?*anyopaque, dirs: []const Io.Dir) void {
-            const r: *Self = @ptrCast(@alignCast(context.?));
+        fn close(userdata: ?*anyopaque, dirs: []const Io.Dir) void {
+            const l = Layer.of(userdata);
             for (dirs) |dir| {
-                std.debug.assert(dir.handle == r.opened.?.handle);
-                dir.close(std.testing.io);
-                r.opened = null;
-                r.closed += 1;
+                std.debug.assert(dir.handle == l.state.opened.?.handle);
+                dir.close(l.base);
+                l.state.opened = null;
+                l.state.closed += 1;
             }
         }
-
-        // What discovery asks to tell a git directory from another.
-        fn statFile(_: ?*anyopaque, dir: Io.Dir, path: []const u8, options: Io.Dir.StatFileOptions) Io.Dir.StatFileError!Io.File.Stat {
-            return dir.statFile(std.testing.io, path, options);
-        }
-
-        fn access(_: ?*anyopaque, dir: Io.Dir, path: []const u8, options: Io.Dir.AccessOptions) Io.Dir.AccessError!void {
-            return dir.access(std.testing.io, path, options);
-        }
-        // And what reads `HEAD` to see that it names a ref or an object.
-        fn readLink(_: ?*anyopaque, dir: Io.Dir, path: []const u8, buffer: []u8) Io.Dir.ReadLinkError!usize {
-            return dir.readLink(std.testing.io, path, buffer);
-        }
-        fn openFile(_: ?*anyopaque, dir: Io.Dir, path: []const u8, options: Io.Dir.OpenFileOptions) Io.File.OpenError!Io.File {
-            return dir.openFile(std.testing.io, path, options);
-        }
-        fn readPositional(_: ?*anyopaque, file: Io.File, data: []const []u8, offset: u64) Io.File.ReadPositionalError!usize {
-            return std.testing.io.vtable.fileReadPositional(std.testing.io.userdata, file, data, offset);
-        }
-        fn fileStat(_: ?*anyopaque, file: Io.File) Io.File.StatError!Io.File.Stat {
-            return file.stat(std.testing.io);
-        }
-        fn closeFiles(_: ?*anyopaque, files: []const Io.File) void {
-            for (files) |file| file.close(std.testing.io);
-        }
-        // airlock's raw calls ask for a cancel before each try.
-        fn checkCancel(_: ?*anyopaque) Io.Cancelable!void {}
     };
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -1178,23 +1150,11 @@ test "discovery closes its git directory when the worktree handle cannot be open
     try tmp.dir.createDirPath(io, ".git/objects");
     try tmp.dir.createDirPath(io, ".git/refs");
     try tmp.dir.writeFile(io, .{ .sub_path = ".git/HEAD", .data = "ref: refs/heads/main\n" });
-    var recorder: Recorder = .{};
+    var recorder: Recorder.Layer = .init(io, .{});
     // Clean up even while this test is proving an unfixed leak.
-    defer if (recorder.opened) |dir| dir.close(io);
-    var vtable = Io.failing.vtable.*;
-    vtable.dirOpenDir = Recorder.openDir;
-    vtable.dirClose = Recorder.close;
-    vtable.dirStatFile = Recorder.statFile;
-    vtable.dirAccess = Recorder.access;
-    vtable.dirReadLink = Recorder.readLink;
-    vtable.dirOpenFile = Recorder.openFile;
-    vtable.fileReadPositional = Recorder.readPositional;
-    vtable.fileStat = Recorder.fileStat;
-    vtable.fileClose = Recorder.closeFiles;
-    vtable.checkCancel = Recorder.checkCancel;
-    const tracked: Io = .{ .userdata = &recorder, .vtable = &vtable };
-    try std.testing.expectError(error.ProcessFdQuotaExceeded, repo_mod.Repository.open(std.testing.allocator, tracked, tmp.dir, .{ .discover = false }));
-    try std.testing.expectEqual(@as(usize, 1), recorder.closed);
+    defer if (recorder.state.opened) |dir| dir.close(io);
+    try std.testing.expectError(error.ProcessFdQuotaExceeded, repo_mod.Repository.open(std.testing.allocator, recorder.io(), tmp.dir, .{ .discover = false }));
+    try std.testing.expectEqual(@as(usize, 1), recorder.state.closed);
 }
 
 test "a commondir that cannot be opened is not replaced by the worktree directory" {
