@@ -2617,3 +2617,63 @@ test "a push goes into the submodules as git's transport_push does: check refuse
         }
     }
 }
+
+test "a push to a remote group pushes each of its remotes in turn, as git 2.55's push_multiple does, and refuses --atomic across them" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var env = try testremote.environ(gpa);
+    defer env.deinit();
+    var root = testing.tmpDir(.{ .iterate = true });
+    defer root.cleanup();
+    const root_path = try testremote.absolutePath(gpa, io, root.dir);
+    defer gpa.free(root_path);
+    var source = try testremote.historyRepo(gpa, io, 3);
+    defer source.deinit();
+    // Two clones of the same history, one pushed from by git and one by
+    // relic, each to bare repositories of its own: `a` behind by one,
+    // `b` empty, and the group listing `a`, `b` and `a` again.
+    for ([_][]const u8{ "git", "relic" }) |who| {
+        const clone_path = try gpa.print("{s}/{s}", .{ root_path, who });
+        defer gpa.free(clone_path);
+        const source_path = try testremote.absolutePath(gpa, io, source.dir);
+        defer gpa.free(source_path);
+        try source.exec(io, &.{ "clone", "-q", source_path, clone_path });
+        for ([_][]const u8{ "a", "b" }) |name| {
+            const bare = try gpa.print("{s}/{s}-{s}.git", .{ root_path, who, name });
+            defer gpa.free(bare);
+            try source.exec(io, &.{ "init", "-q", "--bare", bare });
+            if (name[0] == 'a') try source.exec(io, &.{ "push", "-q", bare, "HEAD~1:refs/heads/main" });
+            try source.exec(io, &.{ "-C", clone_path, "remote", "add", name, bare });
+        }
+        try source.exec(io, &.{ "-C", clone_path, "config", "remotes.both", "a b a" });
+    }
+    var git_clone = try root.dir.openDir(io, "git", .{});
+    defer git_clone.close(io);
+    const out = try testremote.gitInputEnv(gpa, io, git_clone, &env, &.{ "push", "-q", "both", "main" }, "", true);
+    gpa.free(out);
+    try testing.expectError(error.GitFailed, testremote.gitInputEnv(gpa, io, git_clone, &env, &.{ "push", "-q", "--atomic", "both", "main" }, "", false));
+
+    var relic_clone = try root.dir.openDir(io, "relic", .{});
+    defer relic_clone.close(io);
+    var repo = try repo_mod.Repository.open(gpa, io, relic_clone, .{});
+    defer repo.deinit(io);
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const names = try push_mod.remotesToPush(arena_state.allocator(), repo.configuration(), "both");
+    try testing.expectEqual(@as(usize, 3), names.len);
+    var many = try push_mod.pushMany(gpa, io, &repo, names, .{ .who = test_who, .refspecs = &.{"main"}, .programs = .{ .environ = &env } });
+    defer many.deinit();
+    try testing.expect(!many.anyFailed());
+    try testing.expectError(error.AtomicAcrossRemotes, push_mod.pushMany(gpa, io, &repo, names, .{ .who = test_who, .refspecs = &.{"main"}, .atomic = true }));
+    for ([_][]const u8{ "a", "b" }) |name| {
+        var listed: [2][]u8 = undefined;
+        for ([_][]const u8{ "git", "relic" }, &listed) |who, *l| {
+            const bare = try gpa.print("{s}/{s}-{s}.git", .{ root_path, who, name });
+            defer gpa.free(bare);
+            l.* = try testremote.gitInput(gpa, io, root.dir, &.{ "--git-dir", bare, "for-each-ref", "--format=%(refname) %(objectname)" }, "");
+        }
+        defer for (listed) |l| gpa.free(l);
+        try testing.expect(listed[0].len != 0);
+        try testing.expectEqualStrings(listed[0], listed[1]);
+    }
+}

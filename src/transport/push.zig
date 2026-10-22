@@ -123,6 +123,9 @@ pub const Error = error{
     /// A refspec's source names no single ref in a submodule: git's "src
     /// refspec '<src>' must name a ref".
     SubmoduleRefspecUnmatched,
+    /// `atomic` across several remotes: git's "--atomic can only be used
+    /// when pushing to one remote".
+    AtomicAcrossRemotes,
 } || sub_changes.Error || signing.Error || config_mod.ValueError || BeforeSendError || transport.Error || remote_mod.Error || refs_mod.TransactionError || object_walk.Error || rev_walk.Error || branch_mod.Error || refs_mod.Store.ReadLogError;
 
 /// What a `pre-push` hook is shown: one line of its input.
@@ -383,6 +386,76 @@ pub fn push(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8, 
     }
     outcome.refs = results.items;
     return outcome;
+}
+
+/// git 2.55's remotes for `git push <name>`: those `remotes.<name>`
+/// lists, split at blanks, in order and as often as listed; else the
+/// name itself, a remote or a URL. `arena`'s.
+pub fn remotesToPush(arena: Allocator, config: *const config_mod.Config, name: []const u8) Allocator.Error![]const []const u8 {
+    var out: std.ArrayList([]const u8) = .empty;
+    var it = config.iterate(&.{try arena.print("remotes.{s}", .{name})});
+    while (it.next()) |entry| {
+        var words = std.mem.tokenizeAny(u8, entry.value orelse "", " \t\n");
+        while (words.next()) |word| try out.append(arena, word);
+    }
+    if (out.items.len == 0) try out.append(arena, name);
+    return out.items;
+}
+
+/// One remote's part of `pushMany`: what came of it, or why not.
+pub const Pushed = union(enum) {
+    pushed: Outcome,
+    failed: Self.Error,
+};
+
+/// What `pushMany` did, remote by remote, in the order given.
+pub const Many = struct {
+    pub const Error = Self.Error;
+
+    names: []const []const u8,
+    results: []Pushed,
+    gpa: Allocator,
+
+    pub fn deinit(m: *Many) void {
+        for (m.results) |*r| switch (r.*) {
+            .pushed => |*outcome| outcome.deinit(),
+            .failed => {},
+        };
+        m.gpa.free(m.results);
+        m.* = undefined;
+    }
+
+    /// Whether a remote's push failed or refused a ref: git's "could not
+    /// push to <name>" and its exit status.
+    pub fn anyFailed(m: *const Many) bool {
+        for (m.results) |r| switch (r) {
+            .pushed => |outcome| if (outcome.anyRejected()) return true,
+            .failed => return true,
+        };
+        return false;
+    }
+};
+
+/// git 2.55's `push_multiple`: each of `names` pushed in turn as `push`
+/// pushes it, a failure noted and the rest still pushed; `atomic` across
+/// more than one is `error.AtomicAcrossRemotes`.
+pub fn pushMany(gpa: Allocator, io: Io, repo: *Repository, names: []const []const u8, options: Options) Self.Error!Many {
+    if (options.atomic and names.len > 1) return error.AtomicAcrossRemotes;
+    const results = try gpa.alloc(Pushed, names.len);
+    errdefer gpa.free(results);
+    for (names, 0..) |name, i| {
+        results[i] = if (push(gpa, io, repo, name, options)) |outcome| .{ .pushed = outcome } else |err| switch (err) {
+            error.OutOfMemory, error.Canceled => |e| {
+                for (results[0..i]) |*done| switch (done.*) {
+                    .pushed => |*o| o.deinit(),
+                    .failed => {},
+                };
+                return e;
+            },
+            else => .{ .failed = err },
+        };
+    }
+    return .{ .names = names, .results = results, .gpa = gpa };
 }
 
 /// One push URL's part of a push.
