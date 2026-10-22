@@ -171,8 +171,7 @@ const Fixture = struct {
         for (&helpers, [_][]const u8{ "first", "second" }) |*path, name| path.* = try standIn(gpa, io, tmp.dir, name, "credential-person");
         const askpass = try standIn(gpa, io, tmp.dir, "askpass", "askpass");
         try env.put("GIT_ASKPASS", askpass);
-        // A directory with no repository above it.
-        try env.put("GIT_CEILING_DIRECTORIES", home);
+        try testgit.noRepositoryAbove(&env, home);
         return .{ .gpa = gpa, .tmp = tmp, .home = home, .env = env, .helpers = helpers, .askpass = askpass };
     }
 
