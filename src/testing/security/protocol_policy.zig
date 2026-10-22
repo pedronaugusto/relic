@@ -11,7 +11,7 @@ const Io = std.Io;
 const policy = @import("../../wire.zig").policy;
 const transport = @import("../../transport/transport.zig");
 const object = @import("../../object/object.zig");
-const sub_transport = @import("../../submodule/transport.zig");
+const clone_mod = @import("../../transport/clone.zig");
 const testgit = @import("../git.zig");
 const testremote = @import("../remote.zig");
 
@@ -71,7 +71,7 @@ test "CVE-2015-7545, t5815-submodule-protos: a .gitmodules URL is not the person
     for ([_][]const u8{ "ext::sh -c touch% pwned", source_path }) |url| {
         var tmp = std.testing.tmpDir(.{ .iterate = true });
         defer tmp.cleanup();
-        var t = sub_transport.Transport.init(.{ .who = who, .programs = .{ .environ = &env } });
+        var t = clone_mod.SubmoduleTransport.init(.{ .who = who, .programs = .{ .environ = &env } });
         defer t.deinit();
         const seam = t.transport();
         try std.testing.expectError(error.TransportFailed, seam.cloneFn(gpa, io, seam.context, url, tmp.dir));

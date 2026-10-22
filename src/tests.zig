@@ -273,7 +273,6 @@ test {
     _ = @import("pretty/shortlog.zig");
     _ = @import("discover/gitlink.zig");
     _ = @import("config/gitmodules.zig");
-    _ = @import("submodule/transport.zig");
     _ = @import("transport/bundle.zig");
     _ = @import("wire/connection.zig");
     _ = @import("wire/fetch_pack.zig");

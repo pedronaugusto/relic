@@ -1,6 +1,5 @@
 //! Public submodule namespace. Implementation is in `submodule/submodule.zig`.
 
-pub const transport = @import("submodule/transport.zig");
 pub const gitmodules = @import("config/gitmodules.zig");
 pub const gitlink = @import("discover.zig").gitlink;
 pub const max_depth = @import("submodule/submodule.zig").max_depth;

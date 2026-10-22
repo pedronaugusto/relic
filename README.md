@@ -721,7 +721,6 @@ writes beside them, and `relic.refs.reftable.table` is the table format.
 | `transport.remote_helper` | `Helper`, `Spec`, `allowed` — `git-remote-<name>` run as git runs it: capabilities, options, `list`, `connect`, `fetch`, `import` (through `fast.importer`, `bidi-import` answered), `push`, `export` (through `fast.exporter`, with the helper's marks), private refs by its `refspec`. |
 | `transport.policy` | Module within `transport`. |
 | `submodule` | Public concern. |
-| `submodule.transport` | Module within `submodule`. |
 | `submodule.gitmodules` | Module within `submodule`. |
 | `submodule.gitlink` | Module within `submodule`. |
 | `lfs` | LFS without git-lfs: pointers and the store. |

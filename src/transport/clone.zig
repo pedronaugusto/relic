@@ -61,6 +61,8 @@ const fsck = @import("../object/fsck.zig");
 const promisors = @import("../wire.zig").promisors;
 const odb_mod = @import("../odb/odb.zig");
 const ref_names = @import("../names.zig").ref;
+const fetch_mod = @import("fetch.zig");
+const submodule = @import("../submodule/submodule.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -997,6 +999,128 @@ fn absolutePathAsGit(arena: Allocator, io: Io, path: []const u8) ![]const u8 {
     return std.mem.concat(arena, u8, &.{ cwd, sep, path });
 }
 
+/// What every clone and fetch a `SubmoduleTransport` makes is made with.
+pub const SubmoduleOptions = struct {
+    /// Who the reflog entries are written as, and when.
+    who: object.Signature,
+    /// The permission to run `ssh` and credential helpers.
+    programs: ?program.Programs = null,
+    /// The person's configuration, for `core.sshCommand`, `http.*` and the
+    /// credential helpers, which a new submodule repository does not yet
+    /// have: see `user_config.locate`.
+    config: ?*const config_mod.Config = null,
+    prompt: ?credential.Prompt = null,
+    progress: ?progress_mod.Progress = null,
+    /// Whether received objects are checked as git's `index-pack --strict`
+    /// checks them: `null` takes `fetch.fsckObjects` or
+    /// `transfer.fsckObjects`; see `fetch.Options.check_objects`.
+    check_objects: ?bool = null,
+};
+
+/// Where a submodule's repository and its missing commits come from: relic's
+/// own clone and fetch, behind the seam `submodule.update` leaves for them.
+///
+/// What git's `submodule update` runs, this does in process. A submodule
+/// with no repository is cloned into `modules/<name>` as `git clone
+/// --no-checkout --separate-git-dir` clones it — its remote `origin` with
+/// its remote-tracking branches, `HEAD` on the remote's branch, refs
+/// logged, nothing checked out — and `update` connects the working tree
+/// and checks the recorded commit out. A recorded commit the repository
+/// lacks is fetched the way git fetches it: a plain fetch of the default
+/// remote first, and when the commit is still not there, the commit asked
+/// for by name. A relative URL has been resolved against the
+/// superproject's remote by the time it arrives here.
+///
+/// `submodule.Transport` says only that it failed; the error behind it is
+/// kept in `failure`, and a refused credential is described in
+/// `auth_failure`, for the caller's message.
+pub const SubmoduleTransport = struct {
+    pub const Error = ErrorNamespace.Error || fetch_mod.Error || odb_mod.Error;
+    options: SubmoduleOptions,
+    /// The error behind the last `error.TransportFailed`.
+    failure: ?SubmoduleTransport.Error = null,
+    /// The last refusal of a credential, described.
+    auth_failure: auth.Failure = .{},
+    /// How many repositories were cloned and how many fetches made.
+    clones: u32 = 0,
+    fetches: u32 = 0,
+
+    /// A transport making every clone and fetch with `options`.
+    pub fn init(options: SubmoduleOptions) SubmoduleTransport {
+        return .{ .options = options };
+    }
+
+    /// Release the failure's description.
+    pub fn deinit(t: *SubmoduleTransport) void {
+        t.auth_failure.deinit();
+        t.* = undefined;
+    }
+
+    /// The seam `submodule.UpdateOptions.transport` takes. `t` must
+    /// outlive the update.
+    pub fn transport(t: *SubmoduleTransport) submodule.Transport {
+        return .{ .context = t, .cloneFn = cloneFn, .fetchFn = fetchFn };
+    }
+
+    fn failed(t: *SubmoduleTransport, err: SubmoduleTransport.Error) submodule.TransportError {
+        return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.Canceled => error.Canceled,
+            else => {
+                t.failure = err;
+                return error.TransportFailed;
+            },
+        };
+    }
+
+    fn cloneFn(gpa: Allocator, io: Io, context: *anyopaque, url: []const u8, git_dir: Io.Dir) submodule.TransportError!void {
+        const t: *SubmoduleTransport = @ptrCast(@alignCast(context)); // safe: the context handed out with this function is a SubmoduleTransport
+        const o = t.options;
+        var repo = clone(gpa, io, url, git_dir, .{
+            .separate_git_dir = true,
+            .who = o.who,
+            .programs = o.programs,
+            .config = o.config,
+            .prompt = o.prompt,
+            .auth_failure = &t.auth_failure,
+            .progress = o.progress,
+            .check_objects = o.check_objects,
+            // A `.gitmodules` names this URL, not the person, as git's
+            // `GIT_PROTOCOL_FROM_USER=0` says for a submodule.
+            .from_user = false,
+        }) catch |err| return t.failed(err);
+        repo.deinit(io);
+        t.clones += 1;
+    }
+
+    fn fetchFn(gpa: Allocator, io: Io, context: *anyopaque, repo: *Repository, remote: []const u8, want: Oid) submodule.TransportError!void {
+        const t: *SubmoduleTransport = @ptrCast(@alignCast(context)); // safe: the context handed out with this function is a SubmoduleTransport
+        t.fetchOnce(gpa, io, repo, remote, &.{}) catch |err| return t.failed(err);
+        repo.objectDatabase().refresh(io) catch |err| return t.failed(err);
+        if (repo.objectDatabase().exists(io, want) catch |err| return t.failed(err)) return;
+        // Not on any branch the remote advertises: asked for by name, as
+        // git's `fetch <remote> <commit>` asks.
+        var hex: [hash.max_hex_len]u8 = undefined;
+        t.fetchOnce(gpa, io, repo, remote, &.{want.hex(&hex)}) catch |err| return t.failed(err);
+    }
+
+    fn fetchOnce(t: *SubmoduleTransport, gpa: Allocator, io: Io, repo: *Repository, remote: []const u8, refspecs: []const []const u8) SubmoduleTransport.Error!void {
+        const o = t.options;
+        var outcome = try fetch_mod.fetch(gpa, io, repo, remote, .{
+            .refspecs = refspecs,
+            .who = o.who,
+            .programs = o.programs,
+            .prompt = o.prompt,
+            .auth_failure = &t.auth_failure,
+            .progress = o.progress,
+            .check_objects = o.check_objects,
+            .from_user = false,
+        });
+        outcome.deinit();
+        t.fetches += 1;
+    }
+};
+
 const testing = std.testing;
 const testgit = @import("../testing/git.zig");
 const testremote = @import("../testing/remote.zig");
@@ -1473,4 +1597,181 @@ test "a clone takes init.defaultBranch for an empty remote that names no branch,
         defer gpa.free(head);
         try testing.expectEqualStrings(if (version[0] == '0') "refs/heads/stem\n" else "refs/heads/trunk\n", head);
     }
+}
+
+/// Run git in `dir` with the suite's settings, `protocol.file.allow`
+/// among them.
+fn gitIn(gpa: Allocator, io: Io, dir: Io.Dir, args: []const []const u8) !void {
+    const out = try testremote.gitInput(gpa, io, dir, args, "");
+    gpa.free(out);
+}
+
+/// What git and relic are compared on: each submodule repository's refs,
+/// remote and working-tree setting, and the superproject's view of them.
+fn expectSameSubmodules(gpa: Allocator, io: Io, by_git: Io.Dir, by_relic: Io.Dir) !void {
+    for ([_][]const u8{ ".git/modules/lib", ".git/modules/lib/modules/inner" }) |git_dir| {
+        for ([_][]const []const u8{
+            &.{ "--git-dir", git_dir, "for-each-ref", "--format=%(refname) %(objectname) %(symref)" },
+            &.{ "--git-dir", git_dir, "rev-parse", "HEAD" },
+            &.{ "--git-dir", git_dir, "config", "--get-regexp", "^(remote|core\\.(bare|worktree)|branch)" },
+        }) |args| {
+            const theirs = testremote.gitInput(gpa, io, by_git, args, "") catch try gpa.dupe(u8, "(failed)");
+            defer gpa.free(theirs);
+            const ours = testremote.gitInput(gpa, io, by_relic, args, "") catch try gpa.dupe(u8, "(failed)");
+            defer gpa.free(ours);
+            try testing.expectEqualStrings(theirs, ours);
+        }
+    }
+    const theirs = try testremote.gitInput(gpa, io, by_git, &.{ "submodule", "status", "--recursive" }, "");
+    defer gpa.free(theirs);
+    const ours = try testremote.gitInput(gpa, io, by_relic, &.{ "submodule", "status", "--recursive" }, "");
+    defer gpa.free(ours);
+    try testing.expectEqualStrings(theirs, ours);
+    const status = try testremote.gitInput(gpa, io, by_relic, &.{ "status", "--porcelain" }, "");
+    defer gpa.free(status);
+    try testing.expectEqualStrings("", status);
+    for ([_][]const u8{ "lib", "lib/inner" }) |path| {
+        var sub = try by_relic.openDir(io, path, .{});
+        defer sub.close(io);
+        try gitIn(gpa, io, sub, &.{ "fsck", "--strict", "--no-dangling" });
+    }
+}
+
+test "submodules cloned and fetched from a remote are what git submodule update --init --recursive makes" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var root = testing.tmpDir(.{ .iterate = true });
+    defer root.cleanup();
+    const server = try testremote.HttpServer.start(gpa, io, root.dir, .{});
+    defer server.stop();
+    const root_path = try testremote.absolutePath(gpa, io, root.dir);
+    defer gpa.free(root_path);
+    var env = try testremote.environ(gpa);
+    defer env.deinit();
+
+    // Three repositories, each made in `work/<name>` and pushed to the bare
+    // one the server serves: `inner`; `lib`, holding `inner`; `super`,
+    // holding `lib`. The submodule URLs are relative, as a forge's are.
+    var work = try testgit.Repo.init(gpa, io, &.{});
+    defer work.deinit();
+    const names = [_][]const u8{ "inner", "lib", "super" };
+    for (names, 0..) |name, i| {
+        const bare = try gpa.print("{s}/{s}.git", .{ root_path, name });
+        defer gpa.free(bare);
+        try gitIn(gpa, io, work.dir, &.{ "init", "-q", "--bare", "-b", "main", bare });
+        try gitIn(gpa, io, work.dir, &.{ "--git-dir", bare, "config", "uploadpack.allowAnySHA1InWant", "true" });
+        try gitIn(gpa, io, work.dir, &.{ "init", "-q", "-b", "main", name });
+        var dir = try work.dir.openDir(io, name, .{});
+        defer dir.close(io);
+        const file = try gpa.print("{s}.git", .{name});
+        defer gpa.free(file);
+        const url = try server.url(gpa, file);
+        defer gpa.free(url);
+        try gitIn(gpa, io, dir, &.{ "remote", "add", "origin", url });
+        try dir.writeFile(io, .{ .sub_path = "README", .data = name });
+        try gitIn(gpa, io, dir, &.{ "add", "README" });
+        if (i > 0) {
+            const relative = try gpa.print("../{s}.git", .{names[i - 1]});
+            defer gpa.free(relative);
+            try gitIn(gpa, io, dir, &.{ "submodule", "add", "-q", relative, names[i - 1] });
+        }
+        try gitIn(gpa, io, dir, &.{ "commit", "-q", "-m", name });
+        try gitIn(gpa, io, dir, &.{ "push", "-q", bare, "main" });
+    }
+    const super_url = try server.url(gpa, "super.git");
+    defer gpa.free(super_url);
+    try gitIn(gpa, io, work.dir, &.{ "clone", "-q", super_url, "by-git" });
+    try gitIn(gpa, io, work.dir, &.{ "clone", "-q", super_url, "by-relic" });
+    var by_git = try work.dir.openDir(io, "by-git", .{});
+    defer by_git.close(io);
+    var by_relic = try work.dir.openDir(io, "by-relic", .{});
+    defer by_relic.close(io);
+
+    var t: SubmoduleTransport = .init(.{ .who = test_who, .programs = .{ .environ = &env } });
+    defer t.deinit();
+    try gitIn(gpa, io, by_git, &.{ "submodule", "update", "-q", "--init", "--recursive" });
+    {
+        var repo = try Repository.open(gpa, io, by_relic, .{});
+        defer repo.deinit(io);
+        _ = try submodule.update(gpa, io, &repo, .{ .init = true, .recursive = true, .transport = t.transport(), .who = test_who });
+    }
+    try testing.expectEqual(@as(u32, 2), t.clones);
+    try expectSameSubmodules(gpa, io, by_git, by_relic);
+
+    // New commits below: `inner` moves on, once on its branch and once to a
+    // commit only a ref outside refs/heads reaches, and each level records
+    // the one below. An update then has commits to fetch.
+    {
+        var inner = try work.dir.openDir(io, "inner", .{});
+        defer inner.close(io);
+        try inner.writeFile(io, .{ .sub_path = "README", .data = "inner, again" });
+        const bare = try gpa.print("{s}/inner.git", .{root_path});
+        defer gpa.free(bare);
+        try gitIn(gpa, io, inner, &.{ "commit", "-q", "-am", "again" });
+        try gitIn(gpa, io, inner, &.{ "push", "-q", bare, "main" });
+        try inner.writeFile(io, .{ .sub_path = "README", .data = "inner, aside" });
+        try gitIn(gpa, io, inner, &.{ "commit", "-q", "-am", "aside" });
+        try gitIn(gpa, io, inner, &.{ "push", "-q", bare, "HEAD:refs/keep/aside" });
+    }
+    for ([_][]const u8{ "lib", "super" }, [_][]const u8{ "inner", "lib" }) |name, below| {
+        var dir = try work.dir.openDir(io, name, .{});
+        defer dir.close(io);
+        var sub = try dir.openDir(io, below, .{});
+        defer sub.close(io);
+        if (std.mem.eql(u8, below, "inner")) {
+            try gitIn(gpa, io, sub, &.{ "fetch", "-q", "origin", "refs/keep/aside" });
+            try gitIn(gpa, io, sub, &.{ "checkout", "-q", ref_names.Special.fetch_head.name() });
+        } else {
+            try gitIn(gpa, io, sub, &.{ "pull", "-q", "origin", "main" });
+        }
+        try gitIn(gpa, io, dir, &.{ "commit", "-q", "-am", "move" });
+        const bare = try gpa.print("{s}/{s}.git", .{ root_path, name });
+        defer gpa.free(bare);
+        try gitIn(gpa, io, dir, &.{ "push", "-q", bare, "main" });
+    }
+    for ([_]Io.Dir{ by_git, by_relic }) |dir| try gitIn(gpa, io, dir, &.{ "pull", "-q", "--no-recurse-submodules", "origin", "main" });
+    try gitIn(gpa, io, by_git, &.{ "submodule", "update", "-q", "--recursive" });
+    {
+        var repo = try Repository.open(gpa, io, by_relic, .{});
+        defer repo.deinit(io);
+        _ = try submodule.update(gpa, io, &repo, .{ .recursive = true, .transport = t.transport(), .who = test_who });
+    }
+    try testing.expect(t.fetches >= 3);
+    try expectSameSubmodules(gpa, io, by_git, by_relic);
+}
+
+test "a submodule URL naming a repository on this machine is refused unless protocol.file.allow says otherwise, as git refuses it" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var source = try testremote.historyRepo(gpa, io, 1);
+    defer source.deinit();
+    const source_path = try testremote.absolutePath(gpa, io, source.dir);
+    defer gpa.free(source_path);
+    var scratch = testing.tmpDir(.{ .iterate = true });
+    defer scratch.cleanup();
+
+    // git, told the URL is not the person's, as `git submodule` tells it.
+    var env = try testremote.environ(gpa);
+    defer env.deinit();
+    try env.put("GIT_PROTOCOL_FROM_USER", "0");
+    try testing.expectError(error.GitFailed, testremote.gitInputEnv(gpa, io, scratch.dir, &env, &.{ "-c", "protocol.file.allow=user", "clone", "-q", source_path, "by-git" }, "", false));
+
+    try scratch.dir.createDirPath(io, "refused");
+    var refused_dir = try scratch.dir.openDir(io, "refused", .{ .iterate = true });
+    defer refused_dir.close(io);
+    var refused: SubmoduleTransport = .init(.{ .who = test_who });
+    defer refused.deinit();
+    try testing.expectError(error.TransportFailed, SubmoduleTransport.cloneFn(gpa, io, &refused, source_path, refused_dir));
+    try testing.expectEqual(@as(?SubmoduleTransport.Error, error.TransportNotAllowed), refused.failure);
+    try testing.expectEqual(@as(u32, 0), refused.clones);
+
+    var config = try config_mod.Config.parseText(gpa, "[protocol \"file\"]\n\tallow = always\n", .global);
+    defer config.deinit();
+    try scratch.dir.createDirPath(io, "allowed");
+    var allowed_dir = try scratch.dir.openDir(io, "allowed", .{ .iterate = true });
+    defer allowed_dir.close(io);
+    var allowed: SubmoduleTransport = .init(.{ .who = test_who, .config = &config });
+    defer allowed.deinit();
+    try SubmoduleTransport.cloneFn(gpa, io, &allowed, source_path, allowed_dir);
+    try testing.expectEqual(@as(u32, 1), allowed.clones);
 }

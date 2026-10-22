@@ -139,7 +139,6 @@
 //! | `transport.remote_helper` | Module within `transport`. |
 //! | `transport.policy` | Module within `transport`. |
 //! | `submodule` | Public concern. |
-//! | `submodule.transport` | Module within `submodule`. |
 //! | `submodule.gitmodules` | Module within `submodule`. |
 //! | `submodule.gitlink` | Module within `submodule`. |
 //! | `lfs` | Public concern. |
