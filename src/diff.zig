@@ -47,6 +47,7 @@ pub const ColorMoved = @import("diff/diff.zig").ColorMoved;
 pub const ColorMovedWs = @import("diff/diff.zig").ColorMovedWs;
 pub const blobNumStat = @import("diff/diff.zig").blobNumStat;
 pub const numstat = @import("diff/diff.zig").numstat;
+pub const NumstatInputs = @import("diff/diff.zig").NumstatInputs;
 pub const UnifiedInputs = @import("diff/diff.zig").UnifiedInputs;
 pub const PathHeader = @import("diff/diff.zig").PathHeader;
 pub const unified = @import("diff/diff.zig").unified;

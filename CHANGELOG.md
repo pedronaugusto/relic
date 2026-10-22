@@ -50,6 +50,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `diff.BinaryRule` is `diff.driver.Drivers`, and `diff.UnifiedInputs.binary` is `drivers`; `patch_id.ofCommit` and `ofTrees` take `Drivers`. A side that is no regular file (a symbolic link, a gitlink, the side a creation or a deletion lacks) takes the `default` driver, as git's `diff_filespec_load_driver` gives it, where its path's attributes decided before.
 - `odb.quarantine.Quarantine.begin` takes the `Purpose` the objects are held for, which names the directory as git names it: `incoming` for a push, `remerge_diff` for `git log --remerge-diff`.
 - `diff.driver.Error`, `diff.driver.Drivers.isBinary` (`Drivers.BinaryError`) and `diff.patch_id.Error` carry `InvalidBigFileThreshold`, for a `core.bigFileThreshold` git dies on.
+- `diff.numstat` takes `diff.NumstatInputs` (the object store, the changes and their `drivers`) where it took the store and the changes; `diff.NumstatError` carries the attribute and driver errors.
 
 ### Added
 
@@ -186,6 +187,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `diff.numstat` decides binary as git's `--numstat` does (`diff_filespec_is_binary`): a driver's `binary`, a `-diff` and `core.bigFileThreshold` make a file binary or text, where a NUL alone did. A `textconv` changes nothing, as in git, which counts a stat in the bytes.
 - Remotes fetched at once by `transport.fetch.fetchMany` shared the caller's warning list and credential report across tasks, which neither locks; each fetch now keeps its own and hands them over when all are done, and runs without the progress and prompt callbacks, which answer on the caller's task.
 - A clone of an empty remote sets its unborn branch to track the remote's (`branch.<name>.remote` and `.merge`), as git's `update_head` does; relic left it untracked.
 - An empty `remote.<name>.url` or `pushurl` clears the values before it, as git's `add_url` and `add_pushurl` do; relic kept them all.

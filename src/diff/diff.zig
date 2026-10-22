@@ -1008,60 +1008,75 @@ pub const WhitespaceRule = struct {
     }
 };
 
-/// The added and removed line counts between two blobs.
+/// The added and removed line counts between two blobs, binary where
+/// either holds a NUL near its start.
 pub fn blobNumStat(gpa: Allocator, old: []const u8, new: []const u8, options: Options) Self.TextError!NumStat {
     var differ: parallax.Differ = .init(gpa);
     defer differ.deinit();
-    return countLines(&differ, old, new, options);
+    return countLines(&differ, old, new, isBinary(old) or isBinary(new), options);
 }
 
-/// `blobNumStat` in a workspace a caller keeps for many blobs.
-fn countLines(differ: *parallax.Differ, old: []const u8, new: []const u8, options: Options) Self.TextError!NumStat {
+/// `blobNumStat` in a workspace a caller keeps for many blobs, `binary`
+/// already decided.
+fn countLines(differ: *parallax.Differ, old: []const u8, new: []const u8, binary: bool, options: Options) Self.TextError!NumStat {
     try checkTextSize(old, new);
-    if (isBinary(old) or isBinary(new)) return .{ .plus = 0, .minus = 0, .binary = true };
+    if (binary) return .{ .plus = 0, .minus = 0, .binary = true };
     const counts = (try differ.lines(old, new, options.lines())).stat();
     return .{ .plus = counts.added, .minus = counts.removed, .binary = false };
 }
 
 /// Errors from `numstat`.
-pub const NumstatError = Self.Error || Self.TextError;
+pub const NumstatError = Self.Error || Self.TextError || attributes.Error || driver_mod.Drivers.BinaryError;
 
-/// The counts for every change in a tree comparison, in the same order.
-///
-/// The result is the caller's.
-pub fn numstat(
-    gpa: Allocator,
-    io: Io,
+/// The borrowed object store, the changes counted and the drivers their
+/// files take.
+pub const NumstatInputs = struct {
     db: *odb_mod.Odb,
     changes: []const Change,
-    options: Options,
-) NumstatError![]NumStat {
-    var out = try gpa.alloc(NumStat, changes.len);
+    /// The driver each side takes, which says whether it is binary as
+    /// git's stat asks `diff_filespec_is_binary`: as the driver's `binary`
+    /// or a `-diff` says, else past `core.bigFileThreshold` or by a NUL.
+    /// A `textconv` changes nothing: git counts a stat in the bytes. The
+    /// zero value is `default`'s for every file.
+    drivers: driver_mod.Drivers = .{},
+};
+
+/// The counts for every change in a tree comparison, in the same order,
+/// as git's `--numstat` counts them (`builtin_diffstat`).
+///
+/// The result is the caller's.
+pub fn numstat(gpa: Allocator, io: Io, inputs: NumstatInputs, options: Options) NumstatError![]NumStat {
+    const db = inputs.db;
+    var out = try gpa.alloc(NumStat, inputs.changes.len);
     errdefer gpa.free(out);
     // One workspace for every pair: after the first, a diff allocates
     // nothing it does not need more room for.
     var differ: parallax.Differ = .init(gpa);
     defer differ.deinit();
-    for (changes, 0..) |change, i| {
+    var lookup: std.heap.ArenaAllocator = .init(gpa);
+    defer lookup.deinit();
+    for (inputs.changes, 0..) |change, i| {
+        _ = lookup.reset(.retain_capacity);
         // A gitlink has no content in this repository; git counts it as one
         // line changed either way, which is what a commit name is.
-        var old_gitlink: [labels.gitlink_text_max]u8 = undefined;
-        var old_read: ?[]u8 = null;
-        defer if (old_read) |bytes| db.allocator().free(bytes);
-        const old_bytes: []const u8 = if (change.old) |entry| blk: {
-            if (entry.mode == .gitlink) break :blk labels.gitlinkText(&old_gitlink, entry.oid);
-            old_read = (try db.read(io, entry.oid)).bytes;
-            break :blk old_read.?;
-        } else "";
-        var new_gitlink: [labels.gitlink_text_max]u8 = undefined;
-        var new_read: ?[]u8 = null;
-        defer if (new_read) |bytes| db.allocator().free(bytes);
-        const new_bytes: []const u8 = if (change.new) |entry| blk: {
-            if (entry.mode == .gitlink) break :blk labels.gitlinkText(&new_gitlink, entry.oid);
-            new_read = (try db.read(io, entry.oid)).bytes;
-            break :blk new_read.?;
-        } else "";
-        out[i] = try countLines(&differ, old_bytes, new_bytes, options);
+        var gitlinks: [2][labels.gitlink_text_max]u8 = undefined;
+        var read: [2]?[]u8 = .{ null, null };
+        defer for (read) |r| if (r) |bytes| db.allocator().free(bytes);
+        var bytes: [2][]const u8 = .{ "", "" };
+        var binary = false;
+        for ([_]?Entry{ change.old, change.new }, 0..) |side, s| {
+            if (side) |entry| {
+                if (entry.mode == .gitlink) {
+                    bytes[s] = labels.gitlinkText(&gitlinks[s], entry.oid);
+                } else {
+                    read[s] = (try db.read(io, entry.oid)).bytes;
+                    bytes[s] = read[s].?;
+                }
+            }
+            const file: ?driver_mod.Drivers.File = if (side) |e| .{ .path = e.path, .mode = e.mode } else null;
+            if (try inputs.drivers.isBinary(lookup.allocator(), io, file, bytes[s])) binary = true;
+        }
+        out[i] = try countLines(&differ, bytes[0], bytes[1], binary, options);
     }
     return out;
 }

@@ -182,7 +182,7 @@ test "numstat agrees with git, including the binary marker" {
 
     var changes = try diff.tree(gpa, io, &pair.db, .{ .old = pair.old, .new = pair.new }, .{});
     defer changes.deinit();
-    const counts = try diff.numstat(gpa, io, &pair.db, changes.items, .{});
+    const counts = try diff.numstat(gpa, io, .{ .db = &pair.db, .changes = changes.items }, .{});
     defer gpa.free(counts);
 
     const expected = try pair.repo.run(io, &.{ "diff-tree", "--numstat", "-r", pair.old_text, pair.new_text });
@@ -200,6 +200,88 @@ test "numstat agrees with git, including the binary marker" {
     try std.testing.expectEqualStrings(expected, out.written());
 }
 
+fn setupDrivers(io: Io, repo: *testgit.Repo) anyerror!void {
+    try repo.writeFile(io, "text.txt", "a\nb\n");
+    try repo.writeFile(io, "nul.bin", "x\x00y\n");
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "one" });
+    try repo.writeFile(io, "text.txt", "a\nc\nd\n");
+    try repo.writeFile(io, "nul.bin", "x\x00z\n");
+    try repo.writeFile(io, "added.txt", "new\n");
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "two" });
+}
+
+test "numstat decides binary as git's --numstat: a driver's binary, -diff and core.bigFileThreshold, never a textconv" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var pair = try buildPair(setupDrivers, gpa, io);
+    defer pair.deinit(gpa, io);
+    const attributes = @import("../patterns.zig").attributes;
+    const config_mod = @import("../config/config.zig");
+    var changes = try diff.tree(gpa, io, &pair.db, .{ .old = pair.old, .new = pair.new }, .{});
+    defer changes.deinit();
+
+    const Case = struct { attrs: []const u8, config: []const []const u8 };
+    // The textconv keeps one line of anything: git's patch is empty under
+    // it, its numstat counts the bytes.
+    const up = "text.txt diff=up\nnul.bin diff=up\n";
+    const cases = [_]Case{
+        .{ .attrs = "", .config = &.{} },
+        .{ .attrs = up, .config = &.{"diff.up.textconv=sed -n 1p"} },
+        .{ .attrs = up, .config = &.{ "diff.up.textconv=sed -n 1p", "diff.up.binary=true" } },
+        .{ .attrs = up, .config = &.{"diff.up.binary=false"} },
+        .{ .attrs = up, .config = &.{"diff.up.binary=auto"} },
+        .{ .attrs = "text.txt -diff\n", .config = &.{} },
+        .{ .attrs = "nul.bin diff\n", .config = &.{} },
+        .{ .attrs = "", .config = &.{"core.bigFileThreshold=4"} },
+        .{ .attrs = up, .config = &.{ "core.bigFileThreshold=4", "diff.up.binary=false" } },
+        .{ .attrs = "", .config = &.{"diff.default.binary=true"} },
+    };
+    for (cases, 0..) |case, n| {
+        try pair.repo.writeFile(io, ".gitattributes", case.attrs);
+        var text: std.ArrayList(u8) = .empty;
+        defer text.deinit(gpa);
+        var args: std.ArrayList([]const u8) = .empty;
+        defer args.deinit(gpa);
+        for (case.config) |setting| {
+            const eq = std.mem.findScalar(u8, setting, '=').?;
+            const dot = std.mem.findScalarLast(u8, setting[0..eq], '.').?;
+            const first = std.mem.findScalar(u8, setting, '.').?;
+            if (first == dot) {
+                try text.print(gpa, "[{s}]\n\t{s} = {s}\n", .{ setting[0..dot], setting[dot + 1 .. eq], setting[eq + 1 ..] });
+            } else {
+                try text.print(gpa, "[{s} \"{s}\"]\n\t{s} = {s}\n", .{ setting[0..first], setting[first + 1 .. dot], setting[dot + 1 .. eq], setting[eq + 1 ..] });
+            }
+            try args.appendSlice(gpa, &.{ "-c", setting });
+        }
+        var config = try config_mod.Config.parseText(gpa, text.items, .local);
+        defer config.deinit();
+        var attrs = try attributes.Attrs.init(gpa, .{});
+        defer attrs.deinit();
+        const drivers: driver.Drivers = .{ .attrs = &attrs, .work_dir = pair.repo.dir, .config = &config };
+        const counts = try diff.numstat(gpa, io, .{ .db = &pair.db, .changes = changes.items, .drivers = drivers }, .{});
+        defer gpa.free(counts);
+
+        var out: std.Io.Writer.Allocating = .init(gpa);
+        defer out.deinit();
+        for (changes.items, counts) |change, count| {
+            if (count.binary) {
+                try out.writer.print("-\t-\t{s}\n", .{change.path()});
+            } else {
+                try out.writer.print("{d}\t{d}\t{s}\n", .{ count.plus, count.minus, change.path() });
+            }
+        }
+        try args.appendSlice(gpa, &.{ "diff", "--numstat", pair.old_text, pair.new_text });
+        const expected = try pair.repo.run(io, args.items);
+        defer gpa.free(expected);
+        std.testing.expectEqualStrings(expected, out.written()) catch |err| {
+            std.debug.print("case {d}\n", .{n});
+            return err;
+        };
+    }
+}
+
 test "an object's bytes go back to the object database's allocator, whatever the caller's is" {
     // numstat and unified read each blob through the odb, which allocates
     // it on its own allocator; they freed it on the caller's, which leaked
@@ -215,7 +297,7 @@ test "an object's bytes go back to the object database's allocator, whatever the
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     const other = arena.allocator();
-    _ = try diff.numstat(other, io, &pair.db, changes.items, .{});
+    _ = try diff.numstat(other, io, .{ .db = &pair.db, .changes = changes.items }, .{});
     for (changes.items) |change| {
         var out: std.Io.Writer.Allocating = .init(other);
         try diff.unified(other, io, &out.writer, .{ .db = &pair.db, .changes = &.{change} }, .{});
@@ -262,7 +344,7 @@ test "gitlink counts and patch text agree with git" {
     defer changes.deinit();
     try std.testing.expectEqual(@as(usize, 1), changes.items.len);
 
-    const counts = try diff.numstat(gpa, io, &pair.db, changes.items, .{});
+    const counts = try diff.numstat(gpa, io, .{ .db = &pair.db, .changes = changes.items }, .{});
     defer gpa.free(counts);
     try std.testing.expectEqual(@as(u32, 1), counts[0].plus);
     try std.testing.expectEqual(@as(u32, 1), counts[0].minus);
