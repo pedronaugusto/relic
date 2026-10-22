@@ -177,6 +177,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `fast.importer`: a pack of no more objects than `fastimport.unpackLimit` (else `transfer.unpackLimit`, else 100) is written as loose objects and dropped, as git's `end_packfile` unpacks a small one, at the end and at each `checkpoint`. Held to `git count-objects -v` after `git fast-import`.
 ### Changed
 
+- `rev_walk.follow` follows a file as git 2.56's `git log --follow` does: each commit hands its parents the path they follow, a merge each parent the path its own diff leads to, so two lines of history that renamed the file differently are each followed down their own name. Where no child handed a commit a path, the one followed last stays, as before.
 - The module tables are checked as relic compiles: every namespace it exports, three levels down, has one row in `src/relic.zig`'s table and one in the README's, and neither has a row for anything else, or relic does not build, on any target. The README reaches the module as the `README.md` import; the surface test no longer reads it.
 - `odb.Odb` has the empty tree whether or not a file holds it -- `read`, `readInto`, `readHeader` and `exists` answer it, as git's in-memory source does -- and `write` still writes it when asked. The sequencer and `am` no longer write it to read it.
 - A pass over the loose objects (`prune`, `prune-packed`, `repack`, `gc`) lists the objects directory once and opens only the fan-outs there, where it tried all 256; the order is git's, `00` to `ff`.
@@ -191,6 +192,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - index-pack names a blob past `core.bigFileThreshold` as it inflates it, holding none of it, as git's `unpack_entry_data` does; it held any blob up to 16 MiB whole whatever the threshold. A pack of objects of any size is received in memory bounded by the threshold.
+- `diff.combined` writes a `-U0` hunk's wrapped counts as git's `unsigned long` holds them on the platform: 32 bits on Windows, where git writes `+1,4294967295`.
 - `diff.numstat` decides binary as git's `--numstat` does (`diff_filespec_is_binary`): a driver's `binary`, a `-diff` and `core.bigFileThreshold` make a file binary or text, where a NUL alone did. A `textconv` changes nothing, as in git, which counts a stat in the bytes.
 - Remotes fetched at once by `transport.fetch.fetchMany` shared the caller's warning list and credential report across tasks, which neither locks; each fetch now keeps its own and hands them over when all are done, and runs without the progress and prompt callbacks, which answer on the caller's task.
 - A clone of an empty remote sets its unborn branch to track the remote's (`branch.<name>.remote` and `.merge`), as git's `update_head` does; relic left it untracked.

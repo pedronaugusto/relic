@@ -1,8 +1,8 @@
-//! `follow` against git 2.55's `git log --follow --name-status`: the same
+//! `follow` against git 2.56's `git log --follow --name-status`: the same
 //! commits, newest first, each with the change git shows, the file
 //! followed through renames, a rename into a directory, a copy when copies
-//! are found, a rename on a branch merged later, and a root that created
-//! it.
+//! are found, a rename on a branch merged later, two branches that renamed
+//! it differently, and a root that created it.
 
 const std = @import("std");
 const Io = std.Io;
@@ -56,6 +56,41 @@ fn script(io: Io, repo: *testgit.Repo) anyerror!void {
     try commitAll(io, repo, "copy");
 }
 
+/// Two branches that rename one file differently, each editing it first,
+/// and a merge that keeps one name: git 2.56 follows each branch's name
+/// down its own line.
+fn twoNames(io: Io, repo: *testgit.Repo) anyerror!void {
+    try repo.writeFile(io, "shared.txt", body);
+    try repo.writeFile(io, "other", "other\n");
+    try commitAll(io, repo, "root");
+    try repo.exec(io, &.{ "checkout", "-q", "-b", "side" });
+    try repo.writeFile(io, "shared.txt", body ++ "side line\n");
+    try commitAll(io, repo, "side edit");
+    try repo.exec(io, &.{ "mv", "shared.txt", "side-name.txt" });
+    try commitAll(io, repo, "side rename");
+    try repo.writeFile(io, "side-name.txt", body ++ "side line\nside again\n");
+    try commitAll(io, repo, "side edit again");
+    try repo.exec(io, &.{ "checkout", "-q", "main" });
+    try repo.writeFile(io, "shared.txt", "main line\n" ++ body);
+    try commitAll(io, repo, "main edit");
+    try repo.exec(io, &.{ "mv", "shared.txt", "main-name.txt" });
+    try commitAll(io, repo, "main rename");
+    try repo.writeFile(io, "other", "other on main\n");
+    try commitAll(io, repo, "main elsewhere");
+    // Both renamed it: git stops, and the merge keeps main's name with
+    // both lines' edits.
+    repo.report_failures = false;
+    try std.testing.expectError(error.GitFailed, repo.exec(io, &.{ "merge", "-q", "-m", "merge side", "side" }));
+    repo.report_failures = true;
+    try repo.exec(io, &.{ "rm", "-q", "--cached", "--ignore-unmatch", "side-name.txt", "shared.txt" });
+    try repo.dir.deleteFile(io, "side-name.txt");
+    try repo.writeFile(io, "main-name.txt", "main line\n" ++ body ++ "side line\nside again\n");
+    try repo.exec(io, &.{ "add", "main-name.txt" });
+    try repo.exec(io, &.{ "commit", "-q", "--no-edit" });
+    try repo.writeFile(io, "main-name.txt", "main line\n" ++ body ++ "side line\nside again\nafter\n");
+    try commitAll(io, repo, "after the merge");
+}
+
 fn expected(gpa: Allocator, raw: []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);
@@ -86,7 +121,7 @@ fn actual(gpa: Allocator, result: follow.Result) ![]u8 {
 }
 
 test "follow shows the commits git log --follow shows, through renames, a directory, a branch and copies" {
-    try testgit.requireGitVersion(std.testing.allocator, std.testing.io, 2, 55);
+    try testgit.requireGitVersion(std.testing.allocator, std.testing.io, 2, 56);
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     var pair: Pair = undefined;
@@ -112,5 +147,36 @@ test "follow shows the commits git log --follow shows, through renames, a direct
                 return err;
             };
         }
+    }
+}
+
+test "follow takes each line of history down the name it gave the file, as git 2.56's does" {
+    try testgit.requireGitVersion(std.testing.allocator, std.testing.io, 2, 56);
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var pair: Pair = undefined;
+    try Pair.init(gpa, io, &pair, .files, twoNames);
+    defer pair.deinit();
+    const parents = try pair.git.line(io, &.{ "rev-list", "--parents", "-n1", "HEAD~1" });
+    defer gpa.free(parents);
+    // The merge is a merge: three names on its line.
+    try std.testing.expectEqual(@as(usize, 3), std.mem.countScalar(u8, parents, ' ') + 1);
+    for ([_][]const u8{ "main-name.txt", "side-name.txt", "shared.txt" }) |path| {
+        const raw = try pair.git.run(io, &.{ "log", "--follow", "--format=%x00%H", "--name-status", "--", path });
+        defer gpa.free(raw);
+        const want = try expected(gpa, raw);
+        defer gpa.free(want);
+        var repo = try repo_mod.Repository.open(gpa, io, pair.git.dir, .{});
+        defer repo.deinit(io);
+        const head = try history.oidOf(gpa, io, &pair.git, "HEAD");
+        const renames = try diff.RenameSettings.read(repo.configuration());
+        var result = try follow.follow(gpa, io, &repo, .{ .include = &.{head}, .path = path }, .{ .renames = renames });
+        defer result.deinit();
+        const got = try actual(gpa, result);
+        defer gpa.free(got);
+        std.testing.expectEqualStrings(want, got) catch |err| {
+            std.debug.print("--follow {s}\n", .{path});
+            return err;
+        };
     }
 }

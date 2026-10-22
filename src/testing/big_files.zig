@@ -208,7 +208,7 @@ fn objectLayout(gpa: Allocator, io: Io, git: *testgit.Repo) ![]u8 {
     defer walker.deinit();
     while (try walker.next(io)) |entry| {
         if (entry.kind != .file) continue;
-        if (!std.mem.startsWith(u8, entry.path, "pack/")) {
+        if (!std.mem.startsWith(u8, entry.path, "pack" ++ std.Io.Dir.path.sep_str)) {
             try names.append(gpa, try gpa.dupe(u8, entry.path));
             continue;
         }

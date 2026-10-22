@@ -600,6 +600,11 @@ const Lines = struct {
         return l.giveContext(context);
     }
 
+    /// A count `dump` wrapped, as git's `unsigned long` holds it.
+    fn cUlong(count: usize) c_ulong {
+        return @truncate(count);
+    }
+
     /// git's `dump_sline`: each run of marked lines as a hunk, `@@@` with a
     /// range for each parent and the result, the lost lines before the
     /// line they hang on.
@@ -633,7 +638,8 @@ const Lines = struct {
                 }
                 // Wrapping as git's `unsigned long` wraps: a file the result
                 // deleted counts its line past the end twice, and git writes
-                // the wrapped count.
+                // the wrapped count, in the platform's `unsigned long` (32
+                // bits on Windows): `cUlong`.
                 rlines -%= null_context;
             }
             try w.writeAll(c_frag);
@@ -641,9 +647,9 @@ const Lines = struct {
             for (0..l.num_parent) |n| {
                 const l0 = l.lines[lno].p_lno[n];
                 const l1 = l.lines[hunk_end].p_lno[n];
-                try w.print(" -{d},{d}", .{ l0, l1 -% l0 -% null_context });
+                try w.print(" -{d},{d}", .{ l0, cUlong(l1 -% l0 -% null_context) });
             }
-            try w.print(" +{d},{d} ", .{ lno + 1, rlines });
+            try w.print(" +{d},{d} ", .{ lno + 1, cUlong(rlines) });
             try w.splatByteAll('@', l.num_parent + 1);
             if (comment) |start| try l.writeComment(w, start, .{ .reset = c_reset, .context = c_context, .func = c_func });
             try w.print("{s}\n", .{c_reset});
