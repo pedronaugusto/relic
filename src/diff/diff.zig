@@ -30,12 +30,11 @@ const config_mod = @import("../config/config.zig");
 const glob = @import("../text.zig").glob;
 const pathspec = @import("../patterns.zig").pathspec;
 const whitespace = @import("../text.zig").whitespace;
-const c_quote = @import("../text.zig").c_quote;
 const paint = @import("paint.zig");
 const color_mod = @import("../config/color.zig");
 const moved = @import("moved.zig");
 const binarypatch = @import("binary.zig");
-const abbrev = @import("../odb/abbrev.zig");
+const labels = @import("labels.zig");
 
 const Oid = hash.Oid;
 
@@ -684,6 +683,22 @@ pub const Options = struct {
     /// What the headers put before each side's path: `--src-prefix` and
     /// `--dst-prefix`, which `Prefixes.configured` reads as git does.
     prefixes: Prefixes = .{},
+
+    /// The line diff these options ask for, as parallax takes it.
+    pub fn lines(options: Options) parallax.Options {
+        return .{
+            .algorithm = options.algorithm,
+            .minimal = options.minimal,
+            .indent_heuristic = options.indent_heuristic,
+            .compare = .{ .whitespace = .{
+                .all = options.ignore_all_whitespace,
+                .change = options.ignore_whitespace_change,
+                .at_eol = options.ignore_trailing_whitespace,
+            } },
+            .max_work = .fromRaw(options.max_work),
+            .anchors = options.anchors,
+        };
+    }
 };
 
 /// The prefixes a patch's headers put before each side's path.
@@ -954,22 +969,6 @@ pub const RenameSettings = struct {
     }
 };
 
-/// The line diff `options` asks for.
-fn lineOptions(options: Options) parallax.Options {
-    return .{
-        .algorithm = options.algorithm,
-        .minimal = options.minimal,
-        .indent_heuristic = options.indent_heuristic,
-        .compare = .{ .whitespace = .{
-            .all = options.ignore_all_whitespace,
-            .change = options.ignore_whitespace_change,
-            .at_eol = options.ignore_trailing_whitespace,
-        } },
-        .max_work = .fromRaw(options.max_work),
-        .anchors = options.anchors,
-    };
-}
-
 /// git's diff binary rule: a NUL in the first 8000 bytes.
 ///
 /// This is not the rule that decides whether a file is normalised on
@@ -1004,15 +1003,6 @@ pub const WhitespaceRule = struct {
     }
 };
 
-/// The longest line `gitlinkText` writes: the words, the widest name, the newline.
-const gitlink_text_max = "Subproject commit \n".len + hash.max_hex_len;
-
-fn gitlinkText(buf: *[gitlink_text_max]u8, oid: Oid) []const u8 {
-    var hex: [hash.max_hex_len]u8 = undefined;
-    // unreachable: the buffer holds the words and the widest name
-    return std.mem.print(buf, "Subproject commit {s}\n", .{oid.hex(&hex)}) catch unreachable;
-}
-
 /// The added and removed line counts between two blobs.
 pub fn blobNumStat(gpa: Allocator, old: []const u8, new: []const u8, options: Options) Self.TextError!NumStat {
     var differ: parallax.Differ = .init(gpa);
@@ -1024,7 +1014,7 @@ pub fn blobNumStat(gpa: Allocator, old: []const u8, new: []const u8, options: Op
 fn countLines(differ: *parallax.Differ, old: []const u8, new: []const u8, options: Options) Self.TextError!NumStat {
     try checkTextSize(old, new);
     if (isBinary(old) or isBinary(new)) return .{ .plus = 0, .minus = 0, .binary = true };
-    const counts = (try differ.lines(old, new, lineOptions(options))).stat();
+    const counts = (try differ.lines(old, new, options.lines())).stat();
     return .{ .plus = counts.added, .minus = counts.removed, .binary = false };
 }
 
@@ -1050,19 +1040,19 @@ pub fn numstat(
     for (changes, 0..) |change, i| {
         // A gitlink has no content in this repository; git counts it as one
         // line changed either way, which is what a commit name is.
-        var old_gitlink: [gitlink_text_max]u8 = undefined;
+        var old_gitlink: [labels.gitlink_text_max]u8 = undefined;
         var old_read: ?[]u8 = null;
         defer if (old_read) |bytes| db.allocator().free(bytes);
         const old_bytes: []const u8 = if (change.old) |entry| blk: {
-            if (entry.mode == .gitlink) break :blk gitlinkText(&old_gitlink, entry.oid);
+            if (entry.mode == .gitlink) break :blk labels.gitlinkText(&old_gitlink, entry.oid);
             old_read = (try db.read(io, entry.oid)).bytes;
             break :blk old_read.?;
         } else "";
-        var new_gitlink: [gitlink_text_max]u8 = undefined;
+        var new_gitlink: [labels.gitlink_text_max]u8 = undefined;
         var new_read: ?[]u8 = null;
         defer if (new_read) |bytes| db.allocator().free(bytes);
         const new_bytes: []const u8 = if (change.new) |entry| blk: {
-            if (entry.mode == .gitlink) break :blk gitlinkText(&new_gitlink, entry.oid);
+            if (entry.mode == .gitlink) break :blk labels.gitlinkText(&new_gitlink, entry.oid);
             new_read = (try db.read(io, entry.oid)).bytes;
             break :blk new_read.?;
         } else "";
@@ -1095,7 +1085,19 @@ pub const UnifiedInputs = struct {
     /// `External.command`, is the program's output instead of a patch.
     /// `null` writes every patch.
     external: ?*const external_mod.External = null,
+    /// Lines a path's patch carries among its headers, after any rename
+    /// lines and before its `index` line: git's `additional_path_headers`,
+    /// which `git log --remerge-diff` fills with the conflicts its merge
+    /// met. With headers, even none, a path they name that `changes` has
+    /// no change for is written as its `diff --git` line and the headers
+    /// alone, and every file comes in the order of its old path, as git
+    /// sorts its queue for them. `null` writes `changes` as they are.
+    headers: ?[]const PathHeader = null,
 };
+
+/// A header line, or lines, for a path's patch: `UnifiedInputs.headers`.
+/// `path` is the path's old one where it has one.
+pub const PathHeader = struct { path: []const u8, text: []const u8 };
 
 /// Append the unified diff of `inputs.changes` to `w`, each with git's
 /// headers, as `git diff`, `git log -p` and `git format-patch` write a
@@ -1114,16 +1116,72 @@ pub fn unified(
     defer if (recorder) |*r| r.deinit();
     const r: ?*paint.Recorder = if (recorder) |*r| r else null;
     const out = if (r) |rec| &rec.painted.writer else w;
-    var counter: usize = 0;
-    for (inputs.changes) |change| {
-        if (try externalCommand(gpa, io, inputs, change)) |command| {
-            counter += 1;
-            writeExternal(gpa, io, inputs, .{ .command = command, .change = change, .counter = counter }, out, options) catch |err| return recorded(r, err);
-            continue;
-        }
-        writeChange(gpa, io, inputs, change, out, options, r) catch |err| return recorded(r, err);
-    }
+    var file: UnifiedFile = .{ .inputs = inputs, .out = out, .recorder = r };
+    if (inputs.headers) |headers| {
+        const items = try listed(gpa, inputs.changes, headers);
+        defer gpa.free(items);
+        for (items) |item| file.write(gpa, io, item, options) catch |err| return recorded(r, err);
+    } else for (inputs.changes) |change| file.write(gpa, io, .{ .change = change }, options) catch |err| return recorded(r, err);
     if (r) |rec| try rec.finish(w);
+}
+
+/// What `unified` writes each file with, and how many have gone to an
+/// external program.
+const UnifiedFile = struct {
+    inputs: UnifiedInputs,
+    out: *Io.Writer,
+    recorder: ?*paint.Recorder,
+    counter: usize = 0,
+
+    fn write(f: *UnifiedFile, gpa: Allocator, io: Io, item: Listed, options: Options) UnifiedError!void {
+        const change = switch (item) {
+            .change => |c| c,
+            .headers_only => |path| return writeHeadersOnly(gpa, f.out, f.inputs.headers.?, path, options),
+        };
+        if (try externalCommand(gpa, io, f.inputs, change)) |command| {
+            f.counter += 1;
+            return writeExternal(gpa, io, f.inputs, .{ .command = command, .change = change, .counter = f.counter }, f.out, options);
+        }
+        return writeChange(gpa, io, f.inputs, change, f.out, options, f.recorder);
+    }
+};
+
+/// One file of a patch: a change, or a path only `UnifiedInputs.headers`
+/// names.
+const Listed = union(enum) {
+    change: Change,
+    headers_only: []const u8,
+
+    /// The path git files the item's headers under, and sorts by: the old
+    /// one where there is one.
+    fn key(l: Listed) []const u8 {
+        return switch (l) {
+            .change => |c| (c.old orelse c.new.?).path,
+            .headers_only => |path| path,
+        };
+    }
+
+    fn lessThan(_: void, a: Listed, b: Listed) bool {
+        return std.mem.order(u8, a.key(), b.key()) == .lt;
+    }
+};
+
+/// The files of a patch with headers in the order they are written:
+/// `changes` and the paths only the headers name, sorted as git's
+/// `create_filepairs_for_header_only_notifications` sorts them. The list
+/// is `gpa`'s.
+fn listed(gpa: Allocator, changes: []const Change, headers: []const PathHeader) Allocator.Error![]Listed {
+    var out: std.ArrayList(Listed) = .empty;
+    errdefer out.deinit(gpa);
+    for (changes) |c| try out.append(gpa, .{ .change = c });
+    for (headers) |h| {
+        const known = for (out.items) |item| {
+            if (std.mem.eql(u8, item.key(), h.path)) break true;
+        } else false;
+        if (!known) try out.append(gpa, .{ .headers_only = h.path });
+    }
+    std.sort.block(Listed, out.items, {}, Listed.lessThan);
+    return out.toOwnedSlice(gpa);
 }
 
 /// Whether a patch is recorded for its moved lines: git looks for them
@@ -1195,9 +1253,9 @@ fn writeMetainfo(gpa: Allocator, io: Io, inputs: UnifiedInputs, change: Change, 
     const old = change.old.?;
     const new = change.new.?;
     const word = if (change.status == .copied) "copy" else "rename";
-    const from = try quoteTwo(gpa, "", shownPath(options, old.path), options.quote_path);
+    const from = try labels.quoteTwo(gpa, "", shownPath(options, old.path), options.quote_path);
     defer gpa.free(from);
-    const to = try quoteTwo(gpa, "", shownPath(options, new.path), options.quote_path);
+    const to = try labels.quoteTwo(gpa, "", shownPath(options, new.path), options.quote_path);
     defer gpa.free(to);
     try w.print("similarity index {d}%\n{s} from {s}\n{s} to {s}\n", .{ change.similarity, word, from, word, to });
     if (old.oid.eql(new.oid)) return;
@@ -1212,15 +1270,15 @@ fn writeMetainfo(gpa: Allocator, io: Io, inputs: UnifiedInputs, change: Change, 
     var new_hex: [hash.max_hex_len]u8 = undefined;
     var mode_buf: [6]u8 = undefined;
     try w.print("index {s}..{s}", .{
-        try abbreviated(io, inputs.db, old.oid, options.abbrev, full, &old_hex),
-        try abbreviated(io, inputs.db, new.oid, options.abbrev, full, &new_hex),
+        try labels.abbreviated(io, inputs.db, old.oid, options.abbrev, full, &old_hex),
+        try labels.abbreviated(io, inputs.db, new.oid, options.abbrev, full, &new_hex),
     });
     if (old.mode == new.mode) try w.print(" {s:0>6}", .{old.mode.text(&mode_buf)});
     try w.writeByte('\n');
 }
 
 fn writeChange(gpa: Allocator, io: Io, inputs: UnifiedInputs, change: Change, w: *Io.Writer, options: Options, r: ?*paint.Recorder) UnifiedError!void {
-    const file: FileInputs = .{ .db = inputs.db, .drivers = inputs.drivers, .textconv = inputs.textconv, .change = change, .recorder = r };
+    const file: FileInputs = .{ .db = inputs.db, .drivers = inputs.drivers, .textconv = inputs.textconv, .change = change, .recorder = r, .headers = inputs.headers orelse &.{} };
     if (change.old != null and change.new != null and typeChanged(change.old.?.mode, change.new.?.mode)) {
         try writeFilePatch(gpa, io, file, w, options, change.old, null);
         return writeFilePatch(gpa, io, file, w, options, null, change.new);
@@ -1236,6 +1294,7 @@ const FileInputs = struct {
     textconv: ?*const textconv_mod.Textconv,
     change: Change,
     recorder: ?*paint.Recorder,
+    headers: []const PathHeader,
 };
 
 /// One file pair of a diff as git's `builtin_diff` compares it: each
@@ -1289,8 +1348,8 @@ pub const FilePair = struct {
             if (entry) |e| {
                 pair.modes[i] = e.mode;
                 if (e.mode == .gitlink) {
-                    var buf: [gitlink_text_max]u8 = undefined;
-                    pair.bytes[i] = try a.dupe(u8, gitlinkText(&buf, e.oid));
+                    var buf: [labels.gitlink_text_max]u8 = undefined;
+                    pair.bytes[i] = try a.dupe(u8, labels.gitlinkText(&buf, e.oid));
                 } else {
                     pair.read[i] = (try sources.db.read(io, e.oid)).bytes;
                     pair.bytes[i] = pair.read[i].?;
@@ -1380,14 +1439,14 @@ fn writeFilePatch(gpa: Allocator, io: Io, inputs: FileInputs, w: *Io.Writer, opt
     const fully = options.quote_path;
     const old_path = shownPath(options, (old orelse new.?).path);
     const new_path = shownPath(options, (new orelse old.?).path);
-    const old_name = try quoteTwo(gpa, options.prefixes.src, old_path, fully);
+    const old_name = try labels.quoteTwo(gpa, options.prefixes.src, old_path, fully);
     defer gpa.free(old_name);
-    const new_name = try quoteTwo(gpa, options.prefixes.dst, new_path, fully);
+    const new_name = try labels.quoteTwo(gpa, options.prefixes.dst, new_path, fully);
     defer gpa.free(new_name);
 
     const old_oid = if (old) |e| e.oid else Oid.zero(db.objectFormat());
     const new_oid = if (new) |e| e.oid else Oid.zero(db.objectFormat());
-    const header: Header = .{ .old_name = old_name, .new_name = new_name, .old_path = old_path, .new_path = new_path, .old = old, .new = new, .change = change, .quote_fully = fully };
+    const header: Header = .{ .old_name = old_name, .new_name = new_name, .old_path = old_path, .new_path = new_path, .old = old, .new = new, .change = change, .quote_fully = fully, .headers = inputs.headers };
     if (old_oid.eql(new_oid)) {
         // Only the mode moved: git prints no index line and no hunks.
         return writeHeader(gpa, w, colors, header);
@@ -1396,7 +1455,7 @@ fn writeFilePatch(gpa: Allocator, io: Io, inputs: FileInputs, w: *Io.Writer, opt
     var pair: FilePair = undefined;
     try pair.init(gpa, io, .{ .db = db, .drivers = inputs.drivers, .textconv = inputs.textconv }, .{ .old = old, .new = new });
     defer pair.deinit();
-    if (pair.silent(change.status)) return;
+    if (pair.silent(change.status) and !hasHeaders(inputs.headers, change)) return;
     try writeHeader(gpa, w, colors, header);
 
     // The mode is on the index line only when it did not change and the
@@ -1410,8 +1469,8 @@ fn writeFilePatch(gpa: Allocator, io: Io, inputs: FileInputs, w: *Io.Writer, opt
     var new_hex: [hash.max_hex_len]u8 = undefined;
     const same_mode = old != null and new != null and old.?.mode == new.?.mode;
     try paint.writeMeta(w, colors, "index {s}..{s}{s}{s}", .{
-        try abbreviated(io, db, old_oid, options.abbrev, full, &old_hex),
-        try abbreviated(io, db, new_oid, options.abbrev, full, &new_hex),
+        try labels.abbreviated(io, db, old_oid, options.abbrev, full, &old_hex),
+        try labels.abbreviated(io, db, new_oid, options.abbrev, full, &new_hex),
         if (same_mode) " " else "",
         if (same_mode) new.?.mode.text(&new_mode_buf) else "",
     });
@@ -1446,6 +1505,8 @@ const Header = struct {
     new: ?Entry,
     change: Change,
     quote_fully: bool,
+    /// `UnifiedInputs.headers`, those filed under the change's path written.
+    headers: []const PathHeader,
 };
 
 fn writeHeader(gpa: Allocator, w: *Io.Writer, colors: ?*const Colors, h: Header) UnifiedError!void {
@@ -1473,43 +1534,57 @@ fn writeHeader(gpa: Allocator, w: *Io.Writer, colors: ?*const Colors, h: Header)
         if (change.status == .renamed or change.status == .copied) {
             const word = if (change.status == .renamed) "rename" else "copy";
             try paint.writeMeta(w, colors, "similarity index {d}%", .{change.similarity});
-            const from = try quoteTwo(gpa, "", old_path, fully);
+            const from = try labels.quoteTwo(gpa, "", old_path, fully);
             defer gpa.free(from);
-            const to = try quoteTwo(gpa, "", new_path, fully);
+            const to = try labels.quoteTwo(gpa, "", new_path, fully);
             defer gpa.free(to);
             try paint.writeMeta(w, colors, "{s} from {s}", .{ word, from });
             try paint.writeMeta(w, colors, "{s} to {s}", .{ word, to });
         }
     }
+    try writePathHeaders(w, colors, h.headers, (change.old orelse change.new.?).path);
+}
+
+/// Whether `headers` has any for `change`'s path, which git then always
+/// writes the file for (`must_show_header`).
+fn hasHeaders(headers: []const PathHeader, change: Change) bool {
+    const key = (change.old orelse change.new.?).path;
+    for (headers) |h| {
+        if (std.mem.eql(u8, h.path, key)) return true;
+    }
+    return false;
+}
+
+/// The headers filed under `path`, a line each, as git's
+/// `add_formatted_header` writes them.
+fn writePathHeaders(w: *Io.Writer, colors: ?*const Colors, headers: []const PathHeader, path: []const u8) Io.Writer.Error!void {
+    for (headers) |h| {
+        if (!std.mem.eql(u8, h.path, path)) continue;
+        var rest = h.text;
+        while (rest.len != 0) {
+            const end = std.mem.findScalar(u8, rest, '\n') orelse rest.len;
+            try paint.writeMeta(w, colors, "{s}", .{rest[0..end]});
+            rest = if (end < rest.len) rest[end + 1 ..] else "";
+        }
+    }
+}
+
+/// A path only the headers name: its `diff --git` line and its headers,
+/// as git writes the pair it makes for them.
+fn writeHeadersOnly(gpa: Allocator, w: *Io.Writer, headers: []const PathHeader, path: []const u8, options: Options) UnifiedError!void {
+    const shown = shownPath(options, path);
+    const old_name = try labels.quoteTwo(gpa, options.prefixes.src, shown, options.quote_path);
+    defer gpa.free(old_name);
+    const new_name = try labels.quoteTwo(gpa, options.prefixes.dst, shown, options.quote_path);
+    defer gpa.free(new_name);
+    try paint.writeMeta(w, options.colors, "diff --git {s} {s}", .{ old_name, new_name });
+    try writePathHeaders(w, options.colors, headers, path);
 }
 
 /// A path as a patch's headers name it: under `Options.relative_to`, from
 /// that directory, as git's `strip_prefix` names it.
 fn shownPath(options: Options, path: []const u8) []const u8 {
     return if (std.mem.startsWith(u8, path, options.relative_to)) path[options.relative_to.len..] else path;
-}
-
-/// An object's name on the `index` line, as git's `diff_abbrev_oid` writes
-/// it: in full, or the shortest prefix of at least `len` the object
-/// database holds no other object under; the null name cut at `len`.
-fn abbreviated(io: Io, db: *odb_mod.Odb, oid: Oid, len: usize, full: bool, buf: *[hash.max_hex_len]u8) odb_mod.Error![]const u8 {
-    if (full) return oid.hex(buf);
-    if (oid.isZero()) return oid.abbrev(buf, len);
-    return abbrev.unique(io, db, oid, len, buf);
-}
-
-/// `prefix` and `path` as a patch's headers write them: C-quoted
-/// together as git's `quote_two_c_style` quotes them, where either needs
-/// it. The text is `gpa`'s.
-fn quoteTwo(gpa: Allocator, prefix: []const u8, path: []const u8, fully: bool) Allocator.Error![]u8 {
-    if (!c_quote.needsQuote(prefix, fully) and !c_quote.needsQuote(path, fully)) return std.mem.concat(gpa, u8, &.{ prefix, path });
-    var out: Io.Writer.Allocating = .init(gpa);
-    errdefer out.deinit();
-    out.writer.writeByte('"') catch return error.OutOfMemory;
-    c_quote.writeBody(&out.writer, prefix, fully) catch return error.OutOfMemory;
-    c_quote.writeBody(&out.writer, path, fully) catch return error.OutOfMemory;
-    out.writer.writeByte('"') catch return error.OutOfMemory;
-    return out.toOwnedSlice();
 }
 
 /// The `---` and `+++` names a patch body is written under, quoted.
@@ -1563,7 +1638,7 @@ fn writeBody(comptime words_allowed: bool, gpa: Allocator, w: *Io.Writer, old: [
     var differ: parallax.Differ = .init(gpa);
     defer differ.deinit();
     try checkTextSize(old, new);
-    const diff = try differ.lines(old, new, lineOptions(options));
+    const diff = try differ.lines(old, new, options.lines());
     // The rule lives in `options` for as long as the writer reads it.
     const heading: ?parallax.Heading = if (!options.function_context_names)
         null

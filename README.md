@@ -644,6 +644,7 @@ writes beside them, and `relic.refs.reftable.table` is the table format.
 | `worktree.safe_path` | What a path from a tree is allowed to be. |
 | `diff` | `tree`, `numstat`, `blobNumStat`, `unified`, `unifiedBody`, `isBinary`, `Colors`, `WhitespaceRule` — a file's patch as `git diff` and `git format-patch` write it (git's headers, unique abbreviations, `--binary`, `--full-index`, `--relative`), in colour as `git diff --color` writes it where `Options.colors` is given: `color.diff.<slot>`, whitespace errors by `core.whitespace`, the `whitespace` attribute and `diff.wsErrorHighlight`. |
 | `diff.blame` | `file` — which commit each line of a file comes from, as `git blame` says, following renames. |
+| `diff.combined` | `paths`, `write` — the combined diff of a merge against all its parents at once, as `git diff-tree -c` and `--cc` and `git show` write it. |
 | `diff.driver` | `Drivers` — the diff driver each side of a diff takes by its `diff` attribute and mode, and what the driver says: binary or not, its `textconv`, the lines that start its functions. |
 | `diff.external` | `External` — an external diff program (`diff.external`, a driver's `command`) run for a file pair in place of its patch, as `git diff` runs it. |
 | `diff.patch_id` | Patch ids: a name for what a commit changes. |
@@ -737,6 +738,7 @@ writes beside them, and `relic.refs.reftable.table` is the table format.
 | `lfs.server` | `Backend`, `Store`, `Directory`, `S3` — a Git LFS server as a handler for uplink's server: the batch API, basic transfers into the caller's store (a directory, or S3-compatible storage through signed URLs), the locking API, authorization by the caller's hook. |
 | `patch` | `parse`, `Patch`, `FilePatch`, `Fragment`: git patches and plain unified diffs read as `git apply` reads them, from whatever surrounds them. |
 | `patch.am` | `start`, `proceed`, `skip`, `abort`, `quit` — `git am` with `--3way`, its state in `rebase-apply` as git keeps it. |
+| `patch.commit_diff` | `parts`, `write`, `configured` — a commit's diff as `git log -p` and `git show` write it: a merge's by `--diff-merges` and `log.diffMerges`, first parent, each parent, combined, dense or the remerge diff. |
 | `patch.mail` | `split`, `info` — `git mailsplit` and `git mailinfo`. |
 | `patch.format` | `format` — `git format-patch` byte for byte: numbering, the diffstat, binary hunks, a cover letter, base information, threading and attachments. |
 | `patch.apply` | `apply` — `git apply` to the working tree, the index or both: renames, copies, modes, binary hunks, `-R`, `--3way`, `--reject`, `--check`, whitespace checked or fixed, nothing written unless every file applies. |

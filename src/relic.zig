@@ -62,6 +62,7 @@
 //! | `worktree.safe_path` | Module within `worktree`. |
 //! | `diff` | Public concern. |
 //! | `diff.blame` | Module within `diff`. |
+//! | `diff.combined` | Module within `diff`. |
 //! | `diff.driver` | Module within `diff`. |
 //! | `diff.external` | Module within `diff`. |
 //! | `diff.patch_id` | Module within `diff`. |
@@ -155,6 +156,7 @@
 //! | `lfs.server` | Module within `lfs`. |
 //! | `patch` | Public concern. |
 //! | `patch.am` | Module within `patch`. |
+//! | `patch.commit_diff` | Module within `patch`. |
 //! | `patch.mail` | Module within `patch`. |
 //! | `patch.format` | Module within `patch`. |
 //! | `patch.apply` | Module within `patch`. |

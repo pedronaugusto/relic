@@ -1,6 +1,7 @@
 //! Public diff namespace. Implementation is in `diff/diff.zig`.
 
 pub const blame = @import("diff/blame.zig");
+pub const combined = @import("diff/combined.zig");
 pub const driver = @import("diff/driver.zig");
 pub const external = @import("diff/external.zig");
 pub const patch_id = @import("diff/patch_id.zig");
@@ -47,6 +48,7 @@ pub const ColorMovedWs = @import("diff/diff.zig").ColorMovedWs;
 pub const blobNumStat = @import("diff/diff.zig").blobNumStat;
 pub const numstat = @import("diff/diff.zig").numstat;
 pub const UnifiedInputs = @import("diff/diff.zig").UnifiedInputs;
+pub const PathHeader = @import("diff/diff.zig").PathHeader;
 pub const unified = @import("diff/diff.zig").unified;
 pub const unifiedBody = @import("diff/diff.zig").unifiedBody;
 pub const LineDiff = @import("diff/diff.zig").LineDiff;

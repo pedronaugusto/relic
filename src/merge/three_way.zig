@@ -757,6 +757,29 @@ const SubmoduleOpener = struct {
 pub const InCoreInputs = struct { base: ?Oid = null, ours: Oid, theirs: Oid };
 
 pub fn inCore(gpa: Allocator, io: Io, repo: *Repository, inputs: InCoreInputs, options: Options) Self.Error!ort.Result {
+    const sides: Sides = .{ .trees = .{ .base = inputs.base, .ours = inputs.ours, .theirs = inputs.theirs } };
+    return inMemory(gpa, io, repo, .{ .sides = sides, .db = repo.objectDatabase() }, options);
+}
+
+/// A merge of two commits made in memory, their merge bases merged into
+/// one first: git's `merge_incore_recursive`, as `git log --remerge-diff`
+/// merges a merge's parents again. The labels' `ours` and `theirs` name
+/// the sides on the markers and in the messages; `base` is not used, as
+/// git names the ancestor itself. What the merge makes is written to `db`
+/// -- a quarantine (`odb.Quarantine`) that reads the repository's objects
+/// too and is thrown away after, as git's temporary object directory is
+/// -- or with `null` to the repository's own database.
+pub const InCoreCommitInputs = struct { ours: Oid, theirs: Oid, bases: ?[]const Oid = null, db: ?*odb_mod.Odb = null };
+
+pub fn inCoreCommits(gpa: Allocator, io: Io, repo: *Repository, inputs: InCoreCommitInputs, options: Options) Self.Error!ort.Result {
+    const sides: Sides = .{ .commits = .{ .ours = inputs.ours, .theirs = inputs.theirs, .bases = inputs.bases } };
+    return inMemory(gpa, io, repo, .{ .sides = sides, .db = inputs.db orelse repo.objectDatabase() }, options);
+}
+
+/// What an in-memory merge merges, and where it writes.
+const InMemory = struct { sides: Sides, db: *odb_mod.Odb };
+
+fn inMemory(gpa: Allocator, io: Io, repo: *Repository, what: InMemory, options: Options) Error!ort.Result {
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
     const arena = arena_instance.allocator();
@@ -766,7 +789,14 @@ pub fn inCore(gpa: Allocator, io: Io, repo: *Repository, inputs: InCoreInputs, o
     var machinery: Machinery = undefined;
     try machinery.init(gpa, arena, io, repo, .{ .wt = repo.workDirectory(), .rules = rules, .options = options });
     defer machinery.deinit(io);
-    return ort.trees(gpa, io, repo.objectDatabase(), .{ .base = inputs.base, .ours = inputs.ours, .theirs = inputs.theirs }, machinery.ort);
+    return switch (what.sides) {
+        .trees => |t| ort.trees(gpa, io, what.db, .{ .base = t.base, .ours = t.ours, .theirs = t.theirs }, machinery.ort),
+        .commits => |c| blk: {
+            var ort_options = machinery.ort;
+            ort_options.labels.base = "";
+            break :blk ort.commits(gpa, io, what.db, .{ .ours = c.ours, .theirs = c.theirs, .bases = c.bases }, ort_options);
+        },
+    };
 }
 
 /// What git's merge machinery is set up with, and what it holds while it

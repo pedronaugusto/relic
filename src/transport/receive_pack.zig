@@ -468,7 +468,7 @@ pub const Server = struct {
             // git's `unpack-objects` below the limit, its `index-pack`
             // at it and above.
             const loose = count < s.settings.unpack_limit;
-            q = try Quarantine.begin(s.gpa, s.io, s.db());
+            q = try Quarantine.begin(s.gpa, s.io, s.db(), .incoming);
             var diagnostic: index_pack.Diagnostic = .{};
             received = s.unpack(in, &q.?, &diagnostic, .{ .context = s, .report = endOfInput }) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,

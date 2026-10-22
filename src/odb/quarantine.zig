@@ -10,6 +10,9 @@
 //! with their index last so no reader meets an index whose pack is not
 //! there; refused, the directory is removed (`discard`) and nothing of the
 //! push is left behind.
+//!
+//! `git log --remerge-diff` holds the objects of each merge it makes again
+//! in one too, `tmp_objdir-remerge-diff-<random>`, and discards them.
 
 const ErrorNamespace = @This();
 const std = @import("std");
@@ -46,11 +49,26 @@ pub const Quarantine = struct {
     /// Whether the directory is still there.
     open: bool = true,
 
+    /// What the objects are held for, which names the directory.
+    pub const Purpose = enum {
+        /// A push's pack, until the push is accepted.
+        incoming,
+        /// The objects of a merge made again for its diff.
+        remerge_diff,
+
+        fn prefix(p: Purpose) []const u8 {
+            return switch (p) {
+                .incoming => "tmp_objdir-incoming-",
+                .remerge_diff => "tmp_objdir-remerge-diff-",
+            };
+        }
+    };
+
     /// Make the directory beside `main`'s objects and open a database on it.
-    pub fn begin(gpa: Allocator, io: Io, main: *Odb) ErrorNamespace.Error!Quarantine {
+    pub fn begin(gpa: Allocator, io: Io, main: *Odb, purpose: Purpose) ErrorNamespace.Error!Quarantine {
         const objects = main.objectsDirectory();
         var q: Quarantine = .{ .gpa = gpa, .db = undefined, .objects = objects, .name_buf = undefined, .name_len = 0, .path = &.{}, .objects_path = &.{}, .shared = main.sharedPermissions() };
-        const dir_name = fs.tempName(io, &q.name_buf, "tmp_objdir-incoming-");
+        const dir_name = fs.tempName(io, &q.name_buf, purpose.prefix());
         q.name_len = dir_name.len;
         try objects.createDir(io, dir_name, .default_dir);
         errdefer objects.deleteTree(io, dir_name) catch {}; // glint-ignore: Z026 -- a quarantine never opened is removed on a best-effort basis; nothing in it was accepted
