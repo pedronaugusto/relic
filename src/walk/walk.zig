@@ -107,6 +107,11 @@ pub const Walk = struct {
     /// is followed. What the hidden commits reach is still marked through
     /// every parent, as git marks it.
     first_parent: bool = false,
+    /// `--exclude-first-parent-only`: what a hidden commit reaches is
+    /// marked through first parents alone, so a merge's other parents and
+    /// what they bring stay wanted. As git 2.56 walks it, a hidden commit
+    /// whose first parent was already seen goes no further.
+    exclude_first_parent_only: bool = false,
     /// `-- <paths>`: history simplified to the paths as git simplifies it
     /// by default. A commit the same as a parent wherever the paths reach
     /// is marked `treesame`, and a merge the same as one of the parents
@@ -237,12 +242,18 @@ pub const Walk = struct {
     fn markParentsUninteresting(walk: *Walk, n: *Node) ErrorNamespace.Error!void {
         var stack: std.ArrayList(*Node) = .empty;
         defer stack.deinit(walk.gpa);
-        for (n.parents) |parent| try stack.append(walk.gpa, try walk.nodeOf(parent));
+        for (walk.followedWhenHidden(n.parents)) |parent| try stack.append(walk.gpa, try walk.nodeOf(parent));
         while (stack.pop()) |c| {
             if (c.uninteresting) continue;
             c.uninteresting = true;
-            for (c.parents) |parent| try stack.append(walk.gpa, try walk.nodeOf(parent));
+            for (walk.followedWhenHidden(c.parents)) |parent| try stack.append(walk.gpa, try walk.nodeOf(parent));
         }
+    }
+
+    /// The parents a hidden commit's mark goes on to: the first alone under
+    /// `exclude_first_parent_only`.
+    fn followedWhenHidden(walk: *const Walk, parents: []const Oid) []const Oid {
+        return if (walk.exclude_first_parent_only and parents.len > 1) parents[0..1] else parents;
     }
 
     /// `process_parents`, into the date queue.
@@ -263,6 +274,7 @@ pub const Walk = struct {
                 seq.* += 1;
             }
             if (walk.first_parent and !n.uninteresting) break;
+            if (walk.exclude_first_parent_only and n.uninteresting) break;
         }
     }
 
@@ -979,6 +991,63 @@ test "first-parent walks and merge bases of many are git's" {
     }
 }
 
+test "a hidden commit marks its first parents alone under --exclude-first-parent-only, and stops at one already seen as git 2.56 does" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    try testgit.requireGitVersion(gpa, io, 2, 56);
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+    // h merges q into p; w is on q. With p wanted too, h's first parent is
+    // seen when h is walked: git 2.56 goes no further, where 2.55 went on
+    // to q and hid it.
+    const stream =
+        \\commit refs/heads/r
+        \\mark :1
+        \\committer C <c@example.com> 1700000000 +0000
+        \\data 1
+        \\r
+        \\commit refs/heads/q
+        \\mark :2
+        \\committer C <c@example.com> 1700000060 +0000
+        \\data 1
+        \\q
+        \\from :1
+        \\commit refs/heads/p
+        \\mark :3
+        \\committer C <c@example.com> 1700000120 +0000
+        \\data 1
+        \\p
+        \\from :1
+        \\commit refs/heads/h
+        \\mark :4
+        \\committer C <c@example.com> 1700000180 +0000
+        \\data 1
+        \\h
+        \\from :3
+        \\merge :2
+        \\commit refs/heads/w
+        \\mark :5
+        \\committer C <c@example.com> 1700000240 +0000
+        \\data 1
+        \\w
+        \\from :2
+        \\
+    ;
+    const imported = try repo.runInput(io, &.{ "fast-import", "--quiet" }, stream);
+    gpa.free(imported);
+    const git_dir = try repo.gitDir(io);
+    defer git_dir.close(io);
+    var db = try odb_mod.Odb.open(gpa, io, git_dir, .sha1, .{});
+    defer db.deinit(io);
+    const queries = [_][]const []const u8{
+        &.{ "--exclude-first-parent-only", "w", "p", "^h" },
+        &.{ "--exclude-first-parent-only", "w", "^h" },
+        &.{ "--exclude-first-parent-only", "--topo-order", "w", "p", "^h" },
+        &.{ "w", "p", "^h" },
+    };
+    for (queries) |q| try expectWalkLikeRevList(gpa, io, &repo, &db, q);
+}
+
 test "merge bases are git's, in git's order, through a criss-cross" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
@@ -1084,6 +1153,14 @@ fn expectWalkLikeRevList(gpa: Allocator, io: Io, repo: *testgit.Repo, db: *odb_m
             walk.reverse = true;
             continue;
         }
+        if (std.mem.eql(u8, arg, "--first-parent")) {
+            walk.first_parent = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--exclude-first-parent-only")) {
+            walk.exclude_first_parent_only = true;
+            continue;
+        }
         const hidden = arg[0] == '^';
         const name = if (hidden) arg[1..] else arg;
         const text = try repo.line(io, &.{ "rev-parse", name });
@@ -1168,8 +1245,15 @@ fn walkLikeRevList(gpa: Allocator, io: Io, seed: u64) !void {
         &.{ "--topo-order", "--reverse", "b1" },
         &.{ "--date-order", "b0", "b1", "b2", "b3" },
         &.{ "--date-order", "--reverse", "b3", "^b1" },
+        &.{ "--exclude-first-parent-only", "b0", "^b1" },
+        &.{ "--exclude-first-parent-only", "b1", "b2", "^b0", "^b3" },
+        &.{ "--exclude-first-parent-only", "--topo-order", "b2", "b3", "^b0" },
+        &.{ "--exclude-first-parent-only", "--first-parent", "b3", "^b2" },
     };
+    // `--exclude-first-parent-only` as git 2.56 walks it.
+    const excluding_as_2_56 = try testgit.gitAtLeast(gpa, io, 2, 56);
     for (queries) |q| {
+        if (!excluding_as_2_56 and std.mem.eql(u8, q[0], "--exclude-first-parent-only")) continue;
         // A branch this seed has no commit on is not a query.
         var known = true;
         for (q) |arg| {

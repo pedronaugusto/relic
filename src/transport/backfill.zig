@@ -67,6 +67,8 @@ pub const Options = struct {
     include_edges: bool = true,
     /// `--first-parent`.
     first_parent: bool = false,
+    /// `--exclude-first-parent-only`.
+    exclude_first_parent_only: bool = false,
     /// `--filter=<spec>`: see `path_walk.Options.filter`.
     filter: ?[]const u8 = null,
     /// What the promisor remote is asked with.
@@ -123,6 +125,7 @@ pub fn backfill(gpa: Allocator, io: Io, repo: *Repository, inputs: Inputs, optio
         .trees = false,
         .paths = inputs.paths,
         .first_parent = options.first_parent,
+        .exclude_first_parent_only = options.exclude_first_parent_only,
         .edges = options.include_edges,
         .sparse = if (patterns) |*p| p else null,
         .sparse_trees = true,
