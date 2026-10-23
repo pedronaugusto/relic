@@ -1,6 +1,6 @@
 //! What a project that depends on relic with `.http = false` writes. Built by
-//! `bay check-consumer` with conduit, sweep, parallax, airlock and warp, and
-//! aegis and reactor beneath them, to fetch, and none of uplink, cloak and
+//! `bay check-consumer` with conduit, reactor, sweep, parallax, airlock and
+//! warp, and aegis beneath them, to fetch, and none of uplink, cloak and
 //! strand: every entry point that may speak HTTP still compiles, and an HTTP
 //! remote is `error.HttpUnavailable`.
 const relic = @import("relic");

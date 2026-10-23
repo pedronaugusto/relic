@@ -37,6 +37,7 @@ const program = @import("../process.zig").program;
 const config_mod = @import("../config/config.zig");
 const pkt_line = @import("../codec.zig").pkt_line;
 const airlock = @import("airlock");
+const reactor = @import("reactor");
 
 const Index = index_mod.Index;
 
@@ -390,7 +391,7 @@ fn connectSocket(arena: Allocator, io: Io, daemon: Daemon) Error!?Io.net.Stream 
     const address: Io.net.UnixAddress = .{ .path = (try socketPath(arena, io, daemon)) orelse return null };
     var waited_ms: u32 = 0;
     while (true) {
-        return address.connect(io) catch |err| switch (err) {
+        return reactor.net.connectUnix(io, &address) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             error.ConnectionRefused, error.WouldBlock => {
                 if (waited_ms >= 1000) return null;
