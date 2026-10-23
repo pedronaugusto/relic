@@ -3,7 +3,7 @@ const std = @import("std");
 const airlock_build = @import("airlock");
 
 /// What a project that depends on relic builds: the `relic` module, on aegis,
-/// conduit, sweep, parallax, airlock, warp and xenoglyph, and with `http` (the default) uplink,
+/// conduit, reactor, sweep, parallax, airlock, warp and xenoglyph, and with `http` (the default) uplink,
 /// cloak and strand. The tests, examples, benchmarks and gate are `dev`'s.
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -34,7 +34,7 @@ pub fn build(b: *std.Build) void {
 }
 
 /// What the `relic` module imports, from `p`, relic's own build, for `target`
-/// and `optimize`: aegis, conduit, sweep, parallax, airlock, warp and xenoglyph, the
+/// and `optimize`: aegis, conduit, reactor, sweep, parallax, airlock, warp and xenoglyph, the
 /// `relic_options` that say whether `http` is on, `README.md` for its module
 /// table, and with `http` uplink, cloak and strand, each once the build has
 /// fetched it. The tests and the
@@ -43,7 +43,7 @@ fn moduleImports(p: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
     const features = p.addOptions();
     features.addOption(bool, "http", http);
     var imports: std.ArrayList(std.Build.Module.Import) = .empty;
-    for ([_][]const u8{ "aegis", "conduit", "sweep", "parallax", "airlock", "warp", "xenoglyph" }) |name| {
+    for ([_][]const u8{ "aegis", "conduit", "reactor", "sweep", "parallax", "airlock", "warp", "xenoglyph" }) |name| {
         imports.append(p.allocator, .{ .name = name, .module = p.dependency(name, .{ .target = target, .optimize = optimize }).module(name) }) catch @panic("out of memory");
     }
     imports.append(p.allocator, .{ .name = "relic_options", .module = features.createModule() }) catch @panic("out of memory");
@@ -375,8 +375,8 @@ pub fn dev(b: *std.Build, tools: type) void {
         },
     });
     // A project that depends on relic by path with `.http = false`: the
-    // build a consumer gets, with aegis, conduit, sweep, parallax, airlock, warp and
-    // xenoglyph to fetch, and reactor beneath them, and none of uplink,
+    // build a consumer gets, with aegis, conduit, reactor, sweep, parallax, airlock,
+    // warp and xenoglyph to fetch, and none of uplink,
     // cloak and strand. Its program names the entry points that may speak
     // HTTP, so each must compile without them.
     const conduit_dependency = p.dependency("conduit", .{ .target = target, .optimize = optimize });
@@ -386,8 +386,7 @@ pub fn dev(b: *std.Build, tools: type) void {
         .packages = &.{
             conduit_dependency,
             p.dependency("aegis", .{}),
-            // The reactor conduit was built with is its own to pin.
-            conduit_dependency.builder.dependency("reactor", .{}),
+            p.dependency("reactor", .{}),
             p.dependency("sweep", .{}),
             p.dependency("parallax", .{}),
             airlock_dependency,

@@ -845,7 +845,7 @@ running it, and CI does that for `x86_64-linux-gnu`, `aarch64-linux-gnu`,
 ## Built with
 
 One module, with [conduit](https://github.com/pedronaugusto/conduit) for
-running programs, [sweep](https://github.com/pedronaugusto/sweep) for git's globs,
+running programs, [reactor](https://github.com/pedronaugusto/reactor) for Unix sockets, [sweep](https://github.com/pedronaugusto/sweep) for git's globs,
 [parallax](https://github.com/pedronaugusto/parallax) for line diffs and merges,
 [warp](https://github.com/pedronaugusto/warp) for checksums and DEFLATE,
 [airlock](https://github.com/pedronaugusto/airlock) for durable writes, and
