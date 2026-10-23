@@ -26,6 +26,7 @@ const Proxy = http_settings.Proxy;
 
 const url = @import("../wire.zig").url;
 const urlmatch = @import("../text.zig").urlmatch;
+const fs = @import("../fs/fs.zig");
 
 const fetch_pack = @import("../wire.zig").fetch_pack;
 
@@ -472,7 +473,7 @@ pub const Session = struct {
         const spec = remote_helper.Spec.of(remote_url, options.remote_name, vcs) orelse return null;
         try checkAllowed(options, spec.name);
         const programs = options.programs orelse return error.ProgramsNotGranted;
-        const git_dir: ?[:0]u8 = if (options.repository) |r| try r.gitDirectory().realPathFileAlloc(io, ".", gpa) else null;
+        const git_dir: ?[:0]u8 = if (options.repository) |r| try fs.realPathAlloc(gpa, io, r.gitDirectory(), ".") else null;
         defer if (git_dir) |d| gpa.free(d);
         const h = try remote_helper.Helper.open(gpa, io, spec, .{
             .programs = programs,

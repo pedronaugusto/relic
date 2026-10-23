@@ -12,6 +12,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
+const fs = @import("../fs/fs.zig");
 const hash = @import("../hash/hash.zig");
 const program = @import("../process.zig").program;
 const repo_mod = @import("../repo/repo.zig");
@@ -39,8 +40,9 @@ pub fn read(gpa: Allocator, io: Io, repo: *repo_mod.Repository, programs: ?progr
     const command = config.get("core.alternaterefscommand");
     const prefixes = config.get("core.alternaterefsprefixes");
     for (alternates.paths) |path| {
-        // As written, from this repository's `objects`.
-        const objects = repo.objectDatabase().objectsDirectory().realPathFileAlloc(io, path, gpa) catch |err| switch (err) {
+        // As written, from this repository's `objects`, `/`-separated as
+        // git's `strbuf_realpath` gives it on Windows too.
+        const objects = fs.realPathAlloc(gpa, io, repo.objectDatabase().objectsDirectory(), path) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Canceled => return error.Canceled,
             else => continue,
