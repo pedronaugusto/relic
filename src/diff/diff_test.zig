@@ -202,11 +202,11 @@ test "numstat agrees with git, including the binary marker" {
 
 fn setupDrivers(io: Io, repo: *testgit.Repo) anyerror!void {
     try repo.writeFile(io, "text.txt", "a\nb\n");
-    try repo.writeFile(io, "nul.bin", "x\x00y\n");
+    try repo.writeFile(io, "zero.bin", "x\x00y\n");
     try repo.exec(io, &.{ "add", "-A" });
     try repo.exec(io, &.{ "commit", "-q", "-m", "one" });
     try repo.writeFile(io, "text.txt", "a\nc\nd\n");
-    try repo.writeFile(io, "nul.bin", "x\x00z\n");
+    try repo.writeFile(io, "zero.bin", "x\x00z\n");
     try repo.writeFile(io, "added.txt", "new\n");
     try repo.exec(io, &.{ "add", "-A" });
     try repo.exec(io, &.{ "commit", "-q", "-m", "two" });
@@ -225,7 +225,7 @@ test "numstat decides binary as git's --numstat: a driver's binary, -diff and co
     const Case = struct { attrs: []const u8, config: []const []const u8 };
     // The textconv keeps one line of anything: git's patch is empty under
     // it, its numstat counts the bytes.
-    const up = "text.txt diff=up\nnul.bin diff=up\n";
+    const up = "text.txt diff=up\nzero.bin diff=up\n";
     const cases = [_]Case{
         .{ .attrs = "", .config = &.{} },
         .{ .attrs = up, .config = &.{"diff.up.textconv=sed -n 1p"} },
@@ -233,7 +233,7 @@ test "numstat decides binary as git's --numstat: a driver's binary, -diff and co
         .{ .attrs = up, .config = &.{"diff.up.binary=false"} },
         .{ .attrs = up, .config = &.{"diff.up.binary=auto"} },
         .{ .attrs = "text.txt -diff\n", .config = &.{} },
-        .{ .attrs = "nul.bin diff\n", .config = &.{} },
+        .{ .attrs = "zero.bin diff\n", .config = &.{} },
         .{ .attrs = "", .config = &.{"core.bigFileThreshold=4"} },
         .{ .attrs = up, .config = &.{ "core.bigFileThreshold=4", "diff.up.binary=false" } },
         .{ .attrs = "", .config = &.{"diff.default.binary=true"} },
