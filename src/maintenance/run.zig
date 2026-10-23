@@ -606,7 +606,5 @@ fn listed(config: *const config_mod.Config, path: []const u8) bool {
 /// repository, resolved, with forward slashes as git writes it.
 fn maintenancePath(io: Io, repo: *Repository, buf: *[Io.Dir.max_path_bytes]u8) Io.Dir.RealPathError![]const u8 {
     const dir = repo.workDirectory() orelse repo.gitDirectory();
-    const path = buf[0..try dir.realPath(io, buf)];
-    if (@import("builtin").target.os.tag == .windows) std.mem.replaceScalar(u8, path, '\\', '/');
-    return path;
+    return fs.realPath(io, dir, buf);
 }

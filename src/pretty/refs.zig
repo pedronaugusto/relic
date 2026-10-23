@@ -25,6 +25,7 @@ const unicode_width = @import("../text.zig").unicode_width;
 const builtin = @import("builtin");
 const std = @import("std");
 const ctype = @import("../text.zig").ctype;
+const fs = @import("../fs/fs.zig");
 const decimal = @import("../text.zig").decimal;
 const percent = @import("../text.zig").percent;
 const revparse_mod = @import("../repo/rev_parse.zig");
@@ -1931,8 +1932,7 @@ pub const Listing = struct {
     }
 
     fn mainWorktreePath(l: *Listing) ErrorNamespace.Error![]const u8 {
-        const real = l.repo.commonDirectory().realPathFileAlloc(l.io, ".", l.a()) catch return "";
-        var path = try normalizePath(l.a(), real);
+        var path: []const u8 = fs.realPathAlloc(l.a(), l.io, l.repo.commonDirectory(), ".") catch return "";
         if (std.mem.endsWith(u8, path, "/.git")) path = path[0 .. path.len - "/.git".len];
         return path;
     }

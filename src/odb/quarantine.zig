@@ -77,11 +77,12 @@ pub const Quarantine = struct {
         q.db = try Odb.openAt(gpa, io, dir, main.objectFormat(), main.settings());
         errdefer q.db.deinit(io);
         try q.db.borrow(io, objects);
-        const real = try objects.realPathFileAlloc(io, ".", gpa);
+        // `/`-separated, as git's `tmp_objdir` names them to the hooks.
+        const real = try fs.realPathAlloc(gpa, io, objects, ".");
         defer gpa.free(real);
         q.objects_path = try gpa.dupe(u8, real);
         errdefer gpa.free(q.objects_path);
-        q.path = try std.Io.Dir.path.join(gpa, &.{ q.objects_path, dir_name });
+        q.path = try std.mem.concat(gpa, u8, &.{ q.objects_path, "/", dir_name });
         return q;
     }
 

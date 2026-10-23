@@ -48,10 +48,10 @@ pub const Hooks = struct {
         var h: Hooks = .{ .runner = runner, .verify = options.verify, .git_dir = ".git" };
         if (runner == null) return h;
         var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const git_path = try arena.dupe(u8, buf[0..try repo.gitDirectory().realPath(io, &buf)]);
+        const git_path = try arena.dupe(u8, try fs.realPath(io, repo.gitDirectory(), &buf));
         if (repo.workDirectory()) |wt| {
-            const top = buf[0..try wt.realPath(io, &buf)];
-            const expected = try std.Io.Dir.path.join(arena, &.{ top, ".git" });
+            const top = try fs.realPath(io, wt, &buf);
+            const expected = try std.mem.concat(arena, u8, &.{ top, "/.git" });
             if (std.mem.eql(u8, expected, git_path)) return h;
         }
         h.git_dir = git_path;

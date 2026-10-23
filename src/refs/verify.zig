@@ -160,12 +160,12 @@ const Checker = struct {
         // `files_fsck_refs_content`
         if (kind == .sym_link) {
             _ = try c.report(path, .symlink_ref, "use deprecated symbolic link for symref", .{});
-            const real = dir.realPathFileAlloc(c.io, sub, c.a) catch |err| switch (err) {
+            const real = fs.realPathAlloc(c.a, c.io, dir, sub) catch |err| switch (err) {
                 error.FileNotFound => return,
                 error.OutOfMemory => return error.OutOfMemory,
                 else => |e| return e,
             };
-            const git_dir = c.store.gitDir().realPathFileAlloc(c.io, ".", c.a) catch |err| switch (err) {
+            const git_dir = fs.realPathAlloc(c.a, c.io, c.store.gitDir(), ".") catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => |e| return e,
             };

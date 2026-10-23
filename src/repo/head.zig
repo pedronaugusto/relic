@@ -161,8 +161,7 @@ pub fn checkedOutBranches(arena: Allocator, io: Io, repo: *Repository) CheckedOu
     const bare = repo.configuration().getBool("core.bare", false) catch false;
     if (!bare) main: {
         var buf: [4096]u8 = undefined;
-        const len = repo.commonDirectory().realPath(io, &buf) catch break :main;
-        const common = buf[0..len];
+        const common = fs.realPath(io, repo.commonDirectory(), &buf) catch break :main;
         const main_path = if (std.mem.endsWith(u8, common, "/.git")) common[0 .. common.len - "/.git".len] else common;
         try addWorktreeBranches(arena, io, repo, &map, repo.commonDirectory(), "main-worktree/HEAD", try arena.dupe(u8, main_path));
     }
@@ -189,8 +188,7 @@ pub fn bisectingBranch(arena: Allocator, io: Io, repo: *Repository, ref: []const
         const from = (try bisectedFrom(arena, io, repo, repo.commonDirectory())) orelse break :main;
         if (!std.mem.eql(u8, from, ref)) break :main;
         var buf: [4096]u8 = undefined;
-        const len = repo.commonDirectory().realPath(io, &buf) catch break :main;
-        const common = buf[0..len];
+        const common = fs.realPath(io, repo.commonDirectory(), &buf) catch break :main;
         return try arena.dupe(u8, if (std.mem.endsWith(u8, common, "/.git")) common[0 .. common.len - "/.git".len] else common);
     }
     const listing = try worktrees.list(arena, io, repo.refStore());

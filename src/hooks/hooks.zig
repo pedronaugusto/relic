@@ -35,6 +35,7 @@ const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
+const fs = @import("../fs/fs.zig");
 const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
 const config_mod = @import("../config/config.zig");
@@ -319,7 +320,7 @@ pub const Runner = struct {
 
         var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const top = place.work_dir orelse place.git_dir;
-        const cwd = try arena.dupe(u8, buf[0..try top.realPath(io, &buf)]);
+        const cwd = try arena.dupe(u8, try fs.realPath(io, top, &buf));
 
         // Read as git's configset reads it: the last value alone.
         const hooks_path = if (place.config.find("core.hookspath")) |entry|
@@ -331,10 +332,10 @@ pub const Runner = struct {
             if (std.Io.Dir.path.isAbsolute(configured))
                 configured
             else
-                try std.Io.Dir.path.join(arena, &.{ cwd, configured })
+                try std.mem.concat(arena, u8, &.{ cwd, "/", configured })
         else blk: {
-            const common = buf[0..try place.common_dir.realPath(io, &buf)];
-            break :blk try std.Io.Dir.path.join(arena, &.{ common, "hooks" });
+            const common = try fs.realPath(io, place.common_dir, &buf);
+            break :blk try std.mem.concat(arena, u8, &.{ common, "/hooks" });
         };
 
         var disabled_events: std.ArrayList([]const u8) = .empty;

@@ -823,9 +823,7 @@ pub const Repository = struct {
                 fs.ownedByCurrentUser(io, git_dir, ".", options.home);
             if (owned) return;
         }
-        const real = (work orelse git_dir).realPathFileAlloc(io, ".", gpa) catch return error.DubiousOwnership;
-        defer gpa.free(real);
-        const path = try safe.normalize(gpa, real);
+        const path = fs.realPathAlloc(gpa, io, work orelse git_dir, ".") catch return error.DubiousOwnership;
         defer gpa.free(path);
         var protected = try protectedConfig(gpa, io, options);
         defer protected.deinit();
@@ -844,9 +842,7 @@ pub const Repository = struct {
         // A value git does not know refuses, as git dies there.
         const allowed = safe.bareRepositories(&protected) catch .explicit;
         if (allowed == .all) return;
-        const real = git_dir.realPathFileAlloc(io, ".", gpa) catch return error.ImplicitBareRepository;
-        defer gpa.free(real);
-        const path = try safe.normalize(gpa, real);
+        const path = fs.realPathAlloc(gpa, io, git_dir, ".") catch return error.ImplicitBareRepository;
         defer gpa.free(path);
         if (!safe.isImplicitBare(path)) {
             try refuseSetting(options.diagnostic, "safe.bareRepository");
