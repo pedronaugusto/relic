@@ -19,6 +19,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const fs = @import("../fs/fs.zig");
 const ctype = @import("../text.zig").ctype;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -664,7 +665,7 @@ fn resolve(a: Allocator, io: Io, repo: *Repository, options: Options) Error!Plan
         .on => |text| text,
         .configured => if (st.signature) |text| text else if (st.signature_file) |path| sig: {
             const full = config_mod.interpolatePath(a, path, config.context.home) catch return error.InvalidFormatSetting;
-            break :sig try Io.Dir.cwd().readFileAlloc(io, full, a, .unlimited);
+            break :sig try fs.readWhole(Io.Dir.cwd(), io, full, a, .unlimited);
         } else null,
     };
     const from: ?Ident = switch (options.from) {

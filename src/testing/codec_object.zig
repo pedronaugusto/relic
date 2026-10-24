@@ -1,4 +1,5 @@
 const std = @import("std");
+const fs = @import("../fs/fs.zig");
 const relic = @import("../relic.zig");
 
 test "a loose object's Adler checksum is verified before returning content" {
@@ -17,7 +18,7 @@ test "a loose object's Adler checksum is verified before returning content" {
         const text = oid.hex(&hex);
         const path = try gpa.print("{s}/{s}", .{ text[0..2], text[2..] });
         defer gpa.free(path);
-        const stored = try objects.readFileAlloc(io, path, gpa, .limited(1024));
+        const stored = try fs.readWhole(objects, io, path, gpa, .limited(1024));
         defer gpa.free(stored);
         stored[stored.len - 1] ^= 1;
         try objects.deleteFile(io, path);

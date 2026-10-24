@@ -197,7 +197,7 @@ pub fn expectNoFailures(outcome: *const lfstransfer.Outcome) !void {
 }
 
 pub fn expectFile(fx: *Fixture, d: Io.Dir, name: []const u8, want: []const u8) !void {
-    const have = try d.readFileAlloc(fx.io, name, fx.gpa, .limited(64 << 20));
+    const have = try fs.readWhole(d, fx.io, name, fx.gpa, .limited(64 << 20));
     defer fx.gpa.free(have);
     try testing.expectEqualSlices(u8, want, have);
 }
@@ -246,9 +246,9 @@ test "what relic uploads git lfs pull downloads, what git-lfs pushes relic pulls
     // Each asked its own helper the same things: get, then store once the
     // credential worked.
     {
-        const a = try fx.tools.readFileAlloc(io, "ours-helper.log", gpa, .unlimited);
+        const a = try fs.readWhole(fx.tools, io, "ours-helper.log", gpa, .unlimited);
         defer gpa.free(a);
-        const b = try fx.tools.readFileAlloc(io, "theirs-helper.log", gpa, .unlimited);
+        const b = try fs.readWhole(fx.tools, io, "theirs-helper.log", gpa, .unlimited);
         defer gpa.free(b);
         const b_as_ada = try std.mem.replaceOwned(u8, gpa, b, "username=bob\npassword=hunter2", "username=ada\npassword=secret");
         defer gpa.free(b_as_ada);
@@ -366,7 +366,7 @@ test "ssh is started for git-lfs-authenticate as git-lfs starts it, and its toke
             try testing.expectEqual(@as(usize, 0), pulled.fetched.failures());
         }
         try expectFile(fx, d, "a.bin", content);
-        logs[i] = try fx.tools.readFileAlloc(io, "fake-ssh.log", gpa, .unlimited);
+        logs[i] = try fs.readWhole(fx.tools, io, "fake-ssh.log", gpa, .unlimited);
     }
     try testing.expectEqualStrings(logs[0], logs[1]);
     try testing.expect(std.mem.find(u8, logs[1], "[git-lfs-authenticate /org/repo.git download]") != null);
@@ -654,9 +654,9 @@ test "a refused credential is erased, as git-lfs erases it, and the transfer say
     _ = try fx.tools.statFile(io, "wrong-git.erased", .{});
     _ = try fx.tools.statFile(io, "wrong-relic.erased", .{});
 
-    const theirs_log = try fx.tools.readFileAlloc(io, "wrong-git.log", gpa, .unlimited);
+    const theirs_log = try fs.readWhole(fx.tools, io, "wrong-git.log", gpa, .unlimited);
     defer gpa.free(theirs_log);
-    const ours_log = try fx.tools.readFileAlloc(io, "wrong-relic.log", gpa, .unlimited);
+    const ours_log = try fs.readWhole(fx.tools, io, "wrong-relic.log", gpa, .unlimited);
     defer gpa.free(ours_log);
     try testing.expectEqualStrings(theirs_log, ours_log);
 }
@@ -879,9 +879,9 @@ test "a .netrc in the home directory is used before any helper, as git-lfs uses 
     var again = try lfstransfer.fetch(io, server2, &repo, .{});
     defer again.deinit();
     try expectNoFailures(&again);
-    const theirs = try fx.tools.readFileAlloc(io, "by-git-helper.log", gpa, .unlimited);
+    const theirs = try fs.readWhole(fx.tools, io, "by-git-helper.log", gpa, .unlimited);
     defer gpa.free(theirs);
-    const ours = try fx.tools.readFileAlloc(io, "by-relic-helper.log", gpa, .unlimited);
+    const ours = try fs.readWhole(fx.tools, io, "by-relic-helper.log", gpa, .unlimited);
     defer gpa.free(ours);
     try testing.expectEqualStrings(theirs, ours);
 }
@@ -1617,7 +1617,7 @@ test "a client certificate is presented as git-lfs presents it, an encrypted key
             logs[i] = try fx.server.requests(gpa);
             var log_name_buf: [40]u8 = undefined;
             const log_name = try std.mem.print(&log_name_buf, "{s}.log", .{name});
-            helper_logs[i] = fx.tools.readFileAlloc(io, log_name, gpa, .unlimited) catch |err| switch (err) {
+            helper_logs[i] = fs.readWhole(fx.tools, io, log_name, gpa, .unlimited) catch |err| switch (err) {
                 error.FileNotFound => try gpa.dupe(u8, ""),
                 else => return err,
             };
@@ -1668,7 +1668,7 @@ test "a refused credential is described as git-lfs's helpers hear it, with the s
             try testing.expectEqual(.credential, failure.helpers[0].answer);
         }
         var log_name: [64]u8 = undefined;
-        const log = try fx.tools.readFileAlloc(io, try std.mem.print(&log_name, "{s}.log", .{helper_name}), gpa, .unlimited);
+        const log = try fs.readWhole(fx.tools, io, try std.mem.print(&log_name, "{s}.log", .{helper_name}), gpa, .unlimited);
         defer gpa.free(log);
         // What each `get` was told: the lines of every `get`, in order.
         var gets: std.ArrayList(u8) = .empty;
@@ -1828,7 +1828,7 @@ test "a git-lfs-authenticate token is asked for again when it expires, lfs.defau
                 defer fetched.deinit();
                 try expectNoFailures(&fetched);
             }
-            logs[i] = try fx.tools.readFileAlloc(io, "git-lfs-authenticate.log", gpa, .unlimited);
+            logs[i] = try fs.readWhole(fx.tools, io, "git-lfs-authenticate.log", gpa, .unlimited);
         }
         try testing.expectEqualStrings(logs[0], logs[1]);
         try testing.expectEqual(case.calls, std.mem.count(u8, logs[1], "/org/repo.git download\n"));
@@ -2046,7 +2046,7 @@ fn agentLines(fx: *Fixture, logs: []const u8) ![]u8 {
     defer dir.close(fx.io);
     var it = dir.iterate();
     while (try it.next(fx.io)) |entry| {
-        const text = try dir.readFileAlloc(fx.io, entry.name, gpa, .unlimited);
+        const text = try fs.readWhole(dir, fx.io, entry.name, gpa, .unlimited);
         try texts.append(gpa, text);
         var split = std.mem.splitScalar(u8, text, '\n');
         while (split.next()) |l| if (l.len != 0) try lines.append(gpa, l);

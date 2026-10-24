@@ -7,6 +7,7 @@
 //! and fsck in relic and in git, in the nightly's own job.
 
 const std = @import("std");
+const fs = @import("../fs/fs.zig");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 
@@ -296,7 +297,7 @@ test "verify checks each object past the threshold as it reads it, loose and pac
     var path_buf: [64]u8 = undefined;
     const path = try std.mem.print(&path_buf, ".git/objects/{s}/{s}", .{ loose_hex[0..2], loose_hex[2..] });
     // Loose objects are read-only: written again, cut in half.
-    const whole = try git.dir.readFileAlloc(one, path, std.testing.allocator, .unlimited);
+    const whole = try fs.readWhole(git.dir, one, path, std.testing.allocator, .unlimited);
     defer std.testing.allocator.free(whole);
     try git.dir.deleteFile(one, path);
     try git.dir.writeFile(one, .{ .sub_path = path, .data = whole[0 .. whole.len / 2] });

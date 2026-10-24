@@ -2132,7 +2132,7 @@ pub const Listing = struct {
 
     /// git's `get_branch` for a state file.
     fn stateBranch(l: *Listing, path: []const u8) ErrorNamespace.Error!?[]const u8 {
-        const bytes = l.repo.gitDirectory().readFileAlloc(l.io, path, l.a(), .limited(1 << 20)) catch return null;
+        const bytes = fs.readWhole(l.repo.gitDirectory(), l.io, path, l.a(), .limited(1 << 20)) catch return null;
         const trimmed = std.mem.trimEnd(u8, bytes, "\n");
         if (trimmed.len == 0) return null;
         if (std.mem.startsWith(u8, trimmed, "refs/heads/")) return trimmed["refs/heads/".len..];

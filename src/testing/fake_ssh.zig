@@ -53,6 +53,7 @@ const Fixture = struct {
 
     fn read(arena: Allocator, io: Io, executable: []const u8) !Fixture {
         const fixture_path = try arena.print("{s}.fixture", .{executable});
+        // glint-ignore: P006 -- a test program of its own, outside relic's module, that no relic task cancels
         const fixture = Io.Dir.cwd().readFileAlloc(io, fixture_path, arena, .limited(4096)) catch |err| switch (err) {
             error.FileNotFound => "",
             else => return err,
@@ -181,6 +182,7 @@ fn localCommand(arena: Allocator, io: Io, environ: *const std.process.Environ.Ma
 /// status: 127 when it cannot be found, 255 when it did not exit.
 fn run(arena: Allocator, io: Io, environ: *const std.process.Environ.Map, executable: []const u8, command: []const []const u8) !void {
     const capture_sidecar = try arena.print("{s}.capture", .{executable});
+    // glint-ignore: P006 -- a test program of its own, outside relic's module, that no relic task cancels
     const capture = Io.Dir.cwd().readFileAlloc(io, capture_sidecar, arena, .limited(4096)) catch |err| switch (err) {
         error.FileNotFound => null,
         else => return err,

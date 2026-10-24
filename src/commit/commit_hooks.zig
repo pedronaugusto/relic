@@ -95,7 +95,7 @@ pub const Hooks = struct {
         const message_path = try h.path(arena, "COMMIT_EDITMSG");
         _ = try runner.prepareCommitMsg(io, e, message_path, .{ .source = source, .commit = null });
         if (h.verify) _ = try runner.commitMsg(io, e, message_path);
-        return repo.gitDirectory().readFileAlloc(io, "COMMIT_EDITMSG", arena, .limited(1 << 30));
+        return fs.readWhole(repo.gitDirectory(), io, "COMMIT_EDITMSG", arena, .limited(1 << 30));
     }
 
     /// `post-commit`, once the branch has moved. It cannot undo anything.

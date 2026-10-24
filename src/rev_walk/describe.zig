@@ -232,7 +232,11 @@ pub const Describer = struct {
                     break :blk resolved.oid;
                 },
             };
-            const peeled = entry.peeled orelse peelFully(io, d.repo, oid) catch oid;
+            // git's `get_name`: a ref that will not peel is taken as it is.
+            const peeled = entry.peeled orelse peelFully(io, d.repo, oid) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => oid,
+            };
             const annotated = !peeled.eql(oid);
             const prio: u2 = if (annotated) prio_annotated else if (is_tag) prio_lightweight else prio_head;
             const path = if (d.options.all) refname["refs/".len..] else refname["refs/tags/".len..];
@@ -249,9 +253,15 @@ pub const Describer = struct {
             if (e.prio >= prio) {
                 if (!(e.prio == prio_annotated and prio == prio_annotated)) return;
                 // Two annotated tags on one commit: the later tagger date.
-                if (e.tag == null) e.tag = readTag(a, io, d.repo, e.oid) catch null;
+                if (e.tag == null) e.tag = readTag(a, io, d.repo, e.oid) catch |err| switch (err) {
+                    error.Canceled => return error.Canceled,
+                    else => null,
+                };
                 if (e.tag != null) {
-                    tag = readTag(a, io, d.repo, oid) catch return;
+                    tag = readTag(a, io, d.repo, oid) catch |err| switch (err) {
+                        error.Canceled => return error.Canceled,
+                        else => return,
+                    };
                     if (!(e.tag.?.date < tag.?.date)) return;
                 }
             }
@@ -268,7 +278,10 @@ pub const Describer = struct {
     fn appendName(d: *Describer, io: Io, n: *Name, out: *std.ArrayList(u8)) ErrorNamespace.Error!void {
         const a = d.arena.allocator();
         if (n.prio == prio_annotated and n.tag == null) {
-            n.tag = readTag(a, io, d.repo, n.oid) catch return error.TagUnavailable;
+            n.tag = readTag(a, io, d.repo, n.oid) catch |err| return switch (err) {
+                error.Canceled => error.Canceled,
+                else => error.TagUnavailable,
+            };
         }
         if (n.tag) |t| {
             if (!n.name_checked) {
@@ -347,8 +360,13 @@ pub const Describer = struct {
             errdefer map.deinit(d.gpa);
             var it = d.names.valueIterator();
             while (it.next()) |n| {
-                // `peeled` is past every tag already: only its type is asked.
-                const header = d.repo.objectDatabase().readHeader(io, n.peeled) catch continue;
+                // `peeled` is past every tag already: only its type is asked,
+                // and one that cannot be read names nothing, as git's
+                // `lookup_commit_reference_gently` answers.
+                const header = d.repo.objectDatabase().readHeader(io, n.peeled) catch |err| switch (err) {
+                    error.Canceled => return error.Canceled,
+                    else => continue,
+                };
                 if (header.type != .commit) continue;
                 try map.put(d.gpa, n.peeled, n);
             }
@@ -552,7 +570,7 @@ fn anyMatch(globs: []const glob_mod.Glob, text: []const u8) bool {
 
 fn peelFully(io: Io, repo: *Repository, oid: Oid) Error!Oid {
     return repo.peel(io, oid) catch |err| switch (err) {
-        error.OutOfMemory => error.OutOfMemory,
+        error.OutOfMemory, error.Canceled => |e| e,
         else => error.TagDepthExceeded,
     };
 }
@@ -845,10 +863,14 @@ const NameRev = struct {
             var kind: ?object.Type = null;
             var depth: u8 = 0;
             while (depth < 16) : (depth += 1) {
-                const header = nr.repo.objectDatabase().readHeader(io, current) catch break;
+                const header = nr.repo.objectDatabase().readHeader(io, current) catch |err| switch (err) {
+                    error.Canceled => return error.Canceled,
+                    else => break,
+                };
                 kind = header.type;
                 if (header.type != .tag) break;
-                const tag = readTag(a, io, nr.repo, current) catch {
+                const tag = readTag(a, io, nr.repo, current) catch |err| {
+                    if (err == error.Canceled) return error.Canceled;
                     kind = null;
                     break;
                 };

@@ -154,7 +154,7 @@ pub const Index = struct {
         options: OpenOptions,
     ) Self.IndexError!Index {
         const kind = options.kind;
-        const bytes = try dir.readFileAlloc(io, sub_path, gpa, .limited(options.max_bytes));
+        const bytes = try fs.readWhole(dir, io, sub_path, gpa, .limited(options.max_bytes));
         // parse takes ownership on success and failure.
         return parse(gpa, kind, bytes);
     }
@@ -3011,7 +3011,7 @@ test "a pack written to a stream is byte for byte the pack written to a file" {
     var hex: [hash.max_hex_len]u8 = undefined;
     var name_buf: [64]u8 = undefined;
     const pack_name = try std.mem.print(&name_buf, "pack-{s}.pack", .{written.name.hex(&hex)});
-    const on_disk = try tmp.dir.readFileAlloc(io, pack_name, gpa, .unlimited);
+    const on_disk = try fs.readWhole(tmp.dir, io, pack_name, gpa, .unlimited);
     defer gpa.free(on_disk);
     try std.testing.expectEqualSlices(u8, on_disk, stream.written());
 }
@@ -3223,7 +3223,7 @@ test "the block reader serves every std reader call across block boundaries" {
     defer fixture.tmp.cleanup();
     var p = try Pack.open(gpa, io, fixture.tmp.dir, .{ .base = fixture.name(), .kind = .sha1 }, .{ .read_cache_bytes = 2 * read_block_bytes });
     defer p.deinit(io);
-    const file = try fixture.tmp.dir.readFileAlloc(io, try std.mem.print(&fixture.name_buf2, "{s}.pack", .{fixture.name()}), gpa, .limited(1 << 20));
+    const file = try fs.readWhole(fixture.tmp.dir, io, try std.mem.print(&fixture.name_buf2, "{s}.pack", .{fixture.name()}), gpa, .limited(1 << 20));
     defer gpa.free(file);
 
     // Starting a few bytes before each of the first boundaries, every kind

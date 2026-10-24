@@ -5,6 +5,7 @@
 //! walks and fetches on what git made.
 
 const std = @import("std");
+const fs = @import("../fs/fs.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const testing = std.testing;
@@ -65,12 +66,12 @@ fn git(gpa: Allocator, io: Io, dir: Io.Dir, args: []const []const u8) ![]u8 {
 /// byte, every ref, the remote's configuration, how much history each
 /// walk sees — and git's own check of the one relic made.
 fn expectSameShallow(gpa: Allocator, io: Io, by_git: Io.Dir, by_relic: Io.Dir) !void {
-    const theirs_shallow = by_git.readFileAlloc(io, ".git/shallow", gpa, .unlimited) catch |err| switch (err) {
+    const theirs_shallow = fs.readWhole(by_git, io, ".git/shallow", gpa, .unlimited) catch |err| switch (err) {
         error.FileNotFound => try gpa.dupe(u8, "(none)"),
         else => |e| return e,
     };
     defer gpa.free(theirs_shallow);
-    const ours_shallow = by_relic.readFileAlloc(io, ".git/shallow", gpa, .unlimited) catch |err| switch (err) {
+    const ours_shallow = fs.readWhole(by_relic, io, ".git/shallow", gpa, .unlimited) catch |err| switch (err) {
         error.FileNotFound => try gpa.dupe(u8, "(none)"),
         else => |e| return e,
     };
@@ -244,9 +245,9 @@ test "a fetch deepens, and unshallows, as git fetch does, and a plain fetch into
         var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", options);
         outcome.deinit();
         try expectSameShallow(gpa, io, twins.by_git, twins.by_relic);
-        const theirs = try twins.by_git.readFileAlloc(io, ".git/FETCH_HEAD", gpa, .unlimited);
+        const theirs = try fs.readWhole(twins.by_git, io, ".git/FETCH_HEAD", gpa, .unlimited);
         defer gpa.free(theirs);
-        const ours = try twins.by_relic.readFileAlloc(io, ".git/FETCH_HEAD", gpa, .unlimited);
+        const ours = try fs.readWhole(twins.by_relic, io, ".git/FETCH_HEAD", gpa, .unlimited);
         defer gpa.free(ours);
         try testing.expectEqualStrings(theirs, ours);
     }
@@ -339,9 +340,9 @@ test "from a shallow remote a fetch leaves the refs that would move the boundary
         defer outcome.deinit();
         try testing.expect(!outcome.anyRejected());
         for ([_][]const u8{ ".git/shallow", ".git/FETCH_HEAD" }) |name| {
-            const theirs = twins.by_git.readFileAlloc(io, name, gpa, .unlimited) catch try gpa.dupe(u8, "(none)");
+            const theirs = fs.readWhole(twins.by_git, io, name, gpa, .unlimited) catch try gpa.dupe(u8, "(none)");
             defer gpa.free(theirs);
-            const ours = twins.by_relic.readFileAlloc(io, name, gpa, .unlimited) catch try gpa.dupe(u8, "(none)");
+            const ours = fs.readWhole(twins.by_relic, io, name, gpa, .unlimited) catch try gpa.dupe(u8, "(none)");
             defer gpa.free(ours);
             try testing.expectEqualStrings(theirs, ours);
         }
@@ -434,7 +435,7 @@ test "a push from a shallow repository tells the server its boundary, as git's s
                 const status = try testremote.gitInputEnv(gpa, io, work, &env, &.{ "--git-dir", target, "for-each-ref" }, "", true);
                 statuses[1] = status;
             }
-            const bytes = try tools.dir.readFileAlloc(io, "sent", gpa, .unlimited);
+            const bytes = try fs.readWhole(tools.dir, io, "sent", gpa, .unlimited);
             defer gpa.free(bytes);
             // Up to the pack, whose compression is each side's own.
             const end = std.mem.find(u8, bytes, "PACK") orelse bytes.len;

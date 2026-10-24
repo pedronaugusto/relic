@@ -45,7 +45,7 @@ pub const Error = error{
 pub fn read(gpa: Allocator, io: Io, common_dir: Io.Dir, kind: hash.Kind) Self.ReadError!Oid.Set {
     var set: Oid.Set = .empty;
     errdefer set.deinit(gpa);
-    const text = common_dir.readFileAlloc(io, file_name, gpa, .limited(1 << 30)) catch |err| switch (err) {
+    const text = fs.readWhole(common_dir, io, file_name, gpa, .limited(1 << 30)) catch |err| switch (err) {
         error.FileNotFound => return set,
         else => |e| return e,
     };
@@ -145,7 +145,7 @@ test "the file is written sorted, read back, and removed when the boundary goes"
     var set = try apply(gpa, &empty, &.{ a, b }, &.{});
     defer set.deinit(gpa);
     const written = try write(gpa, io, tmp.dir, &set, .{ .seen = null });
-    const text = try tmp.dir.readFileAlloc(io, file_name, gpa, .unlimited);
+    const text = try fs.readWhole(tmp.dir, io, file_name, gpa, .unlimited);
     defer gpa.free(text);
     try std.testing.expectEqualStrings(@as([40]u8, @splat('a')) ++ "\n" ++ @as([40]u8, @splat('b')) ++ "\n", text);
     var back = try read(gpa, io, tmp.dir, .sha1);

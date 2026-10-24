@@ -6,6 +6,7 @@
 //! checked-out branch, in protocol v0, v1 and v2.
 
 const std = @import("std");
+const fs = @import("../fs/fs.zig");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -257,7 +258,7 @@ const Pair = struct {
             defer p.gpa.free(git_dir);
             const log_path = try p.gpa.print("{s}/hook.log", .{std.mem.trimEnd(u8, git_dir, "\n")});
             defer p.gpa.free(log_path);
-            logs[i] = dir.readFileAlloc(p.io, log_path, p.gpa, .unlimited) catch try p.gpa.dupe(u8, "");
+            logs[i] = fs.readWhole(dir, p.io, log_path, p.gpa, .unlimited) catch try p.gpa.dupe(u8, "");
             const objects = try p.gpa.print("{s}/objects", .{std.mem.trimEnd(u8, git_dir, "\n")});
             defer p.gpa.free(objects);
             var objects_dir = try dir.openDir(p.io, objects, .{ .iterate = true });
@@ -378,7 +379,7 @@ const Pair = struct {
         made.deinit(p.gpa);
         const public_path = try p.gpa.print("{s}.pub", .{key});
         defer p.gpa.free(public_path);
-        const public = try Io.Dir.cwd().readFileAlloc(p.io, public_path, p.gpa, .limited(4096));
+        const public = try fs.readWhole(Io.Dir.cwd(), p.io, public_path, p.gpa, .limited(4096));
         defer p.gpa.free(public);
         const allowed = try p.gpa.print("{s}/allowed", .{dir});
         defer p.gpa.free(allowed);
@@ -739,8 +740,8 @@ test "receive.updateServerInfo writes the dumb HTTP files after a push, as git's
     for ([_][]const u8{ p.theirs, p.ours }, 0..) |target, i| {
         var dir = try Io.Dir.cwd().openDir(io, target, .{});
         defer dir.close(io);
-        files[i][0] = try dir.readFileAlloc(io, "info/refs", gpa, .unlimited);
-        files[i][1] = try dir.readFileAlloc(io, "objects/info/packs", gpa, .unlimited);
+        files[i][0] = try fs.readWhole(dir, io, "info/refs", gpa, .unlimited);
+        files[i][1] = try fs.readWhole(dir, io, "objects/info/packs", gpa, .unlimited);
     }
     defer for (files) |pair| for (pair) |text| gpa.free(text);
     try testing.expectEqualStrings(files[0][0], files[1][0]);

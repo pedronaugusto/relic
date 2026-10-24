@@ -6,6 +6,7 @@
 //! `git commit-tree` make under `i18n.commitEncoding`.
 
 const std = @import("std");
+const fs = @import("../fs/fs.zig");
 const Io = std.Io;
 
 const testgit = @import("git.zig");
@@ -409,7 +410,7 @@ test "attr.tree's attributes write a checkout in place of the checked-out tree's
     _ = try ft.relicCheckout(gpa, io, twin.ours.dir, tree, .{});
     try ft.expectSameFile(gpa, io, &twin.ours, &twin.theirs, "a.txt");
     try ft.expectSameFile(gpa, io, &twin.ours, &twin.theirs, "sub/c.txt");
-    const written = try twin.theirs.dir.readFileAlloc(io, "a.txt", gpa, .unlimited);
+    const written = try fs.readWhole(twin.theirs.dir, io, "a.txt", gpa, .unlimited);
     defer gpa.free(written);
     // `attr.tree`'s `-text`, not the tree's `eol=crlf`
     try testing.expectEqualStrings("a\nb\n", written);

@@ -6,6 +6,7 @@
 
 const config_mod = @import("../config/config.zig");
 const std = @import("std");
+const fs = @import("../fs/fs.zig");
 const suite = @import("../testing/helpers.zig");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
@@ -93,12 +94,12 @@ fn expectSame(gpa: Allocator, io: Io, env: *const std.process.Environ.Map, a: Io
         try testing.expectEqualStrings(sorted_theirs, sorted_ours);
     }
     for ([_][]const u8{ ".git/shallow", "shallow" }) |name| {
-        const theirs = a.readFileAlloc(io, name, gpa, .unlimited) catch |err| switch (err) {
+        const theirs = fs.readWhole(a, io, name, gpa, .unlimited) catch |err| switch (err) {
             error.FileNotFound => continue,
             else => |e| return e,
         };
         defer gpa.free(theirs);
-        const ours = try b.readFileAlloc(io, name, gpa, .unlimited);
+        const ours = try fs.readWhole(b, io, name, gpa, .unlimited);
         defer gpa.free(ours);
         try testing.expectEqualStrings(theirs, ours);
     }
@@ -386,7 +387,7 @@ test "git 2.56, relic's upload-pack answers bundle-uri as git's under uploadpack
     try env.put("GIT_PROTOCOL", "version=2");
     const config_path = try std.Io.Dir.path.join(gpa, &.{ bare, "config" });
     defer gpa.free(config_path);
-    const config = try Io.Dir.cwd().readFileAlloc(io, config_path, gpa, .unlimited);
+    const config = try fs.readWhole(Io.Dir.cwd(), io, config_path, gpa, .unlimited);
     defer gpa.free(config);
     const more = "[uploadpack]\n\tadvertiseBundleURIs = yes\n[Bundle]\n\tVersion = 1\n\tbare\n\tmode = all\n[bundle \"One.B\"]\n\tURI = https://example.com/one.bundle\n\tempty =\n\tcreationToken = 3\n[core]\n\tbundled = no\n";
     const joined = try std.mem.concat(gpa, u8, &.{ config, more });
@@ -672,8 +673,8 @@ test "git 2.56, uploadpack.packObjectsHook makes the pack as git's upload-pack h
                 const fetched = try git(gpa, io, d, &env, &.{ "-c", version_setting, "fetch", "-q", "--deepen=1" });
                 gpa.free(fetched);
             }
-            said[i][0] = try root.dir.readFileAlloc(io, "args", gpa, .unlimited);
-            said[i][1] = try root.dir.readFileAlloc(io, "stdin", gpa, .unlimited);
+            said[i][0] = try fs.readWhole(root.dir, io, "args", gpa, .unlimited);
+            said[i][1] = try fs.readWhole(root.dir, io, "stdin", gpa, .unlimited);
         }
         defer for (said) |pair| for (pair) |text| gpa.free(text);
         for (0..2) |k| testing.expectEqualStrings(said[0][k], said[1][k]) catch |err| {
@@ -706,7 +707,7 @@ test "git 2.56, uploadpack.packObjectsHook makes the pack as git's upload-pack h
         try args.appendSlice(gpa, &.{ url, name });
         const out = try git(gpa, io, tmp.dir, &env, args.items);
         gpa.free(out);
-        const traced = try Io.Dir.cwd().readFileAlloc(io, trace, gpa, .unlimited);
+        const traced = try fs.readWhole(Io.Dir.cwd(), io, trace, gpa, .unlimited);
         defer gpa.free(traced);
         testing.expect(std.mem.count(u8, traced, "sideband< \\1\n") >= 1) catch |err| {
             std.debug.print("{s}: no keepalive in\n{s}\n", .{ name, traced });

@@ -22,6 +22,7 @@
 //! Each distinct state is checked by git once, after the simulation, so a
 //! state reached from many crash points costs one `git fsck`.
 const std = @import("std");
+const fs_mod = @import("../fs/fs.zig");
 const builtin = @import("builtin");
 const testing = std.testing;
 const Io = std.Io;
@@ -101,7 +102,7 @@ const Image = struct {
                     try image.readInto(gpa, io, sub, path);
                 },
                 .file => {
-                    const bytes = try dir.readFileAlloc(io, entry.name, gpa, .limited(16 << 20));
+                    const bytes = try fs_mod.readWhole(dir, io, entry.name, gpa, .limited(16 << 20));
                     errdefer gpa.free(bytes);
                     const stat = try dir.statFile(io, entry.name, .{});
                     try image.files.append(gpa, .{ .path = path, .bytes = bytes, .mtime = stat.mtime.nanoseconds });
@@ -381,7 +382,7 @@ pub const Case = struct {
         });
         defer status.deinit();
         for (index.entries.items) |entry| {
-            const bytes = wt.readFileAlloc(io, entry.path, gpa, .limited(1 << 20)) catch |err| switch (err) {
+            const bytes = fs_mod.readWhole(wt, io, entry.path, gpa, .limited(1 << 20)) catch |err| switch (err) {
                 error.FileNotFound => continue,
                 else => |e| return e,
             };

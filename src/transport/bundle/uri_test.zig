@@ -3,6 +3,7 @@
 //! under `transfer.bundleURI` over http.
 
 const std = @import("std");
+const fs = @import("../../fs/fs.zig");
 const Io = std.Io;
 const testing = std.testing;
 
@@ -185,7 +186,7 @@ test "git 2.56, a server's bundle-uri list under transfer.bundleURI as git takes
         if (pass == 1) try src.exec(io, &.{ "-C", bare, "config", "bundle.heuristic", "creationToken" });
         if (in_error) {
             const config_path = try std.Io.Dir.path.join(arena, &.{ bare, "config" });
-            const text = try Io.Dir.cwd().readFileAlloc(io, config_path, arena, .unlimited);
+            const text = try fs.readWhole(Io.Dir.cwd(), io, config_path, arena, .unlimited);
             const more = "[bundle]\n\tmode = none\n[bundle \"b2\"]\n\turi = ../files/b2.bundle\n";
             try Io.Dir.cwd().writeFile(io, .{ .sub_path = config_path, .data = try std.mem.concat(arena, u8, &.{ text, more }) });
         }

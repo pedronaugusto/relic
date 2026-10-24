@@ -587,7 +587,7 @@ const Importer = struct {
 
     fn readMarks(imp: *Importer) Error!void {
         const path = imp.import_marks.?;
-        const bytes = imp.marksDir(path).readFileAlloc(imp.io, path, imp.gpa, .unlimited) catch |err| switch (err) {
+        const bytes = fs.readWhole(imp.marksDir(path), imp.io, path, imp.gpa, .unlimited) catch |err| switch (err) {
             error.FileNotFound => {
                 if (!imp.import_marks_if_exists) return error.FileNotFound;
                 imp.import_marks_done = true;

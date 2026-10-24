@@ -6,6 +6,7 @@
 
 const Self = @This();
 const std = @import("std");
+const fs = @import("../fs/fs.zig");
 const date = @import("../text.zig").date;
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
@@ -158,7 +159,7 @@ pub fn collectStarts(gpa: Allocator, arena: Allocator, io: Io, repo: *Repository
             try git_dirs.append(arena, dir);
         }
         for (git_dirs.items) |dir| for ([_][]const u8{ "rebase-apply/autostash", "rebase-apply/orig-head", "rebase-merge/autostash", "rebase-merge/orig-head" }) |file| {
-            const text = dir.readFileAlloc(io, file, arena, .limited(4096)) catch |err| switch (err) {
+            const text = fs.readWhole(dir, io, file, arena, .limited(4096)) catch |err| switch (err) {
                 error.FileNotFound, error.NotDir => continue,
                 else => |e| return e,
             };

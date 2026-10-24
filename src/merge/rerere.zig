@@ -508,7 +508,7 @@ fn isReg(mode: object.Mode) bool {
 }
 
 fn readWorktree(r: *Run, path: []const u8) ?[]u8 {
-    return r.wt.readFileAlloc(r.io, path, r.arena, .limited(1 << 30)) catch null;
+    return fs.readWhole(r.wt, r.io, path, r.arena, .limited(1 << 30)) catch null;
 }
 
 fn removeVariant(r: *Run, id: Id) Error!void {

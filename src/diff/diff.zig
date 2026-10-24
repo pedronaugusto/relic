@@ -13,6 +13,7 @@ const rename = @import("rename.zig");
 const similarity = @import("similarity.zig");
 
 const std = @import("std");
+const fs = @import("../fs/fs.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -277,7 +278,7 @@ pub const Order = struct {
     /// Everything is `arena`'s.
     pub fn configured(arena: Allocator, io: Io, base: Io.Dir, config: *const config_mod.Config) ConfiguredError!Order {
         const path = (try config.getPath(arena, io, base, "diff.orderfile")) orelse return .{};
-        const text = base.readFileAlloc(io, path, arena, .unlimited) catch |err| switch (err) {
+        const text = fs.readWhole(base, io, path, arena, .unlimited) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.OrderFileUnreadable,
         };

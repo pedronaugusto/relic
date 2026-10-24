@@ -8,6 +8,7 @@
 //! own home directory. Nothing of the person running the suite is reached.
 
 const std = @import("std");
+const fs = @import("../fs/fs.zig");
 const Io = std.Io;
 const testing = std.testing;
 
@@ -92,7 +93,7 @@ test "a push uploads the LFS objects its commits point at, and only those the se
     defer theirs.close(io);
     try fx.gitIn(theirs, &.{ "lfs", "pull" });
     for ([_][2][]const u8{ .{ "big.bin", big }, .{ "small.bin", "small\n" }, .{ "more.bin", more } }) |f| {
-        const have = try theirs.readFileAlloc(io, f[0], gpa, .unlimited);
+        const have = try fs.readWhole(theirs, io, f[0], gpa, .unlimited);
         defer gpa.free(have);
         try testing.expectEqualSlices(u8, f[1], have);
     }

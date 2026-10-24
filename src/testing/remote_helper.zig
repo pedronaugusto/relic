@@ -329,6 +329,7 @@ fn readStream(h: *Helper, buf: *std.ArrayList(u8)) ![]u8 {
 /// `git-remote-testscript`: each command answered from the script.
 fn scripted(gpa: Allocator, io: Io, environ: *const std.process.Environ.Map) !void {
     const path = environ.get("RELIC_HELPER_SCRIPT") orelse return error.NoScript;
+    // glint-ignore: P006 -- a test program of its own, outside relic's module, that no relic task cancels
     const script = try Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 20));
     var in_buf: [64 * 1024]u8 = undefined;
     var in = Io.File.stdin().readerStreaming(io, &in_buf);

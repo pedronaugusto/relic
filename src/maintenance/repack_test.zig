@@ -575,7 +575,7 @@ fn packShape(repo: *testgit.Repo, want_header: u8) !PackShape {
         const listing = try repo.run(io, &.{ "verify-pack", "-v", try std.mem.print(&path_buf, ".git/objects/pack/{s}", .{entry.name}) });
         defer gpa.free(listing);
         const pack_name = try std.mem.print(&path_buf, "{s}.pack", .{entry.name[0 .. entry.name.len - 4]});
-        const bytes = try pack_dir.readFileAlloc(io, pack_name, gpa, .limited(1 << 26));
+        const bytes = try fs.readWhole(pack_dir, io, pack_name, gpa, .limited(1 << 26));
         defer gpa.free(bytes);
         var lines = std.mem.splitScalar(u8, listing, '\n');
         while (lines.next()) |line| {

@@ -3,6 +3,7 @@
 //! refusal with nothing changed.
 
 const std = @import("std");
+const fs = @import("../fs/fs.zig");
 const repeat = @import("shakedown").corpus.repeat;
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
@@ -80,7 +81,7 @@ fn snapshot(gpa: Allocator, io: Io, r: *testgit.Repo) ![]u8 {
                 try out.print(gpa, "{s} link {s}\n", .{ name, buf[0..n] });
             },
             .file => {
-                const bytes = try r.dir.readFileAlloc(io, name, gpa, .limited(1 << 20));
+                const bytes = try fs.readWhole(r.dir, io, name, gpa, .limited(1 << 20));
                 defer gpa.free(bytes);
                 const exec = builtin.target.os.tag != .windows and stat.permissions.toMode() & 0o100 != 0;
                 try out.print(gpa, "{s} {s} {d}\n", .{ name, if (exec) "exec" else "file", bytes.len });

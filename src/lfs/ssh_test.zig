@@ -10,6 +10,7 @@ const lfspush = @import("push.zig");
 const testremote = @import("../testing/remote.zig");
 const object_walk = @import("../walk/object/walk.zig");
 const std = @import("std");
+const fs = @import("../fs/fs.zig");
 const build_options_mod = @import("build_options");
 const lfs_mod = @import("lfs.zig");
 const shakedown_mod = @import("shakedown");
@@ -96,7 +97,7 @@ const Ssh = struct {
         }
         while (try it.next(io)) |e| try names.append(gpa, try gpa.dupe(u8, e.name));
         for (names.items) |n| try s.logs.deleteFile(io, n);
-        const raw = s.fx.tools.readFileAlloc(io, "fake-ssh.log", gpa, .unlimited) catch |err| switch (err) {
+        const raw = fs.readWhole(s.fx.tools, io, "fake-ssh.log", gpa, .unlimited) catch |err| switch (err) {
             error.FileNotFound => try gpa.dupe(u8, ""),
             else => |e| return e,
         };
@@ -586,7 +587,7 @@ test "LFS SSH pagination ends or explicitly refuses a repeated cursor" {
                 for ([_][2][]const u8{ .{ "remote", remote_bytes }, .{ "verifiable", verify_bytes } }) |file| {
                     const path = try testing.allocator.print("{s}/{s}", .{ cache_path, file[0] });
                     defer testing.allocator.free(path);
-                    const actual = try repo.commonDirectory().readFileAlloc(testing.io, path, testing.allocator, .limited(1024));
+                    const actual = try fs.readWhole(repo.commonDirectory(), testing.io, path, testing.allocator, .limited(1024));
                     defer testing.allocator.free(actual);
                     try testing.expectEqualStrings(file[1], actual);
                 }
@@ -646,7 +647,7 @@ test "cached SSH lock connection refuses pipe failure and cancellation without r
         defer faults.deinit();
         try testing.expectError(case.expected, lfslocks.list(faults.io(), server, &repo, .{}, .{ .ref = "refs/heads/main" }));
         try testing.expect(faults.count(case.call) > 0);
-        const after = try repo.commonDirectory().readFileAlloc(io, path, gpa, .unlimited);
+        const after = try fs.readWhole(repo.commonDirectory(), io, path, gpa, .unlimited);
         defer gpa.free(after);
         try testing.expectEqualStrings(previous, after);
     }

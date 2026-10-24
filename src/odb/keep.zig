@@ -40,7 +40,7 @@ pub const Token = struct {
         var buffer: [4096]u8 = undefined;
         var lock = try fs.LockFile.open(gpa, io, dir, .{ .sub_path = name, .buffer = &buffer }, .{ .sync = .none, .on_contention = .{ .wait = .fromMilliseconds(1000) } });
         defer lock.deinit(io);
-        const previous = dir.readFileAlloc(io, name, gpa, .limited(1 << 20)) catch |err| switch (err) {
+        const previous = fs.readWhole(dir, io, name, gpa, .limited(1 << 20)) catch |err| switch (err) {
             error.FileNotFound => try gpa.dupe(u8, header),
             else => return err,
         };
@@ -71,7 +71,7 @@ pub const Token = struct {
         var buffer: [4096]u8 = undefined;
         var lock = try fs.LockFile.open(t.gpa, io, t.dir, .{ .sub_path = name, .buffer = &buffer }, .{ .sync = .none, .on_contention = .{ .wait = .fromMilliseconds(1000) } });
         defer lock.deinit(io);
-        const previous = try t.dir.readFileAlloc(io, name, t.gpa, .limited(1 << 20));
+        const previous = try fs.readWhole(t.dir, io, name, t.gpa, .limited(1 << 20));
         defer t.gpa.free(previous);
         if (!std.mem.startsWith(u8, previous, header)) return;
         var lines = std.mem.splitScalar(u8, previous[header.len..], '\n');
@@ -105,7 +105,7 @@ test "keep tokens retain shared and foreign markers" {
     try tmp.dir.writeFile(io, .{ .sub_path = name, .data = "external keep\n" });
     var c = try Token.open(gpa, io, tmp.dir, oid);
     c.deinit(io);
-    const bytes = try tmp.dir.readFileAlloc(io, name, gpa, .unlimited);
+    const bytes = try fs.readWhole(tmp.dir, io, name, gpa, .unlimited);
     defer gpa.free(bytes);
     try std.testing.expectEqualStrings("external keep\n", bytes);
 }
@@ -167,7 +167,7 @@ test "keep cleanup failure preserves the marker rather than exposing objects" {
     const marker = "pack-1111111111111111111111111111111111111111.keep";
     try tmp.dir.access(io, marker, .{});
     try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, marker ++ ".lock", .{}));
-    const bytes = try tmp.dir.readFileAlloc(io, marker, gpa, .unlimited);
+    const bytes = try fs.readWhole(tmp.dir, io, marker, gpa, .unlimited);
     defer gpa.free(bytes);
     try std.testing.expect(std.mem.startsWith(u8, bytes, Token.header));
 }

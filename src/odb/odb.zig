@@ -412,7 +412,7 @@ pub const Odb = struct {
         errdefer if (odb.backendData().sources.items.len == 0) objects.close(io);
         try odb.addSource(io, objects, true, 0);
         if (options.probe_timestamp_resolution) {
-            odb.timestamp_resolution = fs.probeTimestampResolution(io, objects);
+            odb.timestamp_resolution = try fs.probeTimestampResolution(io, objects);
         }
         return odb;
     }
@@ -433,7 +433,7 @@ pub const Odb = struct {
         errdefer if (odb.backendData().sources.items.len == 0) owned.close(io);
         try odb.addSource(io, owned, true, 0);
         if (options.probe_timestamp_resolution) {
-            odb.timestamp_resolution = fs.probeTimestampResolution(io, owned);
+            odb.timestamp_resolution = try fs.probeTimestampResolution(io, owned);
         }
         return odb;
     }

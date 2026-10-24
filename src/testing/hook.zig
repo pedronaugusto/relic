@@ -16,6 +16,7 @@ pub fn main(init: std.process.Init) !void {
     if (args.len == 0) return error.MissingProgramName;
     const executable = try std.process.executablePathAlloc(io, arena);
     const sidecar = try arena.print("{s}.fixture", .{executable});
+    // glint-ignore: P006 -- a test program of its own, outside relic's module, that no relic task cancels
     const description = try Io.Dir.cwd().readFileAlloc(io, sidecar, arena, .limited(4096));
     const newline = std.mem.findScalar(u8, description, '\n') orelse return error.InvalidFixture;
     const action = actions.get(description[0..newline]) orelse return error.InvalidFixture;
@@ -300,6 +301,7 @@ fn historyRecord(h: *const Hook) !u8 {
     try entry.append(arena, ']');
     if (std.mem.eql(u8, name, "prepare-commit-msg") or std.mem.eql(u8, name, "commit-msg")) {
         if (h.args.len < 2) return error.MissingMessagePath;
+        // glint-ignore: P006 -- a test program of its own, outside relic's module, that no relic task cancels
         const message = try Io.Dir.cwd().readFileAlloc(io, h.args[1], arena, .limited(1 << 20));
         if (std.mem.eql(u8, h.environ.get("GIT_EDITOR") orelse "", ":")) {
             try entry.appendSlice(arena, " msg=[");

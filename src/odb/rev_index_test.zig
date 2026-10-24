@@ -1,4 +1,5 @@
 const std = @import("std");
+const fs = @import("../fs/fs.zig");
 const hash = @import("../hash/hash.zig");
 const testing = std.testing;
 const testremote = @import("../testing/remote.zig");
@@ -28,9 +29,9 @@ test "a pack relic writes has the reverse index git's index-pack writes for it" 
     defer env.deinit();
     const out = try testremote.gitInputEnv(gpa, io, tmp.dir, &env, &.{ "index-pack", "--rev-index", "-o", "check.idx", pack_name }, "", true);
     gpa.free(out);
-    const ours = try tmp.dir.readFileAlloc(io, rev_name, gpa, .unlimited);
+    const ours = try fs.readWhole(tmp.dir, io, rev_name, gpa, .unlimited);
     defer gpa.free(ours);
-    const theirs = try tmp.dir.readFileAlloc(io, "check.rev", gpa, .unlimited);
+    const theirs = try fs.readWhole(tmp.dir, io, "check.rev", gpa, .unlimited);
     defer gpa.free(theirs);
     try testing.expectEqualSlices(u8, theirs, ours);
 }

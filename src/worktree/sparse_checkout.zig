@@ -713,7 +713,7 @@ const Twin = struct {
 };
 
 fn readOptional(gpa: Allocator, io: Io, dir: Io.Dir, path: []const u8) !?[]u8 {
-    return dir.readFileAlloc(io, path, gpa, .limited(1 << 20)) catch |err| switch (err) {
+    return fs.readWhole(dir, io, path, gpa, .limited(1 << 20)) catch |err| switch (err) {
         error.FileNotFound => null,
         else => |e| return e,
     };

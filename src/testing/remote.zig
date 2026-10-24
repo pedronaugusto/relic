@@ -8,6 +8,7 @@
 //! reaches all of them through the same code a real remote meets.
 
 const std = @import("std");
+const fs = @import("../fs/fs.zig");
 const warp = @import("warp");
 const suite = @import("helpers.zig");
 const builtin = @import("builtin");
@@ -370,7 +371,7 @@ pub const HttpServer = struct {
     /// The file `sub_path` under the root, or 404.
     fn serveFile(s: *HttpServer, arena: Allocator, request: *std.http.Server.Request, sub_path: []const u8) !void {
         const full = try std.Io.Dir.path.join(arena, &.{ s.root, sub_path });
-        const data = Io.Dir.cwd().readFileAlloc(s.io, full, arena, .limited(1 << 30)) catch
+        const data = fs.readWhole(Io.Dir.cwd(), s.io, full, arena, .limited(1 << 30)) catch
             return request.respond("", .{ .status = .not_found, .keep_alive = s.options.keep_alive });
         return request.respond(data, .{ .keep_alive = s.options.keep_alive });
     }

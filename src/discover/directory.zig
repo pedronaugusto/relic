@@ -16,13 +16,18 @@ pub const Error = error{
 
 /// git's `validate_headref`: `HEAD` is a link to a name under `refs/`, a
 /// file `ref: refs/...` (spaces allowed after the colon), or a file that
-/// starts with an object name of either hash.
-pub fn validHead(io: Io, dir: Io.Dir) bool {
+/// starts with an object name of either hash. Anything else that keeps it
+/// from being read is not a git directory, as git's `validate_headref`
+/// says; only a cancel is returned.
+pub fn validHead(io: Io, dir: Io.Dir) Io.Cancelable!bool {
     var buf: [256]u8 = undefined;
     if (dir.readLink(io, "HEAD", &buf)) |len| {
         return std.mem.startsWith(u8, buf[0..len], "refs/");
-    } else |_| {}
-    const text = dir.readFile(io, "HEAD", &buf) catch return false;
+    } else |err| if (err == error.Canceled) return error.Canceled;
+    const text = dir.readFile(io, "HEAD", &buf) catch |err| return switch (err) {
+        error.Canceled => error.Canceled,
+        else => false,
+    };
     if (std.mem.startsWith(u8, text, "ref:")) {
         const rest = std.mem.trimStart(u8, text["ref:".len..], " \t\n\r\x0b\x0c");
         if (std.mem.startsWith(u8, rest, "refs/")) return true;
@@ -64,14 +69,21 @@ pub fn openCommon(io: Io, git_dir: Io.Dir) Self.Error!?Io.Dir {
 
 /// git's `is_git_directory`: a valid `HEAD`, and `objects` and `refs` in
 /// the common directory (`git_dir` itself unless `commondir` names
-/// another). A `commondir` that names nothing is not a git directory.
-pub fn isGitDirectory(io: Io, dir: Io.Dir) bool {
-    if (!validHead(io, dir)) return false;
-    const common = openCommon(io, dir) catch return false;
+/// another). A `commondir` that names nothing is not a git directory, nor
+/// is one whose parts cannot be reached, as git's `access` calls say;
+/// only a cancel is returned.
+pub fn isGitDirectory(io: Io, dir: Io.Dir) Io.Cancelable!bool {
+    if (!try validHead(io, dir)) return false;
+    const common = openCommon(io, dir) catch |err| return switch (err) {
+        error.Canceled => error.Canceled,
+        else => false,
+    };
     defer if (common) |c| c.close(io);
     const where = common orelse dir;
-    where.access(io, "objects", .{}) catch return false;
-    where.access(io, "refs", .{}) catch return false;
+    for ([_][]const u8{ "objects", "refs" }) |part| where.access(io, part, .{}) catch |err| return switch (err) {
+        error.Canceled => error.Canceled,
+        else => false,
+    };
     return true;
 }
 

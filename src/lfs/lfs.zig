@@ -820,7 +820,7 @@ test "the store names an object by its SHA-256 and gives it back at the right si
     const p = try store.install(io, &source, null);
     try testing.expectEqualStrings(hello_oid, &p.oid);
     try testing.expectEqual(@as(u64, 6), p.size);
-    const stored = try tmp.dir.readFileAlloc(io, "lfs/objects/58/91/" ++ hello_oid, testing.allocator, .limited(64));
+    const stored = try fs.readWhole(tmp.dir, io, "lfs/objects/58/91/" ++ hello_oid, testing.allocator, .limited(64));
     defer testing.allocator.free(stored);
     try testing.expectEqualStrings("hello\n", stored);
     try testing.expect(try store.contains(io, &p));

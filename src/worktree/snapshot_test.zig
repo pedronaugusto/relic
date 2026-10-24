@@ -33,7 +33,7 @@ fn expectClosure(db: *odb.Odb, oid: hash.Oid) !void {
 }
 
 fn expectFile(dir: Io.Dir, path: []const u8, expected: []const u8) !void {
-    const bytes = try dir.readFileAlloc(testing.io, path, testing.allocator, .limited(1 << 20));
+    const bytes = try fs.readWhole(dir, testing.io, path, testing.allocator, .limited(1 << 20));
     defer testing.allocator.free(bytes);
     try testing.expectEqualStrings(expected, bytes);
 }
@@ -248,7 +248,7 @@ test "snapshot keeps native LFS writes inside the private store" {
     var dest = testing.tmpDir(.{ .iterate = true });
     defer dest.cleanup();
     _ = try store.restore(io, captured.snapshot, dest.dir, .{});
-    const pointer_text = try dest.dir.readFileAlloc(io, "large.bin", gpa, .limited(1024));
+    const pointer_text = try fs.readWhole(dest.dir, io, "large.bin", gpa, .limited(1024));
     defer gpa.free(pointer_text);
     const pointer = try lfs.Pointer.decode(pointer_text);
     const payloads: lfs.Store = .{ .base = store.dir, .root = "lfs" };
@@ -380,7 +380,7 @@ test "a live snapshot store reads its own objects after source packs are damaged
         var replaced = false;
         while (try names.next(io)) |entry| {
             if (!std.mem.endsWith(u8, entry.name, ".pack")) continue;
-            const bytes = try packs.readFileAlloc(io, entry.name, gpa, .limited(1 << 20));
+            const bytes = try fs.readWhole(packs, io, entry.name, gpa, .limited(1 << 20));
             defer gpa.free(bytes);
             try packs.deleteFile(io, entry.name);
             try packs.writeFile(io, .{ .sub_path = entry.name, .data = bytes });

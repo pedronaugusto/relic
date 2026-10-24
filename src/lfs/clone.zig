@@ -7,6 +7,7 @@
 //! `lfstransfer.Fetcher`'s, the same as a fetch's.
 
 const std = @import("std");
+const fs = @import("../fs/fs.zig");
 const transfer_test_mod = @import("transfer_test.zig");
 const lfs_mod = @import("../testing/lfs.zig");
 const Allocator = std.mem.Allocator;
@@ -136,7 +137,7 @@ test "native LFS clone fetches content and skip-smudge leaves pointers" {
             .user_config = .{ .command = &.{ "filter.lfs.clean=git-lfs clean -- %f", "filter.lfs.smudge=git-lfs smudge -- %f", "filter.lfs.process=git-lfs filter-process" } },
         });
         defer repository.deinit(io);
-        const bytes = try target.readFileAlloc(io, "one.bin", gpa, .limited(4096));
+        const bytes = try fs.readWhole(target, io, "one.bin", gpa, .limited(4096));
         defer gpa.free(bytes);
         if (skip) {
             const pointer = try lfs.Pointer.decode(bytes);

@@ -3,6 +3,7 @@
 //! whether it refused.
 
 const std = @import("std");
+const fs = @import("../fs/fs.zig");
 const testgit = @import("../testing/git.zig");
 const repo_mod = @import("../repo/repo.zig");
 const remove_mod = @import("remove.zig");
@@ -48,7 +49,7 @@ pub fn state(repo: *testgit.Repo) ![]u8 {
     }
     while (try walker.next(io)) |entry| {
         if (entry.kind == .file and std.mem.eql(u8, entry.basename, ".git")) {
-            const text = try entry.dir.readFileAlloc(io, ".git", gpa, .unlimited);
+            const text = try fs.readWhole(entry.dir, io, ".git", gpa, .unlimited);
             defer gpa.free(text);
             try files.append(gpa, try gpa.print("{s}: {s}", .{ entry.path, text }));
             continue;
@@ -62,7 +63,7 @@ pub fn state(repo: *testgit.Repo) ![]u8 {
         }
     }.less);
     for (files.items) |f| try out.print(gpa, "{s}\n", .{f});
-    if (repo.dir.readFileAlloc(io, ".gitmodules", gpa, .unlimited)) |modules| {
+    if (fs.readWhole(repo.dir, io, ".gitmodules", gpa, .unlimited)) |modules| {
         defer gpa.free(modules);
         try out.print(gpa, ".gitmodules:\n{s}", .{modules});
     } else |_| {}
@@ -73,7 +74,7 @@ pub fn state(repo: *testgit.Repo) ![]u8 {
         try out.print(gpa, "module {s}\n", .{entry.name});
         const config_path = try gpa.print("{s}/config", .{entry.name});
         defer gpa.free(config_path);
-        const config = try gits.readFileAlloc(io, config_path, gpa, .unlimited);
+        const config = try fs.readWhole(gits, io, config_path, gpa, .unlimited);
         defer gpa.free(config);
         var lines = std.mem.splitScalar(u8, config, '\n');
         while (lines.next()) |line| if (std.mem.find(u8, line, "worktree") != null) try out.print(gpa, "{s}\n", .{line});

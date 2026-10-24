@@ -1917,9 +1917,9 @@ test "a pack git wrote is received, and its index is byte for byte the one git w
         defer gpa.free(pack_name);
         const idx_name = try gpa.print("{s}.idx", .{base});
         defer gpa.free(idx_name);
-        const pack_bytes = try source_packs.readFileAlloc(io, pack_name, gpa, .unlimited);
+        const pack_bytes = try fs.readWhole(source_packs, io, pack_name, gpa, .unlimited);
         defer gpa.free(pack_bytes);
-        const idx_bytes = try source_packs.readFileAlloc(io, idx_name, gpa, .unlimited);
+        const idx_bytes = try fs.readWhole(source_packs, io, idx_name, gpa, .unlimited);
         defer gpa.free(idx_bytes);
 
         var target = try testgit.Repo.init(gpa, io, &.{"--bare"});
@@ -1934,7 +1934,7 @@ test "a pack git wrote is received, and its index is byte for byte the one git w
         try testing.expect(result.deltas > 0);
         try testing.expectEqual(@as(u32, 0), result.appended);
 
-        const received = try pack_dir.readFileAlloc(io, idx_name, gpa, .unlimited);
+        const received = try fs.readWhole(pack_dir, io, idx_name, gpa, .unlimited);
         defer gpa.free(received);
         try testing.expectEqualSlices(u8, idx_bytes, received);
 
@@ -1993,7 +1993,7 @@ test "a pack git wrote is received, and its index is byte for byte the one git w
                 defer gpa.free(base);
                 const idx_name = try gpa.print("{s}.idx", .{base});
                 defer gpa.free(idx_name);
-                const index = try pack_dir.readFileAlloc(io, idx_name, gpa, .unlimited);
+                const index = try fs.readWhole(pack_dir, io, idx_name, gpa, .unlimited);
                 if (serial_index) |want| {
                     defer gpa.free(index);
                     try testing.expectEqualDeep(serial_result, result);
@@ -2959,7 +2959,7 @@ test "a pack received as a task and canceled, reading its stream or resolving it
     defer gpa.free(base);
     const pack_name = try gpa.print("{s}.pack", .{base});
     defer gpa.free(pack_name);
-    const pack_bytes = try source_packs.readFileAlloc(io, pack_name, gpa, .unlimited);
+    const pack_bytes = try fs.readWhole(source_packs, io, pack_name, gpa, .unlimited);
     defer gpa.free(pack_bytes);
     const c: CancelReceive = .{ .pack_bytes = pack_bytes };
     try cancel.eachBackend(&c, CancelReceive.run);

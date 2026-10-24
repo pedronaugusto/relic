@@ -23,6 +23,7 @@
 //! test, is one forgotten line from doing all of it.
 
 const std = @import("std");
+const fs = @import("../fs/fs.zig");
 const suite = @import("helpers.zig");
 const git_release = @import("git_release.zig");
 const builtin = @import("builtin");
@@ -272,7 +273,7 @@ pub const Repo = struct {
 
     /// The whole of a file in the repository, as the caller's bytes.
     pub fn readFile(r: *Repo, io: Io, path: []const u8) ![]u8 {
-        return r.dir.readFileAlloc(io, path, r.gpa, .limited(64 << 20));
+        return fs.readWhole(r.dir, io, path, r.gpa, .limited(64 << 20));
     }
 };
 

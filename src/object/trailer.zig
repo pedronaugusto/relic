@@ -864,7 +864,7 @@ pub fn processFile(gpa: Allocator, io: Io, dir: Io.Dir, path: []const u8, file_o
     const new = file_options.new;
     const in_place = file_options.in_place;
     const out = file_options.out;
-    var input: std.ArrayList(u8) = .fromOwnedSlice(try dir.readFileAlloc(io, path, gpa, .unlimited));
+    var input: std.ArrayList(u8) = .fromOwnedSlice(try fs.readWhole(dir, io, path, gpa, .unlimited));
     defer input.deinit(gpa);
     try completeLine(gpa, &input);
     if (!in_place) return process(gpa, io, out, input.items, .{ .settings = settings, .commands = commands, .formatting = options, .new = new });

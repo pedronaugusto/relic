@@ -13,6 +13,7 @@
 //! test owns. Nothing reaches the person's own keychain, agent or files.
 
 const std = @import("std");
+const fs = @import("../fs/fs.zig");
 const suite = @import("../testing/helpers.zig");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
@@ -153,7 +154,7 @@ const Person = struct {
     /// What `name` was asked since the last `clearLogs`.
     fn log(p: *Person, io: Io, name: []const u8) ![]u8 {
         var buf: [64]u8 = undefined;
-        return p.tools.dir.readFileAlloc(io, try std.mem.print(&buf, "{s}.log", .{name}), p.gpa, .unlimited) catch |err| switch (err) {
+        return fs.readWhole(p.tools.dir, io, try std.mem.print(&buf, "{s}.log", .{name}), p.gpa, .unlimited) catch |err| switch (err) {
             error.FileNotFound => p.gpa.dupe(u8, ""),
             else => err,
         };
@@ -404,7 +405,7 @@ test "named helpers run as git runs them: Git Credential Manager, and git's own 
                     try testing.expectEqualStrings("wrong", password);
                 }
             }
-            files[who] = try person.tools.dir.readFileAlloc(io, "credentials", gpa, .unlimited);
+            files[who] = try fs.readWhole(person.tools.dir, io, "credentials", gpa, .unlimited);
         }
         defer for (files) |f| gpa.free(f);
         try testing.expectEqualStrings(files[0], files[1]);
@@ -896,7 +897,7 @@ test "ssh gets the person's host alias, agent and command line untouched, as git
         var theirs_outcome = try person.git(io, by_git.dir, &.{ "fetch", "-q", "origin" });
         defer theirs_outcome.deinit(gpa);
         try testing.expect(theirs_outcome.succeeded());
-        const theirs = try person.tools.dir.readFileAlloc(io, "ssh.log", gpa, .unlimited);
+        const theirs = try fs.readWhole(person.tools.dir, io, "ssh.log", gpa, .unlimited);
         defer gpa.free(theirs);
         try person.tools.dir.deleteFile(io, "ssh.log");
 
@@ -906,7 +907,7 @@ test "ssh gets the person's host alias, agent and command line untouched, as git
         defer locations.deinit();
         var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &person.env } });
         outcome.deinit();
-        const ours = try person.tools.dir.readFileAlloc(io, "ssh.log", gpa, .unlimited);
+        const ours = try fs.readWhole(person.tools.dir, io, "ssh.log", gpa, .unlimited);
         defer gpa.free(ours);
         try testing.expectEqualStrings(theirs, ours);
         try testing.expect(std.mem.find(u8, ours, "work-github]") != null);

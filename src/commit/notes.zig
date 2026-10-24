@@ -27,6 +27,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const fs = @import("../fs/fs.zig");
 const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
@@ -1725,7 +1726,7 @@ pub fn mergeCommit(gpa: Allocator, io: Io, repo: *Repository, who: object.Signat
     var it = dir.iterate();
     while (try it.next(io)) |e| {
         const obj = Oid.parse(kind, e.name) catch continue;
-        const bytes = try dir.readFileAlloc(io, e.name, gpa, .unlimited);
+        const bytes = try fs.readWhole(dir, io, e.name, gpa, .unlimited);
         defer gpa.free(bytes);
         const blob = try repo.objectDatabase().write(io, .blob, bytes);
         try t.add(io, obj, blob, null);

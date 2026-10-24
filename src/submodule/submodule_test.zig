@@ -9,6 +9,7 @@
 
 const suite = @import("../testing/helpers.zig");
 const std = @import("std");
+const fs = @import("../fs/fs.zig");
 const fs_mod = @import("../fs/fs.zig");
 const builtin = @import("builtin");
 const Io = std.Io;
@@ -276,7 +277,7 @@ fn expectPorcelainV2Agrees(gpa: Allocator, io: Io, git: *testgit.Repo, options: 
 }
 
 fn readAt(gpa: Allocator, io: Io, dir: Io.Dir, path: []const u8) ![]u8 {
-    return dir.readFileAlloc(io, path, gpa, .limited(1 << 20));
+    return fs.readWhole(dir, io, path, gpa, .limited(1 << 20));
 }
 
 fn expectSameFile(gpa: Allocator, io: Io, a: Io.Dir, b: Io.Dir, path: []const u8) !void {
@@ -1250,7 +1251,7 @@ fn pathConfigState(gpa: Allocator, io: Io, repo: *testgit.Repo) ![]u8 {
     for ([_][]const u8{ "vendor/lib", "Plain" }) |path| {
         const dot_git = try std.mem.concat(gpa, u8, &.{ path, "/.git" });
         defer gpa.free(dot_git);
-        if (repo.dir.readFileAlloc(io, dot_git, gpa, .unlimited)) |text| {
+        if (fs.readWhole(repo.dir, io, dot_git, gpa, .unlimited)) |text| {
             defer gpa.free(text);
             try out.print(gpa, "{s}: {s}", .{ dot_git, text });
         } else |_| try out.print(gpa, "{s}: a directory\n", .{dot_git});

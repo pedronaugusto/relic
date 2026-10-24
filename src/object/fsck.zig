@@ -25,6 +25,7 @@
 
 const ErrorNamespace = @This();
 const std = @import("std");
+const fs = @import("../fs/fs.zig");
 const decimal = @import("../text.zig").decimal;
 const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
@@ -355,7 +356,7 @@ pub const Rules = struct {
     /// git reads `fsck.skipList`.
     pub fn readSkipList(r: *Rules, gpa: Allocator, io: Io, list: SkipListAt, path: []const u8) LoadError!void {
         const kind = list.kind;
-        const text_ = list.dir.readFileAlloc(io, path, gpa, .limited(1 << 30)) catch |err| switch (err) {
+        const text_ = fs.readWhole(list.dir, io, path, gpa, .limited(1 << 30)) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Canceled => return error.Canceled,
             else => return error.SkipListUnreadable,

@@ -265,7 +265,7 @@ const Run = struct {
     /// `fetch_bundle_list_in_config_format`.
     fn followList(run: *Run, b: *Bundle, depth: usize, global: *List) Error!bool {
         const objects = run.repo.objectDatabase().objectsDirectory();
-        const text = objects.readFileAlloc(run.io, b.file.?, run.arena, .limited(1 << 30)) catch |err| switch (err) {
+        const text = fs.readWhole(objects, run.io, b.file.?, run.arena, .limited(1 << 30)) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             error.OutOfMemory => return error.OutOfMemory,
             else => return false,
@@ -286,7 +286,7 @@ const Run = struct {
     /// Whether `file`, read from `uri`, is a bundle list.
     fn isList(run: *Run, uri: []const u8, file: []const u8) Error!bool {
         const objects = run.repo.objectDatabase().objectsDirectory();
-        const text = objects.readFileAlloc(run.io, file, run.arena, .limited(1 << 30)) catch |err| switch (err) {
+        const text = fs.readWhole(objects, run.io, file, run.arena, .limited(1 << 30)) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             error.OutOfMemory => return error.OutOfMemory,
             else => return false,

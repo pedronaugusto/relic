@@ -30,6 +30,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const fs = @import("../fs/fs.zig");
 const ctype = @import("../text.zig").ctype;
 const quote = @import("../text.zig").quote;
 const decimal = @import("../text.zig").decimal;
@@ -189,7 +190,7 @@ const Ctx = struct {
     }
 
     fn readState(c: *Ctx, name: []const u8) Error!?[]u8 {
-        return c.dir().readFileAlloc(c.io, name, c.a, .unlimited) catch |err| switch (err) {
+        return fs.readWhole(c.dir(), c.io, name, c.a, .unlimited) catch |err| switch (err) {
             error.FileNotFound => null,
             else => |e| return e,
         };
@@ -1199,7 +1200,7 @@ fn resetTo(c: *Ctx, commit: ?[]const u8) Error!void {
 
 /// `git bisect log`: what `BISECT_LOG` holds. The result is the caller's.
 pub fn log(gpa: Allocator, io: Io, repo: *Repository) Self.Error![]u8 {
-    const text = repo.gitDirectory().readFileAlloc(io, "BISECT_LOG", gpa, .unlimited) catch |err| switch (err) {
+    const text = fs.readWhole(repo.gitDirectory(), io, "BISECT_LOG", gpa, .unlimited) catch |err| switch (err) {
         error.FileNotFound => return error.NoLog,
         else => |e| return e,
     };

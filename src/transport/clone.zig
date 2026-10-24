@@ -1415,9 +1415,9 @@ test "a clone from a local repository is the clone git makes, checked out, bare,
         repo.deinit(io);
         try expectSameClone(gpa, io, &env, by_git.dir, by_relic.dir, case.options.bare);
         if (!case.options.bare and case.options.branch == null) {
-            const theirs = try by_git.dir.readFileAlloc(io, "docs/x.crlf", gpa, .unlimited);
+            const theirs = try fs.readWhole(by_git.dir, io, "docs/x.crlf", gpa, .unlimited);
             defer gpa.free(theirs);
-            const ours = try by_relic.dir.readFileAlloc(io, "docs/x.crlf", gpa, .unlimited);
+            const ours = try fs.readWhole(by_relic.dir, io, "docs/x.crlf", gpa, .unlimited);
             defer gpa.free(ours);
             try testing.expectEqualStrings("one\r\ntwo\r\n", ours);
             try testing.expectEqualStrings(theirs, ours);
@@ -1466,7 +1466,7 @@ test "a local clone writes its pack on the tasks pack.threads asks for, as git's
     defer serial_packs.close(io);
     const serial_name = try PackFile.only(gpa, io, serial_packs);
     defer gpa.free(serial_name);
-    const serial_bytes = try serial_packs.readFileAlloc(io, serial_name, gpa, .unlimited);
+    const serial_bytes = try fs.readWhole(serial_packs, io, serial_name, gpa, .unlimited);
     defer gpa.free(serial_bytes);
 
     const Case = struct { pairs: []const config_mod.Sources.Pair, workers: usize };
@@ -1497,7 +1497,7 @@ test "a local clone writes its pack on the tasks pack.threads asks for, as git's
             const name = try PackFile.only(gpa, io, packs);
             defer gpa.free(name);
             try testing.expectEqualStrings(serial_name, name);
-            const bytes = try packs.readFileAlloc(io, name, gpa, .unlimited);
+            const bytes = try fs.readWhole(packs, io, name, gpa, .unlimited);
             defer gpa.free(bytes);
             try testing.expectEqualSlices(u8, serial_bytes, bytes);
         }
@@ -2035,12 +2035,12 @@ test "a clone borrows from --reference and --reference-if-able as git's does, an
         repo.deinit(io);
         try expectSameClone(gpa, io, &env, by_git.dir, by_relic.dir, false);
         // The same lenders, and as few objects of its own.
-        const alternates_theirs = by_git.dir.readFileAlloc(io, ".git/objects/info/alternates", gpa, .unlimited) catch |e| switch (e) {
+        const alternates_theirs = fs.readWhole(by_git.dir, io, ".git/objects/info/alternates", gpa, .unlimited) catch |e| switch (e) {
             error.FileNotFound => try gpa.dupe(u8, "(none)"),
             else => return e,
         };
         defer gpa.free(alternates_theirs);
-        const alternates_ours = by_relic.dir.readFileAlloc(io, ".git/objects/info/alternates", gpa, .unlimited) catch |e| switch (e) {
+        const alternates_ours = fs.readWhole(by_relic.dir, io, ".git/objects/info/alternates", gpa, .unlimited) catch |e| switch (e) {
             error.FileNotFound => try gpa.dupe(u8, "(none)"),
             else => return e,
         };

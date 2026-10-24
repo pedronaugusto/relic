@@ -1369,7 +1369,7 @@ fn readOldData(st: *State, path: []const u8, found: fs.Entry, crlf_in_old: bool,
             try out.appendSlice(st.gpa, buf[0..n]);
         },
         .file => {
-            const bytes = try wt.readFileAlloc(st.io, path, st.gpa, .unlimited);
+            const bytes = try fs.readWhole(wt, st.io, path, st.gpa, .unlimited);
             defer st.gpa.free(bytes);
             if (crlf_in_old or st.rules.attrs == null) {
                 try out.appendSlice(st.gpa, bytes);

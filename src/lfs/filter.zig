@@ -1,6 +1,7 @@
 //! Native LFS filtering. Checkout knows only the native filter protocol;
 //! this provider owns LFS commands, pointers, stores and batched fetches.
 const std = @import("std");
+const fs = @import("../fs/fs.zig");
 const shakedown_mod = @import("shakedown");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -149,7 +150,7 @@ const Session = struct {
         const n = try file.readPositionalAll(io, &head, 0);
         if (lfs.Pointer.decode(head[0..n])) |_| {
             if (n < head.len) return a.dupe(u8, head[0..n]);
-            return s.options.wt.readFileAlloc(io, path, a, .limited(1 << 31));
+            return fs.readWhole(s.options.wt, io, path, a, .limited(1 << 31));
         } else |_| {}
 
         var buf: [64 * 1024]u8 = undefined;

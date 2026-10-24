@@ -1,4 +1,5 @@
 const std = @import("std");
+const fs = @import("../../fs/fs.zig");
 const shakedown = @import("shakedown");
 const hash_mod = @import("../../hash/hash.zig");
 const reftablestack_mod = @import("stack.zig");
@@ -316,7 +317,7 @@ test "a held tables.list.lock refuses the transaction and changes nothing" {
     defer tmp.cleanup();
     var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{ .default_branch = "main", .ref_format = .reftable });
     defer repo.deinit(io);
-    const before = try tmp.dir.readFileAlloc(io, ".git/reftable/tables.list", gpa, .limited(4096));
+    const before = try fs.readWhole(tmp.dir, io, ".git/reftable/tables.list", gpa, .limited(4096));
     defer gpa.free(before);
 
     const blocker = try tmp.dir.createFile(io, ".git/reftable/tables.list.lock", .{ .exclusive = true });
@@ -328,7 +329,7 @@ test "a held tables.list.lock refuses the transaction and changes nothing" {
         try std.testing.expectError(error.LockHeld, tx.commit(io, null));
     }
     try tmp.dir.access(io, ".git/reftable/tables.list.lock", .{});
-    const after = try tmp.dir.readFileAlloc(io, ".git/reftable/tables.list", gpa, .limited(4096));
+    const after = try fs.readWhole(tmp.dir, io, ".git/reftable/tables.list", gpa, .limited(4096));
     defer gpa.free(after);
     try std.testing.expectEqualStrings(before, after);
     try std.testing.expect(try repo.refStore().read(gpa, io, "refs/heads/main") == null);
@@ -536,7 +537,7 @@ fn createMain(io: Io, repo: *repo_mod.Repository) refs.TransactionError!void {
 }
 
 fn openWithTimeout(gpa: Allocator, io: Io, dir: Io.Dir, text: []const u8) !repo_mod.Repository {
-    const config = try dir.readFileAlloc(io, ".git/config", gpa, .limited(1 << 16));
+    const config = try fs.readWhole(dir, io, ".git/config", gpa, .limited(1 << 16));
     defer gpa.free(config);
     const with = try gpa.print("{s}[reftable]\n\tlockTimeout = {s}\n", .{ config, text });
     defer gpa.free(with);

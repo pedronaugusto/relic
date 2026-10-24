@@ -6,6 +6,7 @@
 //! `Options.max_object_bytes`, which `read` refuses.
 
 const std = @import("std");
+const fs = @import("../fs/fs.zig");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const warp = @import("warp");
@@ -174,7 +175,7 @@ test "a loose object that cannot give its header's bytes fails a stream as it fa
     _ = oid.hex(&hex);
     var path_buf: [64]u8 = undefined;
     const path = try std.mem.print(&path_buf, "{s}/{s}", .{ hex[0..2], hex[2..] });
-    const good = try objects.readFileAlloc(io, path, gpa, .unlimited);
+    const good = try fs.readWhole(objects, io, path, gpa, .unlimited);
     defer gpa.free(good);
 
     const short = try zlib(gpa, "blob 10\x00hello\n");
@@ -216,7 +217,7 @@ test "a pack entry that does not inflate to its header's bytes fails a stream, m
     try git.exec(io, &.{"prune-packed"});
     var pack_path_buf: [128]u8 = undefined;
     const pack_path = try std.mem.print(&pack_path_buf, ".git/objects/pack/pack-{s}.pack", .{std.mem.trimEnd(u8, name, "\n")});
-    const stored = try git.dir.readFileAlloc(io, pack_path, gpa, .unlimited);
+    const stored = try fs.readWhole(git.dir, io, pack_path, gpa, .unlimited);
     defer gpa.free(stored);
     // A byte in the middle of the entry's stored blocks: the inflate goes
     // on to the end, where zlib's checksum fails.

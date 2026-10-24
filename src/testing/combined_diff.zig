@@ -7,6 +7,7 @@
 //! at 0 and 1, whitespace overlooked, an order file, and in colour.
 
 const std = @import("std");
+const fs = @import("../fs/fs.zig");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 
@@ -216,7 +217,7 @@ fn ours(gpa: Allocator, io: Io, git: *testgit.Repo, env: *const std.process.Envi
 
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
-    const order: diff.Order = if (case.order) |o| try diff.Order.parse(arena.allocator(), try git.dir.readFileAlloc(io, o["-O".len..], arena.allocator(), .unlimited)) else .{};
+    const order: diff.Order = if (case.order) |o| try diff.Order.parse(arena.allocator(), try fs.readWhole(git.dir, io, o["-O".len..], arena.allocator(), .unlimited)) else .{};
     var found = try combined.paths(gpa, io, db, .{ .result = result, .parents = parents.items }, .{ .renames = if (case.renames) .{} else null, .order = order });
     defer found.deinit();
     const colors: diff.Colors = .{};

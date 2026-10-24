@@ -33,6 +33,7 @@
 const Self = @This();
 
 const std = @import("std");
+const fs = @import("../fs/fs.zig");
 const aegis = @import("aegis");
 const builtin = @import("builtin");
 const shakedown = @import("shakedown");
@@ -2069,7 +2070,7 @@ test "a certificate's nonce is judged as git's check_nonce judges it: by its HMA
     defer tmp.cleanup();
     var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{ .default_branch = "main", .bare = true });
     repo.deinit(io);
-    const config = try tmp.dir.readFileAlloc(io, "config", gpa, .unlimited);
+    const config = try fs.readWhole(tmp.dir, io, "config", gpa, .unlimited);
     defer gpa.free(config);
     const with_seed = try std.mem.concat(gpa, u8, &.{ config, "[receive]\n\tcertNonceSeed = a seed\n\tcertNonceSlop = 10\n" });
     defer gpa.free(with_seed);

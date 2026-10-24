@@ -13,6 +13,7 @@ pub fn main(init: std.process.Init) !void {
     if (args.len == 0) return error.MissingProgramName;
     const executable = try std.process.executablePathAlloc(io, arena);
     const sidecar = try arena.print("{s}.fixture", .{executable});
+    // glint-ignore: P006 -- a test program of its own, outside relic's module, that no relic task cancels
     const description = try Io.Dir.cwd().readFileAlloc(io, sidecar, arena, .limited(16 << 10));
     var fields = std.mem.splitScalar(u8, description, '\n');
     const tool: Tool = .{
@@ -101,6 +102,7 @@ fn credential(t: *const Tool, kind: []const u8, fields: *Fields) !void {
         try out.interface.print("password={s}\n", .{password});
     } else if (person) {
         const answer_path = try arena.print("{s}.answer", .{person_stem});
+        // glint-ignore: P006 -- a test program of its own, outside relic's module, that no relic task cancels
         const answer = try Io.Dir.cwd().readFileAlloc(io, answer_path, arena, .limited(16 << 10));
         try out.interface.writeAll(answer);
     } else try out.interface.print("username={s}\npassword={s}\n", .{ user, password });

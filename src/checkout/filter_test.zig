@@ -309,7 +309,7 @@ fn helperLogs(gpa: std.mem.Allocator, io: Io, dir: Io.Dir) !std.ArrayList([]u8) 
     }
     var it = dir.iterate();
     while (try it.next(io)) |entry| {
-        try logs.append(gpa, try dir.readFileAlloc(io, entry.name, gpa, .limited(1 << 20)));
+        try logs.append(gpa, try fs.readWhole(dir, io, entry.name, gpa, .limited(1 << 20)));
     }
     return logs;
 }

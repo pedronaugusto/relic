@@ -10,6 +10,7 @@
 //! suite is reached.
 
 const std = @import("std");
+const fs = @import("../fs/fs.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const testing = std.testing;
@@ -114,7 +115,7 @@ const Bench = struct {
 };
 
 fn expectFile(io: Io, dir: Io.Dir, name: []const u8, want: []const u8) !void {
-    const got = try dir.readFileAlloc(io, name, testing.allocator, .limited(1 << 24));
+    const got = try fs.readWhole(dir, io, name, testing.allocator, .limited(1 << 24));
     defer testing.allocator.free(got);
     try testing.expectEqualSlices(u8, want, got);
 }
@@ -289,7 +290,7 @@ test "git-lfs pushes, clones, pulls and locks against relic's LFS server" {
     try b.git(ada, &.{ "commit", "-q", "-am", "second" });
     try b.git(ada, &.{ "push", "-q", "origin", "main" });
     try b.gitWith(bob, "GIT_LFS_SKIP_SMUDGE", "1", &.{ "pull", "-q", "--ff-only", "origin", "main" });
-    const pointer = try bob.readFileAlloc(io, "a.bin", gpa, .limited(1024));
+    const pointer = try fs.readWhole(bob, io, "a.bin", gpa, .limited(1024));
     defer gpa.free(pointer);
     try testing.expect(std.mem.startsWith(u8, pointer, "version https://git-lfs.github.com/spec/v1\n"));
     try b.git(bob, &.{ "lfs", "pull", "origin" });

@@ -519,7 +519,7 @@ fn validateGitDir(arena: Allocator, io: Io, git_dir: Io.Dir, name: []const u8, d
         const prefix = try arena.print("modules/{s}", .{name[0..i]});
         var dir = git_dir.openDir(io, prefix, .{}) catch continue;
         defer dir.close(io);
-        if (discover.directory.isGitDirectory(io, dir)) return refuse(refusal, display, prefix, error.GitDirInsideGitDir);
+        if (try discover.directory.isGitDirectory(io, dir)) return refuse(refusal, display, prefix, error.GitDirInsideGitDir);
     }
 }
 
@@ -551,7 +551,7 @@ pub fn openRepository(gpa: Allocator, io: Io, repo: *Repository, module: PathNam
         else => |e| return e,
     };
     defer dir.close(io);
-    if (!discover.directory.isGitDirectory(io, dir)) return null;
+    if (!try discover.directory.isGitDirectory(io, dir)) return null;
     var o = options;
     o.discover = false;
     return try Repository.open(gpa, io, dir, o);
@@ -1131,7 +1131,7 @@ pub fn deinit(gpa: Allocator, io: Io, repo: *Repository, options: DeinitOptions)
             var module_dir = where.base.openDir(io, where.path, .{}) catch null;
             if (module_dir) |*dir| {
                 defer dir.close(io);
-                if (discover.directory.isGitDirectory(io, dir.*)) try setCoreWorktree(io, repo, dir.*, null);
+                if (try discover.directory.isGitDirectory(io, dir.*)) try setCoreWorktree(io, repo, dir.*, null);
             }
         }
         wt.createDirPath(io, entry.path) catch |err| switch (err) {
@@ -1161,7 +1161,7 @@ pub fn migrateGitDirConfigs(gpa: Allocator, io: Io, repo: *Repository) Self.Erro
         while (try it.next(io)) |entry| {
             var dir = modules.openDir(io, entry.name, .{}) catch continue;
             defer dir.close(io);
-            if (!discover.directory.isGitDirectory(io, dir)) continue;
+            if (!try discover.directory.isGitDirectory(io, dir)) continue;
             if (repo.configuration().get(try configKey(arena, entry.name, "gitdir")) != null) continue;
             try setDefaultGitDir(arena, io, repo, try arena.dupe(u8, entry.name), &edits);
             migrated += 1;
@@ -1217,7 +1217,7 @@ fn encodedGitDirOk(arena: Allocator, io: Io, repo: *Repository, dir: ModuleDir, 
     const is_git_dir = if (dir.base.openDir(io, dir.path, .{})) |d_const| blk: {
         var d = d_const;
         defer d.close(io);
-        break :blk discover.directory.isGitDirectory(io, d);
+        break :blk try discover.directory.isGitDirectory(io, d);
     } else |_| false;
     if (is_git_dir) {
         // `submodule_conflicts_with_existing`.
@@ -1420,7 +1420,7 @@ fn absorbIn(
             const where = try moduleDir(arena, io, repo, module.name, display, options.refusal);
             var module_dir = where.base.openDir(io, where.path, .{}) catch continue;
             defer module_dir.close(io);
-            if (!discover.directory.isGitDirectory(io, module_dir)) continue;
+            if (!try discover.directory.isGitDirectory(io, module_dir)) continue;
             var work = try wt.openDir(io, entry.path, .{});
             defer work.close(io);
             try connect(arena, io, repo, work, try fs.realPathAlloc(arena, io, work, "."), module_dir, try fs.realPathAlloc(arena, io, module_dir, "."));
@@ -1820,7 +1820,7 @@ fn populate(
     const target = where.path;
     var module_dir: Io.Dir = blk: {
         if (where.base.openDir(io, target, .{})) |dir| {
-            if (discover.directory.isGitDirectory(io, dir)) {
+            if (try discover.directory.isGitDirectory(io, dir)) {
                 dir.deleteFile(io, "index") catch |err| switch (err) {
                     error.FileNotFound => {},
                     else => |e| {
@@ -1845,7 +1845,7 @@ fn populate(
             error.TransportFailed => return refuse(options.refusal, display, url, error.TransportFailed),
             else => |e| return e,
         };
-        if (!discover.directory.isGitDirectory(io, dir)) return refuse(options.refusal, display, url, error.TransportFailed);
+        if (!try discover.directory.isGitDirectory(io, dir)) return refuse(options.refusal, display, url, error.TransportFailed);
         outcome.cloned += 1;
         break :blk dir;
     };
@@ -2161,7 +2161,7 @@ pub const Mover = struct {
             else => |e| return e,
         };
         defer module_dir.close(io);
-        if (!discover.directory.isGitDirectory(io, module_dir)) return refuse(m.options.refusal, target.display, target.where.path, error.NotCloned);
+        if (!try discover.directory.isGitDirectory(io, module_dir)) return refuse(m.options.refusal, target.display, target.where.path, error.NotCloned);
         if (request.dry_run) {
             var sub = try Repository.open(m.gpa, io, module_dir, .{ .discover = false });
             defer sub.deinit(io);

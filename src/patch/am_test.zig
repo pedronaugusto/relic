@@ -3,6 +3,7 @@
 //! session either tool stopped is finished by the other.
 
 const std = @import("std");
+const fs = @import("../fs/fs.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -112,7 +113,7 @@ fn stateFiles(gpa: Allocator, io: Io, r: *testgit.Repo) ![]u8 {
         }
     }.less);
     for (names.items) |name| {
-        const bytes = try dir.readFileAlloc(io, name, gpa, .limited(1 << 20));
+        const bytes = try fs.readWhole(dir, io, name, gpa, .limited(1 << 20));
         defer gpa.free(bytes);
         try out.print(gpa, "== {s}\n", .{name});
         try out.appendSlice(gpa, bytes);
@@ -150,7 +151,7 @@ fn snapshot(gpa: Allocator, io: Io, r: *testgit.Repo) ![]u8 {
     var files = std.mem.splitScalar(u8, listed, 0);
     while (files.next()) |name| {
         if (name.len == 0) continue;
-        const bytes = r.dir.readFileAlloc(io, name, gpa, .limited(1 << 20)) catch continue;
+        const bytes = fs.readWhole(r.dir, io, name, gpa, .limited(1 << 20)) catch continue;
         defer gpa.free(bytes);
         try out.print(gpa, "-- {s}\n{s}", .{ name, bytes });
     }

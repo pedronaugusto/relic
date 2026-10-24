@@ -129,7 +129,7 @@ fn expectSameOutput(gpa: Allocator, io: Io, a: *testgit.Repo, b: *testgit.Repo, 
 }
 
 fn readOrMissing(gpa: Allocator, io: Io, repo: *testgit.Repo, path: []const u8) ![]u8 {
-    return repo.dir.readFileAlloc(io, path, gpa, .limited(1 << 24)) catch |err| switch (err) {
+    return fs.readWhole(repo.dir, io, path, gpa, .limited(1 << 24)) catch |err| switch (err) {
         error.FileNotFound => gpa.dupe(u8, "<missing>"),
         // A submodule's checkout, which `git status` has already compared.
         error.IsDir => gpa.dupe(u8, "<directory>"),
@@ -3896,7 +3896,7 @@ fn makeSigningKey(pair: *Pair, io: Io, dir: []const u8, gnupg_home: []const u8, 
             gpa.free(made.stderr);
             const public_path = try gpa.print("{s}.pub", .{key});
             defer gpa.free(public_path);
-            const public = try Io.Dir.cwd().readFileAlloc(io, public_path, gpa, .limited(4096));
+            const public = try fs.readWhole(Io.Dir.cwd(), io, public_path, gpa, .limited(4096));
             defer gpa.free(public);
             const allowed = try gpa.print("fixture@example.com namespaces=\"git\" {s}", .{public});
             defer gpa.free(allowed);

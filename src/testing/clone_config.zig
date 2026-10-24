@@ -3,6 +3,7 @@
 //! setting in the new repository.
 
 const std = @import("std");
+const fs = @import("../fs/fs.zig");
 const builtin = @import("builtin");
 const testing = std.testing;
 
@@ -50,7 +51,7 @@ test "a clone checks out through the filters the person's ~/.gitconfig names, as
     try fx.gitIn(fx.tmp.dir, &.{ "clone", "-q", url, by_git });
     var git_dir = try fx.tmp.dir.openDir(io, "by-git", .{});
     defer git_dir.close(io);
-    const theirs = try git_dir.readFileAlloc(io, "a.bin", gpa, .limited(1 << 20));
+    const theirs = try fs.readWhole(git_dir, io, "a.bin", gpa, .limited(1 << 20));
     defer gpa.free(theirs);
     try testing.expectEqualStrings(content, theirs);
 
@@ -68,7 +69,7 @@ test "a clone checks out through the filters the person's ~/.gitconfig names, as
             .home = locations.home,
         });
         defer repo.deinit(io);
-        const ours = try d.readFileAlloc(io, "a.bin", gpa, .limited(1 << 20));
+        const ours = try fs.readWhole(d, io, "a.bin", gpa, .limited(1 << 20));
         defer gpa.free(ours);
         try testing.expectEqualStrings(content, ours);
         try testing.expect(repo.configuration().get("filter.lfs.process") != null);
@@ -76,7 +77,7 @@ test "a clone checks out through the filters the person's ~/.gitconfig names, as
         defer gpa.free(status);
         try testing.expectEqualStrings("", status);
         // Nothing of the person's was written into the new repository.
-        const local = try d.readFileAlloc(io, ".git/config", gpa, .limited(1 << 20));
+        const local = try fs.readWhole(d, io, ".git/config", gpa, .limited(1 << 20));
         defer gpa.free(local);
         try testing.expect(std.mem.find(u8, local, "filter") == null);
     }
@@ -88,7 +89,7 @@ test "a clone checks out through the filters the person's ~/.gitconfig names, as
         defer d.close(io);
         var repo = try clone_mod.clone(gpa, io, url, d, .{ .who = test_who, .programs = fx.programs() });
         defer repo.deinit(io);
-        const ours = try d.readFileAlloc(io, "a.bin", gpa, .limited(1 << 20));
+        const ours = try fs.readWhole(d, io, "a.bin", gpa, .limited(1 << 20));
         defer gpa.free(ours);
         try testing.expect(std.mem.startsWith(u8, ours, "version https://git-lfs.github.com/spec/v1\n"));
     }
@@ -136,7 +137,7 @@ test "a clone given no settings of its own reaches the remote with the person's,
     try testing.expectEqualStrings(theirs, head.oid.hex(&hex));
     // The setting was read, not written into the new repository.
     try testing.expectEqualStrings(fake, repo.configuration().get("core.sshCommand").?);
-    const local = try d.readFileAlloc(io, ".git/config", gpa, .limited(1 << 20));
+    const local = try fs.readWhole(d, io, ".git/config", gpa, .limited(1 << 20));
     defer gpa.free(local);
     try testing.expect(std.mem.find(u8, local, "sshCommand") == null);
 }

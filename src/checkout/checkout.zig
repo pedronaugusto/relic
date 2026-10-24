@@ -873,7 +873,7 @@ pub const Tracked = struct {
             const applied = try attrs.lookup(a, path, .file);
             return (try t.conv.toGitFile(a, .{ .path = path, .size = found.size, .applied = applied }, .{ .storing = .hash_only })).bytes;
         }
-        return t.wt.readFileAlloc(t.io, path, a, .limited(1 << 31));
+        return fs.readWhole(t.wt, t.io, path, a, .limited(1 << 31));
     }
 };
 
@@ -3603,7 +3603,7 @@ pub fn differsFromIndex(
     }
     const attrs = rules.attrs orelse {
         if (try streamsIn(rules.big_file_bytes, found, null)) return !try namedAs(io, wt, entry);
-        const bytes = wt.readFileAlloc(io, entry.path, a, .limited(1 << 31)) catch |err| switch (err) {
+        const bytes = fs.readWhole(wt, io, entry.path, a, .limited(1 << 31)) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return true,
         };
@@ -3632,7 +3632,7 @@ pub fn differsFromIndex(
     defer if (!entered) attrs.leave();
     const applied = try attrs.lookup(a, entry.path, .file);
     if (try streamsIn(rules.big_file_bytes, found, .{ .session = &conv, .path = entry.path, .applied = applied })) return !try namedAs(io, wt, entry);
-    const bytes = wt.readFileAlloc(io, entry.path, a, .limited(1 << 31)) catch |err| switch (err) {
+    const bytes = fs.readWhole(wt, io, entry.path, a, .limited(1 << 31)) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return true,
     };

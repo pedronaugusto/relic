@@ -363,7 +363,7 @@ pub const Store = struct {
         if (builtin.target.os.tag != .wasi) if (dir.readLink(io, path, &buffer)) |len| {
             const target = buffer[0..len];
             if (std.mem.startsWith(u8, target, "refs/") and names.checkFormat(target, .{})) return .{ .symbolic = try gpa.dupe(u8, target) };
-        } else |_| {};
+        } else |err| if (err == error.Canceled) return error.Canceled;
         const bytes = dir.readFile(io, path, &buffer) catch |err| switch (err) {
             error.FileNotFound, error.NotDir, error.IsDir => return null,
             else => |e| return e,
@@ -3240,7 +3240,7 @@ fn refFilesSnapshot(gpa: Allocator, io: Io, dir: Io.Dir) !std.array_hash_map.Str
         const path = try gpa.dupe(u8, entry.path);
         errdefer gpa.free(path);
         std.mem.replaceScalar(u8, path, '\\', '/');
-        const bytes = try entry.dir.readFileAlloc(io, entry.basename, gpa, .unlimited);
+        const bytes = try fs.readWhole(entry.dir, io, entry.basename, gpa, .unlimited);
         errdefer gpa.free(bytes);
         try out.put(gpa, path, bytes);
     }

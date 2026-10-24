@@ -2,6 +2,7 @@
 //! of `std.Io` writes the bytes the serial writer writes.
 
 const std = @import("std");
+const fs = @import("../fs/fs.zig");
 const warp_mod = @import("warp");
 const Io = std.Io;
 const hash = @import("../hash/hash.zig");
@@ -680,7 +681,7 @@ const Entries = struct {
         var p = try pack_mod.Pack.open(gpa, io, dir, .{ .base = base, .kind = .sha1 }, .{});
         defer p.deinit(io);
         var name: [128]u8 = undefined;
-        var e: Entries = .{ .bytes = try dir.readFileAlloc(io, try std.mem.print(&name, "{s}.pack", .{base}), gpa, .unlimited) };
+        var e: Entries = .{ .bytes = try fs.readWhole(dir, io, try std.mem.print(&name, "{s}.pack", .{base}), gpa, .unlimited) };
         errdefer e.deinit(gpa);
         const At = struct { offset: u64, oid: Oid };
         var all: std.ArrayList(At) = .empty;

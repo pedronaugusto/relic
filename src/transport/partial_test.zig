@@ -5,6 +5,7 @@
 //! `rev-list --missing=print` finds present and promised.
 
 const std = @import("std");
+const fs = @import("../fs/fs.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const testing = std.testing;
@@ -63,7 +64,7 @@ fn promisorFiles(gpa: Allocator, io: Io, dir: Io.Dir) ![]u8 {
     var it = pack_dir.iterate();
     while (try it.next(io)) |entry| {
         if (!std.mem.endsWith(u8, entry.name, ".promisor")) continue;
-        try texts.append(gpa, try pack_dir.readFileAlloc(io, entry.name, gpa, .unlimited));
+        try texts.append(gpa, try fs.readWhole(pack_dir, io, entry.name, gpa, .unlimited));
     }
     std.mem.sort([]u8, texts.items, {}, struct {
         fn lessThan(_: void, a: []u8, b: []u8) bool {
@@ -298,9 +299,9 @@ test "a fetch into a partial clone is filtered, and its pack is a promisor's, as
     var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &env } });
     outcome.deinit();
     try expectSame(gpa, io, twins.by_git, twins.by_relic, true);
-    const theirs = try twins.by_git.readFileAlloc(io, ".git/FETCH_HEAD", gpa, .unlimited);
+    const theirs = try fs.readWhole(twins.by_git, io, ".git/FETCH_HEAD", gpa, .unlimited);
     defer gpa.free(theirs);
-    const ours = try twins.by_relic.readFileAlloc(io, ".git/FETCH_HEAD", gpa, .unlimited);
+    const ours = try fs.readWhole(twins.by_relic, io, ".git/FETCH_HEAD", gpa, .unlimited);
     defer gpa.free(ours);
     try testing.expectEqualStrings(theirs, ours);
 }
@@ -457,7 +458,7 @@ test "a lazy fetch writes the filter it registers, and leaves another process's 
     lazy.install();
     try lazy.prefetchTree(io, (try repo.headTree(io)).?);
 
-    const written = try dir.readFileAlloc(io, ".git/config", gpa, .limited(1 << 16));
+    const written = try fs.readWhole(dir, io, ".git/config", gpa, .limited(1 << 16));
     defer gpa.free(written);
     try testing.expect(std.mem.find(u8, written, "partialclonefilter = blob:none") != null);
     try testing.expect(std.mem.find(u8, written, "external = yes") != null);

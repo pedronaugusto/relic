@@ -4,6 +4,7 @@
 //! git does.
 
 const std = @import("std");
+const fs = @import("../fs/fs.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -105,9 +106,9 @@ test "a bundle's header is git's byte for byte, and its pack unbundles in git to
         try src.exec(io, args.items);
         try create(gpa, io, &repo, .{ .dir = tmp.dir, .path = "relic.bundle" }, case.request);
 
-        const a = try tmp.dir.readFileAlloc(io, "git.bundle", gpa, .unlimited);
+        const a = try fs.readWhole(tmp.dir, io, "git.bundle", gpa, .unlimited);
         defer gpa.free(a);
-        const b = try tmp.dir.readFileAlloc(io, "relic.bundle", gpa, .unlimited);
+        const b = try fs.readWhole(tmp.dir, io, "relic.bundle", gpa, .unlimited);
         defer gpa.free(b);
         std.testing.expectEqualStrings(headerOf(a), headerOf(b)) catch |err| {
             std.debug.print("bundle case {d} differs\n", .{n});
@@ -148,7 +149,7 @@ test "a bundle's header is git's byte for byte, and its pack unbundles in git to
 /// The names of the objects in the pack after a bundle's header, sorted,
 /// as git's `index-pack` and `verify-pack` read them.
 fn packObjects(gpa: Allocator, io: Io, r: *testgit.Repo, dir: Io.Dir, dir_path: []const u8, name: []const u8) ![]u8 {
-    const bytes = try dir.readFileAlloc(io, name, gpa, .unlimited);
+    const bytes = try fs.readWhole(dir, io, name, gpa, .unlimited);
     defer gpa.free(bytes);
     const pack_name = try gpa.print("{s}.pack", .{name});
     defer gpa.free(pack_name);
@@ -204,9 +205,9 @@ test "a bundle filtered by sparse:oid= holds the objects git's holds" {
         try src.exec(io, &.{ "bundle", "create", "-q", theirs, filter_arg, "main", "topic" });
         try create(gpa, io, &repo, .{ .dir = tmp.dir, .path = "relic.bundle" }, .{ .include = &.{ "main", "topic" }, .filter = spec });
 
-        const a = try tmp.dir.readFileAlloc(io, "git.bundle", gpa, .unlimited);
+        const a = try fs.readWhole(tmp.dir, io, "git.bundle", gpa, .unlimited);
         defer gpa.free(a);
-        const b = try tmp.dir.readFileAlloc(io, "relic.bundle", gpa, .unlimited);
+        const b = try fs.readWhole(tmp.dir, io, "relic.bundle", gpa, .unlimited);
         defer gpa.free(b);
         try std.testing.expectEqualStrings(headerOf(a), headerOf(b));
         const want = try packObjects(gpa, io, &src, tmp.dir, tmp_path, "git.bundle");
@@ -243,7 +244,7 @@ test "a bundle's repeated @filter= lines are one combine: filter, as git verifie
     const made = try gpa.print("{s}/made.bundle", .{tmp_path});
     defer gpa.free(made);
     try src.exec(io, &.{ "bundle", "create", "-q", made, "--filter=blob:limit=1k", "main" });
-    const bytes = try tmp.dir.readFileAlloc(io, "made.bundle", gpa, .unlimited);
+    const bytes = try fs.readWhole(tmp.dir, io, "made.bundle", gpa, .unlimited);
     defer gpa.free(bytes);
     const filter_line = "@filter=blob:limit=1024\n";
     const at = std.mem.find(u8, bytes, filter_line).?;

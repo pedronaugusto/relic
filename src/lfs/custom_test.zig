@@ -4,6 +4,7 @@
 //! and an agent that refuses to start.
 
 const std = @import("std");
+const fs = @import("../fs/fs.zig");
 const custom_mod = @import("custom.zig");
 const shakedown_mod = @import("shakedown");
 const suite = @import("../testing/helpers.zig");
@@ -114,7 +115,7 @@ const Fixture = struct {
         defer dir.close(fx.io);
         var it = dir.iterate();
         while (try it.next(fx.io)) |entry| {
-            const text = try dir.readFileAlloc(fx.io, entry.name, fx.gpa, .unlimited);
+            const text = try fs.readWhole(dir, fx.io, entry.name, fx.gpa, .unlimited);
             defer fx.gpa.free(text);
             var split = std.mem.splitScalar(u8, text, '\n');
             while (split.next()) |l| {

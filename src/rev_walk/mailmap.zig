@@ -31,6 +31,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const fs = @import("../fs/fs.zig");
 const ctype = @import("../text.zig").ctype;
 const shakedown = @import("shakedown");
 const builtin = @import("builtin");
@@ -266,7 +267,7 @@ pub const Mailmap = struct {
             const st = dir.statFile(io, path, .{ .follow_symlinks = false }) catch return;
             if (st.kind == .sym_link) return;
         }
-        const bytes = dir.readFileAlloc(io, path, m.gpa, .unlimited) catch |err| switch (err) {
+        const bytes = fs.readWhole(dir, io, path, m.gpa, .unlimited) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return,
         };

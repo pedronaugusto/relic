@@ -4,6 +4,7 @@
 const builtin = @import("builtin");
 const config_mod = @import("../config/config.zig");
 const std = @import("std");
+const fs = @import("../fs/fs.zig");
 const fs_mod = @import("../fs/fs.zig");
 const shakedown = @import("shakedown");
 const Io = std.Io;
@@ -864,10 +865,10 @@ test "opening uses the format validated before worktree settings are read" {
     try std.testing.expectEqualStrings("shared", opened.configuration().get("fixture.edited").?);
     try std.testing.expectEqual(refs_mod.Format.reftable, opened.refStore().refFormat());
     try std.testing.expectError(error.FormatEditInMemory, opened.editConfig(io, &.{.{ .name = "extensions.refstorage", .value = "files" }}, .{}));
-    const before = try tmp.dir.readFileAlloc(io, ".git/config", gpa, .limited(4096));
+    const before = try fs.readWhole(tmp.dir, io, ".git/config", gpa, .limited(4096));
     defer gpa.free(before);
     try std.testing.expectError(error.RefStorageChanged, opened.writeConfig(io, .local, &.{.{ .set = .{ .name = "extensions.refstorage", .value = "files" } }}, .{}));
-    const after = try tmp.dir.readFileAlloc(io, ".git/config", gpa, .limited(4096));
+    const after = try fs.readWhole(tmp.dir, io, ".git/config", gpa, .limited(4096));
     defer gpa.free(after);
     try std.testing.expectEqualStrings(before, after);
     try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, ".git/config.lock", .{}));
@@ -1058,7 +1059,7 @@ test "a reftable HEAD read failure does not become a detached branch" {
         var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{ .default_branch = "main", .object_format = kind, .ref_format = .reftable });
         defer repo.deinit(io);
         try std.testing.expectEqualStrings("main", repo.configuration().context.branch.?);
-        const before = try repo.gitDirectory().readFileAlloc(io, "reftable/tables.list", gpa, .limited(4096));
+        const before = try fs.readWhole(repo.gitDirectory(), io, "reftable/tables.list", gpa, .limited(4096));
         defer gpa.free(before);
         const cases = .{
             .{ "not a table\n", error.MalformedTablesList },
@@ -1502,7 +1503,7 @@ fn treeOf(gpa: std.mem.Allocator, io: Io, dir: Io.Dir) !std.array_hash_map.Strin
         const path = try gpa.dupe(u8, entry.path);
         std.mem.replaceScalar(u8, path, '\\', '/');
         const bytes: []u8 = switch (entry.kind) {
-            .file => try dir.readFileAlloc(io, entry.path, gpa, .limited(1 << 20)),
+            .file => try fs.readWhole(dir, io, entry.path, gpa, .limited(1 << 20)),
             .sym_link => blk: {
                 var buf: [Io.Dir.max_path_bytes]u8 = undefined;
                 const n = try dir.readLink(io, entry.path, &buf);
@@ -1542,7 +1543,7 @@ fn compareInit(gpa: std.mem.Allocator, io: Io, scratch: *testgit.Repo, template:
     try scratch.exec(io, argv.items);
     var git_dir = try scratch.dir.openDir(io, by_git, .{ .iterate = true });
     defer git_dir.close(io);
-    const git_config = try git_dir.readFileAlloc(io, ".git/config", gpa, .limited(1 << 20));
+    const git_config = try fs.readWhole(git_dir, io, ".git/config", gpa, .limited(1 << 20));
     defer gpa.free(git_config);
     var options = probedOptions(gpa, io, git_config);
     options.shared = shared;
@@ -1779,7 +1780,7 @@ test "a directory is taken for a git directory exactly where git's rev-parse tak
         var said = try r.capture(io, &.{ "-C", layout.name, "rev-parse", "--git-dir" });
         defer said.deinit(gpa);
         const git_takes_it = said.code == 0;
-        try std.testing.expectEqual(git_takes_it, discover_directory.isGitDirectory(io, git_dir));
+        try std.testing.expectEqual(git_takes_it, try discover_directory.isGitDirectory(io, git_dir));
     }
 }
 

@@ -811,7 +811,7 @@ pub const Config = struct {
                 // directory's, absolute and with its links resolved.
                 var dir_buf: [4096]u8 = undefined;
                 const including_dir = if (std.mem.find(u8, entry.subsection, ":./") != null)
-                    absoluteDirOf(io, dir, config.files.items[entry.file_index].path, &dir_buf)
+                    try absoluteDirOf(io, dir, config.files.items[entry.file_index].path, &dir_buf)
                 else
                     null;
                 // A `gitdir:./` pattern needs a file to be relative to.
@@ -841,9 +841,12 @@ pub const Config = struct {
     }
 
     /// The directory of `sub_path` under `dir`, absolute, links resolved,
-    /// `/`-separated; `null` when it cannot be found.
-    fn absoluteDirOf(io: Io, dir: Io.Dir, sub_path: []const u8, buf: []u8) ?[]const u8 {
-        const path = fs.realPathFile(io, dir, sub_path, buf) catch return null;
+    /// `/`-separated; `null` when it cannot be found. A cancel is returned.
+    fn absoluteDirOf(io: Io, dir: Io.Dir, sub_path: []const u8, buf: []u8) Io.Cancelable!?[]const u8 {
+        const path = fs.realPathFile(io, dir, sub_path, buf) catch |err| return switch (err) {
+            error.Canceled => error.Canceled,
+            else => null,
+        };
         return std.Io.Dir.path.dirnamePosix(path);
     }
 

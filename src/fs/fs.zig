@@ -313,16 +313,18 @@ pub const Resolution = struct {
 ///
 /// A directory nothing can be written into gives `Resolution.nanosecond`
 /// with `measured` false, which is the assumption this replaces and the
-/// lenient answer of the two.
-pub fn probeTimestampResolution(io: Io, dir: Io.Dir) Resolution {
+/// lenient answer of the two. A cancel is returned, never taken for that.
+pub fn probeTimestampResolution(io: Io, dir: Io.Dir) Io.Cancelable!Resolution {
     var name_buf: [64]u8 = undefined;
     const name = tempName(io, &name_buf, "relic_tres_");
     // The handle is opened for reading as well as writing because the stat
     // below is taken through it: Windows grants a write-only handle no right
     // to read the file's attributes, so `stat` there is `AccessDenied` and
     // the measurement never happens.
-    const file = dir.createFile(io, name, .{ .exclusive = true, .read = true }) catch
-        return .nanosecond;
+    const file = dir.createFile(io, name, .{ .exclusive = true, .read = true }) catch |err| return switch (err) {
+        error.Canceled => error.Canceled,
+        else => .nanosecond,
+    };
     defer {
         file.close(io);
         // glint-ignore: Z026 -- the probe's file is removed best effort; the granularity is already measured
@@ -332,13 +334,22 @@ pub fn probeTimestampResolution(io: Io, dir: Io.Dir) Resolution {
     var divisor: u64 = 0;
     var samples: u8 = 0;
     for (0..3) |_| {
-        file.writeStreamingAll(io, "relic") catch break;
+        file.writeStreamingAll(io, "relic") catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => break,
+        };
         // Windows does not put a write's time on the file while the handle
         // that made it is still open: without this every sample would be the
         // time the file was created and the answer would be of nothing.
         // A write whose time cannot be put on the file is a sample not taken.
-        if (builtin.target.os.tag == .windows) syncFile(io, file, .{ .policy = .per_file }) catch break;
-        const s = file.stat(io) catch break;
+        if (builtin.target.os.tag == .windows) syncFile(io, file, .{ .policy = .per_file }) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => break,
+        };
+        const s = file.stat(io) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => break,
+        };
         const nsec: u64 = @intCast(@mod(s.mtime.toNanoseconds(), std.time.ns_per_s));
         // A zero is divisible by anything: it narrows nothing, and gcd
         // takes no pair of zeros.
@@ -1244,18 +1255,19 @@ extern "kernel32" fn CreateHardLinkW(new_path: [*:0]const u16, old_path: [*:0]co
 /// symbolic link, is the effective user; on Windows its owner is the
 /// user's SID, or the Administrators group when the user is one, and the
 /// user's home (`home`, as git reads `HOME`) is always theirs. A path that
-/// cannot be asked about is not owned: where the platform cannot say whose
-/// a file is -- WASI, which has no users, or a POSIX build without libc
-/// beyond Linux -- nothing is, and a caller that trusts its paths there
-/// opens with `OpenOptions.ownership = .trust`.
-pub fn ownedByCurrentUser(io: Io, dir: Io.Dir, sub_path: []const u8, home: ?[]const u8) bool {
+/// cannot be asked about is not owned, and only a cancel is returned. Where
+/// the platform cannot say whose a file is -- WASI, which has no users, or
+/// a POSIX build without libc beyond Linux -- nothing is, and a caller that
+/// trusts its paths there opens with `OpenOptions.ownership = .trust`.
+pub fn ownedByCurrentUser(io: Io, dir: Io.Dir, sub_path: []const u8, home: ?[]const u8) Io.Cancelable!bool {
     switch (builtin.target.os.tag) {
         .windows => return ownedWindows(io, dir, sub_path, home),
         .wasi => return false,
         else => {
             const found = switch (platstat.full(io, dir, sub_path)) {
                 .found => |f| f,
-                .absent, .failed => return false,
+                .absent => return false,
+                .failed => |err| return if (err == error.Canceled) error.Canceled else false,
             };
             const euid: u32 = switch (builtin.target.os.tag) {
                 .linux => std.os.linux.geteuid(),
@@ -1285,9 +1297,12 @@ extern "kernel32" fn LocalFree(memory: ?*anyopaque) callconv(.winapi) ?*anyopaqu
 extern "kernel32" fn GetCurrentProcess() callconv(.winapi) std.os.windows.HANDLE;
 extern "kernel32" fn CloseHandle(handle: std.os.windows.HANDLE) callconv(.winapi) std.os.windows.BOOL;
 
-fn ownedWindows(io: Io, dir: Io.Dir, sub_path: []const u8, home: ?[]const u8) bool {
+fn ownedWindows(io: Io, dir: Io.Dir, sub_path: []const u8, home: ?[]const u8) Io.Cancelable!bool {
     var root_buf: [Io.Dir.max_path_bytes]u8 = undefined;
-    const root_len = dir.realPath(io, &root_buf) catch return false;
+    const root_len = dir.realPath(io, &root_buf) catch |err| return switch (err) {
+        error.Canceled => error.Canceled,
+        else => false,
+    };
     var path_buf: [Io.Dir.max_path_bytes]u8 = undefined;
     const path = if (std.mem.eql(u8, sub_path, "."))
         root_buf[0..root_len]
@@ -1642,7 +1657,7 @@ pub fn readFileSized(
         if (try file.readPositional(io, &.{&probe}, size) == 0) return buf;
     }
     gpa.free(buf);
-    return dir.readFileAlloc(io, sub_path, gpa, .limited(max_bytes));
+    return readWhole(dir, io, sub_path, gpa, .limited(max_bytes));
 }
 
 /// Read a whole file, or `null` if it is not there.
@@ -1656,10 +1671,54 @@ pub fn readFileAlloc(
     sub_path: []const u8,
     max_bytes: usize,
 ) (Io.Dir.ReadFileAllocError)!?[]u8 {
-    return dir.readFileAlloc(io, sub_path, gpa, .limited(max_bytes)) catch |err| switch (err) {
+    var file = dir.openFile(io, sub_path, .{ .allow_directory = builtin.os.tag != .windows }) catch |err| switch (err) {
         error.FileNotFound, error.NotDir, error.IsDir => return null,
         else => |e| return e,
     };
+    defer file.close(io);
+    return readAll(gpa, io, file, max_bytes) catch |err| switch (err) {
+        error.IsDir => null,
+        else => |e| e,
+    };
+}
+
+/// `Io.Dir.readFileAlloc` as std has it, every error returned, read through
+/// `readAll` so a cancel is never lost.
+pub fn readWhole(dir: Io.Dir, io: Io, sub_path: []const u8, gpa: Allocator, limit: Io.Limit) (Io.Dir.ReadFileAllocError)![]u8 {
+    var file = try dir.openFile(io, sub_path, .{ .allow_directory = builtin.os.tag != .windows });
+    defer file.close(io);
+    // std's limit is reached at `limit` bytes; `readAll` refuses past it.
+    const max = limit.minInt(std.math.maxInt(usize));
+    if (max == 0) return error.StreamTooLong;
+    return readAll(gpa, io, file, max - 1);
+}
+
+/// Every byte left in `file`, the caller's; `error.StreamTooLong` past
+/// `max_bytes`. std's `readFileAlloc` takes the file's length through a
+/// writer that guesses when the stat fails, a cancel included, and so a
+/// cancel landing there is lost (Zig 0.17, `Writer.Allocating.sendFile`);
+/// here the length is a first guess whose cancel is returned.
+pub fn readAll(gpa: Allocator, io: Io, file: Io.File, max_bytes: usize) (Io.Dir.ReadFileAllocError)![]u8 {
+    const length = file.length(io) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => 0,
+    };
+    var bytes: std.ArrayList(u8) = try .initCapacity(gpa, @min(std.math.cast(usize, length) orelse max_bytes, max_bytes) + 1);
+    errdefer bytes.deinit(gpa);
+    while (true) {
+        if (bytes.items.len == bytes.capacity) {
+            if (bytes.items.len > max_bytes) return error.StreamTooLong;
+            try bytes.ensureTotalCapacityPrecise(gpa, @min(bytes.capacity *| 2, max_bytes + 1));
+        }
+        const n = file.readStreaming(io, &.{bytes.unusedCapacitySlice()}) catch |err| switch (err) {
+            error.EndOfStream => 0,
+            else => |e| return e,
+        };
+        bytes.items.len += n;
+        if (n == 0) break;
+    }
+    if (bytes.items.len > max_bytes) return error.StreamTooLong;
+    return bytes.toOwnedSlice(gpa);
 }
 
 /// `readFileAlloc` for a file that holds a secret (`.netrc`, a private
@@ -1679,7 +1738,11 @@ pub fn readSecretFile(
     };
     defer file.close(io);
     // The length is a first guess: the file may change as it is read.
-    const guess = std.math.cast(usize, file.length(io) catch 0) orelse max_bytes;
+    const length = file.length(io) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => 0,
+    };
+    const guess = std.math.cast(usize, length) orelse max_bytes;
     var secret = try aegis.SecretBytes.init(gpa, @min(guess, max_bytes) + 1);
     errdefer secret.deinit();
     while (true) {
@@ -1738,7 +1801,7 @@ test "the filesystem's timestamp resolution is measured, not assumed" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const measured = probeTimestampResolution(io, tmp.dir);
+    const measured = try probeTimestampResolution(io, tmp.dir);
     try std.testing.expect(measured.measured);
     // A round unit, no finer than a nanosecond and no coarser than a second.
     try std.testing.expect(measured.ns >= 1);

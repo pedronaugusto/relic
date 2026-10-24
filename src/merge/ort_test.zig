@@ -4,6 +4,7 @@
 //! with its paths and its kind.
 
 const std = @import("std");
+const fs = @import("../fs/fs.zig");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -448,7 +449,7 @@ const Scenario = struct {
     }
 
     fn read(s: *Scenario, path: []const u8) ![]u8 {
-        return s.repo.dir.readFileAlloc(s.io, path, s.arena.allocator(), .limited(1 << 20)) catch "";
+        return fs.readWhole(s.repo.dir, s.io, path, s.arena.allocator(), .limited(1 << 20)) catch "";
     }
 
     fn edit(s: *Scenario, bytes: []const u8) ![]u8 {

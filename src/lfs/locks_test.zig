@@ -329,7 +329,7 @@ test "a repository with git-lfs's hooks works on a machine without git-lfs" {
     defer home_hooks.close(io);
     try pair.ours.createDirPath(io, ".git/hooks");
     for (hooks.git_lfs_events) |event| {
-        const text = try home_hooks.readFileAlloc(io, event, gpa, .limited(4096));
+        const text = try fs.readWhole(home_hooks, io, event, gpa, .limited(4096));
         defer gpa.free(text);
         try testing.expect(hooks.isGitLfsHook(event, text));
         var path_buf: [64]u8 = undefined;
@@ -455,7 +455,7 @@ test "LFS HTTP pagination ends or fails without publishing partial caches" {
                 for ([_][2][]const u8{ .{ "remote", remote_bytes }, .{ "verifiable", verify_bytes } }) |file| {
                     const path = try fx.gpa.print("{s}/{s}", .{ cache_path, file[0] });
                     defer fx.gpa.free(path);
-                    const actual = try repo.commonDirectory().readFileAlloc(fx.io, path, fx.gpa, .limited(1024));
+                    const actual = try fs.readWhole(repo.commonDirectory(), fx.io, path, fx.gpa, .limited(1024));
                     defer fx.gpa.free(actual);
                     try testing.expectEqualStrings(file[1], actual);
                 }

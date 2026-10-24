@@ -38,7 +38,7 @@ pub const ReadError = Allocator.Error || Io.Dir.ReadFileAllocError || error{
 /// checksum: so does this.
 pub fn read(gpa: Allocator, io: Io, dir: Io.Dir, sub_path: []const u8, count: u32) Self.ReadError![]u32 {
     const max = header_len + @as(usize, count) * 4 + 2 * hash.max_raw_len;
-    const bytes = dir.readFileAlloc(io, sub_path, gpa, .limited(max + 1)) catch |err| switch (err) {
+    const bytes = fs.readWhole(dir, io, sub_path, gpa, .limited(max + 1)) catch |err| switch (err) {
         error.StreamTooLong => return error.InvalidMtimes,
         else => |e| return e,
     };

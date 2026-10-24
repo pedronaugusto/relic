@@ -11,6 +11,7 @@
 
 const local = @import("../../transport/local.zig");
 const std = @import("std");
+const fs = @import("../../fs/fs.zig");
 const filter_mod = @import("../../lfs/filter.zig");
 const path_mod = @import("../../names.zig").path;
 const suite = @import("../helpers.zig");
@@ -216,7 +217,7 @@ fn expectNoLink(gpa: std.mem.Allocator, io: Io, dir: Io.Dir, needle: []const u8)
                 return error.TestUnexpectedResult;
             },
             .file => {
-                const bytes = try dir.readFileAlloc(io, entry.path, gpa, .limited(64 << 20));
+                const bytes = try fs.readWhole(dir, io, entry.path, gpa, .limited(64 << 20));
                 defer gpa.free(bytes);
                 if (needle.len != 0 and std.mem.find(u8, bytes, needle) != null) {
                     std.debug.print("{s} holds what a link pointed at\n", .{entry.path});

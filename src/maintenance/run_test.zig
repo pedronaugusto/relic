@@ -145,7 +145,7 @@ fn compare(format: testgit.RefFormat, cases: []const Case) !void {
         const report = try run_mod.run(gpa, io, &native, options);
         try std.testing.expect(report.succeeded());
 
-        const trace = try theirs.tmp.dir.readFileAlloc(io, trace_path, gpa, .limited(1 << 24));
+        const trace = try fs.readWhole(theirs.tmp.dir, io, trace_path, gpa, .limited(1 << 24));
         defer gpa.free(trace);
         const expected_tasks = try gitTasks(trace);
         defer gpa.free(expected_tasks);
@@ -279,7 +279,7 @@ fn startWrites(scheduler: schedule.Scheduler, flag: []const u8, mock: []const u8
     for (reg.entries) |entry| {
         const path = try std.Io.Dir.path.join(gpa, &.{ base, entry.path });
         defer gpa.free(path);
-        const written = try git.tmp.dir.readFileAlloc(io, path, gpa, .limited(1 << 20));
+        const written = try fs.readWhole(git.tmp.dir, io, path, gpa, .limited(1 << 20));
         defer gpa.free(written);
         std.testing.expectEqualStrings(written, entry.contents) catch |err| {
             std.debug.print("{t}: {s}\n", .{ scheduler, entry.path });

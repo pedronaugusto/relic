@@ -82,7 +82,7 @@ pub fn open(gpa: Allocator, io: Io, wt: Io.Dir, path: []const u8) Self.Error!?Gi
         via_file = true;
         break :blk gitfile.open(io, work, target, .{ .iterate = true }) catch return null;
     };
-    if (!directory.isGitDirectory(io, git_dir)) {
+    if (!try directory.isGitDirectory(io, git_dir)) {
         git_dir.close(io);
         return null;
     }

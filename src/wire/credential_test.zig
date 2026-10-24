@@ -13,6 +13,7 @@
 //! path and the home is the test's.
 
 const std = @import("std");
+const fs = @import("../fs/fs.zig");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -209,7 +210,7 @@ const Fixture = struct {
     fn takeLogs(fx: *Fixture, arena: Allocator, io: Io) ![log_names.len][]const u8 {
         var logs: [log_names.len][]const u8 = undefined;
         for (log_names, &logs) |name, *log| {
-            log.* = fx.tmp.dir.readFileAlloc(io, name, arena, .limited(1 << 20)) catch |err| switch (err) {
+            log.* = fs.readWhole(fx.tmp.dir, io, name, arena, .limited(1 << 20)) catch |err| switch (err) {
                 error.FileNotFound => "",
                 else => return err,
             };
@@ -361,9 +362,9 @@ test "credential-store run in process keeps the file git's keeps and answers as 
             try store_mod.erase(gpa, io, files, step.c);
         }
         try testing.expectEqualStrings(answer, ours_answer.items);
-        const file_theirs = try tmp.dir.readFileAlloc(io, "by-git", gpa, .unlimited);
+        const file_theirs = try fs.readWhole(tmp.dir, io, "by-git", gpa, .unlimited);
         defer gpa.free(file_theirs);
-        const file_ours = try tmp.dir.readFileAlloc(io, "by-relic", gpa, .unlimited);
+        const file_ours = try fs.readWhole(tmp.dir, io, "by-relic", gpa, .unlimited);
         defer gpa.free(file_ours);
         try testing.expectEqualStrings(file_theirs, file_ours);
     }
@@ -415,7 +416,7 @@ test "credential-store's default files are git's: ~/.git-credentials first, else
             for ([_][]const u8{ "git-home", "relic-home" }, &contents) |home, *c| {
                 const path = try gpa.print("{s}/{s}", .{ home, name });
                 defer gpa.free(path);
-                c.* = tmp.dir.readFileAlloc(io, path, gpa, .unlimited) catch try gpa.dupe(u8, "(none)");
+                c.* = fs.readWhole(tmp.dir, io, path, gpa, .unlimited) catch try gpa.dupe(u8, "(none)");
             }
             defer for (contents) |c| gpa.free(c);
             try testing.expectEqualStrings(contents[0], contents[1]);

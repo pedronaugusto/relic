@@ -7,6 +7,7 @@ const client_cert = @import("client_cert.zig");
 const repo_mod = @import("../repo/repo.zig");
 const fetch_mod = @import("../transport/fetch.zig");
 const std = @import("std");
+const fs = @import("../fs/fs.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const Environ = std.process.Environ;
@@ -212,9 +213,9 @@ test "git and relic fetch from a server that requires a certificate alike: key b
     // A certificate and its key in one file, as curl reads it when no key
     // file is named.
     {
-        const cert = try pki.dir.dir.readFileAlloc(io, "p256.pem", gpa, .unlimited);
+        const cert = try fs.readWhole(pki.dir.dir, io, "p256.pem", gpa, .unlimited);
         defer gpa.free(cert);
-        const key = try pki.dir.dir.readFileAlloc(io, "p256.key", gpa, .unlimited);
+        const key = try fs.readWhole(pki.dir.dir, io, "p256.key", gpa, .unlimited);
         defer gpa.free(key);
         const both = try std.mem.concat(gpa, u8, &.{ cert, key });
         defer gpa.free(both);
@@ -305,9 +306,9 @@ fn sideBySide(gpa: Allocator, io: Io, pki: *Pki, root: Io.Dir, front: *testremot
         try testing.expectEqualStrings("ed25519", case.kind);
     }
     if (case.protected != null) {
-        const theirs = try tools_git.dir.readFileAlloc(io, "helper.log", gpa, .unlimited);
+        const theirs = try fs.readWhole(tools_git.dir, io, "helper.log", gpa, .unlimited);
         defer gpa.free(theirs);
-        const ours = try tools_relic.dir.readFileAlloc(io, "helper.log", gpa, .unlimited);
+        const ours = try fs.readWhole(tools_relic.dir, io, "helper.log", gpa, .unlimited);
         defer gpa.free(ours);
         try testing.expectEqualStrings(theirs, ours);
     }

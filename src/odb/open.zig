@@ -35,10 +35,14 @@ pub fn register(io: Io, db: anytype, dir: Io.Dir, writable: bool) odb.Error!void
 }
 
 /// Where `dir` is, with every link resolved, as git compares alternates;
-/// empty, and so equal to no other, where the platform cannot say.
-pub fn realPath(gpa: Allocator, io: Io, dir: Io.Dir) Allocator.Error![]u8 {
+/// empty, and so equal to no other, where the platform cannot say. A cancel
+/// is returned.
+pub fn realPath(gpa: Allocator, io: Io, dir: Io.Dir) (Allocator.Error || Io.Cancelable)![]u8 {
     var buffer: [Io.Dir.max_path_bytes]u8 = undefined;
-    const len = dir.realPathFile(io, ".", &buffer) catch return &.{};
+    const len = dir.realPathFile(io, ".", &buffer) catch |err| return switch (err) {
+        error.Canceled => error.Canceled,
+        else => &.{},
+    };
     return gpa.dupe(u8, buffer[0..len]);
 }
 
@@ -49,7 +53,7 @@ pub fn openOwn(comptime Odb: type, gpa: Allocator, io: Io, git_dir: Io.Dir, kind
     errdefer if (storage.get(db.state).sources.items.len == 0) objects.close(io);
     try register(io, &db, objects, true);
     try db.refresh(io);
-    if (options.probe_timestamp_resolution) db.timestamp_resolution = fs.probeTimestampResolution(io, objects);
+    if (options.probe_timestamp_resolution) db.timestamp_resolution = try fs.probeTimestampResolution(io, objects);
     return db;
 }
 

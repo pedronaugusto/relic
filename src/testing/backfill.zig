@@ -12,6 +12,7 @@
 //! `d/f` alone -- unless a cone takes in `z` and not `d`.
 
 const std = @import("std");
+const fs = @import("../fs/fs.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const testing = std.testing;
@@ -182,7 +183,7 @@ fn packs(gpa: Allocator, io: Io, server: *Server, dir: Io.Dir) ![]u8 {
     var it = pack_dir.iterate();
     while (try it.next(io)) |entry| {
         if (!std.mem.endsWith(u8, entry.name, ".idx")) continue;
-        const idx = try pack_dir.readFileAlloc(io, entry.name, gpa, .unlimited);
+        const idx = try fs.readWhole(pack_dir, io, entry.name, gpa, .unlimited);
         defer gpa.free(idx);
         const listed = try testremote.gitInputEnv(gpa, io, dir, &server.env, &.{"show-index"}, idx, true);
         defer gpa.free(listed);

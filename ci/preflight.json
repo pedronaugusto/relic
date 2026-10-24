@@ -83,6 +83,20 @@
         "id": "A006",
         "level": "gate"
       }
+    ],
+    "disallowed": [
+      {
+        "source": "std",
+        "declaration": "Io.Dir.readFileAlloc",
+        "reason": "it takes the file's length through a writer that guesses when the stat fails, a cancel included, so a cancel landing there is lost (Zig 0.17, Writer.Allocating.sendFile)",
+        "replacement": "fs.readWhole, or fs.readFileAlloc for a file that may be absent"
+      },
+      {
+        "source": "std",
+        "declaration": "Io.Dir.readFileAllocOptions",
+        "reason": "it takes the file's length through a writer that guesses when the stat fails, a cancel included, so a cancel landing there is lost (Zig 0.17, Writer.Allocating.sendFile)",
+        "replacement": "fs.readWhole, or fs.readFileAlloc for a file that may be absent"
+      }
     ]
   }
 }

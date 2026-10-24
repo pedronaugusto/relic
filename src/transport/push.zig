@@ -26,6 +26,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const fs = @import("../fs/fs.zig");
 const gitdate = @import("../text.zig").date;
 const httpsettings_mod = @import("../wire.zig").http_settings;
 const Allocator = std.mem.Allocator;
@@ -1799,7 +1800,7 @@ test "push.negotiate leaves out what a negotiation finds the remote has, asking 
             defer outcome.deinit();
             try testing.expect(!outcome.anyRejected());
         }
-        const traced = try Io.Dir.cwd().readFileAlloc(io, trace, gpa, .unlimited);
+        const traced = try fs.readWhole(Io.Dir.cwd(), io, trace, gpa, .unlimited);
         defer gpa.free(traced);
         var said: std.ArrayList(u8) = .empty;
         var lines = std.mem.tokenizeScalar(u8, traced, '\n');
@@ -1926,7 +1927,7 @@ test "the pre-push hook point is shown what git's pre-push hook is shown, and ca
         .pre_push = .{ .context = &seen, .run = PrePushSeen.run },
     });
     outcome.deinit();
-    const theirs = try twins.root.dir.readFileAlloc(io, "pre-push.log", gpa, .unlimited);
+    const theirs = try fs.readWhole(twins.root.dir, io, "pre-push.log", gpa, .unlimited);
     defer gpa.free(theirs);
     try testing.expectEqualStrings(theirs, seen.text.items);
 
@@ -2051,7 +2052,7 @@ fn signedTwins(twins: *PushTwins, io: Io, server: ?*testremote.HttpServer, seed:
     made.deinit(gpa);
     const public_path = try gpa.print("{s}.pub", .{key});
     defer gpa.free(public_path);
-    const public = try Io.Dir.cwd().readFileAlloc(io, public_path, gpa, .limited(4096));
+    const public = try fs.readWhole(Io.Dir.cwd(), io, public_path, gpa, .limited(4096));
     defer gpa.free(public);
     const allowed = try gpa.print("signer@example.com namespaces=\"git\" {s}", .{public});
     defer gpa.free(allowed);
@@ -2100,7 +2101,7 @@ fn expectSameHookLogs(twins: *PushTwins, io: Io) !void {
     for ([_][]const u8{ "remote-git.git", "remote-relic.git" }, 0..) |name, i| {
         var dir = try twins.root.dir.openDir(io, name, .{});
         defer dir.close(io);
-        logs[i] = try dir.readFileAlloc(io, "hook.log", twins.gpa, .unlimited);
+        logs[i] = try fs.readWhole(dir, io, "hook.log", twins.gpa, .unlimited);
     }
     defer for (logs) |l| twins.gpa.free(l);
     try testing.expectEqualStrings(logs[0], logs[1]);
@@ -2125,7 +2126,7 @@ test "a signed push carries a certificate git's receive-pack checks, as git's pu
         });
         defer outcome.deinit();
         try expectSameHookLogs(&twins, io);
-        const log = try twins.root.dir.readFileAlloc(io, "remote-relic.git/hook.log", gpa, .unlimited);
+        const log = try fs.readWhole(twins.root.dir, io, "remote-relic.git/hook.log", gpa, .unlimited);
         defer gpa.free(log);
         try testing.expect(std.mem.startsWith(u8, log, "G signer@example.com SHA256:"));
         try testing.expect(std.mem.find(u8, log, " nonce OK\n") != null);
@@ -2214,7 +2215,7 @@ test "under transfer.advertiseSID a push and a fetch name their session to a ser
         var fetched = try fetch_mod.fetch(gpa, io, &reopened, "origin", .{ .who = test_who, .programs = .{ .environ = &twins.env }, .refspecs = &.{"refs/heads/main:refs/heads/fetched"} });
         fetched.deinit();
     }
-    const log = try Io.Dir.cwd().readFileAlloc(io, events, gpa, .unlimited);
+    const log = try fs.readWhole(Io.Dir.cwd(), io, events, gpa, .unlimited);
     defer gpa.free(log);
     // receive-pack's, and upload-pack's in v0 and v2: relic's id each time.
     var told: usize = 0;

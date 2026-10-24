@@ -3226,7 +3226,7 @@ test "learned LFS policy writes the shared source without replacing worktree con
     try testing.expect(shared.get("fixture.shared") != null);
     try testing.expectEqualStrings("kept", shared.get("fixture.shared").?);
     try testing.expectEqualStrings("false", shared.get("lfs.https://example.com/project.locksverify").?);
-    const after = try repo.commonDirectory().readFileAlloc(io, "config.worktree", gpa, .limited(4096));
+    const after = try fs.readWhole(repo.commonDirectory(), io, "config.worktree", gpa, .limited(4096));
     defer gpa.free(after);
     try testing.expectEqualStrings(worktree, after);
     _ = try repo.refreshConfig(io, .{});

@@ -59,6 +59,7 @@ pub fn main(init: std.process.Init) !void {
     } else if (std.mem.eql(u8, args[1], "copy-file") or std.mem.eql(u8, args[1], "keep-copy")) {
         if (args.len < 4) return error.MissingPath;
         const from: usize = if (std.mem.eql(u8, args[1], "keep-copy")) 3 else 2;
+        // glint-ignore: P006 -- a test program of its own, outside relic's module, that no relic task cancels
         const contents = try Io.Dir.cwd().readFileAlloc(io, args[from], init.arena.allocator(), .limited(1 << 20));
         try Io.Dir.cwd().writeFile(io, .{ .sub_path = args[5 - from], .data = contents });
     } else if (std.mem.eql(u8, args[1], "fsmonitor")) {
@@ -68,9 +69,11 @@ pub fn main(init: std.process.Init) !void {
         if (args.len < 4) return error.MissingPath;
         const arena = init.arena.allocator();
         const cwd = Io.Dir.cwd();
+        // glint-ignore: P006 -- a test program of its own, outside relic's module, that no relic task cancels
         const log = cwd.readFileAlloc(io, ".git/fsmonitor-log", arena, .limited(1 << 20)) catch "";
         try cwd.writeFile(io, .{ .sub_path = ".git/fsmonitor-log", .data = try arena.print("{s}{s} {s}\n", .{ log, args[2], args[3] }) });
         const answer_path = try arena.print(".git/fsmonitor-v{s}", .{args[2]});
+        // glint-ignore: P006 -- a test program of its own, outside relic's module, that no relic task cancels
         const answer = cwd.readFileAlloc(io, answer_path, arena, .limited(1 << 20)) catch std.process.exit(1);
         try out.interface.writeAll(answer);
     } else if (std.mem.eql(u8, args[1], "record")) {
@@ -124,6 +127,7 @@ fn extDiff(arena: std.mem.Allocator, io: Io, environ: *const std.process.Environ
         // `/dev/null` -- `nul` once Git for Windows' shell has passed it
         // to a program of its own.
         if (!std.mem.eql(u8, args[at + 1], ".")) {
+            // glint-ignore: P006 -- a test program of its own, outside relic's module, that no relic task cancels
             const bytes = try Io.Dir.cwd().readFileAlloc(io, file, arena, .limited(1 << 20));
             try out.print("<<{s}>>\n", .{bytes});
         }
@@ -145,6 +149,7 @@ fn transform(arena: std.mem.Allocator, io: Io, args: []const []const u8, out: *I
     var input: std.ArrayList(u8) = .empty;
     if (std.mem.eql(u8, args[1], "upper-file")) {
         if (args.len < 3) return error.MissingPath;
+        // glint-ignore: P006 -- a test program of its own, outside relic's module, that no relic task cancels
         try input.appendSlice(arena, try Io.Dir.cwd().readFileAlloc(io, args[2], arena, .limited(1 << 24)));
     } else {
         var in_buf: [4096]u8 = undefined;

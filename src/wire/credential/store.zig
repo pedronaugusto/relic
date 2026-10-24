@@ -66,7 +66,7 @@ pub fn defaultFiles(arena: Allocator, environ: *const std.process.Environ.Map) A
 /// The file's text, or `null` when it cannot be read for not being there
 /// or for want of permission, which git passes over.
 fn readFile(gpa: Allocator, io: Io, path: []const u8) Self.Error!?[]u8 {
-    return Io.Dir.cwd().readFileAlloc(io, path, gpa, .unlimited) catch |err| switch (err) {
+    return fs.readWhole(Io.Dir.cwd(), io, path, gpa, .unlimited) catch |err| switch (err) {
         error.FileNotFound, error.AccessDenied, error.PermissionDenied => null,
         else => |e| e,
     };

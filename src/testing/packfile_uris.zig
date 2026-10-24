@@ -7,6 +7,7 @@
 //! `fsck_finish` checks it; a pack that is not the one named is refused.
 
 const std = @import("std");
+const fs = @import("../fs/fs.zig");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -91,7 +92,7 @@ fn promisorsOf(gpa: Allocator, io: Io, path: []const u8) ![]u8 {
         if (!std.mem.endsWith(u8, name, ".promisor")) continue;
         const file = try std.Io.Dir.path.join(gpa, &.{ path, ".git", "objects", "pack", name });
         defer gpa.free(file);
-        const text = try Io.Dir.cwd().readFileAlloc(io, file, gpa, .unlimited);
+        const text = try fs.readWhole(Io.Dir.cwd(), io, file, gpa, .unlimited);
         defer gpa.free(text);
         try out.print(gpa, "{s}:\n{s}", .{ name, text });
     }
@@ -318,7 +319,7 @@ test "packfile URIs in a partial clone: the packs named by URI are promisor pack
     {
         const empty = try dropLeftKeep(arena, gpa, io, lazy_git);
         const base = try std.Io.Dir.path.join(arena, &.{ lazy_git, ".git", "objects", "pack", empty });
-        const pack = try Io.Dir.cwd().readFileAlloc(io, try std.mem.concat(arena, u8, &.{ base, ".pack" }), arena, .unlimited);
+        const pack = try fs.readWhole(Io.Dir.cwd(), io, try std.mem.concat(arena, u8, &.{ base, ".pack" }), arena, .unlimited);
         try testing.expectEqualStrings("PACK", pack[0..4]);
         try testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, pack[8..12], .big));
         for ([_][]const u8{ ".pack", ".idx", ".rev", ".promisor" }) |ext| {
@@ -445,7 +446,7 @@ test "packfile URIs from relic's upload-pack: git's clone is named the packs git
         if (upload_pack) |p| try args.appendSlice(arena, &.{ "--upload-pack", p });
         try args.appendSlice(arena, &.{ url, name });
         gpa.free(try testremote.gitInputEnv(gpa, io, out.dir, &env, args.items, "", true));
-        const traced = try Io.Dir.cwd().readFileAlloc(io, trace, gpa, .unlimited);
+        const traced = try fs.readWhole(Io.Dir.cwd(), io, trace, gpa, .unlimited);
         defer gpa.free(traced);
         sections[i] = try uriSection(gpa, traced);
         made += 1;
@@ -533,11 +534,11 @@ test "packfile URIs from relic's upload-pack: git's clone is named the packs git
             if (upload_pack) |p| try args.appendSlice(arena, &.{ "--upload-pack", p });
             try args.appendSlice(arena, &.{ url, name });
             gpa.free(try testremote.gitInputEnv(gpa, io, out.dir, &env, args.items, "", true));
-            const traced = try Io.Dir.cwd().readFileAlloc(io, trace, gpa, .unlimited);
+            const traced = try fs.readWhole(Io.Dir.cwd(), io, trace, gpa, .unlimited);
             defer gpa.free(traced);
             const section = try uriSection(gpa, traced);
             errdefer gpa.free(section);
-            hooked[kept] = .{ try root.dir.readFileAlloc(io, "args", gpa, .unlimited), section };
+            hooked[kept] = .{ try fs.readWhole(root.dir, io, "args", gpa, .unlimited), section };
             kept += 1;
             const packs = try packsOf(gpa, io, try std.Io.Dir.path.join(arena, &.{ outside, name }));
             defer gpa.free(packs);

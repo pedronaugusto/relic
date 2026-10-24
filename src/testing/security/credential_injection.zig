@@ -6,6 +6,7 @@
 //! into a request in one place.
 
 const std = @import("std");
+const fs = @import("../../fs/fs.zig");
 const suite = @import("../helpers.zig");
 const builtin = @import("builtin");
 
@@ -59,7 +60,7 @@ fn fill(gpa: std.mem.Allocator, io: std.Io, url_text: []const u8, extra: []const
     var session: credential.Session = .{ .gpa = gpa, .url = try url_mod.Url.parse(url_text) };
     defer session.deinit();
     const result = session.fill(io, .{ .config = &config, .programs = .{ .environ = &env } });
-    const sent = tmp.dir.readFileAlloc(io, "sent", gpa, .limited(1 << 16)) catch |err| switch (err) {
+    const sent = fs.readWhole(tmp.dir, io, "sent", gpa, .limited(1 << 16)) catch |err| switch (err) {
         error.FileNotFound => null,
         else => return err,
     };

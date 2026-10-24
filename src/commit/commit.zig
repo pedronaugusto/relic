@@ -222,7 +222,7 @@ pub fn commit(io: Io, repo: *Repository, request: Request, options: Options) Sel
         if (options.verify) _ = try runner.commitMsg(io, env, message_path);
     }
 
-    const edited = try repo.gitDirectory().readFileAlloc(io, "COMMIT_EDITMSG", arena, .limited(1 << 30));
+    const edited = try fs.readWhole(repo.gitDirectory(), io, "COMMIT_EDITMSG", arena, .limited(1 << 30));
     const cleaned = try clean(arena, edited, cleanup, comment);
     try validateMessage(arena, cleaned, cleanup, comment, options);
 
@@ -310,7 +310,7 @@ fn prepareMessage(arena: Allocator, io: Io, repo: *Repository, input: []const u8
 pub fn template(gpa: Allocator, io: Io, repo: *Repository) config_mod.PathSettingError!?[]u8 {
     const path = (try repo.configuration().getPath(gpa, io, repo.topDirectory(), "commit.template")) orelse return null;
     defer gpa.free(path);
-    const text = repo.topDirectory().readFileAlloc(io, path, gpa, .limited(1 << 30)) catch return null;
+    const text = fs.readWhole(repo.topDirectory(), io, path, gpa, .limited(1 << 30)) catch return null;
     if (text.len == 0) {
         gpa.free(text);
         return null;

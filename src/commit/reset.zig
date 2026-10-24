@@ -314,7 +314,7 @@ test "reset writes through the target tree's attributes as git reset hard does" 
 
     try fixture.exec(io, &.{ "reset", "-q", "--hard", "old" });
     try fixture.exec(io, &.{ "reset", "-q", "--hard", "new" });
-    const expected = try fixture.dir.readFileAlloc(io, "file", gpa, .limited(100));
+    const expected = try fs.readWhole(fixture.dir, io, "file", gpa, .limited(100));
     defer gpa.free(expected);
     try std.testing.expectEqualStrings("new\r\n", expected);
     try fixture.exec(io, &.{ "reset", "-q", "--hard", "old" });
@@ -323,7 +323,7 @@ test "reset writes through the target tree's attributes as git reset hard does" 
     var idx = try repo.openIndex(io);
     defer idx.deinit();
     try toTree(gpa, io, &repo, .{ .index = &idx, .tree = tree, .mode = .hard, .blocked = null });
-    const actual = try fixture.dir.readFileAlloc(io, "file", gpa, .limited(100));
+    const actual = try fs.readWhole(fixture.dir, io, "file", gpa, .limited(100));
     defer gpa.free(actual);
     try std.testing.expectEqualSlices(u8, expected, actual);
 }

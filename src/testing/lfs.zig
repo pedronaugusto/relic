@@ -16,6 +16,7 @@
 //! directory of its own, no system configuration, no terminal prompt.
 
 const std = @import("std");
+const fs = @import("../fs/fs.zig");
 const warp = @import("warp");
 const suite = @import("helpers.zig");
 const builtin = @import("builtin");
@@ -1032,7 +1033,7 @@ pub fn transferLog(gpa: Allocator, io: Io, log_dir: Io.Dir) ![]u8 {
     var it = log_dir.iterate();
     while (try it.next(io)) |e| {
         if (e.kind != .file) continue;
-        try texts.append(gpa, try log_dir.readFileAlloc(io, e.name, gpa, .unlimited));
+        try texts.append(gpa, try fs.readWhole(log_dir, io, e.name, gpa, .unlimited));
     }
     std.mem.sort([]u8, texts.items, {}, struct {
         fn less(_: void, a: []u8, b: []u8) bool {

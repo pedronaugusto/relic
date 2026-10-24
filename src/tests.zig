@@ -146,6 +146,7 @@ test {
         _ = @import("testing/commit_diff.zig");
         _ = @import("testing/big_files.zig");
         _ = @import("testing/canceled_scans.zig");
+        _ = @import("testing/every_cancel.zig");
         _ = @import("testing/canceled_text.zig");
         _ = @import("testing/streamed_objects.zig");
         _ = @import("testing/object_stream.zig");

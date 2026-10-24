@@ -108,7 +108,7 @@ fn infoPacks(arena: Allocator, io: Io, db: *odb_mod.Odb, out: *Io.Writer) Self.E
     std.mem.sort([]const u8, present.items, {}, lessString);
 
     var ordered: std.ArrayList([]const u8) = .empty;
-    const old: []const u8 = db.objectsDirectory().readFileAlloc(io, "info/packs", arena, .limited(1 << 24)) catch |err| switch (err) {
+    const old: []const u8 = fs.readWhole(db.objectsDirectory(), io, "info/packs", arena, .limited(1 << 24)) catch |err| switch (err) {
         error.FileNotFound, error.NotDir => "",
         else => |e| return e,
     };
@@ -154,7 +154,7 @@ fn update(arena: Allocator, io: Io, dir: Io.Dir, sub_dir: []const u8, name: []co
     var path_buf: [64]u8 = undefined;
     // unreachable: both names are this file's own, a few bytes each
     const path = std.mem.print(&path_buf, "{s}/{s}", .{ sub_dir, name }) catch unreachable;
-    if (dir.readFileAlloc(io, path, arena, .limited(bytes.len + 1))) |old| {
+    if (fs.readWhole(dir, io, path, arena, .limited(bytes.len + 1))) |old| {
         if (std.mem.eql(u8, old, bytes)) return;
     } else |err| switch (err) {
         error.FileNotFound, error.NotDir, error.StreamTooLong => {},

@@ -578,7 +578,7 @@ const Exporter = struct {
 
     /// git's `import_marks`: every commit marked is taken as written.
     fn importMarks(ex: *Exporter, path: []const u8) Error!void {
-        const bytes = ex.marksDir().readFileAlloc(ex.io, path, ex.gpa, .unlimited) catch |err| switch (err) {
+        const bytes = fs.readWhole(ex.marksDir(), ex.io, path, ex.gpa, .unlimited) catch |err| switch (err) {
             error.FileNotFound => if (ex.options.import_marks_if_exists) return else return error.FileNotFound,
             else => |e| return e,
         };

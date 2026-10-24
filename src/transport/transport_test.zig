@@ -9,6 +9,7 @@
 
 const warning = @import("../report.zig").warning;
 const std = @import("std");
+const fs = @import("../fs/fs.zig");
 const suite = @import("../testing/helpers.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -326,9 +327,9 @@ test "credentials come from a helper as git asks for them, are stored when they 
         // The helpers were asked the same things in the same order: `get`,
         // then `store` or `erase`, each with the protocol, the host and the
         // user as git sends them.
-        const theirs = try tools_git.dir.readFileAlloc(io, "helper.log", gpa, .unlimited);
+        const theirs = try fs.readWhole(tools_git.dir, io, "helper.log", gpa, .unlimited);
         defer gpa.free(theirs);
-        const ours = try tools_relic.dir.readFileAlloc(io, "helper.log", gpa, .unlimited);
+        const ours = try fs.readWhole(tools_relic.dir, io, "helper.log", gpa, .unlimited);
         defer gpa.free(ours);
         try testing.expectEqualStrings(theirs, ours);
     }
@@ -374,7 +375,7 @@ test "credentials in the URL, from askpass and from the caller's prompt are what
         var session = try transport.Session.open(gpa, io, url, .{ .service = .upload_pack, .kind = .sha1 }, .{ .programs = .{ .environ = &env }, .prompt = .{ .askpass = true } });
         session.deinit(io);
     }
-    const ours = try tools.dir.readFileAlloc(io, "askpass.log", gpa, .unlimited);
+    const ours = try fs.readWhole(tools.dir, io, "askpass.log", gpa, .unlimited);
     defer gpa.free(ours);
     try tools.dir.deleteFile(io, "askpass.log");
     var by_git = try testgit.Repo.init(gpa, io, &.{});
@@ -384,7 +385,7 @@ test "credentials in the URL, from askpass and from the caller's prompt are what
     try git_env.put("GIT_ASKPASS", askpass);
     const listed = try testremote.gitInputEnv(gpa, io, by_git.dir, &git_env, &.{ "ls-remote", url }, "", true);
     gpa.free(listed);
-    const theirs = try tools.dir.readFileAlloc(io, "askpass.log", gpa, .unlimited);
+    const theirs = try fs.readWhole(tools.dir, io, "askpass.log", gpa, .unlimited);
     defer gpa.free(theirs);
     try testing.expectEqualStrings(theirs, ours);
 
@@ -475,7 +476,7 @@ test "ssh is handed the same arguments git hands it" {
         if (here.run(io, &.{ "-c", variant_setting, "ls-remote", case.url })) |listed| {
             gpa.free(listed);
         } else |err| if (case.variant == null) return err;
-        const theirs = try tools.dir.readFileAlloc(io, "fake-ssh.log", gpa, .unlimited);
+        const theirs = try fs.readWhole(tools.dir, io, "fake-ssh.log", gpa, .unlimited);
         defer gpa.free(theirs);
         try tools.dir.deleteFile(io, "fake-ssh.log");
 
@@ -493,7 +494,7 @@ test "ssh is handed the same arguments git hands it" {
             refs.deinit();
             session.deinit(io);
         } else |err| if (case.variant == null) return err;
-        const ours = try tools.dir.readFileAlloc(io, "fake-ssh.log", gpa, .unlimited);
+        const ours = try fs.readWhole(tools.dir, io, "fake-ssh.log", gpa, .unlimited);
         defer gpa.free(ours);
         try testing.expectEqualStrings(theirs, ours);
     }
@@ -957,7 +958,7 @@ test "a proxy's credentials come from its URL, or its user's from the helpers, a
                     break :blk false;
                 };
             }
-            logs[logs_len] = tools.dir.readFileAlloc(io, "helper.log", gpa, .unlimited) catch try gpa.dupe(u8, "");
+            logs[logs_len] = fs.readWhole(tools.dir, io, "helper.log", gpa, .unlimited) catch try gpa.dupe(u8, "");
             logs_len += 1;
         }
         const seen = try proxy.take(gpa);
@@ -1252,7 +1253,7 @@ test "http.sslVersion=tlsv1.3 and http.pinnedPubkey hold the server as curl hold
     const pem = try std.Io.Dir.path.join(arena, &.{ keys, "pub.pem" });
     const der = try std.Io.Dir.path.join(arena, &.{ keys, "pub.der" });
     var hash: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(try Io.Dir.cwd().readFileAlloc(io, der, arena, .limited(1 << 16)), &hash, .{});
+    std.crypto.hash.sha2.Sha256.hash(try fs.readWhole(Io.Dir.cwd(), io, der, arena, .limited(1 << 16)), &hash, .{});
     var spelled: [44]u8 = undefined;
     const right = try arena.print("sha256//{s}", .{std.base64.standard.Encoder.encode(&spelled, &hash)});
     const wrong = "sha256//AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
@@ -1454,7 +1455,7 @@ test "the negotiation git's fetch-pack makes is made byte for byte, over a pipe 
                 const out = try testremote.gitInputEnv(gpa, io, twin.dir, &env, &.{ "-c", if (v2) "protocol.version=2" else "protocol.version=0", "fetch", "-q", "far" }, "", true);
                 gpa.free(out);
             } else try relicFetchV(gpa, io, twin.dir, &env, v2, "far");
-            sent[who] = tools.dir.readFileAlloc(io, "sent", gpa, .unlimited) catch try gpa.dupe(u8, "");
+            sent[who] = fs.readWhole(tools.dir, io, "sent", gpa, .unlimited) catch try gpa.dupe(u8, "");
             const after = try server.requests(gpa);
             defer gpa.free(after);
             requests[who] = try gpa.dupe(u8, after[before.len..]);
@@ -1973,7 +1974,7 @@ test "a fetch stores fewer objects than fetch.unpackLimit loose and the rest in 
 /// shows them, less the ones that name a program or a session: what the
 /// client chose to send, in its order.
 fn serverHeard(gpa: Allocator, io: Io, trace_path: []const u8) ![]u8 {
-    const traced = Io.Dir.cwd().readFileAlloc(io, trace_path, gpa, .unlimited) catch |err| switch (err) {
+    const traced = fs.readWhole(Io.Dir.cwd(), io, trace_path, gpa, .unlimited) catch |err| switch (err) {
         error.FileNotFound => return gpa.dupe(u8, ""),
         else => |e| return e,
     };
@@ -2066,7 +2067,7 @@ test "server options go with each v2 request as git sends them, from the remote'
 /// The haves git's upload-pack heard, and where each round ended, as its
 /// packet trace shows them.
 fn havesHeard(gpa: Allocator, io: Io, trace_path: []const u8) ![]u8 {
-    const traced = try Io.Dir.cwd().readFileAlloc(io, trace_path, gpa, .unlimited);
+    const traced = try fs.readWhole(Io.Dir.cwd(), io, trace_path, gpa, .unlimited);
     defer gpa.free(traced);
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);
@@ -2350,7 +2351,7 @@ fn expectSameSubmoduleFetch(gpa: Allocator, io: Io, world: *SubmoduleWorld) !voi
             listed.* = try testremote.gitInput(gpa, io, dir, &.{ "--git-dir", git_dir, "for-each-ref", "--format=%(refname) %(objectname)" }, "");
             const path = try gpa.print("{s}/FETCH_HEAD", .{git_dir});
             defer gpa.free(path);
-            head.* = dir.readFileAlloc(io, path, gpa, .unlimited) catch |err| switch (err) {
+            head.* = fs.readWhole(dir, io, path, gpa, .unlimited) catch |err| switch (err) {
                 error.FileNotFound => try gpa.dupe(u8, "(none)"),
                 else => return err,
             };
@@ -2444,7 +2445,7 @@ fn expectSameRecursiveClone(gpa: Allocator, io: Io, world: *SubmoduleWorld) !voi
             for ([_][]const u8{ "objects/info/alternates", "shallow" }, out[2..4]) |file, *content| {
                 const path = try gpa.print("{s}/{s}", .{ git_dir, file });
                 defer gpa.free(path);
-                content.* = dir.readFileAlloc(io, path, gpa, .unlimited) catch |err| switch (err) {
+                content.* = fs.readWhole(dir, io, path, gpa, .unlimited) catch |err| switch (err) {
                     error.FileNotFound => try gpa.dupe(u8, "(none)"),
                     else => return err,
                 };
