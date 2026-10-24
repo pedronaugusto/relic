@@ -334,7 +334,9 @@ test "maintenance register and unregister write what git's write" {
     try theirs.writeFile(io, "global", "[user]\n\tname = x\n");
     try ours.writeFile(io, "global", "[user]\n\tname = x\n");
     var their_global_buf: [Io.Dir.max_path_bytes]u8 = undefined;
-    const their_global = their_global_buf[0..try theirs.dir.realPath(io, &their_global_buf)];
+    // git names a repository with forward slashes on Windows too, as
+    // register does.
+    const their_global = try fs.realPath(io, theirs.dir, &their_global_buf);
     const global_path = try std.Io.Dir.path.join(gpa, &.{ their_global, "global" });
     defer gpa.free(global_path);
     try theirs.exec(io, &.{ "maintenance", "register", "--config-file", global_path });
@@ -354,7 +356,7 @@ test "maintenance register and unregister write what git's write" {
     }
     // Each file lists its own repository once, in the same place.
     var our_buf: [Io.Dir.max_path_bytes]u8 = undefined;
-    const our_path = our_buf[0..try ours.dir.realPath(io, &our_buf)];
+    const our_path = try fs.realPath(io, ours.dir, &our_buf);
     const theirs_file = try theirs.readFile(io, "global");
     defer gpa.free(theirs_file);
     const ours_file = try ours.readFile(io, "global");

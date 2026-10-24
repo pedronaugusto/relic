@@ -2313,13 +2313,7 @@ const SubmoduleWorld = struct {
         try w.work.dir.createDirPath(io, to);
         var dest = try w.work.dir.openDir(io, to, .{});
         defer dest.close(io);
-        var walker = try source.walk(gpa);
-        defer walker.deinit();
-        while (try walker.next(io)) |entry| switch (entry.kind) {
-            .directory => try dest.createDirPath(io, entry.path),
-            .file => try source.copyFile(entry.path, dest, entry.path, io, .{}),
-            else => return error.UnexpectedEntryKind,
-        };
+        try testgit.copyTree(gpa, io, source, dest);
     }
 
     /// A new commit of `inner`, pushed to `ref`, and, under `record`, the

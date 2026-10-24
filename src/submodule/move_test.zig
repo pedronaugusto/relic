@@ -113,10 +113,11 @@ fn state(repo: *testgit.Repo) ![]u8 {
     return out.toOwnedSlice(gpa);
 }
 
-fn compare(n: usize, case: Case) !void {
-    var theirs = try fixture(case.nested);
+fn compare(n: usize, case: Case, built: *const [2]testgit.Repo) !void {
+    const source = &built[@intFromBool(case.nested)];
+    var theirs = try testgit.Repo.copyOf(gpa, io, source);
     defer theirs.deinit();
-    var ours = try fixture(case.nested);
+    var ours = try testgit.Repo.copyOf(gpa, io, source);
     defer ours.deinit();
     if (!std.mem.eql(u8, case.from, "one")) {
         try theirs.exec(io, &.{ "checkout", "-q", "--recurse-submodules", case.from });
@@ -196,27 +197,43 @@ fn move(repo: *testgit.Repo, case: Case) !bool {
     return false;
 }
 
-test "checkout and reset --recurse-submodules move submodules as git's do" {
-    const cases = [_]Case{
-        .{ .to = "two" },
-        .{ .to = "two", .change = .modified },
-        .{ .to = "two", .change = .modified_moved },
-        .{ .to = "two", .change = .staged },
-        .{ .to = "two", .change = .untracked },
-        .{ .to = "two", .change = .inactive },
-        .{ .to = "none" },
-        .{ .to = "none", .change = .modified },
-        .{ .from = "none", .to = "one" },
-        .{ .from = "two", .to = "one" },
-        .{ .to = "two", .command = .reset_hard },
-        .{ .to = "two", .command = .reset_hard, .change = .modified_moved },
-        .{ .to = "two", .command = .reset_hard, .change = .staged },
-        .{ .to = "one", .command = .reset_hard, .change = .modified },
-        .{ .to = "none", .command = .reset_hard },
-        .{ .to = "two", .nested = true },
-        .{ .to = "none", .nested = true },
-        .{ .from = "none", .to = "two", .nested = true },
-        .{ .to = "two", .nested = true, .command = .reset_hard },
-    };
-    for (cases, 0..) |case, n| try compare(n, case);
+/// Every case, its number its place here.
+const cases = [_]Case{
+    .{ .to = "two" },
+    .{ .to = "two", .change = .modified },
+    .{ .to = "two", .change = .modified_moved },
+    .{ .to = "two", .change = .staged },
+    .{ .to = "two", .change = .untracked },
+    .{ .to = "two", .change = .inactive },
+    .{ .to = "none" },
+    .{ .to = "none", .change = .modified },
+    .{ .from = "none", .to = "one" },
+    .{ .from = "two", .to = "one" },
+    .{ .to = "two", .command = .reset_hard },
+    .{ .to = "two", .command = .reset_hard, .change = .modified_moved },
+    .{ .to = "two", .command = .reset_hard, .change = .staged },
+    .{ .to = "one", .command = .reset_hard, .change = .modified },
+    .{ .to = "none", .command = .reset_hard },
+    .{ .to = "two", .nested = true },
+    .{ .to = "none", .nested = true },
+    .{ .from = "none", .to = "two", .nested = true },
+    .{ .to = "two", .nested = true, .command = .reset_hard },
+};
+
+/// The cases `command` moves by. Each fixture is built once by git, and each
+/// case moves two copies of it.
+fn compareAll(command: Command) !void {
+    var built: [2]testgit.Repo = .{ try fixture(false), undefined };
+    defer built[0].deinit();
+    built[1] = try fixture(true);
+    defer built[1].deinit();
+    for (cases, 0..) |case, n| if (case.command == command) try compare(n, case, &built);
+}
+
+test "checkout --recurse-submodules moves submodules as git's does" {
+    try compareAll(.checkout);
+}
+
+test "reset --hard --recurse-submodules moves submodules as git's does" {
+    try compareAll(.reset_hard);
 }

@@ -52,10 +52,10 @@ fn state(repo: *testgit.Repo) ![]u8 {
     return out.toOwnedSlice(gpa);
 }
 
-fn compare(n: usize, case: Case) !void {
-    var theirs = try move_test.fixture(true);
+fn compare(n: usize, case: Case, built: *const testgit.Repo) !void {
+    var theirs = try testgit.Repo.copyOf(gpa, io, built);
     defer theirs.deinit();
-    var ours = try move_test.fixture(true);
+    var ours = try testgit.Repo.copyOf(gpa, io, built);
     defer ours.deinit();
     try prepare(&theirs, case.prepare);
     try prepare(&ours, case.prepare);
@@ -110,7 +110,10 @@ test "branch --recurse-submodules makes branches as git's does" {
         .{ .args = &.{ "-f", "topic" }, .force = true, .prepare = .taken },
         .{ .args = &.{"topic"}, .prepare = .inactive },
     };
-    for (cases, 0..) |case, n| try compare(n, case);
+    // Built once by git; each case moves two copies of it.
+    var built = try move_test.fixture(true);
+    defer built.deinit();
+    for (cases, 0..) |case, n| try compare(n, case, &built);
 }
 
 test "branch recurses only under submodule.propagateBranches" {

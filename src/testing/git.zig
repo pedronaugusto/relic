@@ -103,6 +103,29 @@ pub const Repo = struct {
         return repo;
     }
 
+    /// A twin of `source`: its working tree and `.git` copied to the byte
+    /// into a new temporary directory, with an isolated environment of its
+    /// own, for less than building it again takes where every git costs a
+    /// process start. What names `source`'s directory by an absolute path —
+    /// a submodule's URL — still names it, so `source` outlives the twin.
+    /// The copied files are new to the file system, so every index, the
+    /// submodules' too, is refreshed, as clean as git left `source`'s.
+    pub fn copyOf(gpa: Allocator, io: Io, source: *const Repo) !Repo {
+        var tmp = std.testing.tmpDir(.{ .iterate = true });
+        errdefer tmp.cleanup();
+        var home = std.testing.tmpDir(.{ .iterate = true });
+        errdefer home.cleanup();
+        const home_path = try home.dir.realPathFileAlloc(io, ".", gpa);
+        defer gpa.free(home_path);
+        var isolated = try isolatedEnviron(gpa, home_path);
+        errdefer isolated.deinit();
+        try copyTree(gpa, io, source.dir, tmp.dir);
+        var repo: Repo = .{ .gpa = gpa, .tmp = tmp, .dir = tmp.dir, .home = home, .isolated = isolated };
+        try repo.exec(io, &.{ "update-index", "-q", "--refresh" });
+        try repo.exec(io, &.{ "submodule", "foreach", "--quiet", "--recursive", "git update-index -q --refresh" });
+        return repo;
+    }
+
     /// Remove the directory and release everything.
     pub fn deinit(r: *Repo) void {
         if (r.isolated) |*map| map.deinit();
@@ -687,6 +710,20 @@ pub fn setDate(map: *Environ.Map, secs: i64) !void {
 /// count runs in every other build.
 pub fn corpusCases(full: usize) usize {
     return if (builtin.sanitize_thread) @max(2, full / 8) else full;
+}
+
+/// Every directory and file under `from` copied to the same path under
+/// `to`, the same to the byte: a twin of a tree git built, for less than
+/// building it again takes. A tree with anything else in it, a symbolic
+/// link, is refused.
+pub fn copyTree(gpa: Allocator, io: Io, from: Io.Dir, to: Io.Dir) !void {
+    var walker = try from.walk(gpa);
+    defer walker.deinit();
+    while (try walker.next(io)) |entry| switch (entry.kind) {
+        .directory => try to.createDirPath(io, entry.path),
+        .file => try from.copyFile(entry.path, to, entry.path, io, .{}),
+        else => return error.UnexpectedEntryKind,
+    };
 }
 
 /// `error.SkipZigTest` unless a usable `git` is on the path.

@@ -81,9 +81,10 @@ pub fn state(repo: *testgit.Repo) ![]u8 {
     return out.toOwnedSlice(gpa);
 }
 
-/// A repository's own `.git`, or a submodule's.
+/// A repository's own `.git`, or a submodule's, in a walker's path, whose
+/// separator is the platform's: a backslash on Windows.
 pub fn isGitDir(path: []const u8) bool {
-    var parts = std.mem.splitScalar(u8, path, '/');
+    var parts = std.mem.splitScalar(u8, path, std.Io.Dir.path.sep);
     while (parts.next()) |part| if (std.mem.eql(u8, part, ".git")) return true;
     return false;
 }
