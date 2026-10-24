@@ -369,6 +369,7 @@ pub const Signer = struct {
             error.UnexpandablePath => error.UnexpandablePath,
             error.UnstatablePath => error.UnstatablePath,
             error.MissingPath => error.MissingSigningValue,
+            error.Canceled => error.Canceled,
         };
     }
 

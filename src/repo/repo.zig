@@ -124,7 +124,7 @@ pub const max_discovery_depth: u8 = 64;
 pub const Diagnostic = diagnostic_mod.Diagnostic;
 
 /// Errors from `templateDir`.
-pub const TemplateDirError = Allocator.Error || error{ UnexpandablePath, UnstatablePath };
+pub const TemplateDirError = Allocator.Error || Io.Cancelable || error{ UnexpandablePath, UnstatablePath };
 
 /// `init.templateDir` in `config`, as git's `template_dir_cb` reads it for
 /// `git init`: every value in order, a bare name unsetting it, the rest a
