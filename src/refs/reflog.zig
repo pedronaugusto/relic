@@ -315,15 +315,15 @@ pub fn expire(
         // old value it will have: the last kept one's new value.
         if (rewrite) entry.old = last_kept orelse Oid.zero(kind);
         if (!keeper.keep(entry, count - seen)) continue;
-        const w = lock.writer();
+        const w = &lock;
         if (rewrite) {
             const old = last_kept orelse Oid.zero(kind);
-            w.writeAll(old.hex(&hex)) catch return error.WriteFailed;
-            w.writeAll(line[hex_len..]) catch return error.WriteFailed;
+            try w.writeAll(old.hex(&hex));
+            try w.writeAll(line[hex_len..]);
         } else {
-            w.writeAll(line) catch return error.WriteFailed;
+            try w.writeAll(line);
         }
-        w.writeByte('\n') catch return error.WriteFailed;
+        try w.writeByte('\n');
         last_kept = entry.new;
     }
     try lock.commit(io);

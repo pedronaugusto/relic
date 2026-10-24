@@ -444,8 +444,8 @@ pub const Outcome = struct {
 };
 
 /// Whether a merge is waiting to be concluded: `MERGE_HEAD` is there.
-pub fn inProgress(io: Io, repo: *Repository) bool {
-    return repo.refStore().special().exists(io, .merge_head);
+pub fn inProgress(io: Io, repo: *Repository) Io.Cancelable!bool {
+    return (try repo.refStore().special().exists(io, .merge_head));
 }
 
 /// Merge `target` into the current branch.
@@ -681,9 +681,9 @@ pub fn startHeads(gpa: Allocator, io: Io, repo: *Repository, targets: []const Ta
     const hint_cleanup = asked_cleanup orelse try message.cleanupMode(cleanup_setting, true);
 
     if (targets.len == 0) return error.NoMergeTarget;
-    if (inProgress(io, repo)) return error.MergeInProgress;
-    if (repo.refStore().root().exists(repo.allocator(), io, .cherry_pick_head) or
-        repo.refStore().root().exists(repo.allocator(), io, .revert_head)) return error.SequencerInProgress;
+    if ((try inProgress(io, repo))) return error.MergeInProgress;
+    if ((try repo.refStore().root().exists(repo.allocator(), io, .cherry_pick_head)) or
+        (try repo.refStore().root().exists(repo.allocator(), io, .revert_head))) return error.SequencerInProgress;
     // `git merge` reads `fmt_merge_msg_config`'s settings at its start too,
     // and the diff's (`git_diff_ui_config`): every `diff.renames` and
     // `diff.renameLimit` value, where the merge itself reads the last.
@@ -1296,7 +1296,7 @@ pub const AbortOptions = struct {
 pub fn abort(gpa: Allocator, io: Io, repo: *Repository, options: AbortOptions) Self.Error!?stash.Restored {
     const who = options.who;
     const blocked = options.blocked;
-    if (!inProgress(io, repo)) return error.NoMergeInProgress;
+    if (!(try inProgress(io, repo))) return error.NoMergeInProgress;
     var head = try head_mod.read(gpa, io, repo);
     defer head.deinit(gpa);
     const current = head.oid orelse return error.UnbornBranch;

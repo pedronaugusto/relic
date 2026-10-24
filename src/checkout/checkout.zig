@@ -3840,7 +3840,7 @@ fn writeFile(io: Io, wt: Io.Dir, path: safe_path.Checked, source: Source, execut
         var buf: [16 * 1024]u8 = undefined;
         var fw = file.writer(io, &buf);
         switch (source) {
-            .bytes => |bytes| try fw.interface.writeAll(bytes),
+            .bytes => |bytes| fw.interface.writeAll(bytes) catch return fw.err.?,
             .file => |from| {
                 var in_buf: [64 * 1024]u8 = undefined;
                 var reader = from.reader(io, &in_buf);
@@ -3868,7 +3868,7 @@ fn writeFile(io: Io, wt: Io.Dir, path: safe_path.Checked, source: Source, execut
                 };
             },
         }
-        try fw.interface.flush();
+        fw.interface.flush() catch return fw.err.?;
     }
     try fs.rename(io, wt, temp_path, path.bytes);
     failed = false;

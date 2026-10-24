@@ -426,7 +426,7 @@ const Op = struct {
         defer patterns.deinit();
         const outcome = try op.updateWorkingTreeWith(&patterns);
 
-        lock.writer().writeAll(text) catch return error.WriteFailed;
+        try lock.writeAll(text);
         try lock.commit(op.io);
         return outcome;
     }

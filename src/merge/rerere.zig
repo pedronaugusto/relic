@@ -500,7 +500,7 @@ fn writeMergeRr(r: *Run, rr: *const std.array_hash_map.String(?Id)) Error!void {
         try out.append(r.arena, 0);
     }
     const lock = &r.lock.?;
-    try lock.writer().writeAll(out.items);
+    try lock.writeAll(out.items);
     try lock.commit(r.io);
 }
 

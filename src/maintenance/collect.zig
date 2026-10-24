@@ -488,7 +488,7 @@ fn lockGc(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Erro
     defer lock.deinit(io);
     if (!options.force) if (try holderOf(io, repo, options.clock)) |holder| return holder;
     var host_buf: [fs.max_host_name]u8 = undefined;
-    try lock.writer().print("{d} {s}", .{ fs.currentPid(), try fs.hostName(&host_buf) });
+    try lock.print("{d} {s}", .{ fs.currentPid(), try fs.hostName(&host_buf) });
     try lock.commit(io);
     return null;
 }
@@ -498,7 +498,7 @@ fn writeLog(gpa: Allocator, io: Io, repo: *Repository, comptime format: []const 
     var buffer: [256]u8 = undefined;
     var lock = try fs.LockFile.open(gpa, io, repo.gitDirectory(), .{ .sub_path = "gc.log", .buffer = &buffer }, .{ .sync = .none, .write_pid = repo.lockfilePid() });
     defer lock.deinit(io);
-    try lock.writer().print(format, args);
+    try lock.print(format, args);
     try lock.commit(io);
 }
 
