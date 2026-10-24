@@ -394,6 +394,44 @@ pub const Mux = struct {
     }
 };
 
+/// A server's lines as git's `packet_writer` writes them: as they are, or,
+/// once a v2 client asked for `sideband-all`, each on channel one and an
+/// error on channel three where it is otherwise an `ERR` line. A flush or
+/// a delimiter goes as it is either way.
+pub const Lines = struct {
+    out: *Io.Writer,
+    /// `sideband-all`.
+    banded: bool = false,
+
+    /// One line, its newline in `data`.
+    pub fn write(l: *const Lines, data: []const u8) pkt_line.WriteError!void {
+        if (!l.banded) return pkt_line.write(l.out, data);
+        return pkt_line.print(l.out, "\x01{s}", .{data});
+    }
+
+    /// One line formatted in place.
+    pub fn print(l: *const Lines, comptime fmt: []const u8, args: anytype) pkt_line.WriteError!void {
+        if (!l.banded) return pkt_line.print(l.out, fmt, args);
+        return pkt_line.print(l.out, "\x01" ++ fmt, args);
+    }
+
+    /// git's `packet_writer_error`.
+    pub fn err(l: *const Lines, comptime fmt: []const u8, args: anytype) pkt_line.WriteError!void {
+        if (!l.banded) return pkt_line.print(l.out, "ERR " ++ fmt, args);
+        return pkt_line.print(l.out, "\x03" ++ fmt, args);
+    }
+
+    /// `0001`.
+    pub fn delim(l: *const Lines) Io.Writer.Error!void {
+        return pkt_line.delim(l.out);
+    }
+
+    /// `0000`.
+    pub fn flush(l: *const Lines) Io.Writer.Error!void {
+        return pkt_line.flush(l.out);
+    }
+};
+
 /// The most data one packet of `band` carries after its channel byte.
 fn bandLength(of: Band) usize {
     return switch (of) {

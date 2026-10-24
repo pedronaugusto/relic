@@ -90,6 +90,9 @@ pub const Options = struct {
     /// `uploadpack.allowRefInWant`: protocol v2's `want-ref`, a ref asked
     /// for by name and answered in `wanted-refs`.
     allow_ref_in_want: ?bool = null,
+    /// `uploadpack.allowSidebandAll`: protocol v2's `sideband-all`, every
+    /// line of a fetch's response on the side band.
+    allow_sideband_all: ?bool = null,
     /// For `uploadpack.packObjectsHook`, which makes the pack in place of
     /// this process when the configuration the repository cannot write
     /// names one.
@@ -159,6 +162,10 @@ pub const Server = struct {
     allow_any: bool,
     advertise_bundle_uris: bool,
     allow_ref_in_want: bool,
+    allow_sideband_all: bool,
+    /// `uploadpack.blobPackfileUri` has a value: protocol v2's
+    /// `packfile-uris`, the objects it names sent as packs to download.
+    allow_packfile_uris: bool,
     filters: FilterRules,
     /// `transfer.advertiseObjectInfo`: protocol v2's `object-info`.
     advertise_object_info: bool,
@@ -198,6 +205,8 @@ pub const Server = struct {
             .allow_any = any,
             .advertise_bundle_uris = options.advertise_bundle_uris orelse advertisesBundleUris(config),
             .allow_ref_in_want = options.allow_ref_in_want orelse (config.getBool("uploadpack.allowrefinwant", false) catch false),
+            .allow_sideband_all = options.allow_sideband_all orelse (config.getBool("uploadpack.allowsidebandall", false) catch false),
+            .allow_packfile_uris = namesPackfileUris(config),
             .filters = .read(config),
             .advertise_object_info = config.getBool("transfer.advertiseobjectinfo", false) catch false,
             .keepalive = .fromRaw(config.getInt("uploadpack.keepalive", 5) catch 5),
@@ -211,6 +220,34 @@ pub const Server = struct {
 
     fn db(s: *Server) *odb_mod.Odb {
         return s.remote.repo.objectDatabase();
+    }
+
+    /// Every `uploadpack.blobPackfileUri`, read as git's pack-objects
+    /// reads them: `<object-hash> <pack-hash> <uri>`, an object named
+    /// once.
+    fn packfileUris(s: *Server, arena: Allocator) Allocator.Error!Exclusions {
+        var exclusions: Exclusions = .{};
+        const hex_len = s.kind().hexLen();
+        var it = s.remote.repo.configuration().iterate(&.{"uploadpack.blobpackfileuri"});
+        while (it.next()) |entry| {
+            const value = entry.value orelse {
+                exclusions.refused = "error: missing value for 'uploadpack.blobpackfileuri'\n";
+                return exclusions;
+            };
+            const well_formed = value.len > 2 * hex_len + 2 and value[hex_len] == ' ' and value[2 * hex_len + 1] == ' ';
+            const oid = if (well_formed) s.parseOid(value[0..hex_len]) else null;
+            if (oid == null or s.parseOid(value[hex_len + 1 .. 2 * hex_len + 1]) == null) {
+                exclusions.refused = try arena.print("fatal: value of uploadpack.blobpackfileuri must be of the form '<object-hash> <pack-hash> <uri>' (got '{s}')\n", .{value});
+                return exclusions;
+            }
+            const slot = try exclusions.by_oid.getOrPut(arena, oid.?);
+            if (slot.found_existing) {
+                exclusions.refused = try arena.print("fatal: object already configured in another uploadpack.blobpackfileuri (got '{s}')\n", .{value});
+                return exclusions;
+            }
+            slot.value_ptr.* = .{ .pack_hash = value[hex_len + 1 .. 2 * hex_len + 1], .uri = value[2 * hex_len + 2 ..] };
+        }
+        return exclusions;
     }
 
     fn kind(s: *Server) hash.Kind {
@@ -233,7 +270,12 @@ pub const Server = struct {
         try pkt_line.write(w, "version 2\n");
         try pkt_line.print(w, "agent={s}\n", .{protocol.agent});
         try pkt_line.write(w, "ls-refs=unborn\n");
-        try pkt_line.print(w, "fetch=shallow wait-for-done{s}{s}\n", .{ if (s.allow_filter) " filter" else "", if (s.allow_ref_in_want) " ref-in-want" else "" });
+        try pkt_line.print(w, "fetch=shallow wait-for-done{s}{s}{s}{s}\n", .{
+            if (s.allow_filter) " filter" else "",
+            if (s.allow_ref_in_want) " ref-in-want" else "",
+            if (s.allow_sideband_all) " sideband-all" else "",
+            if (s.allow_packfile_uris) " packfile-uris" else "",
+        });
         try pkt_line.write(w, "server-option\n");
         try pkt_line.print(w, "object-format={s}\n", .{s.kind().name()});
         if (s.sessionId()) |sid| try pkt_line.print(w, "session-id={s}\n", .{sid});
@@ -330,6 +372,8 @@ pub const Server = struct {
 
     /// Read and answer one command. `false` at the end of the input.
     fn commandV2(s: *Server, in: *Io.Reader, out: *Io.Writer) Error!bool {
+        // Banded only once a fetch asks for `sideband-all`.
+        var lines: side_band.Lines = .{ .out = out };
         var arena_state: std.heap.ArenaAllocator = .init(s.gpa);
         defer arena_state.deinit();
         const arena = arena_state.allocator();
@@ -373,18 +417,18 @@ pub const Server = struct {
         }
         const name = command orelse return error.ProtocolError;
         if (std.mem.eql(u8, name, "ls-refs")) {
-            try s.lsRefs(args.items, out);
+            try s.lsRefs(args.items, &lines);
         } else if (std.mem.eql(u8, name, "fetch")) {
-            try s.fetchV2(arena, args.items, out);
+            try s.fetchV2(arena, args.items, &lines);
         } else if (std.mem.eql(u8, name, "bundle-uri") and s.advertise_bundle_uris) {
-            try s.bundleUri(arena, args.items, out);
+            try s.bundleUri(arena, args.items, &lines);
         } else if (std.mem.eql(u8, name, "object-info") and s.advertise_object_info) {
-            try s.objectInfo(args.items, out);
+            try s.objectInfo(args.items, &lines);
         } else {
-            try s.sendError(out, "unknown command");
+            try s.sendError(&lines, "unknown command");
             return error.ProtocolError;
         }
-        out.flush() catch return error.WriteFailed;
+        lines.out.flush() catch return error.WriteFailed;
         return true;
     }
 
@@ -393,7 +437,7 @@ pub const Server = struct {
     /// that order, or with a space alone when this repository does not have
     /// it; a line that is not an object's name, or not asked for at all,
     /// refused in git's words and passed over.
-    fn objectInfo(s: *Server, args: []const []const u8, out: *Io.Writer) Error!void {
+    fn objectInfo(s: *Server, args: []const []const u8, lines: *const side_band.Lines) Error!void {
         var size = false;
         var object_type = false;
         var oids: std.ArrayList([]const u8) = .empty;
@@ -408,15 +452,15 @@ pub const Server = struct {
                     object_type = true;
                 } else if (std.mem.startsWith(u8, arg, "oid ")) {
                     try oids.append(arena, arg["oid ".len..]);
-                } else pkt_line.print(out, "ERR object-info: unexpected line: '{s}'", .{arg}) catch |e| break :write e;
+                } else lines.err("object-info: unexpected line: '{s}'", .{arg}) catch |e| break :write e;
             }
             if (oids.items.len != 0) {
-                if (size) pkt_line.write(out, "size") catch |e| break :write e;
-                if (object_type) pkt_line.write(out, "type") catch |e| break :write e;
+                if (size) lines.write("size") catch |e| break :write e;
+                if (object_type) lines.write("type") catch |e| break :write e;
                 var line: std.ArrayList(u8) = .empty;
                 for (oids.items) |text| {
                     const oid = s.parseOid(text) orelse {
-                        pkt_line.print(out, "ERR object-info: protocol error, expected to get oid, not '{s}'", .{text}) catch |e| break :write e;
+                        lines.err("object-info: protocol error, expected to get oid, not '{s}'", .{text}) catch |e| break :write e;
                         continue;
                     };
                     line.clearRetainingCapacity();
@@ -426,10 +470,10 @@ pub const Server = struct {
                         if (size) try line.print(arena, " {d}", .{header.size});
                         if (object_type) try line.print(arena, " {s}", .{header.type.name()});
                     } else try line.append(arena, ' ');
-                    pkt_line.write(out, line.items) catch |e| break :write e;
+                    lines.write(line.items) catch |e| break :write e;
                 }
             }
-            pkt_line.flush(out) catch |e| break :write e;
+            lines.flush() catch |e| break :write e;
         }) catch |err| return writeError(err);
     }
 
@@ -437,7 +481,7 @@ pub const Server = struct {
         return if (s.session_id_len == 0) null else s.session_id_buf[0..s.session_id_len];
     }
 
-    fn lsRefs(s: *Server, args: []const []const u8, out: *Io.Writer) Error!void {
+    fn lsRefs(s: *Server, args: []const []const u8, lines: *const side_band.Lines) Error!void {
         var peel = false;
         var symrefs = false;
         var unborn = false;
@@ -462,20 +506,20 @@ pub const Server = struct {
             if (symrefs) if (ref.symref_target) |t| try line.print(s.gpa, " symref-target:{s}", .{t});
             if (peel) if (ref.peeled) |p| try line.print(s.gpa, " peeled:{f}", .{p});
             try line.append(s.gpa, '\n');
-            pkt_line.write(out, line.items) catch |err| return writeError(err);
+            lines.write(line.items) catch |err| return writeError(err);
         }
-        pkt_line.flush(out) catch |err| return writeError(err);
+        lines.flush() catch |err| return writeError(err);
     }
 
     /// git's `bundle_uri_command`: no arguments, and the served
     /// repository's `bundle.*` settings with a value as `key=value` lines.
-    fn bundleUri(s: *Server, arena: Allocator, args: []const []const u8, out: *Io.Writer) Error!void {
-        if (args.len != 0) return s.refuse(out, try arena.print("bundle-uri: unexpected argument: '{s}'", .{args[0]}));
-        for (try bundleSettings(arena, s.remote.repo.configuration(), s.warnings)) |line| pkt_line.write(out, line) catch |err| return writeError(err);
-        pkt_line.flush(out) catch |err| return writeError(err);
+    fn bundleUri(s: *Server, arena: Allocator, args: []const []const u8, lines: *const side_band.Lines) Error!void {
+        if (args.len != 0) return s.refuse(lines, try arena.print("bundle-uri: unexpected argument: '{s}'", .{args[0]}));
+        for (try bundleSettings(arena, s.remote.repo.configuration(), s.warnings)) |line| lines.write(line) catch |err| return writeError(err);
+        lines.flush() catch |err| return writeError(err);
     }
 
-    fn fetchV2(s: *Server, arena: Allocator, args: []const []const u8, out: *Io.Writer) Error!void {
+    fn fetchV2(s: *Server, arena: Allocator, args: []const []const u8, lines: *side_band.Lines) Error!void {
         var n: Negotiation = .{ .server = s, .arena = arena };
         var seen_haves = false;
         var haves: std.ArrayList(Oid) = .empty;
@@ -483,14 +527,14 @@ pub const Server = struct {
         var wait_for_done = false;
         for (args) |arg| {
             if (std.mem.startsWith(u8, arg, "want ")) {
-                const oid = s.parseOid(arg["want ".len..]) orelse return s.refuse(out, "protocol error: bad want");
-                if (!try s.db().exists(s.io, oid)) return s.notOurRef(out, oid);
+                const oid = s.parseOid(arg["want ".len..]) orelse return s.refuse(lines, "protocol error: bad want");
+                if (!try s.db().exists(s.io, oid)) return s.notOurRef(lines, oid);
                 if (!n.wanted.contains(oid)) {
                     try n.wanted.put(arena, oid, {});
                     try n.wants.append(arena, oid);
                 }
             } else if (std.mem.startsWith(u8, arg, "have ")) {
-                const oid = s.parseOid(arg["have ".len..]) orelse return s.refuse(out, "protocol error: bad have");
+                const oid = s.parseOid(arg["have ".len..]) orelse return s.refuse(lines, "protocol error: bad have");
                 try haves.append(arena, oid);
                 seen_haves = true;
             } else if (std.mem.eql(u8, arg, "done")) {
@@ -505,19 +549,27 @@ pub const Server = struct {
                 n.thin = true;
             } else if (std.mem.eql(u8, arg, "no-progress")) {
                 n.no_progress = true;
-            } else if (std.mem.eql(u8, arg, "sideband-all")) {
-                // The pack goes on the side band in any case.
+            } else if (s.allow_sideband_all and std.mem.eql(u8, arg, "sideband-all")) {
+                lines.banded = true;
+            } else if (s.allow_packfile_uris and std.mem.startsWith(u8, arg, "packfile-uris ")) {
+                if (n.uri_protocols.len != 0) return s.refusePlain(lines, "multiple packfile-uris lines forbidden", .{}, error.ProtocolError);
+                var protocols: std.ArrayList([]const u8) = .empty;
+                var it = std.mem.splitScalar(u8, arg["packfile-uris ".len..], ',');
+                while (it.next()) |protocol_name| try protocols.append(arena, protocol_name);
+                n.uri_protocols = protocols.items;
             } else if (try n.takeShallowArg(arg)) {
                 // Recorded.
             } else if (std.mem.startsWith(u8, arg, "filter ")) {
-                if (!s.allow_filter) return s.refuse(out, "unexpected line: 'filter'");
-                n.filter = try n.readFilter(out, arg["filter ".len..]);
+                if (!s.allow_filter) return s.refuse(lines, "unexpected line: 'filter'");
+                n.filter = try n.readFilter(lines, arg["filter ".len..]);
             } else if (s.allow_ref_in_want and std.mem.startsWith(u8, arg, "want-ref ")) {
-                try n.wantRef(out, arg["want-ref ".len..]);
-            } else if (std.mem.startsWith(u8, arg, "packfile-uris ") or std.mem.startsWith(u8, arg, "want-ref ")) {
-                return s.refuse(out, "unexpected line");
+                try n.wantRef(lines, arg["want-ref ".len..]);
+            } else if (std.mem.eql(u8, arg, "sideband-all") or std.mem.startsWith(u8, arg, "packfile-uris ") or std.mem.startsWith(u8, arg, "want-ref ")) {
+                return s.refuse(lines, "unexpected line");
             }
         }
+        // Packs to download are named on the side band only.
+        if (!lines.banded) n.uri_protocols = &.{};
         if (n.wants.items.len == 0 and !wait_for_done) return;
 
         var send_pack = !seen_haves;
@@ -530,16 +582,16 @@ pub const Server = struct {
                 send_pack = true;
             } else {
                 (write: {
-                    pkt_line.write(out, "acknowledgments\n") catch |e| break :write e;
-                    if (n.have_obj.items.len == 0) pkt_line.write(out, "NAK\n") catch |e| break :write e;
-                    for (n.have_obj.items) |oid| pkt_line.print(out, "ACK {f}\n", .{oid}) catch |e| break :write e;
+                    lines.write("acknowledgments\n") catch |e| break :write e;
+                    if (n.have_obj.items.len == 0) lines.write("NAK\n") catch |e| break :write e;
+                    for (n.have_obj.items) |oid| lines.print("ACK {f}\n", .{oid}) catch |e| break :write e;
                 }) catch |err| return writeError(err);
                 if (!wait_for_done and try n.okToGiveUp()) {
-                    pkt_line.write(out, "ready\n") catch |err| return writeError(err);
-                    pkt_line.delim(out) catch |err| return writeError(err);
+                    lines.write("ready\n") catch |err| return writeError(err);
+                    lines.delim() catch |err| return writeError(err);
                     send_pack = true;
                 } else {
-                    pkt_line.flush(out) catch |err| return writeError(err);
+                    lines.flush() catch |err| return writeError(err);
                 }
             }
         }
@@ -547,20 +599,23 @@ pub const Server = struct {
 
         // git's `send_wanted_ref_info`.
         if (n.wanted_refs.items.len != 0) {
-            pkt_line.write(out, "wanted-refs\n") catch |err| return writeError(err);
-            for (n.wanted_refs.items) |ref| pkt_line.print(out, "{f} {s}\n", .{ ref.oid, ref.name }) catch |err| return writeError(err);
-            pkt_line.delim(out) catch |err| return writeError(err);
+            lines.write("wanted-refs\n") catch |err| return writeError(err);
+            for (n.wanted_refs.items) |ref| lines.print("{f} {s}\n", .{ ref.oid, ref.name }) catch |err| return writeError(err);
+            lines.delim() catch |err| return writeError(err);
         }
         if (n.depth != 0 or n.deepen_since != null or n.deepen_not.items.len != 0 or n.client_shallows.items.len != 0 or s.db().shallow.count() != 0) {
-            pkt_line.write(out, "shallow-info\n") catch |err| return writeError(err);
-            if (!try n.sendShallowList(out) and s.db().shallow.count() != 0) try n.deepen(out, infinite_depth);
-            pkt_line.delim(out) catch |err| return writeError(err);
+            lines.write("shallow-info\n") catch |err| return writeError(err);
+            if (!try n.sendShallowList(lines) and s.db().shallow.count() != 0) try n.deepen(lines, infinite_depth);
+            lines.delim() catch |err| return writeError(err);
         }
-        pkt_line.write(out, "packfile\n") catch |err| return writeError(err);
-        try n.sendPack(out, .large);
+        // With `packfile-uris` the section is opened once the objects to
+        // name are known, as git's `relay_pack_data` opens it.
+        if (n.uri_protocols.len == 0) lines.write("packfile\n") catch |err| return writeError(err);
+        try n.sendPack(lines, .large);
     }
 
     fn conversationV0(s: *Server, in: *Io.Reader, out: *Io.Writer) Error!void {
+        const lines: side_band.Lines = .{ .out = out };
         var arena_state: std.heap.ArenaAllocator = .init(s.gpa);
         defer arena_state.deinit();
         const arena = arena_state.allocator();
@@ -588,10 +643,10 @@ pub const Server = struct {
             if (std.mem.startsWith(u8, line, "want ")) {
                 const rest = line["want ".len..];
                 const hex_len = s.kind().hexLen();
-                if (rest.len < hex_len) return s.refuse(out, "protocol error: bad want");
-                const oid = s.parseOid(rest[0..hex_len]) orelse return s.refuse(out, "protocol error: bad want");
+                if (rest.len < hex_len) return s.refuse(&lines, "protocol error: bad want");
+                const oid = s.parseOid(rest[0..hex_len]) orelse return s.refuse(&lines, "protocol error: bad want");
                 if (n.wants.items.len == 0 and rest.len > hex_len) caps = try arena.dupe(u8, rest[hex_len..]);
-                if (!try s.wantAllowed(oid, &advertised)) return s.notOurRef(out, oid);
+                if (!try s.wantAllowed(oid, &advertised)) return s.notOurRef(&lines, oid);
                 if (!n.wanted.contains(oid)) {
                     try n.wanted.put(arena, oid, {});
                     try n.wants.append(arena, oid);
@@ -599,9 +654,9 @@ pub const Server = struct {
             } else if (try n.takeShallowArg(line)) {
                 // Recorded.
             } else if (std.mem.startsWith(u8, line, "filter ")) {
-                if (!s.allow_filter) return s.refuse(out, "filtering not allowed");
-                n.filter = try n.readFilter(out, line["filter ".len..]);
-            } else return s.refuse(out, "protocol error: unexpected line");
+                if (!s.allow_filter) return s.refuse(&lines, "filtering not allowed");
+                n.filter = try n.readFilter(&lines, line["filter ".len..]);
+            } else return s.refuse(&lines, "protocol error: unexpected line");
         }
         if (n.wants.items.len == 0) return;
 
@@ -623,12 +678,12 @@ pub const Server = struct {
         }
 
         if (n.depth != 0 or n.deepen_since != null or n.deepen_not.items.len != 0 or n.client_shallows.items.len != 0) {
-            if (try n.sendShallowList(out)) pkt_line.flush(out) catch |err| return writeError(err);
+            if (try n.sendShallowList(&lines)) lines.flush() catch |err| return writeError(err);
         }
-        out.flush() catch return error.WriteFailed;
+        lines.out.flush() catch return error.WriteFailed;
 
-        if (!try n.commonCommits(in, out, multi_ack, no_done)) return;
-        try n.sendPack(out, band);
+        if (!try n.commonCommits(in, &lines, multi_ack, no_done)) return;
+        try n.sendPack(&lines, band);
     }
 
     /// Whether a v0 client may want `oid`: an advertised ref's tip, or more
@@ -665,31 +720,73 @@ pub const Server = struct {
         return Oid.parse(s.kind(), std.mem.trim(u8, text, " ")) catch null;
     }
 
-    fn sendError(_: *Server, out: *Io.Writer, text: []const u8) Error!void {
-        pkt_line.print(out, "ERR upload-pack: {s}\n", .{text}) catch return error.WriteFailed;
-        out.flush() catch return error.WriteFailed;
+    fn sendError(_: *Server, lines: *const side_band.Lines, text: []const u8) Error!void {
+        lines.err("upload-pack: {s}\n", .{text}) catch return error.WriteFailed;
+        lines.out.flush() catch return error.WriteFailed;
     }
 
-    fn refuse(s: *Server, out: *Io.Writer, text: []const u8) Error {
-        try s.sendError(out, text);
+    fn refuse(s: *Server, lines: *const side_band.Lines, text: []const u8) Error {
+        try s.sendError(lines, text);
         return if (std.mem.find(u8, text, "filter") != null) error.FilterRefused else error.ProtocolError;
     }
 
     /// An error in the server's own words, as git's `packet_writer_error`
     /// sends one with no `upload-pack:` before it, and the conversation
     /// ends.
-    fn refusePlain(_: *Server, out: *Io.Writer, comptime fmt: []const u8, args: anytype, err: Error) Error {
-        pkt_line.print(out, "ERR " ++ fmt ++ "\n", args) catch return error.WriteFailed;
-        out.flush() catch return error.WriteFailed;
+    fn refusePlain(_: *Server, lines: *const side_band.Lines, comptime fmt: []const u8, args: anytype, err: Error) Error {
+        lines.err(fmt ++ "\n", args) catch return error.WriteFailed;
+        lines.out.flush() catch return error.WriteFailed;
         return err;
     }
 
-    fn notOurRef(s: *Server, out: *Io.Writer, oid: Oid) Error {
+    fn notOurRef(s: *Server, lines: *const side_band.Lines, oid: Oid) Error {
         var buf: [128]u8 = undefined;
-        try s.sendError(out, std.mem.print(&buf, "not our ref {f}", .{oid}) catch "not our ref");
+        try s.sendError(lines, std.mem.print(&buf, "not our ref {f}", .{oid}) catch "not our ref");
         return error.NotOurRef;
     }
 };
+
+/// The objects `uploadpack.blobPackfileUri` names, each with the pack it
+/// is in and the URI that pack is at.
+const Exclusions = struct {
+    by_oid: Oid.Map(struct { pack_hash: []const u8, uri: []const u8 }) = .empty,
+    /// git's words for a value it dies on.
+    refused: ?[]const u8 = null,
+};
+
+/// Whether an `uploadpack.blobPackfileUri` has a value, which has git's
+/// upload-pack offer `packfile-uris`.
+fn namesPackfileUris(config: *const config_mod.Config) bool {
+    var it = config.iterate(&.{"uploadpack.blobpackfileuri"});
+    while (it.next()) |entry| if (entry.value != null) return true;
+    return false;
+}
+
+/// What goes before the pack under `packfile-uris`, as git's
+/// `relay_pack_data` writes it on the side band: the `packfile-uris`
+/// section when there are packs to name, then `packfile`.
+fn openPack(arena: Allocator, paced: *Paced, named: []const []const u8) Error!void {
+    var section: Io.Writer.Allocating = .init(arena);
+    const lines: side_band.Lines = .{ .out = &section.writer, .banded = true };
+    (write: {
+        if (named.len != 0) {
+            lines.write("packfile-uris\n") catch |e| break :write e;
+            for (named) |line| lines.write(line) catch |e| break :write e;
+            lines.delim() catch |e| break :write e;
+        }
+        lines.write("packfile\n") catch |e| break :write e;
+    }) catch |err| return writeError(err);
+    paced.send(section.written()) catch return error.WriteFailed;
+}
+
+/// Whether `uri` is of one of `protocols`: `<protocol>:` begins it, as
+/// git's pack-objects matches `--uri-protocol`.
+fn takenProtocol(uri: []const u8, protocols: []const []const u8) bool {
+    for (protocols) |protocol_name| {
+        if (uri.len > protocol_name.len and std.mem.startsWith(u8, uri, protocol_name) and uri[protocol_name.len] == ':') return true;
+    }
+    return false;
+}
 
 /// git's `INFINITE_DEPTH`: `--unshallow`.
 const infinite_depth: u32 = 0x7fff_ffff;
@@ -737,6 +834,9 @@ const Negotiation = struct {
     edges: std.ArrayList(Oid) = .empty,
     /// Parents of those, wanted.
     extra_wants: std.ArrayList(Oid) = .empty,
+    /// `packfile-uris`: the protocols the client downloads packs over, on
+    /// a side band; none, and every object goes in the pack.
+    uri_protocols: []const []const u8 = &.{},
 
     fn io(n: *Negotiation) Io {
         return n.server.io;
@@ -854,7 +954,7 @@ const Negotiation = struct {
     }
 
     /// git's `get_common_commits`, for v0. Whether a pack is to follow.
-    fn commonCommits(n: *Negotiation, in: *Io.Reader, out: *Io.Writer, multi_ack_in: u2, no_done: bool) Error!bool {
+    fn commonCommits(n: *Negotiation, in: *Io.Reader, lines: *const side_band.Lines, multi_ack_in: u2, no_done: bool) Error!bool {
         const s = n.server;
         var multi_ack = multi_ack_in;
         _ = &multi_ack;
@@ -874,15 +974,15 @@ const Negotiation = struct {
                     (write: {
                         if (multi_ack == 2 and got_common and !got_other and try n.okToGiveUp()) {
                             sent_ready = true;
-                            pkt_line.print(out, "ACK {f} ready\n", .{last.?}) catch |e| break :write e;
+                            lines.print("ACK {f} ready\n", .{last.?}) catch |e| break :write e;
                         }
-                        if (n.have_obj.items.len == 0 or multi_ack != 0) pkt_line.write(out, "NAK\n") catch |e| break :write e;
+                        if (n.have_obj.items.len == 0 or multi_ack != 0) lines.write("NAK\n") catch |e| break :write e;
                         if (no_done and sent_ready) {
-                            pkt_line.print(out, "ACK {f}\n", .{last.?}) catch |e| break :write e;
-                            out.flush() catch |e| break :write e;
+                            lines.print("ACK {f}\n", .{last.?}) catch |e| break :write e;
+                            lines.out.flush() catch |e| break :write e;
                             return true;
                         }
-                        out.flush() catch |e| break :write e;
+                        lines.out.flush() catch |e| break :write e;
                     }) catch |err| return writeError(err);
                     if (s.stateless) return false;
                     got_common = false;
@@ -893,14 +993,14 @@ const Negotiation = struct {
             };
             const line = std.mem.trimEnd(u8, raw, "\n");
             if (std.mem.startsWith(u8, line, "have ")) {
-                const oid = s.parseOid(line["have ".len..]) orelse return s.refuse(out, "protocol error: expected SHA1 list");
+                const oid = s.parseOid(line["have ".len..]) orelse return s.refuse(lines, "protocol error: expected SHA1 list");
                 if (!try n.db().exists(n.io(), oid)) {
                     got_other = true;
                     if (multi_ack != 0 and try n.okToGiveUp()) {
                         if (multi_ack == 2) {
                             sent_ready = true;
-                            pkt_line.print(out, "ACK {f} ready\n", .{oid}) catch |err| return writeError(err);
-                        } else pkt_line.print(out, "ACK {f} continue\n", .{oid}) catch |err| return writeError(err);
+                            lines.print("ACK {f} ready\n", .{oid}) catch |err| return writeError(err);
+                        } else lines.print("ACK {f} continue\n", .{oid}) catch |err| return writeError(err);
                     }
                     continue;
                 }
@@ -908,23 +1008,23 @@ const Negotiation = struct {
                 got_common = true;
                 last = oid;
                 (if (multi_ack == 2)
-                    pkt_line.print(out, "ACK {f} common\n", .{oid})
+                    lines.print("ACK {f} common\n", .{oid})
                 else if (multi_ack == 1)
-                    pkt_line.print(out, "ACK {f} continue\n", .{oid})
+                    lines.print("ACK {f} continue\n", .{oid})
                 else if (n.have_obj.items.len == 1)
-                    pkt_line.print(out, "ACK {f}\n", .{oid})
+                    lines.print("ACK {f}\n", .{oid})
                 else {}) catch |err| return writeError(err);
                 continue;
             }
             if (std.mem.eql(u8, line, "done")) {
                 (write: {
                     if (n.have_obj.items.len > 0) {
-                        if (multi_ack != 0) pkt_line.print(out, "ACK {f}\n", .{last.?}) catch |e| break :write e;
-                    } else pkt_line.write(out, "NAK\n") catch |e| break :write e;
+                        if (multi_ack != 0) lines.print("ACK {f}\n", .{last.?}) catch |e| break :write e;
+                    } else lines.write("NAK\n") catch |e| break :write e;
                 }) catch |err| return writeError(err);
                 return true;
             }
-            return s.refuse(out, "protocol error: expected SHA1 list");
+            return s.refuse(lines, "protocol error: expected SHA1 list");
         }
     }
 
@@ -934,31 +1034,31 @@ const Negotiation = struct {
 
     /// git's `send_shallow_list`: the boundary moved as asked, the lines
     /// that say so written. Whether anything was asked.
-    fn sendShallowList(n: *Negotiation, out: *Io.Writer) Error!bool {
-        if (n.depth != 0 and (n.deepen_since != null or n.deepen_not.items.len != 0)) return n.server.refuse(out, "--depth and --shallow-since (or --shallow-exclude) cannot be used together");
+    fn sendShallowList(n: *Negotiation, lines: *const side_band.Lines) Error!bool {
+        if (n.depth != 0 and (n.deepen_since != null or n.deepen_not.items.len != 0)) return n.server.refuse(lines, "--depth and --shallow-since (or --shallow-exclude) cannot be used together");
         if (n.depth != 0) {
-            try n.deepen(out, n.depth);
+            try n.deepen(lines, n.depth);
             return true;
         }
         if (n.deepen_since != null or n.deepen_not.items.len != 0) {
-            try n.deepenByRevList(out);
+            try n.deepenByRevList(lines);
             return true;
         }
         for (n.client_shallows.items) |oid| try n.boundary.put(n.arena, oid, {});
         return false;
     }
 
-    fn deepen(n: *Negotiation, out: *Io.Writer, depth: u32) Error!void {
+    fn deepen(n: *Negotiation, lines: *const side_band.Lines, depth: u32) Error!void {
         if (depth == infinite_depth and n.db().shallow.count() == 0) {
             for (n.client_shallows.items) |oid| try n.not_shallow.put(n.arena, oid, {});
         } else if (n.deepen_relative) {
             const result = try n.shallowByDepth(n.client_shallows.items, depth + 1);
-            try n.sendShallow(out, result);
+            try n.sendShallow(lines, result);
         } else {
             const result = try n.shallowByDepth(n.wants.items, depth);
-            try n.sendShallow(out, result);
+            try n.sendShallow(lines, result);
         }
-        try n.sendUnshallow(out);
+        try n.sendUnshallow(lines);
     }
 
     /// git's `get_shallow_commits`: the commits `depth` from `heads`.
@@ -998,10 +1098,10 @@ const Negotiation = struct {
     /// git's `get_shallow_commits_by_rev_list`: the commits reachable from
     /// the wants, newer than `deepen-since` and not reachable from the
     /// `deepen-not` refs; those with a parent outside them are the boundary.
-    fn deepenByRevList(n: *Negotiation, out: *Io.Writer) Error!void {
+    fn deepenByRevList(n: *Negotiation, lines: *const side_band.Lines) Error!void {
         var excluded: Oid.Set = .empty;
         for (n.deepen_not.items) |name| {
-            const tip = (try n.resolveRef(name)) orelse return n.server.refuse(out, "git upload-pack: ambiguous deepen-not");
+            const tip = (try n.resolveRef(name)) orelse return n.server.refuse(lines, "git upload-pack: ambiguous deepen-not");
             const start = (try n.peelToCommit(tip)) orelse continue;
             var stack: std.ArrayList(Oid) = .empty;
             try stack.append(n.arena, start);
@@ -1036,8 +1136,8 @@ const Negotiation = struct {
         }
         // A commit on the boundary is not one within it.
         for (result.items) |oid| _ = n.not_shallow.remove(oid);
-        try n.sendShallow(out, result.items);
-        try n.sendUnshallow(out);
+        try n.sendShallow(lines, result.items);
+        try n.sendUnshallow(lines);
     }
 
     fn resolveRef(n: *Negotiation, name: []const u8) Error!?Oid {
@@ -1050,24 +1150,24 @@ const Negotiation = struct {
     }
 
     /// git's `send_shallow`: each new boundary commit, once.
-    fn sendShallow(n: *Negotiation, out: *Io.Writer, result: []const Oid) Error!void {
+    fn sendShallow(n: *Negotiation, lines: *const side_band.Lines, result: []const Oid) Error!void {
         var i = result.len;
         while (i > 0) {
             i -= 1;
             const oid = result[i];
             if (n.client_shallow_set.contains(oid) or n.not_shallow.contains(oid)) continue;
             if (n.boundary.contains(oid)) continue;
-            pkt_line.print(out, "shallow {f}\n", .{oid}) catch |err| return writeError(err);
+            lines.print("shallow {f}\n", .{oid}) catch |err| return writeError(err);
             try n.boundary.put(n.arena, oid, {});
         }
     }
 
     /// git's `send_unshallow`: a client boundary commit now within the
     /// history sent is no longer one; its parents are wanted.
-    fn sendUnshallow(n: *Negotiation, out: *Io.Writer) Error!void {
+    fn sendUnshallow(n: *Negotiation, lines: *const side_band.Lines) Error!void {
         for (n.client_shallows.items) |oid| {
             if (n.not_shallow.contains(oid)) {
-                pkt_line.print(out, "unshallow {f}\n", .{oid}) catch |err| return writeError(err);
+                lines.print("unshallow {f}\n", .{oid}) catch |err| return writeError(err);
                 const c = (try n.commit(oid)) orelse continue;
                 for (c.parents) |p| try n.extra_wants.append(n.arena, p);
                 try n.edges.append(n.arena, oid);
@@ -1085,12 +1185,12 @@ const Negotiation = struct {
     /// refuses it.
     /// git's `parse_want_ref`: a ref the client may see, named once, and
     /// wanted at its value.
-    fn wantRef(n: *Negotiation, out: *Io.Writer, name: []const u8) Error!void {
+    fn wantRef(n: *Negotiation, lines: *const side_band.Lines, name: []const u8) Error!void {
         const s = n.server;
         const oid = (if (s.remote.isHidden(name)) null else try s.remote.repo.refStore().readOid(n.arena, s.io, name)) orelse
-            return s.refusePlain(out, "unknown ref {s}", .{name}, error.ProtocolError);
+            return s.refusePlain(lines, "unknown ref {s}", .{name}, error.ProtocolError);
         for (n.wanted_refs.items) |ref| {
-            if (std.mem.eql(u8, ref.name, name)) return s.refusePlain(out, "duplicate want-ref {s}", .{name}, error.ProtocolError);
+            if (std.mem.eql(u8, ref.name, name)) return s.refusePlain(lines, "duplicate want-ref {s}", .{name}, error.ProtocolError);
         }
         try n.wanted_refs.append(n.arena, .{ .name = try n.arena.dupe(u8, name), .oid = oid });
         if (!n.wanted.contains(oid)) {
@@ -1101,38 +1201,38 @@ const Negotiation = struct {
 
     /// git's `check_one_filter`, for the filter and each one it combines:
     /// `uploadpackfilter.*` allows it.
-    fn checkFilter(n: *Negotiation, out: *Io.Writer, spec: filter_spec.Spec) Error!void {
+    fn checkFilter(n: *Negotiation, lines: *const side_band.Lines, spec: filter_spec.Spec) Error!void {
         const rules = n.server.filters;
         const at = FilterRules.index(spec);
-        if (!(rules.named[at] orelse rules.fallback)) return n.server.refusePlain(out, "filter '{s}' not supported", .{FilterRules.names[at]}, error.FilterRefused);
+        if (!(rules.named[at] orelse rules.fallback)) return n.server.refusePlain(lines, "filter '{s}' not supported", .{FilterRules.names[at]}, error.FilterRefused);
         switch (spec) {
             .tree_depth => |depth| if (rules.tree_max_depth) |max| if (depth > max) {
-                return n.server.refusePlain(out, "tree filter allows max depth {d}, but got {d}", .{ max, depth }, error.FilterRefused);
+                return n.server.refusePlain(lines, "tree filter allows max depth {d}, but got {d}", .{ max, depth }, error.FilterRefused);
             },
-            .combine => |parts| for (parts) |part| try n.checkFilter(out, part),
+            .combine => |parts| for (parts) |part| try n.checkFilter(lines, part),
             else => {},
         }
     }
 
-    fn readFilter(n: *Negotiation, out: *Io.Writer, text: []const u8) Error!object_walk.Filter {
+    fn readFilter(n: *Negotiation, lines: *const side_band.Lines, text: []const u8) Error!object_walk.Filter {
         const spec = filter_spec.parse(n.arena, text) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.InvalidFilter => return n.server.refuse(out, "invalid filter-spec"),
+            error.InvalidFilter => return n.server.refuse(lines, "invalid filter-spec"),
         };
-        try n.checkFilter(out, spec);
+        try n.checkFilter(lines, spec);
         // As git hands it to pack-objects.
         n.filter_text = filter_spec.sendForm(n.arena, text) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.InvalidFilter => return n.server.refuse(out, "invalid filter-spec"),
+            error.InvalidFilter => return n.server.refuse(lines, "invalid filter-spec"),
         };
         var lookup: SparseLookup = .{ .n = n };
         return filter_spec.toWalk(n.arena, spec, &lookup) catch |err| switch (err) {
             // One set of patterns to a walk.
-            error.TwoSparseFilters => n.server.refuse(out, "invalid filter-spec"),
+            error.TwoSparseFilters => n.server.refuse(lines, "invalid filter-spec"),
             error.SparseBlobMissing => {
                 var buf: [512]u8 = undefined;
                 const name = lookup.last orelse "";
-                return n.server.refuse(out, std.mem.print(&buf, "unable to access sparse blob in '{s}'", .{name}) catch "unable to access sparse blob");
+                return n.server.refuse(lines, std.mem.print(&buf, "unable to access sparse blob in '{s}'", .{name}) catch "unable to access sparse blob");
             },
             else => |e| e,
         };
@@ -1184,12 +1284,12 @@ const Negotiation = struct {
 
     /// The pack, on the side band when there is one, made here or by
     /// `uploadpack.packObjectsHook`, with keepalives while it is made.
-    fn sendPack(n: *Negotiation, out: *Io.Writer, band: Band) Error!void {
+    fn sendPack(n: *Negotiation, lines: *const side_band.Lines, band: Band) Error!void {
         const s = n.server;
         // Whatever went before is out before the pack's packets.
-        out.flush() catch return error.WriteFailed;
+        lines.out.flush() catch return error.WriteFailed;
         const buffer = try n.arena.alloc(u8, 2 * pkt_line.max_line);
-        var paced: Paced = .init(s.io, out, band, buffer);
+        var paced: Paced = .init(s.io, lines.out, band, buffer);
         var keeper: ?Io.Future(void) = null;
         defer if (keeper) |*task| task.cancel(s.io);
         if (band != .none and s.keepalive.compare(.fromRaw(0)) == .gt) {
@@ -1198,13 +1298,13 @@ const Negotiation = struct {
         var framed: side_band.Mux = .init(&paced.interface, band);
         if (s.pack_objects_hook) |hook| {
             try n.packByHook(hook orelse return error.InvalidPackObjectsHook, &paced, framed.writer());
-        } else try n.packHere(framed.writer());
+        } else try n.packHere(&paced, framed.writer());
         framed.end() catch return error.WriteFailed;
         paced.interface.flush() catch return error.WriteFailed;
     }
 
     /// The pack made in this process.
-    fn packHere(n: *Negotiation, packed_writer: *Io.Writer) Error!void {
+    fn packHere(n: *Negotiation, paced: *Paced, packed_writer: *Io.Writer) Error!void {
         const s = n.server;
         var include: std.ArrayList(Oid) = .empty;
         try include.appendSlice(n.arena, n.wants.items);
@@ -1228,6 +1328,17 @@ const Negotiation = struct {
             entries.shrinkRetainingCapacity(kept);
         }
         if (n.include_tag) try n.addTags(&entries);
+        // git's pack-objects reads every `uploadpack.blobPackfileUri`, and
+        // dies on one it cannot.
+        const exclusions = try n.server.packfileUris(n.arena);
+        if (exclusions.refused) |words| {
+            if (paced.band != .none) paced.sendBand(2, words) catch return error.WriteFailed;
+            return paced.died();
+        }
+        if (n.uri_protocols.len != 0) {
+            const named = try n.excludeByUri(&entries, &exclusions);
+            try openPack(n.arena, paced, named);
+        }
 
         // The settings git's pack-objects reads, its delta form the client's.
         var pack_options = n.db().packOptions();
@@ -1237,6 +1348,29 @@ const Negotiation = struct {
             error.Canceled => return error.Canceled,
             else => return error.WriteFailed,
         };
+    }
+
+    /// git's pack-objects under `--uri-protocol`: an object that
+    /// `uploadpack.blobPackfileUri` names at a URI of one of the client's
+    /// protocols, and that no pack here holds, is left out of the pack and
+    /// named by the pack it is in and where that is. A packed object is
+    /// sent, as git's `want_object_in_pack_mtime` keeps it before it looks
+    /// at the setting.
+    fn excludeByUri(n: *Negotiation, entries: *std.ArrayList(odb_mod.PackEntry), exclusions: *const Exclusions) Error![]const []const u8 {
+        var named: std.ArrayList([]const u8) = .empty;
+        var kept: usize = 0;
+        for (entries.items) |entry| {
+            if (exclusions.by_oid.get(entry.oid)) |ex| {
+                if (takenProtocol(ex.uri, n.uri_protocols) and !try n.db().isPacked(entry.oid)) {
+                    try named.append(n.arena, try n.arena.print("{s} {s}\n", .{ ex.pack_hash, ex.uri }));
+                    continue;
+                }
+            }
+            entries.items[kept] = entry;
+            kept += 1;
+        }
+        entries.shrinkRetainingCapacity(kept);
+        return named.items;
     }
 
     /// git's `create_pack_file` with `uploadpack.packObjectsHook`: the
@@ -1273,6 +1407,7 @@ const Negotiation = struct {
         if (s.promisor_taken) try argv.append(n.arena, "--missing=allow-promisor");
         try argv.append(n.arena, if (n.no_progress) "--quiet" else "--progress");
         if (n.filter_text) |text| try argv.append(n.arena, try n.arena.print("--filter={s}", .{text}));
+        for (n.uri_protocols) |protocol_name| try argv.append(n.arena, try n.arena.print("--uri-protocol={s}", .{protocol_name}));
 
         var running = try program.start(s.gpa, s.io, programs, .{
             .argv = argv.items,
@@ -1311,6 +1446,18 @@ const Negotiation = struct {
         }
         var read_buffer: [pkt_line.max_data]u8 = undefined;
         var pack = running.child.stdoutFile().?.readerStreaming(s.io, &read_buffer);
+        if (n.uri_protocols.len != 0) {
+            // What it prints before the pack names the packs it left out,
+            // a line each, as git's `relay_pack_data` takes them.
+            var named: std.ArrayList([]const u8) = .empty;
+            while (true) {
+                const head = pack.interface.peek(4) catch return paced.died();
+                if (std.mem.eql(u8, head, "PACK")) break;
+                const line = pack.interface.takeDelimiterInclusive('\n') catch return paced.died();
+                try named.append(n.arena, try n.arena.dupe(u8, line));
+            }
+            try openPack(n.arena, paced, named.items);
+        }
         _ = pack.interface.streamRemaining(packed_writer) catch |err| switch (err) {
             error.WriteFailed => return error.WriteFailed,
             error.ReadFailed => return paced.died(),

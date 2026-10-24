@@ -7,12 +7,14 @@
 //! `fsck_finish` checks it; a pack that is not the one named is refused.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const testing = std.testing;
 
 const testgit = @import("git.zig");
 const testremote = @import("remote.zig");
+const suite = @import("helpers.zig");
 const object = @import("../object/object.zig");
 const config_mod = @import("../config/config.zig");
 const repo_mod = @import("../repo/repo.zig");
@@ -355,4 +357,224 @@ fn expectSamePacks(gpa: Allocator, io: Io, src: *testgit.Repo, theirs: []const u
     defer gpa.free(marks_ours);
     try testing.expectEqualStrings(marks_theirs, marks_ours);
     try src.exec(io, &.{ "-C", ours, "fsck", "--no-progress" });
+}
+
+/// What `trace`, git's packet trace of a clone, says the server sent from
+/// the `packfile-uris` section to `packfile`, a line each.
+fn uriSection(gpa: Allocator, trace: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    var in_section = false;
+    var lines = std.mem.tokenizeScalar(u8, trace, '\n');
+    while (lines.next()) |line| {
+        const at = std.mem.find(u8, line, "< ") orelse continue;
+        const said = line[at + 2 ..];
+        if (std.mem.eql(u8, said, "\\1packfile-uris")) in_section = true;
+        if (!in_section and !std.mem.eql(u8, said, "\\1packfile")) continue;
+        try out.print(gpa, "{s}\n", .{said});
+        if (std.mem.eql(u8, said, "\\1packfile")) break;
+    }
+    return out.toOwnedSlice(gpa);
+}
+
+test "packfile URIs from relic's upload-pack: git's clone is named the packs git's upload-pack names, loose objects alone, under sideband-all, and both die on a setting git's pack-objects dies on" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    try testgit.requireGitVersion(gpa, io, 2, 56);
+    const helper = try gpa.dupe(u8, suite.path(.upload_pack_helper));
+    defer gpa.free(helper);
+    if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, helper, '\\', '/');
+    var src = try testgit.Repo.init(gpa, io, &.{});
+    defer src.deinit();
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var root = testing.tmpDir(.{ .iterate = true });
+    defer root.cleanup();
+    const served = try testremote.absolutePath(arena, io, root.dir);
+    var env = try testremote.environ(gpa);
+    defer env.deinit();
+    const server = try testremote.HttpServer.start(gpa, io, root.dir, .{ .files = true });
+    defer server.stop();
+
+    var big: std.ArrayList(u8) = .empty;
+    for (0..2000) |i| try big.print(arena, "line {d} of a blob handed over by URI\n", .{i});
+    try src.writeFile(io, "big.bin", big.items);
+    try src.writeFile(io, "packed.txt", "a blob a pack holds\n");
+    try src.writeFile(io, "secure.txt", "a blob named at an https URI\n");
+    try src.exec(io, &.{ "add", "." });
+    try src.exec(io, &.{ "commit", "-q", "-m", "first" });
+    const bare = try std.Io.Dir.path.join(arena, &.{ served, "repo.git" });
+    // A local clone's objects are loose, as the source's are: what git
+    // sends by URI, but for the one a pack is made to hold below.
+    try src.exec(io, &.{ "clone", "-q", "--bare", ".", bare });
+    try src.exec(io, &.{ "-C", bare, "config", "uploadpack.allowSidebandAll", "true" });
+    const uri_pack = try offerByUri(gpa, io, &src, bare, served, server, "big.bin", "big", null);
+    defer gpa.free(uri_pack);
+    const packed_pack = try offerByUri(gpa, io, &src, bare, served, server, "packed.txt", "packed", null);
+    defer gpa.free(packed_pack);
+    {
+        const packed_oid = try src.line(io, &.{ "rev-parse", "HEAD:packed.txt" });
+        defer gpa.free(packed_oid);
+        const input = try std.mem.concat(arena, u8, &.{ packed_oid, "\n" });
+        const pack_base = try std.Io.Dir.path.join(arena, &.{ bare, "objects", "pack", "pack" });
+        gpa.free(try src.runInput(io, &.{ "-C", bare, "pack-objects", "-q", pack_base }, input));
+    }
+    // A client of `http` is no client of `https`: `<protocol>:` begins
+    // the URI, as git matches it.
+    const secure_value = blk: {
+        const oid = try src.line(io, &.{ "rev-parse", "HEAD:secure.txt" });
+        defer gpa.free(oid);
+        break :blk try std.mem.concat(arena, u8, &.{ oid, " ", uri_pack, " https://example.invalid/secure.pack" });
+    };
+    try src.exec(io, &.{ "-C", bare, "config", "--add", "uploadpack.blobPackfileUri", secure_value });
+    const url = try std.mem.concat(arena, u8, &.{ "file://", bare });
+
+    var out = testing.tmpDir(.{ .iterate = true });
+    defer out.cleanup();
+    const outside = try testremote.absolutePath(arena, io, out.dir);
+    var sections: [2][]u8 = undefined;
+    var made: usize = 0;
+    defer for (sections[0..made]) |text| gpa.free(text);
+    for ([_]?[]const u8{ null, helper }, [_][]const u8{ "from-git", "from-relic" }, 0..) |upload_pack, name, i| {
+        const trace = try std.mem.concat(arena, u8, &.{ outside, "/", name, ".trace" });
+        try env.put("GIT_TRACE_PACKET", trace);
+        defer _ = env.swapRemove("GIT_TRACE_PACKET");
+        var args: std.ArrayList([]const u8) = .empty;
+        try args.appendSlice(arena, &.{ "-c", "fetch.uriProtocols=http", "-c", "transfer.fsckObjects=true", "clone", "-q", "--no-checkout" });
+        if (upload_pack) |p| try args.appendSlice(arena, &.{ "--upload-pack", p });
+        try args.appendSlice(arena, &.{ url, name });
+        gpa.free(try testremote.gitInputEnv(gpa, io, out.dir, &env, args.items, "", true));
+        const traced = try Io.Dir.cwd().readFileAlloc(io, trace, gpa, .unlimited);
+        defer gpa.free(traced);
+        sections[i] = try uriSection(gpa, traced);
+        made += 1;
+        const path = try std.Io.Dir.path.join(arena, &.{ outside, name });
+        const packs = try packsOf(gpa, io, path);
+        defer gpa.free(packs);
+        try testing.expect(std.mem.find(u8, packs, uri_pack) != null);
+        try testing.expect(std.mem.find(u8, packs, packed_pack) == null);
+        try testing.expectEqual(@as(usize, 2), std.mem.count(u8, packs, "\n"));
+        try src.exec(io, &.{ "-C", path, "fsck", "--no-progress" });
+    }
+    try testing.expectEqualStrings(sections[0], sections[1]);
+    try testing.expect(std.mem.find(u8, sections[1], uri_pack) != null);
+    for ([_][]const u8{ "rev-list --objects --all", "for-each-ref" }) |listing| {
+        var words = std.mem.tokenizeScalar(u8, listing, ' ');
+        var args: std.ArrayList([]const u8) = .empty;
+        while (words.next()) |word| try args.append(arena, word);
+        var said: [2][]u8 = undefined;
+        for ([_][]const u8{ "from-git", "from-relic" }, 0..) |name, i| {
+            const path = try std.Io.Dir.path.join(arena, &.{ outside, name });
+            said[i] = try src.run(io, try std.mem.concat(arena, []const u8, &.{ &.{ "-C", path }, args.items }));
+        }
+        defer for (said) |text| gpa.free(text);
+        try testing.expectEqualStrings(said[0], said[1]);
+    }
+    const seen = try server.requests(gpa);
+    defer gpa.free(seen);
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, seen, try std.mem.concat(arena, u8, &.{ "-", uri_pack, ".pack" })));
+    try testing.expectEqual(@as(usize, 0), std.mem.count(u8, seen, try std.mem.concat(arena, u8, &.{ "-", packed_pack, ".pack" })));
+
+    // relic's client from relic's upload-pack, in process for `file://`.
+    {
+        var config = try config_mod.Config.parseText(gpa, "[fetch]\n\turiProtocols = http\n[transfer]\n\tfsckObjects = true\n", .command);
+        defer config.deinit();
+        try out.dir.createDirPath(io, "relic-both");
+        var dir = try out.dir.openDir(io, "relic-both", .{});
+        defer dir.close(io);
+        var cloned = try clone_mod.clone(gpa, io, url, dir, .{ .who = who, .checkout = false, .programs = .{ .environ = &env }, .config = &config });
+        cloned.deinit(io);
+        const packs = try packsOf(gpa, io, try std.Io.Dir.path.join(arena, &.{ outside, "relic-both" }));
+        defer gpa.free(packs);
+        try testing.expect(std.mem.find(u8, packs, uri_pack) != null);
+        try testing.expectEqual(@as(usize, 2), std.mem.count(u8, packs, "\n"));
+    }
+
+    // A client of another protocol is sent every object in the pack.
+    try src.exec(io, &.{ "-C", bare, "config", "--unset", "uploadpack.blobPackfileUri", "example\\.invalid" });
+    for ([_]?[]const u8{ null, helper }, [_][]const u8{ "https-git", "https-relic" }) |upload_pack, name| {
+        var args: std.ArrayList([]const u8) = .empty;
+        try args.appendSlice(arena, &.{ "-c", "fetch.uriProtocols=https", "clone", "-q", "--no-checkout" });
+        if (upload_pack) |p| try args.appendSlice(arena, &.{ "--upload-pack", p });
+        try args.appendSlice(arena, &.{ url, name });
+        gpa.free(try testremote.gitInputEnv(gpa, io, out.dir, &env, args.items, "", true));
+        const packs = try packsOf(gpa, io, try std.Io.Dir.path.join(arena, &.{ outside, name }));
+        defer gpa.free(packs);
+        try testing.expectEqual(@as(usize, 1), std.mem.count(u8, packs, "\n"));
+    }
+
+    // A pack-objects hook is handed the protocols, and what it prints
+    // before the pack is relayed as git relays it.
+    {
+        // As a configuration value names it: `/`, never `\\`.
+        const hook = try std.mem.concat(arena, u8, &.{ served, "/hook" });
+        if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, hook, '\\', '/');
+        try root.dir.writeFile(io, .{ .sub_path = "hook", .data = "#!/bin/sh\nprintf '%s\\n' \"$*\" >>\"$(dirname \"$0\")/args\"\nexec \"$@\"\n" });
+        if (builtin.target.os.tag != .windows) {
+            const file = try root.dir.openFile(io, "hook", .{});
+            defer file.close(io);
+            try file.setPermissions(io, .fromMode(0o755));
+        }
+        const global = try std.mem.concat(arena, u8, &.{ served, "/global.gitconfig" });
+        try root.dir.writeFile(io, .{ .sub_path = "global.gitconfig", .data = try std.mem.concat(arena, u8, &.{ "[uploadpack]\n\tpackObjectsHook = ", hook, "\n" }) });
+        const isolated = try arena.dupe(u8, env.get("GIT_CONFIG_GLOBAL").?);
+        try env.put("GIT_CONFIG_GLOBAL", global);
+        var hooked: [2][2][]u8 = undefined;
+        var kept: usize = 0;
+        defer for (hooked[0..kept]) |pair| for (pair) |text| gpa.free(text);
+        for ([_]?[]const u8{ null, helper }, [_][]const u8{ "hook-git", "hook-relic" }) |upload_pack, name| {
+            root.dir.deleteFile(io, "args") catch |err| if (err != error.FileNotFound) return err;
+            const trace = try std.mem.concat(arena, u8, &.{ outside, "/", name, ".trace" });
+            try env.put("GIT_TRACE_PACKET", trace);
+            defer _ = env.swapRemove("GIT_TRACE_PACKET");
+            var args: std.ArrayList([]const u8) = .empty;
+            try args.appendSlice(arena, &.{ "-c", "fetch.uriProtocols=http", "clone", "-q", "--no-checkout" });
+            if (upload_pack) |p| try args.appendSlice(arena, &.{ "--upload-pack", p });
+            try args.appendSlice(arena, &.{ url, name });
+            gpa.free(try testremote.gitInputEnv(gpa, io, out.dir, &env, args.items, "", true));
+            const traced = try Io.Dir.cwd().readFileAlloc(io, trace, gpa, .unlimited);
+            defer gpa.free(traced);
+            const section = try uriSection(gpa, traced);
+            errdefer gpa.free(section);
+            hooked[kept] = .{ try root.dir.readFileAlloc(io, "args", gpa, .unlimited), section };
+            kept += 1;
+            const packs = try packsOf(gpa, io, try std.Io.Dir.path.join(arena, &.{ outside, name }));
+            defer gpa.free(packs);
+            try testing.expect(std.mem.find(u8, packs, uri_pack) != null);
+        }
+        // The isolated global file again, never none.
+        try env.put("GIT_CONFIG_GLOBAL", isolated);
+        try testing.expect(std.mem.find(u8, hooked[0][0], "--uri-protocol=http") != null);
+        for (0..2) |k| try testing.expectEqualStrings(hooked[0][k], hooked[1][k]);
+        try testing.expectEqualStrings(sections[0], hooked[1][1]);
+    }
+
+    // A value not of git's form: each server's pack dies, in git's words.
+    try src.exec(io, &.{ "-C", bare, "config", "--add", "uploadpack.blobPackfileUri", "not a value of the form" });
+    var words: [2][]u8 = undefined;
+    var said: usize = 0;
+    defer for (words[0..said]) |text| gpa.free(text);
+    for ([_]?[]const u8{ null, helper }, [_][]const u8{ "bad-git", "bad-relic" }) |upload_pack, name| {
+        var args: std.ArrayList([]const u8) = .empty;
+        try args.appendSlice(arena, &.{ "-C", outside, "-c", "fetch.uriProtocols=http", "clone", "-q", "--no-checkout" });
+        if (upload_pack) |p| try args.appendSlice(arena, &.{ "--upload-pack", p });
+        try args.appendSlice(arena, &.{ url, name });
+        const captured = try src.capture(io, args.items);
+        defer gpa.free(captured.stdout);
+        defer gpa.free(captured.stderr);
+        try testing.expect(captured.code != 0);
+        // What the client says the server told it; over `file://` the
+        // server's own standard error is the client's too.
+        var told: std.ArrayList(u8) = .empty;
+        errdefer told.deinit(gpa);
+        var lines = std.mem.tokenizeScalar(u8, captured.stderr, '\n');
+        while (lines.next()) |line| {
+            if (std.mem.startsWith(u8, line, "remote: ") or std.mem.startsWith(u8, line, "fatal: remote error: ")) try told.print(gpa, "{s}\n", .{line});
+        }
+        words[said] = try told.toOwnedSlice(gpa);
+        said += 1;
+    }
+    try testing.expectEqualStrings(words[0], words[1]);
+    try testing.expect(std.mem.find(u8, words[1], "remote: fatal: value of uploadpack.blobpackfileuri must be of the form") != null);
 }
