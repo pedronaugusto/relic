@@ -105,7 +105,7 @@ fn publish(gpa: Allocator, io: Io, db: *const odb.Odb, dir: Io.Dir, path: []cons
     var buffer: [8192]u8 = undefined;
     var lock = try fs.LockFile.open(gpa, io, dir, .{ .sub_path = path, .buffer = &buffer }, .{ .sync = sync, .shared = db.sharedPermissions(), .write_pid = db.lockfilePid() });
     defer lock.deinit(io);
-    try lock.writer().writeAll(bytes);
+    try lock.writeAll(bytes);
     try lock.commit(io);
     if (mode == .read_only) fs.readOnlyObject(io, dir, path, db.sharedPermissions());
 }
@@ -230,8 +230,8 @@ pub fn writeCommitGraph(gpa: Allocator, io: Io, db: *odb.Odb, tips: []const Oid,
         try publish(gpa, io, db, dir, name, bytes, options.sync orelse db.settings().fsync.sync(.commit_graph), .read_only);
         try bases.append(arena, checksum);
         for (bases.items) |base| {
-            try chain_lock.writer().writeAll(base.hex(&hex_buffer));
-            try chain_lock.writer().writeByte('\n');
+            try chain_lock.writeAll(base.hex(&hex_buffer));
+            try chain_lock.print("{c}", .{'\n'});
         }
         try chain_lock.commit(io);
         fs.readOnlyObject(io, dir, "info/commit-graphs/commit-graph-chain", db.sharedPermissions());

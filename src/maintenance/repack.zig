@@ -199,7 +199,7 @@ pub fn dropCandidates(gpa: Allocator, io: Io, repo: *Repository, filter: object_
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
     if ((try promisors.remotes(arena_instance.allocator(), repo.configuration())).len == 0) return error.NoPromisorRemote;
-    if (!repo.isBare() and !in_progress.read(io, repo).none()) return error.OperationInProgress;
+    if (!repo.isBare() and !(try in_progress.read(io, repo)).none()) return error.OperationInProgress;
     const db = repo.objectDatabase();
     var found: Oid.Set = .empty;
     defer found.deinit(gpa);

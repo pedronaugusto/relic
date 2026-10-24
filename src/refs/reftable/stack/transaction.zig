@@ -736,10 +736,10 @@ fn install(gpa: Allocator, io: Io, locked: *Pending.Locked, stack: *const Stack,
     var name_buf: [64]u8 = undefined;
     const name = tableName(io, &name_buf, update_index, update_index);
     try writeTable(gpa, io, locked.dir, name, bytes, locked.shared, locked.sync);
-    const w = locked.lock.writer();
-    w.writeAll(stack.list) catch return error.WriteFailed;
-    if (stack.list.len != 0 and stack.list[stack.list.len - 1] != '\n') w.writeByte('\n') catch return error.WriteFailed;
-    w.print("{s}\n", .{name}) catch return error.WriteFailed;
+    const w = &locked.lock;
+    try w.writeAll(stack.list);
+    if (stack.list.len != 0 and stack.list[stack.list.len - 1] != '\n') try w.writeByte('\n');
+    try w.print("{s}\n", .{name});
     try locked.lock.commit(io);
     locked.lock.deinit(io);
     locked.written = true;
@@ -877,7 +877,7 @@ fn writeTable(gpa: Allocator, io: Io, dir: Io.Dir, name: []const u8, bytes: []co
     var buffer: [16 * 1024]u8 = undefined;
     var lock = try fs.LockFile.open(gpa, io, dir, .{ .sub_path = name, .buffer = &buffer }, .{ .shared = shared, .sync = sync, .sync_directory = namesDurable(sync) });
     defer lock.deinit(io);
-    lock.writer().writeAll(bytes) catch return error.WriteFailed;
+    try lock.writeAll(bytes);
     try lock.commit(io);
 }
 
@@ -982,10 +982,10 @@ pub fn compactIn(gpa: Allocator, io: Io, parent: Io.Dir, inputs: CompactInputs, 
     // a list without them is one this does not understand, and is left be.
     const offset = findRun(current.items, merged) orelse return error.LockHeld;
 
-    const w = list_lock.?.writer();
-    for (current.items[0..offset]) |name| w.print("{s}\n", .{name}) catch return error.WriteFailed;
-    if (new_name) |name| w.print("{s}\n", .{name}) catch return error.WriteFailed;
-    for (current.items[offset + merged.len ..]) |name| w.print("{s}\n", .{name}) catch return error.WriteFailed;
+    const w = &list_lock.?;
+    for (current.items[0..offset]) |name| try w.print("{s}\n", .{name});
+    if (new_name) |name| try w.print("{s}\n", .{name});
+    for (current.items[offset + merged.len ..]) |name| try w.print("{s}\n", .{name});
     try list_lock.?.commit(io);
     installed = true;
 

@@ -616,7 +616,7 @@ const Importer = struct {
         var buffer: [4096]u8 = undefined;
         var lock = try fs.LockFile.open(imp.gpa, imp.io, dir, .{ .sub_path = path, .buffer = &buffer }, .{ .sync = .none });
         defer lock.deinit(imp.io);
-        try imp.marks.write(imp.gpa, lock.writer());
+        imp.marks.write(imp.gpa, lock.writer()) catch |err| return lock.failure(err);
         try lock.commit(imp.io);
     }
 

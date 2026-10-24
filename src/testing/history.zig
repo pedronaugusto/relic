@@ -1489,7 +1489,7 @@ test "a pick's pseudo-refs are found and removed in a reftable repository, as gi
 
     var repo = try repo_mod.Repository.open(gpa, io, r.dir, .{});
     defer repo.deinit(io);
-    try std.testing.expectEqual(sequencer.Action.pick, sequencer.inProgress(io, &repo).?);
+    try std.testing.expectEqual(sequencer.Action.pick, (try sequencer.inProgress(io, &repo)).?);
     try sequencer.abort(gpa, io, &repo, who, null);
     r.report_failures = false;
     try std.testing.expectError(error.GitFailed, r.exec(io, &.{ "rev-parse", "--verify", "-q", "CHERRY_PICK_HEAD" }));
@@ -2059,7 +2059,7 @@ test "an exec line runs only through the programs the caller hands in" {
                 var repo = try pair.open(io);
                 defer repo.deinit(io);
                 try std.testing.expectError(error.ExecNotPermitted, rebase.start(gpa, io, &repo, try oidOf(gpa, io, &pair.ours, "main"), .{ .who = who, .onto_name = "main", .todo = sheet }));
-                try std.testing.expect(!rebase.inProgress(io, &repo));
+                try std.testing.expect(!(try rebase.inProgress(io, &repo)));
             }
             for ([_]*testgit.Repo{&pair.git}) |r| try r.writeFile(io, ".git/info/exclude", "exec-log\n");
             try pair.ours.writeFile(io, ".git/info/exclude", "exec-log\n");
@@ -4493,7 +4493,7 @@ test "a merge line under strategy options merges as the git merge git's rebase r
                 const stopped = stopped: {
                     var repo = try pair.open(io);
                     defer repo.deinit(io);
-                    break :stopped rebase.inProgress(io, &repo);
+                    break :stopped (try rebase.inProgress(io, &repo));
                 };
                 if (!stopped) continue;
                 // Stopped on the merge: resolved and continued, each side the

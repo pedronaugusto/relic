@@ -43,7 +43,7 @@ fn agrees(gpa: std.mem.Allocator, io: std.Io, r: *testgit.Repo, read: in_progres
 fn readOf(gpa: std.mem.Allocator, io: std.Io, r: *testgit.Repo) !in_progress.InProgress {
     var repo = try Repository.open(gpa, io, r.dir, .{});
     defer repo.deinit(io);
-    return in_progress.read(io, &repo);
+    return try in_progress.read(io, &repo);
 }
 
 test "what is in progress is what git status says: merge, rebase, interactive rebase, am, cherry-pick, revert, bisect" {

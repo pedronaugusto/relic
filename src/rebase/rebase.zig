@@ -388,15 +388,15 @@ pub const Outcome = struct {
 
 /// Whether a rebase is waiting: `.git/rebase-merge` is there, or
 /// `.git/rebase-apply` with no `git am` session in it.
-pub fn inProgress(io: Io, repo: *Repository) bool {
-    return backendInProgress(io, repo) != null;
+pub fn inProgress(io: Io, repo: *Repository) Io.Cancelable!bool {
+    return (try backendInProgress(io, repo)) != null;
 }
 
 /// The backend of the rebase that is waiting.
-fn backendInProgress(io: Io, repo: *Repository) ?Backend {
+fn backendInProgress(io: Io, repo: *Repository) Io.Cancelable!?Backend {
     const dir = repo.gitDirectory();
-    if (state_file.exists(io, dir, Backend.merge.dir())) return .merge;
-    if (state_file.exists(io, dir, Backend.apply.dir()) and !state_file.exists(io, dir, "rebase-apply/applying")) return .apply;
+    if (try state_file.exists(io, dir, Backend.merge.dir())) return .merge;
+    if (try state_file.exists(io, dir, Backend.apply.dir()) and !try state_file.exists(io, dir, "rebase-apply/applying")) return .apply;
     return null;
 }
 
@@ -462,8 +462,8 @@ const Run = struct {
         try state_file.remove(r.io, r.repo.gitDirectory(), r.statePath(name));
     }
 
-    fn hasState(r: *Run, comptime name: []const u8) bool {
-        return state_file.exists(r.io, r.repo.gitDirectory(), r.statePath(name));
+    fn hasState(r: *Run, comptime name: []const u8) Io.Cancelable!bool {
+        return try state_file.exists(r.io, r.repo.gitDirectory(), r.statePath(name));
     }
 
     fn appendState(r: *Run, comptime name: []const u8, bytes: []const u8) Error!void {
@@ -1293,9 +1293,9 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, upstream: Oid, options: 
     // which dies on a value that is no boolean, asked for or not.
     const configured_autostash = try repo.configuration().getBool("rebase.autostash", false);
 
-    if (inProgress(io, repo) or state_file.exists(io, repo.gitDirectory(), Backend.apply.dir())) return error.RebaseInProgress;
+    if ((try inProgress(io, repo)) or try state_file.exists(io, repo.gitDirectory(), Backend.apply.dir())) return error.RebaseInProgress;
     r.backend = try backendOf(&r);
-    if (merging.inProgress(io, repo) or sequencer.inProgress(io, repo) != null) return error.OperationInProgress;
+    if ((try merging.inProgress(io, repo)) or (try sequencer.inProgress(io, repo)) != null) return error.OperationInProgress;
     if (options.exec.len != 0 and options.programs == null) return error.ExecNotPermitted;
 
     const tip = try resolveTip(&r);
@@ -1528,12 +1528,12 @@ fn readBasicState(r: *Run) Error!Tip {
     const head_name = state_file.oneliner((try r.readState("head-name")) orelse return error.MalformedState);
     // git always writes `orig-head`; an older one wrote `head`.
     const orig = (try r.readState("orig-head")) orelse (try r.readState("head")) orelse return error.MalformedState;
-    if (r.hasState("signoff")) {
+    if ((try r.hasState("signoff"))) {
         r.options.signoff = true;
         r.allow_ff = false;
     }
-    if (r.hasState("drop_redundant_commits")) r.empty = .drop else if (r.hasState("keep_redundant_commits")) r.empty = .keep else r.empty = .stop;
-    r.reschedule_failed_exec = r.hasState("reschedule-failed-exec");
+    if ((try r.hasState("drop_redundant_commits"))) r.empty = .drop else if ((try r.hasState("keep_redundant_commits"))) r.empty = .keep else r.empty = .stop;
+    r.reschedule_failed_exec = (try r.hasState("reschedule-failed-exec"));
     if (try r.readState("allow_rerere_autoupdate")) |text| {
         const value = state_file.oneliner(text);
         if (std.mem.eql(u8, value, "--rerere-autoupdate")) r.options.rerere_autoupdate = true else if (std.mem.eql(u8, value, "--no-rerere-autoupdate")) r.options.rerere_autoupdate = false;
@@ -1849,11 +1849,11 @@ fn pickOne(r: *Run) Error!?Outcome {
 /// `stopped-sha`, `REBASE_HEAD`, the commit's patch, and with `to_amend`
 /// the commit `HEAD` names, to be amended.
 fn errorWithPatch(r: *Run, commit: Oid, to_amend: bool) Error!void {
-    if (r.have_message and !r.hasState("message")) try r.state("message", r.msg.items);
+    if (r.have_message and !(try r.hasState("message"))) try r.state("message", r.msg.items);
     try r.state("stopped-sha", try r.arena.print("{s}\n", .{try r.hex(commit)}));
     try r.repo.refStore().root().write(r.repo.allocator(), r.io, .rebase_head, commit);
     try writePatch(r, commit);
-    if (!r.hasState("message")) {
+    if (!(try r.hasState("message"))) {
         const parsed = (try readSource(r, commit)).commit;
         try r.state("message", try r.arena.print("{s}\n", .{message.fromSubject(parsed.message)}));
     }
@@ -1980,7 +1980,7 @@ fn doPickCommit(r: *Run, item: todo.Item, final_fixup: bool) Error!Picked {
         try updateSquashMessages(r, item, commit.message);
         if (!final_fixup) {
             msg_source = .squash;
-        } else if (r.hasState("message-fixup")) {
+        } else if ((try r.hasState("message-fixup"))) {
             msg_source = .fixup;
         } else {
             msg_source = .squash_edit;
@@ -2379,7 +2379,7 @@ fn appendSquashMessage(r: *Run, buf: *std.ArrayList(u8), body: []const u8, item:
     try buf.appendSlice(arena, body[commented_len..]);
     if (isFixupFlag(item) and !seenSquash(r)) {
         if (r.options.signoff) try message.appendSignoff(arena, buf, r.options.who, r.trailers);
-        if (item.replace_message and (r.hasState("message-fixup") or !r.hasState("message-squash"))) {
+        if (item.replace_message and ((try r.hasState("message-fixup")) or !(try r.hasState("message-squash")))) {
             var rest = buf.items[fixup_off..];
             while (rest.len != 0) {
                 const nl = std.mem.findScalar(u8, rest, '\n') orelse break;
@@ -2765,7 +2765,7 @@ fn doMerge(r: *Run, item: todo.Item) Error!?Outcome {
         for (copied) |*c| c.path = try r.arena.dupe(u8, c.path);
         r.conflicts = copied;
         _ = try rerere.afterStop(gpa, io, repo, .{ .arena = r.arena, .autoupdate = r.options.rerere_autoupdate });
-        if (item.commit) |original| try errorWithPatch(r, original, false) else if (r.have_message and !r.hasState("message")) try r.state("message", r.msg.items);
+        if (item.commit) |original| try errorWithPatch(r, original, false) else if (r.have_message and !(try r.hasState("message"))) try r.state("message", r.msg.items);
         _ = r.items.orderedRemove(0);
         return finishOutcome(r, .stopped, .conflict, item.commit);
     }
@@ -2853,7 +2853,7 @@ fn mergeAsGitMerge(r: *Run, item: todo.Item, merge_heads: []const Oid, author: o
     }
     if (item.commit) |original| try recordInRewritten(r, original, peekCommand(r, 1));
     if (outcome.result == .conflicted) {
-        if (item.commit) |original| try errorWithPatch(r, original, false) else if (r.have_message and !r.hasState("message")) try r.state("message", r.msg.items);
+        if (item.commit) |original| try errorWithPatch(r, original, false) else if (r.have_message and !(try r.hasState("message"))) try r.state("message", r.msg.items);
         _ = r.items.orderedRemove(0);
         return finishOutcome(r, .stopped, .conflict, item.commit);
     }
@@ -3159,7 +3159,7 @@ fn loadRun(gpa: Allocator, io: Io, repo: *Repository, options: Options) Error!Ru
 /// and `--quit` start from, as git's read only what they undo, so a sheet
 /// it cannot read does not keep a rebase from being given up.
 fn loadBareRun(gpa: Allocator, io: Io, repo: *Repository, options: Options) Error!Run {
-    const backend = backendInProgress(io, repo) orelse return error.NoRebaseInProgress;
+    const backend = (try backendInProgress(io, repo)) orelse return error.NoRebaseInProgress;
     const arena_state = try gpa.create(std.heap.ArenaAllocator);
     arena_state.* = .init(gpa);
     errdefer {
@@ -3176,7 +3176,7 @@ fn loadBareRun(gpa: Allocator, io: Io, repo: *Repository, options: Options) Erro
 /// staged, as git does, and carry on down the sheet.
 pub fn proceed(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Error!Outcome {
     diagnostic.reset(options.diagnostic);
-    if (backendInProgress(io, repo) == .apply) {
+    if ((try backendInProgress(io, repo)) == .apply) {
         var r = try loadBareRun(gpa, io, repo, options);
         errdefer freeRun(&r);
         return proceedApply(&r);
@@ -3186,7 +3186,7 @@ pub fn proceed(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self
     errdefer freeRun(&r);
     // A sheet refused for the commits it leaves out is checked again
     // against the one written first.
-    if (r.hasState("dropped")) {
+    if ((try r.hasState("dropped"))) {
         const backup = (try r.readState("git-rebase-todo.backup")) orelse "";
         var context: sequencer.ResolverContext = .{ .repo = repo, .io = io };
         const old = try todo.parse(r.arena, backup, context.resolver(), .{ .comment = r.comment, .rebase = true, .fixup_first_ok = true });
@@ -3194,7 +3194,7 @@ pub fn proceed(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self
         try r.removeState("dropped");
     }
     try commitStagedChanges(&r);
-    if (r.hasState("stopped-sha")) {
+    if ((try r.hasState("stopped-sha"))) {
         const text = (try r.readState("stopped-sha")).?;
         // git records it only when it reads as a name, and goes on if not.
         if (state_file.oidHex(repo.objectFormat(), state_file.oneliner(text))) |oid| try recordInRewritten(&r, oid, peekCommand(&r, 0));
@@ -3243,7 +3243,7 @@ fn commitStagedChanges(r: *Run) Error!void {
     }
     const merge_head_text = try repo.refStore().special().readAll(r.arena, io, .merge_head);
     const is_clean = !staged and merge_head_text == null;
-    if (!is_clean and !r.hasState("message")) return error.StagedWithoutMessage;
+    if (!is_clean and !(try r.hasState("message"))) return error.StagedWithoutMessage;
 
     var amend = false;
     var final_fixup: ?FinalFixup = null;
@@ -3336,7 +3336,7 @@ const FinalFixup = struct { edit: bool };
 fn skippedFixup(r: *Run, is_clean: bool, head_oid: Oid, to_amend: Oid) Error!?FinalFixup {
     if (!is_clean or r.fixup_count == 0) return null;
     const fixup_follows = peekCommand(r, 0).isFixup();
-    if (!head_oid.eql(to_amend) or !r.hasState("stopped-sha")) {
+    if (!head_oid.eql(to_amend) or !(try r.hasState("stopped-sha"))) {
         if (!fixup_follows) try clearFixupChain(r);
         return null;
     }
@@ -3418,7 +3418,7 @@ const hooksEnv = ?hooks_mod.Runner.CommitEnv;
 /// carry on: `--skip`.
 pub fn skip(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Error!Outcome {
     diagnostic.reset(options.diagnostic);
-    if (backendInProgress(io, repo) == .apply) {
+    if ((try backendInProgress(io, repo)) == .apply) {
         var r = try loadBareRun(gpa, io, repo, options);
         errdefer freeRun(&r);
         // git's `--skip`: the working tree back to `HEAD`, the branch state

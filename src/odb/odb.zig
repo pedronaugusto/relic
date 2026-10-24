@@ -1679,10 +1679,8 @@ pub const Odb = struct {
         var header_buf: [64]u8 = undefined;
         // unreachable: a type name is at most six bytes and a usize at most twenty digits
         const header = std.mem.print(&header_buf, "{s} {d}\x00", .{ t.name(), bytes.len }) catch unreachable;
-        try writer.interface.writeAll(header);
-        try writer.interface.writeAll(bytes);
-        try writer.finish();
-        try file_writer.interface.flush();
+        // A writer says only that it failed; the file's writer keeps why.
+        writeDeflated(&writer, &file_writer, header, bytes) catch return file_writer.err orelse error.WriteFailed;
         // Batch and per-file both flush the object's own descriptor; the
         // difference is the single barrier `syncBatch` puts at the end.
         try fs.syncFile(io, file, .{ .policy = odb.looseSync() });
@@ -1813,6 +1811,15 @@ pub const Odb = struct {
     /// The naming options every name this database takes is given.
     fn hashOptions(odb: *const Odb) hash.Hasher.Options {
         return .{ .detect_collisions = odb.backendData().options.detect_sha1_collisions };
+    }
+
+    /// A loose object's header and bytes through `writer`'s compression,
+    /// out to `file_writer`.
+    fn writeDeflated(writer: *warp.Deflate.Writer, file_writer: *Io.File.Writer, header: []const u8, bytes: []const u8) !void {
+        try writer.interface.writeAll(header);
+        try writer.interface.writeAll(bytes);
+        try writer.finish();
+        try file_writer.interface.flush();
     }
 
     fn writableSource(odb: *Odb) *Source {
@@ -6480,6 +6487,16 @@ fn sameObjectFile(io: Io, dir: Io.Dir, a: []const u8, b: []const u8) Error!enum 
 }
 
 /// git's `finalize_object_file`: `temp` given the name `final` as
+/// Remove `temp` once its object is in place: a failure is git's warning
+/// ("unable to unlink"), the temporary file left for `gc`; a cancel is
+/// returned, the object in place.
+fn unlinkPlaced(io: Io, dir: Io.Dir, temp: []const u8) Io.Cancelable!void {
+    dir.deleteFile(io, temp) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => std.log.warn("unable to unlink '{s}': {t}", .{ temp, err }),
+    };
+}
+
 /// `core.createObject` says -- linked, or where no link can be made renamed,
 /// or renamed -- and where an object is there already, kept: the two files
 /// compared, `temp` removed when they are the same and
@@ -6489,10 +6506,11 @@ fn finalizeLoose(io: Io, dir: Io.Dir, temp: []const u8, final: []const u8, mode:
     while (true) : (retries += 1) {
         const placed = switch (mode) {
             .link => if (fs.hardLink(io, dir, temp, final)) |_| blk: {
-                dir.deleteFile(io, temp) catch |err| std.log.warn("unable to unlink '{s}': {t}", .{ temp, err });
+                try unlinkPlaced(io, dir, temp);
                 break :blk true;
             } else |err| switch (err) {
                 error.PathAlreadyExists => false,
+                error.Canceled => return error.Canceled,
                 // git's fallback for a filesystem with no links.
                 else => try renameUnlessThere(io, dir, temp, final),
             },
@@ -6500,10 +6518,7 @@ fn finalizeLoose(io: Io, dir: Io.Dir, temp: []const u8, final: []const u8, mode:
         };
         if (placed) return;
         switch (try sameObjectFile(io, dir, temp, final)) {
-            .same => {
-                dir.deleteFile(io, temp) catch |err| std.log.warn("unable to unlink '{s}': {t}", .{ temp, err });
-                return;
-            },
+            .same => return unlinkPlaced(io, dir, temp),
             .vanished => if (retries >= 5) return error.LooseObjectVanishing,
             .differs => return error.LooseObjectDiffers,
         }

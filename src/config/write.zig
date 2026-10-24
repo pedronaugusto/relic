@@ -75,7 +75,7 @@ pub const Pending = struct {
                 };
             } else |_| {}
         }
-        p.lock.writer().writeAll(p.bytes) catch return error.WriteFailed;
+        try p.lock.writeAll(p.bytes);
         try p.lock.commit(io);
     }
 

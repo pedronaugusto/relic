@@ -111,7 +111,7 @@ pub fn write(gpa: Allocator, io: Io, common_dir: Io.Dir, set: *const Oid.Set, op
             return a.order(b) == .lt;
         }
     }.lessThan);
-    const w = lock.writer();
+    const w = &lock;
     for (sorted) |oid| try w.print("{f}\n", .{oid});
     try lock.commit(io);
     return seen(io, common_dir);

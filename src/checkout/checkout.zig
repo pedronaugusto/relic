@@ -3573,9 +3573,14 @@ pub const RacyCheck = struct {
         return .{ .context = c, .changed = changed };
     }
 
-    fn changed(context: *anyopaque, index: *const Index, entry: index_mod.Entry) bool {
+    /// One that cannot be read is changed, as git smudges what it cannot
+    /// check; a cancel is returned.
+    fn changed(context: *anyopaque, index: *const Index, entry: index_mod.Entry) Io.Cancelable!bool {
         const c: *RacyCheck = @ptrCast(@alignCast(context)); // safe: the context handed out with this function is a RacyCheck
-        return differsFromIndex(c.gpa, c.io, c.wt, .{ .index = index, .entry = entry }, c.rules) catch true;
+        return differsFromIndex(c.gpa, c.io, c.wt, .{ .index = index, .entry = entry }, c.rules) catch |err| switch (err) {
+            error.Canceled => error.Canceled,
+            else => true,
+        };
     }
 };
 
@@ -3609,7 +3614,7 @@ pub fn differsFromIndex(
     const attrs = rules.attrs orelse {
         if (try streamsIn(rules.big_file_bytes, found, null)) return !try namedAs(io, wt, entry);
         const bytes = fs.readWhole(wt, io, entry.path, a, .limited(1 << 31)) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
+            error.OutOfMemory, error.Canceled => |e| return e,
             else => return true,
         };
         return !hash.Hasher.object(index.kind, "blob", bytes).eql(entry.oid);
@@ -3638,7 +3643,7 @@ pub fn differsFromIndex(
     const applied = try attrs.lookup(a, entry.path, .file);
     if (try streamsIn(rules.big_file_bytes, found, .{ .session = &conv, .path = entry.path, .applied = applied })) return !try namedAs(io, wt, entry);
     const bytes = fs.readWhole(wt, io, entry.path, a, .limited(1 << 31)) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
+        error.OutOfMemory, error.Canceled => |e| return e,
         else => return true,
     };
     const content = (try conv.toGit(a, .{ .path = entry.path, .bytes = bytes, .applied = applied }, .{ .storing = .hash_only })).bytes;
@@ -3649,7 +3654,7 @@ pub fn differsFromIndex(
 /// names; one that cannot be read is not.
 fn namedAs(io: Io, wt: Io.Dir, entry: index_mod.Entry) Error!bool {
     const oid = hashFile(io, wt, entry.oid.kind, entry.path) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
+        error.OutOfMemory, error.Canceled => |e| return e,
         else => return false,
     };
     return oid.eql(entry.oid);
@@ -3784,7 +3789,7 @@ fn writeFile(io: Io, wt: Io.Dir, path: []const u8, source: Source, executable: b
         var buf: [16 * 1024]u8 = undefined;
         var fw = file.writer(io, &buf);
         switch (source) {
-            .bytes => |bytes| try fw.interface.writeAll(bytes),
+            .bytes => |bytes| fw.interface.writeAll(bytes) catch return fw.err.?,
             .file => |from| {
                 var in_buf: [64 * 1024]u8 = undefined;
                 var reader = from.reader(io, &in_buf);
@@ -3812,7 +3817,7 @@ fn writeFile(io: Io, wt: Io.Dir, path: []const u8, source: Source, executable: b
                 };
             },
         }
-        try fw.interface.flush();
+        fw.interface.flush() catch return fw.err.?;
     }
     try fs.rename(io, wt, temp_path, path);
     failed = false;

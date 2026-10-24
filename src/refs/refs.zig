@@ -720,13 +720,13 @@ pub const Store = struct {
     /// Write `entries` through a `packed-refs.lock` already held, and
     /// install it.
     fn writePackedLocked(store: *const Store, io: Io, lock: *fs.LockFile, entries: []const PackedEntry) TransactionError!void {
-        const w = lock.writer();
-        w.writeAll(packed_header) catch return error.WriteFailed;
+        const w = lock;
+        try w.writeAll(packed_header);
         var hex: [hash.max_hex_len]u8 = undefined;
         for (entries) |entry| {
-            w.print("{s} {s}\n", .{ entry.oid.hex(&hex), entry.name }) catch return error.WriteFailed;
+            try w.print("{s} {s}\n", .{ entry.oid.hex(&hex), entry.name });
             if (entry.peeled) |peeled| {
-                w.print("^{s}\n", .{peeled.hex(&hex)}) catch return error.WriteFailed;
+                try w.print("^{s}\n", .{peeled.hex(&hex)});
             }
         }
         try lock.commit(io);
@@ -1084,7 +1084,7 @@ pub const Store = struct {
             },
         };
         var hex: [hash.max_hex_len]u8 = undefined;
-        lock.writer().print("{s}\n", .{oid.hex(&hex)}) catch return error.WriteFailed;
+        try lock.print("{s}\n", .{oid.hex(&hex)});
         try lock.commit(io);
     }
 
@@ -1245,8 +1245,11 @@ pub const RootRefs = struct {
 
     /// Whether `ref` is there, as git's `ref_exists` asks: one that
     /// cannot be read is not.
-    pub fn exists(r: RootRefs, gpa: Allocator, io: Io, ref: names.Root) bool {
-        return (r.read(gpa, io, ref) catch return false) != null;
+    pub fn exists(r: RootRefs, gpa: Allocator, io: Io, ref: names.Root) Io.Cancelable!bool {
+        return (r.read(gpa, io, ref) catch |err| return switch (err) {
+            error.Canceled => error.Canceled,
+            else => false,
+        }) != null;
     }
 
     /// Point `ref` at `oid`, whatever it was.
@@ -1333,9 +1336,13 @@ pub const SpecialRefs = struct {
         return fs.readFileAlloc(gpa, io, s.store.gitDir(), ref.name(), max_bytes);
     }
 
-    /// Whether `ref` is there, as git's `file_exists` asks.
-    pub fn exists(s: SpecialRefs, io: Io, ref: names.Special) bool {
-        s.store.gitDir().access(io, ref.name(), .{}) catch return false;
+    /// Whether `ref` is there, as git's `file_exists` asks; a cancel is
+    /// returned.
+    pub fn exists(s: SpecialRefs, io: Io, ref: names.Special) Io.Cancelable!bool {
+        s.store.gitDir().access(io, ref.name(), .{}) catch |err| return switch (err) {
+            error.Canceled => error.Canceled,
+            else => false,
+        };
         return true;
     }
 
@@ -1346,7 +1353,7 @@ pub const SpecialRefs = struct {
         var buffer: [4096]u8 = undefined;
         var lock = try s.takeLock(gpa, io, ref, &buffer);
         defer lock.deinit(io);
-        lock.writer().writeAll(bytes) catch return error.WriteFailed;
+        try lock.writeAll(bytes);
         try lock.commit(io);
     }
 
@@ -1359,9 +1366,9 @@ pub const SpecialRefs = struct {
         defer lock.deinit(io);
         if (try s.readAll(gpa, io, ref)) |existing| {
             defer gpa.free(existing);
-            lock.writer().writeAll(existing) catch return error.WriteFailed;
+            try lock.writeAll(existing);
         }
-        lock.writer().writeAll(bytes) catch return error.WriteFailed;
+        try lock.writeAll(bytes);
         try lock.commit(io);
     }
 
@@ -2060,14 +2067,14 @@ pub const Transaction = struct {
             const lock = &edit.lock.?;
             switch (new) {
                 .direct => |oid| {
-                    lock.writer().print("{s}\n", .{oid.hex(&hex)}) catch return error.WriteFailed;
+                    try lock.print("{s}\n", .{oid.hex(&hex)});
                 },
                 .symbolic => |target| {
                     // git's `create_ref_symlink`: the ref a link to its
                     // target's name, its lock given up with the rest; where
                     // no link can be made, the text after all.
                     if (tx.store.preferSymlinkRefs() and symlinkRef(io, tx.store.dirFor(edit.name), edit.name, target)) continue;
-                    lock.writer().print("ref: {s}\n", .{target}) catch return error.WriteFailed;
+                    try lock.print("ref: {s}\n", .{target});
                 },
             }
             try lock.commit(io);

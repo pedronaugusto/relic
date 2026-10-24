@@ -169,7 +169,7 @@ fn rewrite(gpa: Allocator, io: Io, path: []const u8, timeout_ms: u32, how: Rewri
         else => |e| e,
     };
     defer lock.deinit(io);
-    const w = lock.writer();
+    const w = &lock;
     if (how.first) |line| {
         try w.writeAll(line);
         try w.writeByte('\n');

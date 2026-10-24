@@ -49,8 +49,8 @@ pub const Token = struct {
             t.managed = false;
             return t;
         }
-        try lock.writer().writeAll(previous);
-        try lock.writer().print("{s}\n", .{t.id});
+        try lock.writeAll(previous);
+        try lock.print("{s}\n", .{t.id});
         try lock.commit(io);
         return t;
     }
@@ -76,11 +76,11 @@ pub const Token = struct {
         if (!std.mem.startsWith(u8, previous, header)) return;
         var lines = std.mem.splitScalar(u8, previous[header.len..], '\n');
         var remaining: usize = 0;
-        try lock.writer().writeAll(header);
+        try lock.writeAll(header);
         while (lines.next()) |line| {
             if (line.len == 0 or std.mem.eql(u8, line, &t.id)) continue;
             remaining += 1;
-            try lock.writer().print("{s}\n", .{line});
+            try lock.print("{s}\n", .{line});
         }
         if (remaining == 0) {
             // The lock excludes new token acquisition through this deletion.

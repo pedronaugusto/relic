@@ -66,10 +66,10 @@ test "a root ref is written, read and removed as itself, never through what it n
             const roots = repo.refStore().root();
             const orig = names.Root.orig_head.name();
 
-            try std.testing.expect(!roots.exists(gpa, io, .orig_head));
+            try std.testing.expect(!(try roots.exists(gpa, io, .orig_head)));
             try std.testing.expectEqual(null, try roots.read(gpa, io, .orig_head));
             try roots.write(gpa, io, .orig_head, tip);
-            try std.testing.expect(roots.exists(gpa, io, .orig_head));
+            try std.testing.expect((try roots.exists(gpa, io, .orig_head)));
             try std.testing.expect((try roots.read(gpa, io, .orig_head)).?.eql(tip));
             try std.testing.expect((try oidOf(gpa, io, &r, orig)).eql(tip));
 
@@ -88,7 +88,7 @@ test "a root ref is written, read and removed as itself, never through what it n
             try std.testing.expect(!try gitHas(io, &r, orig));
 
             try roots.delete(gpa, io, .orig_head);
-            try std.testing.expect(!roots.exists(gpa, io, .orig_head));
+            try std.testing.expect(!(try roots.exists(gpa, io, .orig_head)));
 
             // `HEAD` and the root refs, as git's `--include-root-refs`
             // lists them.
@@ -129,9 +129,9 @@ test "the special refs are files the store reads and replaces whole, and no tran
             var hex: [2][hash.max_hex_len]u8 = undefined;
             const bytes = try std.mem.concat(gpa, u8, &.{ side.hex(&hex[0]), "\n", tip.hex(&hex[1]), "\n" });
             defer gpa.free(bytes);
-            try std.testing.expect(!specials.exists(io, .merge_head));
+            try std.testing.expect(!(try specials.exists(io, .merge_head)));
             try specials.write(gpa, io, .merge_head, bytes);
-            try std.testing.expect(specials.exists(io, .merge_head));
+            try std.testing.expect((try specials.exists(io, .merge_head)));
             const back = (try specials.readAll(gpa, io, .merge_head)).?;
             defer gpa.free(back);
             try std.testing.expectEqualStrings(bytes, back);
@@ -165,7 +165,7 @@ test "the special refs are files the store reads and replaces whole, and no tran
 
             try specials.delete(io, .merge_head);
             try specials.delete(io, .merge_head);
-            try std.testing.expect(!specials.exists(io, .merge_head));
+            try std.testing.expect(!(try specials.exists(io, .merge_head)));
             try std.testing.expectEqual(null, try specials.read(gpa, io, .merge_head));
         }
     }.inFormat);

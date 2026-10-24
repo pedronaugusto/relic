@@ -166,7 +166,7 @@ pub fn pull(gpa: Allocator, io: Io, repo: *Repository, remote: ?[]const u8, opti
     defer if (plan.branch) |*b| b.deinit();
 
     try requireMerged(io, repo, options.merge.blocked);
-    if (merging.inProgress(io, repo)) return error.MergeInProgress;
+    if ((try merging.inProgress(io, repo))) return error.MergeInProgress;
     var orig = try head_mod.read(gpa, io, repo);
     defer orig.deinit(gpa);
     var forked: ?Oid = null;

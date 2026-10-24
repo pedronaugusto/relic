@@ -576,6 +576,9 @@ pub const CacheTree = struct {
         // among names of one length, and writes them in that order.
         std.mem.sort(CacheTreeNode, kept.items, {}, CacheTreeNode.lessThan);
         node.children = kept;
+        // The node holds them now: a failure writing its tree below frees
+        // them once, with the node, and not here as well.
+        kept = .empty;
 
         const bytes = try builder.build();
         defer t.gpa.free(bytes);
@@ -712,7 +715,7 @@ pub const WriteOptions = struct {
     /// See `racy`.
     pub const Racy = struct {
         context: *anyopaque,
-        changed: *const fn (context: *anyopaque, index: *const Index, entry: Entry) bool,
+        changed: *const fn (context: *anyopaque, index: *const Index, entry: Entry) Io.Cancelable!bool,
     };
 
     /// The version to write.
@@ -1651,7 +1654,7 @@ pub const Index = struct {
         defer index.gpa.free(buffer);
         var lock = try fs.LockFile.open(index.gpa, io, git_dir, .{ .sub_path = name, .buffer = buffer }, options.lock);
         defer lock.deinit(io);
-        try lock.writer().writeAll(written);
+        try lock.writeAll(written);
         try lock.commit(io);
 
         var shared: std.ArrayList(Entry) = try .initCapacity(index.gpa, index.entries.items.len);
@@ -1772,7 +1775,7 @@ pub const Index = struct {
     /// and put it in place: the end of a write whose lock was taken before
     /// the index was read, as git's `repo_hold_locked_index` takes it.
     pub fn commitTo(index: *Index, io: Io, lock: *fs.LockFile, options: WriteOptions) Self.WriteError!void {
-        try index.writeTo(lock.writer(), options);
+        index.writeTo(lock.writer(), options) catch |err| return lock.failure(err);
         try lock.commit(io);
         // The file just written is the racy cutoff from now on, as git's
         // `do_write_index` takes it: an entry written in its second is
@@ -1782,7 +1785,7 @@ pub const Index = struct {
             const s = fs.Stat.fromIo(stat, .{});
             index.racy_cutoff_sec = s.mtime_sec;
             index.racy_cutoff_nsec = s.mtime_nsec;
-        } else |_| {}
+        } else |err| if (err == error.Canceled) return error.Canceled;
     }
 
     /// Errors from `writeTo`.
@@ -1906,7 +1909,7 @@ pub const Index = struct {
     /// then the path, prefix-compressed against `previous` from version 4
     /// on unless the entry starts an `IEOT` block, and NUL-padded to eight
     /// bytes before it.
-    fn writeEntry(index: *const Index, out: *Io.Writer, entry: Entry, name: []const u8, version: u32, previous: []const u8, starts_block: bool, options: WriteOptions) Io.Writer.Error!void {
+    fn writeEntry(index: *const Index, out: *Io.Writer, entry: Entry, name: []const u8, version: u32, previous: []const u8, starts_block: bool, options: WriteOptions) (Io.Writer.Error || Io.Cancelable)!void {
         std.debug.assert(name.len <= std.math.maxInt(u16));
         std.debug.assert(version >= 3 or !entry.needsExtendedFlags());
         const raw_len = index.kind.rawLen();
@@ -1917,7 +1920,7 @@ pub const Index = struct {
         // unchanged on the strength of a size that was never checked.
         var stat = entry.stat;
         if (index.isRacy(entry)) {
-            const changed = if (options.racy) |r| r.changed(r.context, index, entry) else true;
+            const changed = if (options.racy) |r| try r.changed(r.context, index, entry) else true;
             if (changed) stat.size = 0;
         }
 

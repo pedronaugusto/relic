@@ -261,10 +261,10 @@ pub fn initConfig(repo: *Repository) Error!void {
 
 /// Whether a cherry-pick or revert is waiting: a sequence in
 /// `.git/sequencer`, or a single pick's `CHERRY_PICK_HEAD` or `REVERT_HEAD`.
-pub fn inProgress(io: Io, repo: *Repository) ?Action {
+pub fn inProgress(io: Io, repo: *Repository) Io.Cancelable!?Action {
     if (lastCommand(repo.allocator(), io, repo)) |action| return action;
-    if (repo.refStore().root().exists(repo.allocator(), io, .cherry_pick_head)) return .pick;
-    if (repo.refStore().root().exists(repo.allocator(), io, .revert_head)) return .revert;
+    if ((try repo.refStore().root().exists(repo.allocator(), io, .cherry_pick_head))) return .pick;
+    if ((try repo.refStore().root().exists(repo.allocator(), io, .revert_head))) return .revert;
     return null;
 }
 
@@ -434,7 +434,7 @@ fn parseOpts(gpa: Allocator, arena: Allocator, text: []const u8, options: *Optio
 /// Write `abort-safety`: where `HEAD` is now, so an abort can tell whether
 /// something else has moved it since.
 fn updateAbortSafety(gpa: Allocator, io: Io, repo: *Repository) Error!void {
-    if (!state_file.exists(io, repo.gitDirectory(), seq_dir)) return;
+    if (!try state_file.exists(io, repo.gitDirectory(), seq_dir)) return;
     var head = try head_mod.read(gpa, io, repo);
     defer head.deinit(gpa);
     var buf: [hash.max_hex_len + 1]u8 = undefined;
@@ -765,7 +765,7 @@ fn start(gpa: Allocator, io: Io, repo: *Repository, action: Action, commits: []c
     errdefer arena_instance.deinit();
     const arena = arena_instance.allocator();
     if (commits.len == 0) return error.NotACommit;
-    if (merging.inProgress(io, repo)) return error.MergeInProgress;
+    if ((try merging.inProgress(io, repo))) return error.MergeInProgress;
 
     var r = try newReplay(gpa, arena, io, repo, action, options);
 
@@ -953,18 +953,18 @@ pub fn proceed(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_instance.deinit();
     const arena = arena_instance.allocator();
-    const action = inProgress(io, repo) orelse return error.NoSequencerInProgress;
+    const action = (try inProgress(io, repo)) orelse return error.NoSequencerInProgress;
     var opts = options;
     try readOpts(gpa, arena, io, repo, &opts);
     var r = try newReplay(gpa, arena, io, repo, action, opts);
 
-    if (!state_file.exists(io, repo.gitDirectory(), todo_path)) {
+    if (!try state_file.exists(io, repo.gitDirectory(), todo_path)) {
         _ = try commitStaged(&r);
         return finishOutcome(&r, &arena_instance, .committed, null);
     }
     const list = try readTodo(&r);
-    if (repo.refStore().root().exists(repo.allocator(), io, .cherry_pick_head) or
-        repo.refStore().root().exists(repo.allocator(), io, .revert_head))
+    if ((try repo.refStore().root().exists(repo.allocator(), io, .cherry_pick_head)) or
+        (try repo.refStore().root().exists(repo.allocator(), io, .revert_head)))
     {
         _ = try commitStaged(&r);
     }
@@ -1004,12 +1004,12 @@ fn requireIndexIsHead(r: *Replay) Error!void {
 pub fn skip(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Error!Outcome {
     diagnostic.reset(options.diagnostic);
     try initConfig(repo);
-    const action = inProgress(io, repo) orelse return error.NoSequencerInProgress;
-    if (!repo.refStore().root().exists(repo.allocator(), io, action.headRef())) {
+    const action = (try inProgress(io, repo)) orelse return error.NoSequencerInProgress;
+    if (!(try repo.refStore().root().exists(repo.allocator(), io, action.headRef()))) {
         if (!try abortIsSafe(gpa, io, repo)) return error.NothingToSkip;
     }
     try resetMerge(gpa, io, repo, try currentHead(gpa, io, repo), .{ .who = options.who, .blocked = options.blocked });
-    if (!state_file.exists(io, repo.gitDirectory(), seq_dir)) {
+    if (!try state_file.exists(io, repo.gitDirectory(), seq_dir)) {
         const arena_instance: std.heap.ArenaAllocator = .init(gpa);
         return .{ .gpa = gpa, .arena = arena_instance.state };
     }
@@ -1023,8 +1023,8 @@ pub fn skip(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Er
 pub fn abort(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature, blocked: ?*three_way.Blocked) Self.Error!void {
     try initConfig(repo);
     const text = (try state_file.read(gpa, io, repo.gitDirectory(), head_path)) orelse {
-        if (!repo.refStore().root().exists(repo.allocator(), io, .cherry_pick_head) and
-            !repo.refStore().root().exists(repo.allocator(), io, .revert_head)) return error.NoSequencerInProgress;
+        if (!(try repo.refStore().root().exists(repo.allocator(), io, .cherry_pick_head)) and
+            !(try repo.refStore().root().exists(repo.allocator(), io, .revert_head))) return error.NoSequencerInProgress;
         return resetMerge(gpa, io, repo, try currentHead(gpa, io, repo), .{ .who = who, .blocked = blocked });
     };
     defer gpa.free(text);

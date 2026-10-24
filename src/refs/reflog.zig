@@ -113,10 +113,13 @@ pub fn pathFor(gpa: Allocator, ref: []const u8) Allocator.Error![]u8 {
 }
 
 /// Whether a log already exists for `ref`.
-pub fn exists(gpa: Allocator, io: Io, git_dir: Io.Dir, ref: []const u8) Allocator.Error!bool {
+pub fn exists(gpa: Allocator, io: Io, git_dir: Io.Dir, ref: []const u8) (Allocator.Error || Io.Cancelable)!bool {
     const path = try pathFor(gpa, ref);
     defer gpa.free(path);
-    git_dir.access(io, path, .{}) catch return false;
+    git_dir.access(io, path, .{}) catch |err| return switch (err) {
+        error.Canceled => error.Canceled,
+        else => false,
+    };
     return true;
 }
 
@@ -311,15 +314,15 @@ pub fn expire(
         // old value it will have: the last kept one's new value.
         if (rewrite) entry.old = last_kept orelse Oid.zero(kind);
         if (!keeper.keep(entry, count - seen)) continue;
-        const w = lock.writer();
+        const w = &lock;
         if (rewrite) {
             const old = last_kept orelse Oid.zero(kind);
-            w.writeAll(old.hex(&hex)) catch return error.WriteFailed;
-            w.writeAll(line[hex_len..]) catch return error.WriteFailed;
+            try w.writeAll(old.hex(&hex));
+            try w.writeAll(line[hex_len..]);
         } else {
-            w.writeAll(line) catch return error.WriteFailed;
+            try w.writeAll(line);
         }
-        w.writeByte('\n') catch return error.WriteFailed;
+        try w.writeByte('\n');
         last_kept = entry.new;
     }
     try lock.commit(io);

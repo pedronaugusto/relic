@@ -107,9 +107,9 @@ pub const Outcome = struct {
 
 /// Whether rerere runs here: `rerere.enabled`, or, unset, whether
 /// `.git/rr-cache` is there.
-pub fn enabled(io: Io, repo: *Repository) bool {
+pub fn enabled(io: Io, repo: *Repository) Io.Cancelable!bool {
     const setting = repo.configuration().getBool("rerere.enabled", false) catch null;
-    if (repo.configuration().get("rerere.enabled") == null) return state_file.exists(io, repo.commonDirectory(), "rr-cache");
+    if (repo.configuration().get("rerere.enabled") == null) return try state_file.exists(io, repo.commonDirectory(), "rr-cache");
     return setting orelse false;
 }
 
@@ -342,7 +342,7 @@ pub fn run(gpa: Allocator, io: Io, repo: *Repository, index: *Index, options: Op
     errdefer arena_instance.deinit();
     const arena = arena_instance.allocator();
     var outcome: Outcome = .{ .gpa = gpa, .arena = undefined };
-    if (!enabled(io, repo)) {
+    if (!(try enabled(io, repo))) {
         outcome.arena = arena_instance.state;
         return outcome;
     }
@@ -499,7 +499,7 @@ fn writeMergeRr(r: *Run, rr: *const std.array_hash_map.String(?Id)) Error!void {
         try out.append(r.arena, 0);
     }
     const lock = &r.lock.?;
-    try lock.writer().writeAll(out.items);
+    try lock.writeAll(out.items);
     try lock.commit(r.io);
 }
 
@@ -658,7 +658,7 @@ fn stagePath(r: *Run, index: *Index, path: []const u8) Error!void {
 /// `rerere_clear`: forget the conflicts in play that have no resolution,
 /// and `MERGE_RR` -- what an aborted rebase does.
 pub fn clear(gpa: Allocator, io: Io, repo: *Repository) Self.Error!void {
-    if (!enabled(io, repo)) return;
+    if (!(try enabled(io, repo))) return;
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
     const arena = arena_instance.allocator();
@@ -756,7 +756,7 @@ pub fn status(gpa: Allocator, io: Io, repo: *Repository) Self.Error!Paths {
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_instance.deinit();
     var out: Paths = .{ .gpa = gpa, .arena = undefined };
-    if (enabled(io, repo)) {
+    if ((try enabled(io, repo))) {
         var r = try startRun(gpa, arena_instance.allocator(), io, repo, null);
         const rr = try readMergeRr(&r);
         out.paths = rr.keys();
@@ -774,7 +774,7 @@ pub fn remaining(gpa: Allocator, io: Io, repo: *Repository) Self.Error!Paths {
     errdefer arena_instance.deinit();
     const arena = arena_instance.allocator();
     var out: Paths = .{ .gpa = gpa, .arena = undefined };
-    if (enabled(io, repo)) {
+    if ((try enabled(io, repo))) {
         var r = try startRun(gpa, arena, io, repo, null);
         var rr = try readMergeRr(&r);
         var resolved: std.StringHashMapUnmanaged(void) = .empty;
@@ -819,7 +819,7 @@ pub fn diff(gpa: Allocator, io: Io, repo: *Repository) Self.Error![]u8 {
     const arena = arena_instance.allocator();
     var out: std.Io.Writer.Allocating = .init(gpa);
     errdefer out.deinit();
-    if (!enabled(io, repo)) return out.toOwnedSlice() catch return error.OutOfMemory;
+    if (!(try enabled(io, repo))) return out.toOwnedSlice() catch return error.OutOfMemory;
     var r = try startRun(gpa, arena, io, repo, null);
     const rr = try readMergeRr(&r);
     for (rr.keys(), rr.values()) |path, slot| {
@@ -879,7 +879,7 @@ pub fn forget(gpa: Allocator, io: Io, repo: *Repository, pathspec: []const []con
     errdefer arena_instance.deinit();
     const arena = arena_instance.allocator();
     var out: Forgotten = .{ .gpa = gpa, .arena = undefined };
-    if (!enabled(io, repo)) {
+    if (!(try enabled(io, repo))) {
         out.arena = arena_instance.state;
         return out;
     }
@@ -993,7 +993,7 @@ fn handleCache(r: *Run, path: []const u8, stages: Stages, size: u32) Error!Norma
 /// happens when rerere is not enabled.
 pub fn gc(gpa: Allocator, io: Io, repo: *Repository, now_at: Io.Timestamp) Self.Error!void {
     const now = now_at.toSeconds();
-    if (!enabled(io, repo)) return;
+    if (!(try enabled(io, repo))) return;
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
     const arena = arena_instance.allocator();

@@ -477,7 +477,7 @@ pub fn create(gpa: Allocator, io: Io, repo: *Repository, target: Target, request
     var buffer: [64 * 1024]u8 = undefined;
     var lock = try fs.LockFile.open(gpa, io, dir, .{ .sub_path = path, .buffer = &buffer }, .{ .sync = .none });
     defer lock.deinit(io);
-    try write(gpa, io, lock.writer(), repo, request);
+    write(gpa, io, lock.writer(), repo, request) catch |err| return lock.failure(err);
     try lock.commit(io);
 }
 

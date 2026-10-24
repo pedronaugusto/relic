@@ -713,7 +713,11 @@ pub const LockError = error{
 } || airlock.CreateError || Io.Cancelable;
 
 /// Errors from finishing a lock.
-pub const CommitError = Io.Writer.Error || SyncError || Io.Dir.RenameError || Io.Dir.DeleteFileError || Io.Dir.OpenError || Io.File.SetLengthError || airlock.Pending.CommitError;
+/// A write to a lock: the file's own error, which a writer's
+/// `error.WriteFailed` stands for, or that when the file kept none.
+pub const WriteError = Io.Writer.Error || Io.File.Writer.Error;
+
+pub const CommitError = WriteError || SyncError || Io.Dir.RenameError || Io.Dir.DeleteFileError || Io.Dir.OpenError || Io.File.SetLengthError || airlock.Pending.CommitError;
 
 /// git's lock file: `<path>.lock`, created with `O_CREAT|O_EXCL`, written,
 /// made durable as the policy asks, and renamed over `<path>`.
@@ -804,16 +808,39 @@ pub const LockFile = struct {
         };
     }
 
-    /// The writer the new contents go through.
+    /// The writer the new contents go through. It fails as every writer
+    /// does, with `error.WriteFailed`; `failure` says why.
     pub fn writer(lock: *LockFile) *Io.Writer {
         return &lock.file_writer.interface;
+    }
+
+    /// What a write through `writer` failed with: for `error.WriteFailed`,
+    /// the file's own error, a cancel among them; any other error as it is.
+    pub fn failure(lock: *const LockFile, err: anytype) (@TypeOf(err) || Io.File.Writer.Error) {
+        if (@as(anyerror, err) == error.WriteFailed) if (lock.file_writer.err) |cause| return cause;
+        return err;
+    }
+
+    /// `bytes` through `writer`, failing with the file's own error.
+    pub fn writeAll(lock: *LockFile, bytes: []const u8) Self.WriteError!void {
+        lock.writer().writeAll(bytes) catch |err| return lock.failure(err);
+    }
+
+    /// `writer`'s `print`, failing with the file's own error.
+    pub fn print(lock: *LockFile, comptime format: []const u8, args: anytype) Self.WriteError!void {
+        lock.writer().print(format, args) catch |err| return lock.failure(err);
+    }
+
+    /// One byte through `writer`, failing with the file's own error.
+    pub fn writeByte(lock: *LockFile, byte: u8) Self.WriteError!void {
+        lock.writer().writeByte(byte) catch |err| return lock.failure(err);
     }
 
     /// Flush, make durable, close and rename over the target. After this the
     /// lock is gone and the new bytes are the file.
     pub fn commit(lock: *LockFile, io: Io) Self.CommitError!void {
         assert(!lock.finished);
-        try lock.file_writer.interface.flush();
+        lock.file_writer.interface.flush() catch |err| return lock.failure(err);
         // The lock's own descriptor is synced before the rename, which is the
         // step that prevents every corruption the field reports: an empty
         // ref, a truncated index, a zero-length loose object. A batch differs
@@ -837,6 +864,10 @@ pub const LockFile = struct {
     /// Give the lock up, leaving the target as it was. Safe to call after
     /// `commit`, which is what makes `defer lock.deinit(io)` the right shape.
     pub fn deinit(lock: *LockFile, io: Io) void {
+        // Giving up says nothing to its caller, so it takes no cancel in:
+        // one that arrives meanwhile stays for the caller's next point.
+        const protection = io.swapCancelProtection(.blocked);
+        defer _ = io.swapCancelProtection(protection);
         lock.pending.discard(io);
         lock.removePidFile(io);
         lock.gpa.free(lock.lock_name);

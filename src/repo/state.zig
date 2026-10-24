@@ -43,9 +43,14 @@ pub fn remove(io: Io, dir: Io.Dir, sub_path: []const u8) Self.Error!void {
     };
 }
 
-/// Whether the state file or directory `sub_path` under `dir` is there.
-pub fn exists(io: Io, dir: Io.Dir, sub_path: []const u8) bool {
-    dir.access(io, sub_path, .{}) catch return false;
+/// Whether the state file or directory `sub_path` under `dir` is there:
+/// not when it cannot be reached, as git's `file_exists` answers; a cancel
+/// is returned.
+pub fn exists(io: Io, dir: Io.Dir, sub_path: []const u8) Io.Cancelable!bool {
+    dir.access(io, sub_path, .{}) catch |err| return switch (err) {
+        error.Canceled => error.Canceled,
+        else => false,
+    };
     return true;
 }
 

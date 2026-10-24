@@ -209,8 +209,8 @@ pub const Outcome = struct {
 
 /// Whether an `am` session is in progress: `rebase-apply` with `next` and
 /// `last` in it.
-pub fn inProgress(io: Io, repo: *Repository) bool {
-    return state_file.exists(io, repo.gitDirectory(), state_dir ++ "/next") and state_file.exists(io, repo.gitDirectory(), state_dir ++ "/last");
+pub fn inProgress(io: Io, repo: *Repository) Io.Cancelable!bool {
+    return try state_file.exists(io, repo.gitDirectory(), state_dir ++ "/next") and try state_file.exists(io, repo.gitDirectory(), state_dir ++ "/last");
 }
 
 const Session = struct {
@@ -276,7 +276,7 @@ const Session = struct {
     }
 
     fn exists(s: *Session, name: []const u8) Error!bool {
-        return state_file.exists(s.io, s.repo.gitDirectory(), try s.path(name));
+        return try state_file.exists(s.io, s.repo.gitDirectory(), try s.path(name));
     }
 
     fn msgnum(s: *Session) Allocator.Error![]const u8 {
@@ -396,9 +396,9 @@ fn applyOptionsFrom(a: Allocator, words: []const []const u8) Error!apply_mod.Opt
 /// each a mailbox's whole contents, and run it until it finishes or stops.
 pub fn start(gpa: Allocator, io: Io, repo: *Repository, mailboxes: []const []const u8, options: Options) Self.Error!Outcome {
     if (repo.workDirectory() == null) return error.BareRepository;
-    if (inProgress(io, repo)) return error.AmInProgress;
+    if ((try inProgress(io, repo))) return error.AmInProgress;
     // A rebase made the directory for its autostash.
-    if (!options.rebasing and state_file.exists(io, repo.gitDirectory(), state_dir)) return error.RebaseInProgress;
+    if (!options.rebasing and try state_file.exists(io, repo.gitDirectory(), state_dir)) return error.RebaseInProgress;
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_instance.deinit();
     const a = arena_instance.allocator();
@@ -481,7 +481,7 @@ fn destroy(io: Io, repo: *Repository) Error!void {
 //=========================================================================
 
 fn load(gpa: Allocator, a: Allocator, io: Io, repo: *Repository, options: Options) Error!Session {
-    if (!inProgress(io, repo)) return error.NoAmInProgress;
+    if (!(try inProgress(io, repo))) return error.NoAmInProgress;
     var s: Session = .{ .gpa = gpa, .a = a, .io = io, .repo = repo, .options = options, .dir = repo.gitDirectory() };
     try reload(&s);
     return s;
@@ -1040,7 +1040,7 @@ pub fn skip(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Er
 /// `git am --abort`: put `HEAD`, the index and the working tree back where
 /// the session started, unless `HEAD` moved since it stopped, and end it.
 pub fn abort(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature) Self.Error!void {
-    if (!inProgress(io, repo)) return destroyStray(io, repo);
+    if (!(try inProgress(io, repo))) return destroyStray(io, repo);
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
     const a = arena_instance.allocator();
@@ -1083,7 +1083,7 @@ pub fn abort(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature) S
 
 /// `git am --quit`: end the session and leave everything as it is.
 pub fn quit(io: Io, repo: *Repository) Self.Error!void {
-    if (!inProgress(io, repo)) return destroyStray(io, repo);
+    if (!(try inProgress(io, repo))) return destroyStray(io, repo);
     try destroy(io, repo);
 }
 
@@ -1091,6 +1091,6 @@ pub fn quit(io: Io, repo: *Repository) Self.Error!void {
 /// and `--quit` remove a stray one; with none there either, there is
 /// nothing to end.
 fn destroyStray(io: Io, repo: *Repository) Self.Error!void {
-    if (!state_file.exists(io, repo.gitDirectory(), state_dir)) return error.NoAmInProgress;
+    if (!try state_file.exists(io, repo.gitDirectory(), state_dir)) return error.NoAmInProgress;
     try destroy(io, repo);
 }

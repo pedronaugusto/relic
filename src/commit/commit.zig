@@ -153,9 +153,9 @@ pub fn commit(io: Io, repo: *Repository, request: Request, options: Options) Sel
     if (repo.workDirectory() == null) return error.BareRepository;
     // Through the ref store: a reftable repository keeps the pick's and
     // the revert's refs in its tables, where no file says they are there.
-    if (repo.refStore().special().exists(io, .merge_head) or
-        repo.refStore().root().exists(gpa, io, .cherry_pick_head) or
-        repo.refStore().root().exists(gpa, io, .revert_head)) return error.OperationInProgress;
+    if ((try repo.refStore().special().exists(io, .merge_head)) or
+        (try repo.refStore().root().exists(gpa, io, .cherry_pick_head)) or
+        (try repo.refStore().root().exists(gpa, io, .revert_head))) return error.OperationInProgress;
     const cleanup = options.cleanup orelse try message.commitCleanup(repo.configuration());
 
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
