@@ -409,6 +409,7 @@ pub const Rules = struct {
                 const read = config_mod.pathSetting(gpa, io, base, config.context.home, value) catch |err| return switch (err) {
                     error.UnexpandablePath, error.UnstatablePath, error.MissingPath => error.SkipListUnreadable,
                     error.OutOfMemory => error.OutOfMemory,
+                    error.Canceled => error.Canceled,
                 };
                 const path = read orelse continue;
                 defer gpa.free(path);

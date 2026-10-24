@@ -255,10 +255,14 @@ pub const Settings = struct {
         const read = config_mod.pathSetting(arena, io, base, paths.home, raw) catch |err| return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             error.MissingPath, error.UnexpandablePath, error.UnstatablePath => error.InvalidHttpSetting,
+            error.Canceled => error.Canceled,
         };
         const path = read orelse return null;
         if (paths.base == null or std.Io.Dir.path.isAbsolute(path)) return path;
-        const top = base.realPathFileAlloc(io, ".", arena) catch return error.InvalidHttpSetting;
+        const top = base.realPathFileAlloc(io, ".", arena) catch |err| return switch (err) {
+            error.Canceled, error.OutOfMemory => |e| e,
+            else => error.InvalidHttpSetting,
+        };
         return try std.Io.Dir.path.join(arena, &.{ top, path });
     }
 
@@ -353,7 +357,7 @@ pub const Error = error{
     InvalidHttpSetting,
     /// relic was built without HTTP: its `http` build option is off.
     HttpUnavailable,
-} || Allocator.Error;
+} || Allocator.Error || Io.Cancelable;
 
 /// Which proxy an HTTP remote is reached through, chosen by the caller.
 /// Other remotes do not read it.

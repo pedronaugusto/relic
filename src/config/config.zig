@@ -81,7 +81,7 @@ pub const PathSettingError = PathError || error{
     /// A path marked `:(optional)` whose stat failed other than by the file
     /// not being there, which git dies on ("could not stat").
     UnstatablePath,
-};
+} || Io.Cancelable;
 
 /// One line of a configuration file, in the order the file holds them.
 ///
@@ -1676,7 +1676,10 @@ pub fn pathSetting(gpa: Allocator, io: Io, base: Io.Dir, home: ?[]const u8, raw:
         gpa.free(path);
         return null;
     }
-    const present = fs.existsFollowing(io, base, path) catch return error.UnstatablePath;
+    const present = fs.existsFollowing(io, base, path) catch |err| return switch (err) {
+        error.Canceled => error.Canceled,
+        else => error.UnstatablePath,
+    };
     if (!present) {
         gpa.free(path);
         return null;

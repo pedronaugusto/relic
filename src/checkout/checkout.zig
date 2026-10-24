@@ -2764,7 +2764,12 @@ const WriteBatch = struct {
         // It stops only once every job is claimed, so none is read below
         // with the result it started with.
         assert(next.load(.monotonic) >= b.jobs.items.len);
-        group.await(io) catch group.cancel(io);
+        // A cancel of this task while it waits ends the others too, and is
+        // this batch's answer: meeting it used the request up.
+        group.await(io) catch |err| {
+            group.cancel(io);
+            return err;
+        };
         var first: ?Error = null;
         for (b.jobs.items) |*job| {
             const stat = job.result catch |err| {

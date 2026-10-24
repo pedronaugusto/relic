@@ -2154,6 +2154,7 @@ pub const Client = struct {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidHttpSetting => return c.fail("an http.* setting for {s} does not parse", io, .{stripQuery(request_url)}, error.InvalidHttpSetting),
             error.HttpUnavailable => return error.HttpUnavailable,
+            error.Canceled => return error.Canceled,
         };
         var ca_info: ?[]const u8 = null;
         var ca_path: ?[]const u8 = null;
