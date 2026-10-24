@@ -10,6 +10,7 @@ const groups = .{
     @import("pack_codec.zig"),
     @import("zstd.zig"),
     @import("local_push.zig"),
+    @import("walk.zig"),
     native,
 };
 
