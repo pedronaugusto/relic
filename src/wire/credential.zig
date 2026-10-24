@@ -863,7 +863,11 @@ pub const Session = struct {
         }
         try s.write(s.gpa, &input, if (operation == .get) .helper else .response);
         const req: cache.Request = .{ .action = action, .timeout = helper.timeout, .input = input.items };
-        const answered = cache.request(s.gpa, io, socket, req) catch |err| return cacheFailed(err);
+        const answered = cache.request(s.gpa, io, socket, req) catch |err| {
+            std.debug.print("PROBE request {t} {s}: {t}\n", .{ action, socket, err });
+            return cacheFailed(err);
+        };
+        std.debug.print("PROBE request {t} {s}: {s}\n", .{ action, socket, if (answered == null) "null" else "answered" });
         const got = answered orelse retry: {
             if (action != .store) return .{ .failed = false, .any = false };
             if (cache_daemon) |starter| {
@@ -872,7 +876,12 @@ pub const Session = struct {
                     error.CacheDaemonNotStarted => return failed,
                 };
             } else if (!try startGitDaemon(s.gpa, io, programs, socket)) return failed;
-            break :retry (cache.request(s.gpa, io, socket, req) catch |err| return cacheFailed(err)) orelse return failed;
+            const again = cache.request(s.gpa, io, socket, req) catch |err| {
+                std.debug.print("PROBE retry {s}: {t}\n", .{ socket, err });
+                return cacheFailed(err);
+            };
+            std.debug.print("PROBE retry {s}: {s}\n", .{ socket, if (again == null) "null" else "answered" });
+            break :retry again orelse return failed;
         };
         defer {
             std.crypto.secureZero(u8, got);
@@ -893,9 +902,13 @@ pub const Session = struct {
         }, .{ .output = .limited(128) }) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Canceled => return error.Canceled,
-            else => return false,
+            else => {
+                std.debug.print("PROBE daemon run: {t}\n", .{err});
+                return false;
+            },
         };
         defer outcome.deinit(gpa);
+        std.debug.print("PROBE daemon stdout '{s}' succeeded {}\n", .{ outcome.stdout, outcome.succeeded() });
         return std.mem.eql(u8, outcome.stdout, "ok\n");
     }
 

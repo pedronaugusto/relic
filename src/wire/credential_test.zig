@@ -655,6 +655,7 @@ test "the cache helper runs in process against git's daemon and relic's, and a s
             _ = try session.fill(io, opts);
             try session.approve(io, opts);
         }
+        std.debug.print("PROBE socket {s} stored\n", .{socket});
         // git's client finds what relic's stored.
         const found = try gitCache(gpa, io, tmp.dir, &env, socket, &.{"get"}, "protocol=https\nhost=example.com\nusername=ada\n\n");
         defer gpa.free(found);
