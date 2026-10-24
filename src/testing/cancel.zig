@@ -82,8 +82,9 @@ pub fn expectCanceled(io: Io, at: u64, after: u64, function: anytype, args: anyt
     var future = try io.concurrent(Task.run, .{ counter.io(), &counter.state, io, args });
     counter.state.reached.waitUncancelable(io);
     if (counter.state.finished.load(.monotonic)) {
-        _ = future.await(io) catch {}; // glint-ignore: Z026 -- what it returned does not matter: ending at all is the failure
-        std.debug.print("the computation ended after {d} cancellation points, before point {d}\n", .{ points(&counter), at });
+        // Ending at all is the failure; how it ended says where to look.
+        const how: []const u8 = if (future.await(io)) |_| "an answer" else |err| @errorName(err);
+        std.debug.print("the computation ended after {d} cancellation points, before point {d}, with {s}\n", .{ points(&counter), at, how });
         return error.TestUnexpectedResult;
     }
     const result = future.cancel(io);
