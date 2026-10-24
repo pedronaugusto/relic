@@ -1744,12 +1744,12 @@ pub fn readAll(gpa: Allocator, io: Io, file: Io.File, max_bytes: usize) (Io.Dir.
             if (bytes.items.len > max_bytes) return error.StreamTooLong;
             try bytes.ensureTotalCapacityPrecise(gpa, @min(bytes.capacity *| 2, max_bytes + 1));
         }
-        const n = file.readStreaming(io, &.{bytes.unusedCapacitySlice()}) catch |err| switch (err) {
-            error.EndOfStream => 0,
+        // A read may give no bytes short of the end (reactor's io_uring
+        // answers so for an interrupted one): only EndOfStream ends it.
+        bytes.items.len += file.readStreaming(io, &.{bytes.unusedCapacitySlice()}) catch |err| switch (err) {
+            error.EndOfStream => break,
             else => |e| return e,
         };
-        bytes.items.len += n;
-        if (n == 0) break;
     }
     if (bytes.items.len > max_bytes) return error.StreamTooLong;
     return bytes.toOwnedSlice(gpa);
@@ -1787,8 +1787,13 @@ pub fn readSecretFile(
         }
         // unreachable: the capacity was just made room for.
         secret.resizeWithinCapacity(secret.capacity()) catch unreachable;
+        // As in `readAll`, a read of no bytes is not the end.
         const n = file.readStreaming(io, &.{secret.exposeMut()[have..]}) catch |err| switch (err) {
-            error.EndOfStream => 0,
+            error.EndOfStream => {
+                // unreachable: no larger than it was.
+                secret.resizeWithinCapacity(have) catch unreachable;
+                break;
+            },
             error.IsDir => {
                 secret.deinit();
                 return null;
@@ -1797,7 +1802,6 @@ pub fn readSecretFile(
         };
         // unreachable: the read filled no more than the capacity.
         secret.resizeWithinCapacity(have + n) catch unreachable;
-        if (n == 0) break;
     }
     if (secret.len() > max_bytes) return error.StreamTooLong;
     return secret;
@@ -2030,6 +2034,50 @@ test "a secret file is read whole into its owner, and refused past its limit as 
     try std.testing.expectError(error.StreamTooLong, readSecretFile(gpa, io, dir, "f", 4));
     try std.testing.expect(try readSecretFile(gpa, io, dir, "missing", 1 << 20) == null);
     try std.testing.expect(try readSecretFile(gpa, io, dir, "d", 1 << 20) == null);
+}
+
+/// An `Io` whose first streaming read gives five bytes and whose second
+/// gives none, short of the end: what reactor's io_uring backend answers
+/// for an interrupted read, and what `readStreaming` allows ("including 0").
+const ZeroMidStream = @import("shakedown").Layer(struct { reads: u32 = 0 }, .{ .operate = ZeroMidStreamOps.operate });
+const ZeroMidStreamOps = struct {
+    fn operate(userdata: ?*anyopaque, operation: Io.Operation) Io.Cancelable!Io.Operation.Result {
+        const l = ZeroMidStream.of(userdata);
+        if (operation == .file_read_streaming) {
+            l.state.reads += 1;
+            switch (l.state.reads) {
+                1 => {
+                    var short = operation;
+                    const first = operation.file_read_streaming.data[0];
+                    short.file_read_streaming.data = &.{first[0..@min(first.len, 5)]};
+                    return l.base.vtable.operate(l.base.userdata, short);
+                },
+                2 => return .{ .file_read_streaming = 0 },
+                else => {},
+            }
+        }
+        return l.base.vtable.operate(l.base.userdata, operation);
+    }
+};
+
+test "a whole-file read goes on past a read that gives no bytes short of the end" {
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = tmp.dir;
+    try dir.writeFile(std.testing.io, .{ .sub_path = "f", .data = "twelve bytes" });
+
+    var plain: ZeroMidStream = .init(std.testing.io, .{});
+    const whole = try readWhole(dir, plain.io(), "f", gpa, .limited(1 << 20));
+    defer gpa.free(whole);
+    try std.testing.expectEqualStrings("twelve bytes", whole);
+    try std.testing.expect(plain.state.reads > 2);
+
+    var secret: ZeroMidStream = .init(std.testing.io, .{});
+    var kept = (try readSecretFile(gpa, secret.io(), dir, "f", 1 << 20)).?;
+    defer kept.deinit();
+    try std.testing.expectEqualStrings("twelve bytes", kept.expose());
+    try std.testing.expect(secret.state.reads > 2);
 }
 
 test "a lock is refused, not broken, and says who holds it" {
