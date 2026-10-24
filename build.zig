@@ -279,6 +279,16 @@ pub fn dev(b: *std.Build, tools: type) void {
     });
 
     const run_tests = b.addRunArtifact(tests);
+    // The git the comparisons are held to, asked once before the tests run,
+    // where they run.
+    const held_git = b.addExecutable(.{ .name = "relic-held-git", .root_module = b.createModule(.{
+        .root_source_file = p.path("src/testing/held_git.zig"),
+        .target = target,
+        .optimize = optimize,
+    }) });
+    const ask_git = b.addRunArtifact(held_git);
+    ask_git.has_side_effects = true;
+    run_tests.step.dependOn(&ask_git.step);
 
     const test_step = b.step("test", "Run the relic tests");
     test_step.dependOn(&run_tests.step);
@@ -288,6 +298,7 @@ pub fn dev(b: *std.Build, tools: type) void {
     // the default install step does not.
     const check_step = b.step("check", "Compile everything without running it");
     check_step.dependOn(&tests.step);
+    check_step.dependOn(&held_git.step);
     check_step.dependOn(&lock_helper.step);
     check_step.dependOn(&filter_helper.step);
     check_step.dependOn(&lfs_transfer_helper.step);
