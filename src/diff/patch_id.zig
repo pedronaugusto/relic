@@ -184,7 +184,7 @@ fn hashChange(gpa: Allocator, io: Io, db: *odb_mod.Odb, h: *hash.Hasher, change:
 
     // No indentation heuristic: the patch id is taken with xdiff's plain
     // settings.
-    var script = try parallax.diffLines(gpa, old_bytes, new_bytes, .{ .indent_heuristic = false });
+    var script = try parallax.diffLines(gpa, old_bytes, new_bytes, .{ .indent_heuristic = false, .io = io });
     defer script.deinit();
     const d = script.diff;
 

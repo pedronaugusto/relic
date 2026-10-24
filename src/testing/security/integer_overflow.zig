@@ -36,13 +36,13 @@ test "git 2.3.10 (MAX_XDIFF_SIZE, no t/ test): a text too large for the line dif
     defer out.deinit();
     // A line is numbered with a `u32`, so a side of 4 GiB is refused.
     const huge = unread(u8, @as(usize, std.math.maxInt(u32)) + 1);
-    try std.testing.expectError(error.InputTooLarge, diff.unifiedBody(gpa, &out.writer, huge, "", .{}));
-    try std.testing.expectError(error.InputTooLarge, diff.unifiedBody(gpa, &out.writer, "", huge, .{}));
+    try std.testing.expectError(error.InputTooLarge, diff.unifiedBody(gpa, std.testing.io, &out.writer, .{ .old = huge, .new = "" }, .{}));
+    try std.testing.expectError(error.InputTooLarge, diff.unifiedBody(gpa, std.testing.io, &out.writer, .{ .old = "", .new = huge }, .{}));
     // A merge takes a side larger than MAX_XDIFF_SIZE as binary, as git's
     // `ll_merge` does.
-    try std.testing.expectError(error.BinaryBlob, blob_merge.blobs(gpa, "a", unread(u8, blob_merge.max_text_size + 1), "", .{}));
+    try std.testing.expectError(error.BinaryBlob, blob_merge.blobs(gpa, std.testing.io, .{ .ancestor = "a", .ours = unread(u8, blob_merge.max_text_size + 1), .theirs = "" }, .{}));
     // And an ordinary diff is unchanged by the checks.
-    try diff.unifiedBody(gpa, &out.writer, "a\nb\n", "a\nc\n", .{});
+    try diff.unifiedBody(gpa, std.testing.io, &out.writer, .{ .old = "a\nb\n", .new = "a\nc\n" }, .{});
     try std.testing.expect(out.written().len != 0);
 }
 

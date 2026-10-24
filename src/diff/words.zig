@@ -57,6 +57,8 @@ fn marksOf(style: Style, colors: ?*const paint_mod.Colors) Marks {
 /// painting.
 pub const Painter = struct {
     gpa: Allocator,
+    /// The task whose cancellation ends the word diff.
+    io: Io,
     style: Style,
     /// `null` cuts words at spaces.
     regex: ?*const ere.Regex,
@@ -149,7 +151,7 @@ pub const Painter = struct {
 
         var differ: parallax.Differ = .init(p.gpa);
         defer differ.deinit();
-        const diff = try differ.lines(old_list, new_list, .{ .algorithm = .myers, .indent_heuristic = false });
+        const diff = try differ.lines(old_list, new_list, .{ .algorithm = .myers, .indent_heuristic = false, .io = p.io });
         var hunks = diff.hunks(.{ .context = 0, .inter_hunk_context = 0 });
         var current: usize = 0;
         while (hunks.next()) |h| {

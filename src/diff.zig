@@ -58,6 +58,7 @@ pub const SubmoduleChange = @import("diff/diff.zig").SubmoduleChange;
 pub const SubmoduleWriter = @import("diff/diff.zig").SubmoduleWriter;
 pub const PathHeader = @import("diff/diff.zig").PathHeader;
 pub const unified = @import("diff/diff.zig").unified;
+pub const Texts = @import("diff/diff.zig").Texts;
 pub const unifiedBody = @import("diff/diff.zig").unifiedBody;
 pub const LineDiff = @import("diff/diff.zig").LineDiff;
 pub const max_text_bytes = @import("diff/diff.zig").max_text_bytes;

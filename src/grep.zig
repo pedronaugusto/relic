@@ -1165,8 +1165,11 @@ const Work = struct {
     next: std.atomic.Value(usize) = .init(0),
 };
 
-fn runWorker(work: *Work, worker: usize) void {
+/// Search files until none is left; a step is one file, held in memory
+/// already, so the check is explicit.
+fn runWorker(work: *Work, io: Io, worker: usize) Io.Cancelable!void {
     while (true) {
+        try io.checkCancel();
         const i = work.next.fetchAdd(1, .monotonic);
         if (i >= work.items.len) return;
         const content = work.contents[i] orelse continue;
@@ -1181,6 +1184,19 @@ fn runWorker(work: *Work, worker: usize) void {
         work.used[worker] += n;
         work.hits[i] = hit;
     }
+}
+
+/// `tasks` workers over the batch, the first on the calling task. A
+/// cancellation that stops the first cancels the others before it returns;
+/// one that reaches the group while the first works ends the group's wait.
+fn searchAll(work: *Work, io: Io, tasks: usize) Io.Cancelable!void {
+    var group: Io.Group = .init;
+    for (1..tasks) |t| group.async(io, runWorker, .{ work, io, t });
+    runWorker(work, io, 0) catch |err| {
+        group.cancel(io);
+        return err;
+    };
+    try group.await(io);
 }
 
 fn taskCount(threads: u16) usize {
@@ -1359,12 +1375,7 @@ pub fn grep(gpa: Allocator, io: Io, w: *Io.Writer, repo: *Repository, options: O
             .used = used,
             .scratch = scratch,
         };
-        var group: Io.Group = .init;
-        for (1..@min(workers, n)) |t| group.async(io, runWorker, .{ &work, t });
-        runWorker(&work, 0);
-        group.await(io) catch |err| switch (err) {
-            error.Canceled => return error.Canceled,
-        };
+        try searchAll(&work, io, @min(workers, n));
         // in order; what did not fit a task's buffer is searched again here
         for (0..n) |i| {
             const content = work.contents[i] orelse continue;

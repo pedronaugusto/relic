@@ -1065,9 +1065,9 @@ fn patchApplies(gpa: Allocator, io: Io, db: *odb_mod.Odb, base: Oid, current: Oi
         defer gpa.free(now_blob.bytes);
         if (attributes.isBinaryForDiff(old_blob.bytes) or attributes.isBinaryForDiff(new_blob.bytes) or attributes.isBinaryForDiff(now_blob.bytes)) return false;
 
-        var patch = try parallax.diffLines(arena, old_blob.bytes, new_blob.bytes, .{});
+        var patch = try parallax.diffLines(arena, old_blob.bytes, new_blob.bytes, .{ .io = io });
         defer patch.deinit();
-        var moved = try parallax.diffLines(arena, old_blob.bytes, now_blob.bytes, .{});
+        var moved = try parallax.diffLines(arena, old_blob.bytes, now_blob.bytes, .{ .io = io });
         defer moved.deinit();
         const old_len = patch.diff.old.len();
         var hunks = patch.diff.hunks(.{});

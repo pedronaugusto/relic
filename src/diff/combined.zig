@@ -256,7 +256,7 @@ const File = struct {
                 lines.reuse(n, j);
             } else {
                 const text = try f.side(parent.oid, parent.mode, conversion);
-                try lines.combine(f.a, f.differ, text, n, f.options.diff);
+                try lines.combine(f.a, f.io, f.differ, text, n, f.options.diff);
             }
         }
         const context = f.options.diff.context;
@@ -418,10 +418,10 @@ const Lines = struct {
     /// git's `combine_diff` for parent `n`: what it lost hung before the
     /// result's line where each change starts, what the result added
     /// marked, the lost lines merged, and the parent's line numbers.
-    fn combine(l: *Lines, a: Allocator, differ: *parallax.Differ, parent: []const u8, n: usize, options: diff.Options) Self.Error!void {
+    fn combine(l: *Lines, a: Allocator, io: Io, differ: *parallax.Differ, parent: []const u8, n: usize, options: diff.Options) Self.Error!void {
         const nmask = @as(u64, 1) << @intCast(n);
         if (parent.len > diff.max_text_bytes or l.result.len > diff.max_text_bytes) return error.InputTooLarge;
-        const d = try differ.lines(parent, l.result, options.lines());
+        const d = try differ.lines(parent, l.result, options.lines(io));
         for (d.changes) |c| {
             // The lost lines hang before the line the change starts at.
             const bucket = &l.lines[c.new_start];

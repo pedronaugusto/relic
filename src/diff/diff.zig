@@ -75,7 +75,7 @@ fn checkTextSize(old: []const u8, new: []const u8) TextError!void {
 }
 
 /// Errors from diffing two texts.
-pub const TextError = Allocator.Error || error{
+pub const TextError = Allocator.Error || Io.Cancelable || error{
     /// A side exceeds Git's 1023 MiB limit, or the two hold 2^32 lines or more
     /// between them: more than a line diff numbers.
     InputTooLarge,
@@ -834,8 +834,9 @@ pub const Options = struct {
     /// `--submodule`, `diff.submodule`.
     submodule: SubmoduleFormat = .short,
 
-    /// The line diff these options ask for, as parallax takes it.
-    pub fn lines(options: Options) parallax.Options {
+    /// The line diff these options ask for, as parallax takes it, canceled
+    /// with the task `io` runs.
+    pub fn lines(options: Options, io: Io) parallax.Options {
         return .{
             .algorithm = options.algorithm,
             .minimal = options.minimal,
@@ -847,6 +848,7 @@ pub const Options = struct {
             } },
             .max_work = .fromRaw(options.max_work),
             .anchors = options.anchors,
+            .io = io,
         };
     }
 };
@@ -1158,18 +1160,18 @@ pub const WhitespaceRule = struct {
 
 /// The added and removed line counts between two blobs, binary where
 /// either holds a NUL near its start.
-pub fn blobNumStat(gpa: Allocator, old: []const u8, new: []const u8, options: Options) Self.TextError!NumStat {
+pub fn blobNumStat(gpa: Allocator, io: Io, old: []const u8, new: []const u8, options: Options) Self.TextError!NumStat {
     var differ: parallax.Differ = .init(gpa);
     defer differ.deinit();
-    return countLines(&differ, old, new, isBinary(old) or isBinary(new), options);
+    return countLines(&differ, io, old, new, isBinary(old) or isBinary(new), options);
 }
 
 /// `blobNumStat` in a workspace a caller keeps for many blobs, `binary`
 /// already decided.
-fn countLines(differ: *parallax.Differ, old: []const u8, new: []const u8, binary: bool, options: Options) Self.TextError!NumStat {
+fn countLines(differ: *parallax.Differ, io: Io, old: []const u8, new: []const u8, binary: bool, options: Options) Self.TextError!NumStat {
     try checkTextSize(old, new);
     if (binary) return .{ .plus = 0, .minus = 0, .binary = true };
-    const counts = (try differ.lines(old, new, options.lines())).stat();
+    const counts = (try differ.lines(old, new, options.lines(io))).stat();
     return .{ .plus = counts.added, .minus = counts.removed, .binary = false };
 }
 
@@ -1229,7 +1231,7 @@ pub fn numstat(gpa: Allocator, io: Io, inputs: NumstatInputs, options: Options) 
             const file: ?driver_mod.Drivers.File = if (side) |e| .{ .path = e.path, .mode = e.mode } else null;
             if (try inputs.drivers.isBinary(lookup.allocator(), io, file, bytes[s])) binary = true;
         }
-        out[i] = try countLines(&differ, bytes[0], bytes[1], binary, options);
+        out[i] = try countLines(&differ, io, bytes[0], bytes[1], binary, options);
     }
     return out;
 }
@@ -1749,7 +1751,7 @@ fn writeFilePatch(gpa: Allocator, io: Io, inputs: FileInputs, w: *Io.Writer, opt
     };
     if (options.function_line == null and options.function_context_names) body_options.function_line = try pair.functionLine();
     const word_regex = if (options.word_diff == .none) null else options.word_regex orelse pair.wordRegex() orelse options.configured_word_regex;
-    try writeBody(true, gpa, w, pair.texts[0], pair.texts[1], body_options, .{ .files = .{ .old = old_label, .new = new_label }, .recorder = inputs.recorder, .word_regex = word_regex });
+    try writeBody(true, gpa, io, w, .{ .old = pair.texts[0], .new = pair.texts[1] }, body_options, .{ .files = .{ .old = old_label, .new = new_label }, .recorder = inputs.recorder, .word_regex = word_regex });
     try pair.finish();
 }
 
@@ -1857,23 +1859,27 @@ pub const WordDiffError = UnifiedBodyError || words.Error || error{
     InvalidWordRegex,
 };
 
+/// The two texts a body compares.
+pub const Texts = struct { old: []const u8, new: []const u8 };
+
 /// Append the `@@` hunks for two blobs, with no `diff --git` header.
 ///
 /// This is what a caller that wants only the body asks for, and what
 /// `unified` uses. Context lines are the new side's, as git prints them,
 /// which shows where a whitespace option lets the two differ. Moved lines
-/// are found within the body, a diff of one file.
+/// are found within the body, a diff of one file. The line diff ends with
+/// `error.Canceled` once the task `io` runs is canceled.
 pub fn unifiedBody(
     gpa: Allocator,
+    io: Io,
     w: *Io.Writer,
-    old: []const u8,
-    new: []const u8,
+    texts: Texts,
     options: Options,
 ) UnifiedBodyError!void {
     var recorder: ?paint.Recorder = if (movedWanted(options)) .init(gpa, options.color_moved, options.color_moved_ws) else null;
     defer if (recorder) |*r| r.deinit();
     const r: ?*paint.Recorder = if (recorder) |*r| r else null;
-    writeBody(false, gpa, if (r) |rec| &rec.painted.writer else w, old, new, options, .{ .recorder = r }) catch |err| return recorded(r, err);
+    writeBody(false, gpa, io, if (r) |rec| &rec.painted.writer else w, texts, options, .{ .recorder = r }) catch |err| return recorded(r, err);
     if (r) |rec| try rec.finish(w);
 }
 
@@ -1890,13 +1896,13 @@ const BodyExtras = struct {
 /// any, painted where `options` has colours, or with `words` as a word
 /// diff where `options` asks; the removed and added lines recorded in
 /// `recorder` where there is one.
-fn writeBody(comptime words_allowed: bool, gpa: Allocator, w: *Io.Writer, old: []const u8, new: []const u8, options: Options, extras: BodyExtras) (if (words_allowed) WordDiffError else UnifiedBodyError)!void {
+fn writeBody(comptime words_allowed: bool, gpa: Allocator, io: Io, w: *Io.Writer, texts: Texts, options: Options, extras: BodyExtras) (if (words_allowed) WordDiffError else UnifiedBodyError)!void {
     const files = extras.files;
     const recorder = extras.recorder;
     var differ: parallax.Differ = .init(gpa);
     defer differ.deinit();
-    try checkTextSize(old, new);
-    const diff = try differ.lines(old, new, options.lines());
+    try checkTextSize(texts.old, texts.new);
+    const diff = try differ.lines(texts.old, texts.new, options.lines(io));
     // The rule lives in `options` for as long as the writer reads it.
     const heading: ?parallax.Heading = if (!options.function_context_names)
         null
@@ -1906,7 +1912,7 @@ fn writeBody(comptime words_allowed: bool, gpa: Allocator, w: *Io.Writer, old: [
         .c_function;
     const word_diff = words_allowed and options.word_diff != .none;
     var own_painter: ?paint.Painter = if (options.colors != null or options.diff_of_patches != null or word_diff)
-        .init(options.colors, options.whitespace_rule, options.ws_error_highlight, options.diff_of_patches, old, new)
+        .init(options.colors, options.whitespace_rule, options.ws_error_highlight, options.diff_of_patches, texts.old, texts.new)
     else
         null;
     // A recorded painter lives in the recorder, which replays its lines.
@@ -1931,14 +1937,14 @@ fn writeBody(comptime words_allowed: bool, gpa: Allocator, w: *Io.Writer, old: [
         .paint = if (painter) |p| p.paint() else null,
     };
     if (words_allowed) {
-        if (word_diff) return writeWords(gpa, w, diff, unified_options, options, extras.word_regex);
+        if (word_diff) return writeWords(gpa, io, w, diff, unified_options, options, extras.word_regex);
     }
     try parallax.writeUnified(w, diff, unified_options);
 }
 
 /// The hunks as a word diff: the file and hunk lines by `unified_options`'
 /// painter, the content lines' words by `words.Painter`.
-fn writeWords(gpa: Allocator, w: *Io.Writer, diff: parallax.Diff, unified_options: parallax.UnifiedOptions, options: Options, word_regex: ?[]const u8) WordDiffError!void {
+fn writeWords(gpa: Allocator, io: Io, w: *Io.Writer, diff: parallax.Diff, unified_options: parallax.UnifiedOptions, options: Options, word_regex: ?[]const u8) WordDiffError!void {
     var regex: ?ere.Regex = if (word_regex) |text|
         ere.Regex.compile(gpa, text, .{ .syntax = .extended, .newline = true }) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
@@ -1949,6 +1955,7 @@ fn writeWords(gpa: Allocator, w: *Io.Writer, diff: parallax.Diff, unified_option
     defer if (regex) |*re| re.deinit();
     var painter: words.Painter = .{
         .gpa = gpa,
+        .io = io,
         .style = options.word_diff,
         .regex = if (regex) |*re| re else null,
         .colors = options.colors,
@@ -1978,9 +1985,9 @@ test "a unified body matches the shape git prints" {
     defer out.deinit();
     try unifiedBody(
         gpa,
+        std.testing.io,
         &out.writer,
-        "one\ntwo\nthree\nfour\nfive\n",
-        "one\ntwo\nTHREE\nfour\nfive\n",
+        .{ .old = "one\ntwo\nthree\nfour\nfive\n", .new = "one\ntwo\nTHREE\nfour\nfive\n" },
         .{},
     );
     try std.testing.expectEqualStrings(
@@ -1994,7 +2001,7 @@ test "the enclosing line on a hunk header is cut at eighty bytes, as xdiff's buf
     var out: std.Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
     const long = "function_with_a_very_long_name_that_goes_on(int first_argument, int second_argument, int third)";
-    try unifiedBody(gpa, &out.writer, long ++ "\n1\n2\n3\n4\n5\n6\nx\n", long ++ "\n1\n2\n3\n4\n5\n6\ny\n", .{});
+    try unifiedBody(gpa, std.testing.io, &out.writer, .{ .old = long ++ "\n1\n2\n3\n4\n5\n6\nx\n", .new = long ++ "\n1\n2\n3\n4\n5\n6\ny\n" }, .{});
     // `git diff --no-index` prints the same header for these two files
     try std.testing.expect(std.mem.startsWith(u8, out.written(), "@@ -5,4 +5,4 @@ " ++ long[0..80] ++ "\n"));
 }
@@ -2003,11 +2010,11 @@ test "an empty range is printed the way a unified diff prints it" {
     const gpa = std.testing.allocator;
     var out: std.Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
-    try unifiedBody(gpa, &out.writer, "", "added\n", .{});
+    try unifiedBody(gpa, std.testing.io, &out.writer, .{ .old = "", .new = "added\n" }, .{});
     try std.testing.expectEqualStrings("@@ -0,0 +1 @@\n+added\n", out.written());
 
     out.clearRetainingCapacity();
-    try unifiedBody(gpa, &out.writer, "gone\n", "", .{});
+    try unifiedBody(gpa, std.testing.io, &out.writer, .{ .old = "gone\n", .new = "" }, .{});
     try std.testing.expectEqualStrings("@@ -1 +0,0 @@\n-gone\n", out.written());
 }
 
@@ -2015,7 +2022,7 @@ test "a missing final newline is marked" {
     const gpa = std.testing.allocator;
     var out: std.Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
-    try unifiedBody(gpa, &out.writer, "one\n", "one", .{});
+    try unifiedBody(gpa, std.testing.io, &out.writer, .{ .old = "one\n", .new = "one" }, .{});
     try std.testing.expect(std.mem.find(u8, out.written(), "\\ No newline at end of file") != null);
 }
 
@@ -2030,6 +2037,6 @@ test "diff refuses over Git's byte limit before binary scanning" {
     const prefix: [8000]u8 = @splat(0);
     const pointer: [*]const u8 = &prefix;
     const too_large = pointer[0 .. 1023 * 1024 * 1024 + 1];
-    try std.testing.expectError(error.InputTooLarge, blobNumStat(std.testing.allocator, too_large, "", .{}));
-    try std.testing.expectError(error.InputTooLarge, blobNumStat(std.testing.allocator, "", too_large, .{}));
+    try std.testing.expectError(error.InputTooLarge, blobNumStat(std.testing.allocator, std.testing.io, too_large, "", .{}));
+    try std.testing.expectError(error.InputTooLarge, blobNumStat(std.testing.allocator, std.testing.io, "", too_large, .{}));
 }

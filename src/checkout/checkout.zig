@@ -522,6 +522,9 @@ const Walker = struct {
         std.mem.sort(Found, entries.items, {}, lessThanFound);
 
         for (entries.items) |e| {
+            // A step is one file: its stat came with the scan, and an
+            // unchanged one reads nothing more.
+            try w.io.checkCancel();
             const path = if (dir_path.len == 0)
                 try w.gpa.dupe(u8, e.name)
             else
@@ -1546,6 +1549,9 @@ const StatusScan = struct {
 
         defer scan.deinit();
         while (try scan.next()) |item| {
+            // A step is one file: the scan reads names in batches, and an
+            // unchanged file reads nothing more.
+            try s.io.checkCancel();
             if (std.mem.eql(u8, item.name, ".git")) continue;
             const path = if (dir_path.len == 0)
                 try s.arena.dupe(u8, item.name)
@@ -1622,6 +1628,7 @@ const StatusScan = struct {
     fn checkEntries(s: *StatusScan) Error!void {
         var not_directories: std.StringHashMapUnmanaged(void) = .empty;
         for (s.index.entries.items) |*entry| {
+            try s.io.checkCancel();
             if (entry.stage != 0 or entry.skip_worktree or entry.isSparseDirectory()) continue;
             if (entry.assume_valid or entry.fsmonitor_valid) {
                 try s.seen.put(s.gpa, entry.path, {});
@@ -1781,6 +1788,8 @@ const StatusScan = struct {
 
         defer scan.deinit();
         while (try scan.next()) |item| {
+            // The untracked directories' files, once each.
+            try s.io.checkCancel();
             if (std.mem.eql(u8, item.name, ".git")) continue;
             try out.append(s.gpa, .{ .name = try s.arena.dupe(u8, item.name), .kind = item.entry.kind });
         }
@@ -2311,6 +2320,7 @@ fn removeUnwanted(
     var leading: LeadingDirs = .{};
     var i: usize = 0;
     while (i < index.entries.items.len) {
+        try io.checkCancel();
         const entry = index.entries.items[i];
         if (entry.stage != 0) {
             i += 1;
@@ -2396,11 +2406,16 @@ const CheckoutWrite = struct {
         var batch: WriteBatch = .{ .gpa = c.gpa, .workers = checkoutWorkers(c.options.workers) };
         defer batch.deinit();
         // A path that fails here leaves every path before it written, as a
-        // checkout one file at a time leaves them.
-        // glint-ignore: Z026 -- the path's own error is the one returned; flushing only keeps the paths before it written
-        errdefer batch.flush(c.io, c.wt, c.index, c.outcome, c.options.rules) catch {};
+        // checkout one file at a time leaves them, a canceled one too.
+        errdefer {
+            const protection = c.io.swapCancelProtection(.blocked);
+            defer _ = c.io.swapCancelProtection(protection);
+            // glint-ignore: Z026 -- the path's own error is the one returned; flushing only keeps the paths before it written
+            batch.flush(c.io, c.wt, c.index, c.outcome, c.options.rules) catch {};
+        }
         var leading: LeadingDirs = .{ .hide = c.options.rules.hide_dot_files };
         for (paths) |path| {
+            try c.io.checkCancel();
             const want = c.wanted.get(path).?;
             if (try c.unchanged(path, want)) {
                 c.outcome.unchanged += 1;
@@ -3003,6 +3018,7 @@ pub fn writePaths(
     defer waiting.deinit(gpa);
     var leading: LeadingDirs = .{ .hide = options.rules.hide_dot_files };
     for (writes) |w| {
+        try io.checkCancel();
         const want = w.blob orelse continue;
         if (std.Io.Dir.path.dirnamePosix(w.path)) |parent| try leading.make(io, wt, parent, options.force, options.refusal);
         if (try fs.statAt(io, wt, w.path)) |found| {
@@ -3381,6 +3397,7 @@ pub fn verifyUpdates(
     const paths = try arena.dupe([]const u8, updates.keys());
     std.mem.sort([]const u8, paths, {}, lessThanName);
     for (paths) |path| {
+        try io.checkCancel();
         const want = updates.get(path).?;
         if (index.find(path)) |entry| {
             if (entry.skip_worktree) continue;
@@ -4082,6 +4099,9 @@ const ListScan = struct {
 
         defer scan.deinit();
         while (try scan.next()) |item| {
+            // A step is one file: the scan reads names in batches, and an
+            // unchanged file reads nothing more.
+            try s.io.checkCancel();
             if (std.mem.eql(u8, item.name, ".git")) continue;
             const path = if (dir_path.len == 0)
                 try s.arena.dupe(u8, item.name)

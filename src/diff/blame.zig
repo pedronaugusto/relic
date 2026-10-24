@@ -141,6 +141,9 @@ pub fn file(gpa: Allocator, io: Io, db: *odb_mod.Odb, inputs: Inputs, options: O
     try s.enqueue(start);
 
     while (s.queue.pop()) |n| {
+        // A step is one commit: its tree and its parents' read from the
+        // database, which a cache may answer without a cancellation point.
+        try io.checkCancel();
         n.queued = false;
         // Origins the walk adds to this commit while it works go on the
         // list behind these and are taken in turn.
@@ -528,7 +531,7 @@ const Scoreboard = struct {
     fn passToParent(s: *Scoreboard, target: *Origin, parent: *Origin, ignoring: bool) Error!void {
         const old = try s.textFor(parent);
         const new = try s.textFor(target);
-        const changes = (try s.differ.lines(old, new, .{})).changes;
+        const changes = (try s.differ.lines(old, new, .{ .io = s.io })).changes;
         var parent_prints: []blame_ignore.Fingerprint = &.{};
         var target_prints: []const blame_ignore.Fingerprint = &.{};
         var guesses: []const []const blame_ignore.Guess = &.{};

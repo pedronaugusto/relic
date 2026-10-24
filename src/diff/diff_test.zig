@@ -871,7 +871,7 @@ test "under a whitespace option a context line is the new side's, \\v and \\f ar
         defer gpa.free(said);
         var out: std.Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
-        try diff.unifiedBody(gpa, &out.writer, old, new, case.options);
+        try diff.unifiedBody(gpa, std.testing.io, &out.writer, .{ .old = old, .new = new }, case.options);
         std.testing.expectEqualStrings(said[std.mem.find(u8, said, "@@ ").?..], out.written()) catch |err| {
             std.debug.print("git diff {s}\n", .{case.flag});
             return err;
@@ -966,7 +966,7 @@ test "diff.context, diff.interHunkContext, diff.indentHeuristic, diff.algorithm 
         }
         var out: std.Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
-        try diff.unifiedBody(gpa, &out.writer, old.items, new.items, options);
+        try diff.unifiedBody(gpa, std.testing.io, &out.writer, .{ .old = old.items, .new = new.items }, options);
         const body = if (std.mem.find(u8, git.stdout, "\n@@")) |at| git.stdout[at + 1 ..] else "";
         std.testing.expectEqualStrings(body, out.written()) catch |err| {
             std.debug.print("with\n{s}", .{config_text.items});
@@ -1292,7 +1292,7 @@ test "a diff of one body finds its moved lines within it" {
     var out: std.Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
     const block = "a line long enough to count\nand another one of them\n";
-    try diff.unifiedBody(gpa, &out.writer, block ++ "x\ny\nz\n", "x\ny\nz\n" ++ block, .{ .colors = &colors, .color_moved = .plain });
+    try diff.unifiedBody(gpa, std.testing.io, &out.writer, .{ .old = block ++ "x\ny\nz\n", .new = "x\ny\nz\n" ++ block }, .{ .colors = &colors, .color_moved = .plain });
     try std.testing.expect(std.mem.find(u8, out.written(), colors.old_moved.bytes()) != null);
     try std.testing.expect(std.mem.find(u8, out.written(), colors.new_moved.bytes()) != null);
 }

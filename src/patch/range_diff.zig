@@ -144,7 +144,7 @@ pub fn compute(gpa: Allocator, io: Io, repo: *Repository, inputs: Inputs, option
     result.old = try reader.readPatches(old);
     result.new = try reader.readPatches(new);
     try findExactMatches(gpa, result.old, result.new);
-    try getCorrespondences(gpa, result.old, result.new, options);
+    try getCorrespondences(gpa, io, result.old, result.new, options);
     return result;
 }
 
@@ -331,7 +331,7 @@ const Reader = struct {
         var body: Io.Writer.Allocating = .init(a);
         var options = r.diff_options;
         if (options.function_line == null and options.function_context_names) options.function_line = try pair.functionLine();
-        diff.unifiedBody(r.gpa, &body.writer, pair.texts[0], pair.texts[1], options) catch |err| switch (err) {
+        diff.unifiedBody(r.gpa, r.io, &body.writer, .{ .old = pair.texts[0], .new = pair.texts[1] }, options) catch |err| switch (err) {
             error.WriteFailed => return error.OutOfMemory,
             else => |e| return e,
         };
@@ -481,7 +481,7 @@ const Table = struct {
 const cost_max: i32 = 1 << 16;
 
 /// `get_correspondences`.
-fn getCorrespondences(gpa: Allocator, old: []Patch, new: []Patch, options: Options) Error!void {
+fn getCorrespondences(gpa: Allocator, io: Io, old: []Patch, new: []Patch, options: Options) Error!void {
     const n = old.len + new.len;
     const cells = std.math.mul(usize, n, n) catch return error.RangeDiffTooLarge;
     const bytes = std.math.mul(usize, cells, @sizeOf(i32)) catch return error.RangeDiffTooLarge;
@@ -500,10 +500,13 @@ fn getCorrespondences(gpa: Allocator, old: []Patch, new: []Patch, options: Optio
 
     for (old, 0..) |*a, i| {
         for (new, 0..) |*b, j| {
+            // A pair of equal patches is no work to the diff, which then
+            // asks nothing: the pair is the step.
+            try io.checkCancel();
             const c: i32 = if (a.matching == j)
                 0
             else if (a.matching == null and b.matching == null)
-                try diffSize(&differ, a.diffText(), b.diffText())
+                try diffSize(&differ, io, a.diffText(), b.diffText())
             else
                 cost_max;
             cost[i + n * j] = c;
@@ -532,8 +535,8 @@ fn getCorrespondences(gpa: Allocator, old: []Patch, new: []Patch, options: Optio
 
 /// `diffsize`: the hunks and their lines in a diff of two patches with
 /// three lines of context and none of the heuristics.
-fn diffSize(differ: *parallax.Differ, a: []const u8, b: []const u8) diff.TextError!i32 {
-    const d = try differ.lines(a, b, .{ .indent_heuristic = false });
+fn diffSize(differ: *parallax.Differ, io: Io, a: []const u8, b: []const u8) diff.TextError!i32 {
+    const d = try differ.lines(a, b, .{ .indent_heuristic = false, .io = io });
     var count: usize = 0;
     var hunks = d.hunks(.{ .context = 3 });
     while (hunks.next()) |hunk| {
@@ -885,7 +888,7 @@ const Writer = struct {
     /// `patch_diff`: the diff of two patches, as `diff.DiffOfPatches`
     /// writes it, the section a hunk is in after its `@@`.
     fn patchDiff(s: *Writer, old: *const Patch, new: *const Patch, options: diff.Options) Error!void {
-        try diff.unifiedBody(s.gpa, s.w, old.text, new.text, options);
+        try diff.unifiedBody(s.gpa, s.io, s.w, .{ .old = old.text, .new = new.text }, options);
     }
 };
 

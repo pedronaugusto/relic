@@ -232,7 +232,7 @@ const Octopus = struct {
         // `merge-file`'s result, written over our side; a binary file it
         // refuses stays ours.
         var merged_oid = our.oid;
-        if (blob_merge.blobs(o.gpa, ancestor_text, our_text, their_text, .{
+        if (blob_merge.blobs(o.gpa, o.io, .{ .ancestor = ancestor_text, .ours = our_text, .theirs = their_text }, .{
             .conflict_style = o.options.conflict_style,
             .labels = .{ .ours = try o.tempName(), .base = try o.tempName(), .theirs = try o.tempName() },
             .level = .zealous_alnum,

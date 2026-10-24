@@ -7,6 +7,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const Io = std.Io;
 const Allocator = std.mem.Allocator;
 
 const parallax = @import("parallax");
@@ -14,7 +15,7 @@ const attributes = @import("../patterns.zig").attributes;
 const config_mod = @import("../config/config.zig");
 
 /// A content merge refuses data git classifies as binary.
-pub const BlobError = error{BinaryBlob} || Allocator.Error;
+pub const BlobError = error{BinaryBlob} || Allocator.Error || Io.Cancelable;
 
 /// Which conflict body to write, which is what `merge.conflictStyle` names.
 pub const ConflictStyle = parallax.merge.Style;
@@ -103,17 +104,18 @@ pub fn mergesAsText(bytes: []const u8) bool {
     return bytes.len <= max_text_size and !attributes.isBinaryForDiff(bytes);
 }
 
+/// The three texts a merge takes.
+pub const Sides = struct { ancestor: []const u8, ours: []const u8, theirs: []const u8 };
+
 /// Merge `ours` and `theirs` against `ancestor`, as git's `ll_merge` does
 /// with its text driver. An unchanged side takes the other side byte for
 /// byte, binary or not; otherwise a side that is binary, or larger than
-/// `max_text_size`, is refused with `error.BinaryBlob`.
-pub fn blobs(
-    gpa: Allocator,
-    ancestor: []const u8,
-    ours: []const u8,
-    theirs: []const u8,
-    options: BlobOptions,
-) Self.BlobError!BlobResult {
+/// `max_text_size`, is refused with `error.BinaryBlob`. The line merge
+/// ends with `error.Canceled` once the task `io` runs is canceled.
+pub fn blobs(gpa: Allocator, io: Io, sides: Sides, options: BlobOptions) Self.BlobError!BlobResult {
+    const ancestor = sides.ancestor;
+    const ours = sides.ours;
+    const theirs = sides.theirs;
     if (std.mem.eql(u8, ours, theirs)) return ownedBlob(gpa, ours, .clean);
     if (std.mem.eql(u8, ours, ancestor)) return ownedBlob(gpa, theirs, .clean);
     if (std.mem.eql(u8, theirs, ancestor)) return ownedBlob(gpa, ours, .clean);
@@ -126,12 +128,14 @@ pub fn blobs(
         .compare = .{ .whitespace = options.whitespace },
         .style = options.conflict_style,
         .level = options.level,
+        .io = io,
     }, .{
         .labels = options.labels,
         .marker_size = options.marker_size,
         .resolve = options.resolve,
     }) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
+        error.Canceled => return error.Canceled,
         // unreachable: three sides of max_text_size at most hold fewer bytes and lines than a u32 counts
         error.InputTooLarge => unreachable,
     };

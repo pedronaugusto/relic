@@ -1075,7 +1075,7 @@ const Merge = struct {
             }
         } else {
             if (found.driver == .union_) resolve = .both;
-            var result = merge.blobs(m.arena, orig, src1, src2, .{
+            var result = merge.blobs(m.arena, m.io, .{ .ancestor = orig, .ours = src1, .theirs = src2 }, .{
                 .conflict_style = m.options.conflict_style,
                 .labels = .{ .ours = name1, .base = base_label, .theirs = name2 },
                 .marker_size = marker_size,
@@ -1086,6 +1086,7 @@ const Merge = struct {
             }) catch |err| switch (err) {
                 error.BinaryBlob => unreachable,
                 error.OutOfMemory => return error.OutOfMemory,
+                error.Canceled => return error.Canceled,
             };
             bytes = result.bytes;
             if (!result.isClean()) status = .conflict;

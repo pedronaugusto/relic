@@ -791,14 +791,14 @@ fn row7() !void {
             var out: std.Io.Writer.Allocating = .init(std.heap.smp_allocator);
             defer out.deinit();
             for (w.pairs) |p| {
-                try relic.diff.unifiedBody(std.heap.smp_allocator, &out.writer, p.old, p.new, .{});
+                try relic.diff.unifiedBody(std.heap.smp_allocator, benchmark_io, &out.writer, .{ .old = p.old, .new = p.new }, .{});
                 out.clearRetainingCapacity();
             }
         }
         fn counts(w: @This()) !void {
             var lines: usize = 0;
             for (w.pairs) |p| {
-                const n = try relic.diff.blobNumStat(std.heap.smp_allocator, p.old, p.new, .{});
+                const n = try relic.diff.blobNumStat(std.heap.smp_allocator, benchmark_io, p.old, p.new, .{});
                 lines += n.plus + n.minus;
             }
             std.mem.doNotOptimizeAway(lines);
@@ -806,7 +806,7 @@ fn row7() !void {
         fn merges(w: @This()) !void {
             var conflicts: usize = 0;
             for (w.pairs) |p| {
-                var r = try relic.merge.blobs(std.heap.smp_allocator, p.old, p.new, p.theirs, .{ .algorithm = .histogram });
+                var r = try relic.merge.blobs(std.heap.smp_allocator, benchmark_io, .{ .ancestor = p.old, .ours = p.new, .theirs = p.theirs }, .{ .algorithm = .histogram });
                 if (!r.isClean()) conflicts += 1;
                 r.deinit();
             }

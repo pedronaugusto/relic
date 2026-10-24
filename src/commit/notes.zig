@@ -1672,7 +1672,7 @@ fn writeConflict(gpa: Allocator, io: Io, repo: *Repository, p: Pair, local_ref: 
         const ours = try read(io, repo, p.local, &held[1]);
         const theirs = try read(io, repo, p.remote, &held[2]);
         const style = try blob_merge.configuredStyle(repo.configuration());
-        if (blob_merge.blobs(gpa, base, ours, theirs, .{
+        if (blob_merge.blobs(gpa, io, .{ .ancestor = base, .ours = ours, .theirs = theirs }, .{
             .conflict_style = style,
             .labels = .{ .ours = local_ref, .theirs = remote_ref, .base = "" },
         })) |result_value| {

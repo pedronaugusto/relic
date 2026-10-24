@@ -16,6 +16,7 @@ pub const Level = @import("merge/merge.zig").Level;
 pub const Labels = @import("merge/merge.zig").Labels;
 pub const BlobOptions = @import("merge/merge.zig").BlobOptions;
 pub const BlobResult = @import("merge/merge.zig").BlobResult;
+pub const Sides = @import("merge/merge.zig").Sides;
 pub const blobs = @import("merge/merge.zig").blobs;
 pub const Blocked = @import("merge/merge.zig").Blocked;
 pub const Side = @import("merge/merge.zig").Side;

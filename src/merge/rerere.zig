@@ -619,7 +619,7 @@ fn llMerge(r: *Run, path: []const u8, base: []const u8, ours: []const u8, theirs
         } else if (std.mem.eql(u8, driver, "union")) resolve = .both;
     }
     const style = try blob_merge.configuredStyle(r.repo.configuration());
-    var merged = blob_merge.blobs(r.arena, base, ours, theirs, .{
+    var merged = blob_merge.blobs(r.arena, r.io, .{ .ancestor = base, .ours = ours, .theirs = theirs }, .{
         .labels = labels,
         .marker_size = size,
         .resolve = resolve,
@@ -628,6 +628,7 @@ fn llMerge(r: *Run, path: []const u8, base: []const u8, ours: []const u8, theirs
         // `ll_xdl_merge` hands a binary file to the binary driver.
         error.BinaryBlob => return .{ .bytes = ours, .clean = false },
         error.OutOfMemory => return error.OutOfMemory,
+        error.Canceled => return error.Canceled,
     };
     return .{ .bytes = merged.bytes, .clean = merged.isClean() };
 }
@@ -828,7 +829,7 @@ pub fn diff(gpa: Allocator, io: Io, repo: *Repository) Self.Error![]u8 {
         out.writer.print("--- a/{s}\n+++ b/{s}\n", .{ path, path }) catch return error.OutOfMemory;
         // `xdi_diff` with no flags: Myers, no indentation heuristic, no
         // function names, three lines of context.
-        diff_mod.unifiedBody(arena, &out.writer, minus, plus, .{
+        diff_mod.unifiedBody(arena, io, &out.writer, .{ .old = minus, .new = plus }, .{
             .indent_heuristic = false,
             .function_context_names = false,
         }) catch |err| switch (err) {
@@ -1152,7 +1153,7 @@ test "a marker ends at a space, a tab or a line end, as git's isspace has it, an
         try std.testing.expectEqualStrings(want, n.text);
     }
     // The markers a merge writes at a size past a byte's are the ones read.
-    var merged = try blob_merge.blobs(a, "base\n", "mine\n", "yours\n", .{ .marker_size = 300 });
+    var merged = try blob_merge.blobs(a, std.testing.io, .{ .ancestor = "base\n", .ours = "mine\n", .theirs = "yours\n" }, .{ .marker_size = 300 });
     defer merged.deinit();
     try std.testing.expect(std.mem.startsWith(u8, merged.bytes, @as([300]u8, @splat('<')) ++ " "));
     try std.testing.expectEqual(@as(i8, 1), (try normalize(a, merged.bytes, 300, .sha1)).conflicts);

@@ -1446,7 +1446,7 @@ fn threeWayMerge(st: *State, img: *Image, path: []const u8, base: Oid, ours: Oid
     defer db.allocator().free(t.bytes);
     const style = try blob_merge.configuredStyle(st.repo.configuration());
     _ = path;
-    var result = blob_merge.blobs(st.gpa, b.bytes, o.bytes, t.bytes, .{
+    var result = blob_merge.blobs(st.gpa, st.io, .{ .ancestor = b.bytes, .ours = o.bytes, .theirs = t.bytes }, .{
         .conflict_style = style,
         .resolve = st.options.resolve,
     }) catch |err| switch (err) {

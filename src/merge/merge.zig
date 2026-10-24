@@ -56,6 +56,7 @@ pub const BlobOptions = blob_merge.BlobOptions;
 /// The owned bytes produced by a blob merge.
 pub const BlobResult = blob_merge.BlobResult;
 /// Merge `ours` and `theirs` against `ancestor`, as git's `ll_merge` does.
+pub const Sides = blob_merge.Sides;
 pub const blobs = blob_merge.blobs;
 /// Where a refusal writes the path that caused it.
 pub const Blocked = ort.Blocked;
@@ -586,7 +587,7 @@ test "blob conflicts match git merge-file in merge and diff3 styles" {
     for ([_]ConflictStyle{ .merge, .diff3 }) |style| {
         const expected = try gitMergeFileFixture(gpa, io, ancestor, ours, theirs, style);
         defer gpa.free(expected);
-        var got = try blobs(gpa, ancestor, ours, theirs, .{ .conflict_style = style });
+        var got = try blobs(gpa, std.testing.io, .{ .ancestor = ancestor, .ours = ours, .theirs = theirs }, .{ .conflict_style = style });
         defer got.deinit();
         try std.testing.expectEqual(BlobResult.Status.conflicted, got.status);
         try std.testing.expectEqualSlices(u8, expected, got.bytes);
@@ -601,7 +602,7 @@ test "adjacent blob edits form the same conflict region as git" {
     const theirs = "a\nB\nc\n";
     const expected = try gitMergeFileFixture(gpa, io, ancestor, ours, theirs, .merge);
     defer gpa.free(expected);
-    var got = try blobs(gpa, ancestor, ours, theirs, .{});
+    var got = try blobs(gpa, std.testing.io, .{ .ancestor = ancestor, .ours = ours, .theirs = theirs }, .{});
     defer got.deinit();
     try std.testing.expectEqual(BlobResult.Status.conflicted, got.status);
     try std.testing.expectEqualSlices(u8, expected, got.bytes);
@@ -612,7 +613,7 @@ test "conflict markers terminate lines that had no newline" {
     const io = std.testing.io;
     const expected = try gitMergeFileFixture(gpa, io, "base", "ours", "theirs", .merge);
     defer gpa.free(expected);
-    var got = try blobs(gpa, "base", "ours", "theirs", .{});
+    var got = try blobs(gpa, std.testing.io, .{ .ancestor = "base", .ours = "ours", .theirs = "theirs" }, .{});
     defer got.deinit();
     try std.testing.expectEqualSlices(u8, expected, got.bytes);
 }
@@ -625,7 +626,7 @@ test "merge style moves a shared conflict tail outside the markers" {
     const theirs = "B\nX\nc\n";
     const expected = try gitMergeFileFixture(gpa, io, ancestor, ours, theirs, .merge);
     defer gpa.free(expected);
-    var got = try blobs(gpa, ancestor, ours, theirs, .{});
+    var got = try blobs(gpa, std.testing.io, .{ .ancestor = ancestor, .ours = ours, .theirs = theirs }, .{});
     defer got.deinit();
     try std.testing.expectEqualSlices(u8, expected, got.bytes);
 }
@@ -638,11 +639,11 @@ test "conflicts with only punctuation between them join as git merge-file joins 
     const theirs = "P\n}\n}\n}\n}\nQ\n";
     const expected = try gitMergeFileFixture(gpa, io, ancestor, ours, theirs, .merge);
     defer gpa.free(expected);
-    var got = try blobs(gpa, ancestor, ours, theirs, .{ .level = .zealous_alnum });
+    var got = try blobs(gpa, std.testing.io, .{ .ancestor = ancestor, .ours = ours, .theirs = theirs }, .{ .level = .zealous_alnum });
     defer got.deinit();
     try std.testing.expectEqualSlices(u8, expected, got.bytes);
     // The merge machinery keeps them apart.
-    var apart = try blobs(gpa, ancestor, ours, theirs, .{});
+    var apart = try blobs(gpa, std.testing.io, .{ .ancestor = ancestor, .ours = ours, .theirs = theirs }, .{});
     defer apart.deinit();
     try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, apart.bytes, "<<<<<<<"));
 }
@@ -657,7 +658,7 @@ test "independent and identical blob changes match git merge-file" {
     }) |fixture| {
         const expected = try gitMergeFileFixture(gpa, io, ancestor, fixture.ours, fixture.theirs, .merge);
         defer gpa.free(expected);
-        var got = try blobs(gpa, ancestor, fixture.ours, fixture.theirs, .{});
+        var got = try blobs(gpa, std.testing.io, .{ .ancestor = ancestor, .ours = fixture.ours, .theirs = fixture.theirs }, .{});
         defer got.deinit();
         try std.testing.expect(got.isClean());
         try std.testing.expectEqualSlices(u8, expected, got.bytes);
@@ -672,7 +673,7 @@ test "a delete modify blob conflict matches git merge-file" {
     const theirs = "changed\n";
     const expected = try gitMergeFileFixture(gpa, io, ancestor, ours, theirs, .merge);
     defer gpa.free(expected);
-    var got = try blobs(gpa, ancestor, ours, theirs, .{});
+    var got = try blobs(gpa, std.testing.io, .{ .ancestor = ancestor, .ours = ours, .theirs = theirs }, .{});
     defer got.deinit();
     try std.testing.expectEqual(BlobResult.Status.conflicted, got.status);
     try std.testing.expectEqualSlices(u8, expected, got.bytes);
@@ -687,7 +688,7 @@ test "binary blob content is refused like git merge-file" {
     const git_bytes = try gitMergeFileFixture(gpa, io, ancestor, ours, theirs, .merge);
     defer gpa.free(git_bytes);
     try std.testing.expectEqualSlices(u8, ours, git_bytes);
-    try std.testing.expectError(error.BinaryBlob, blobs(gpa, ancestor, ours, theirs, .{}));
+    try std.testing.expectError(error.BinaryBlob, blobs(gpa, std.testing.io, .{ .ancestor = ancestor, .ours = ours, .theirs = theirs }, .{}));
 }
 
 test "a random corpus of three-way merges matches git merge-file in every style and every algorithm" {
@@ -738,7 +739,7 @@ test "a random corpus of three-way merges matches git merge-file in every style 
                 const algorithm = if (options.minimal) "minimal" else @tagName(options.algorithm);
                 const expected = try gitMergeFile(gpa, io, &repo, texts[0].items, texts[1].items, texts[2].items, options);
                 defer gpa.free(expected);
-                var got = try blobs(gpa, texts[0].items, texts[1].items, texts[2].items, options);
+                var got = try blobs(gpa, std.testing.io, .{ .ancestor = texts[0].items, .ours = texts[1].items, .theirs = texts[2].items }, options);
                 defer got.deinit();
                 std.testing.expectEqualStrings(expected, got.bytes) catch |err| {
                     std.debug.print("case {d}, {s}, {s}\n", .{ case, @tagName(style), algorithm });
@@ -767,7 +768,7 @@ test "labels, marker size and a resolved side are written as git merge-file writ
     }) |options| {
         const expected = try gitMergeFile(gpa, io, &repo, ancestor, ours, theirs, options);
         defer gpa.free(expected);
-        var got = try blobs(gpa, ancestor, ours, theirs, options);
+        var got = try blobs(gpa, std.testing.io, .{ .ancestor = ancestor, .ours = ours, .theirs = theirs }, options);
         defer got.deinit();
         try std.testing.expectEqualStrings(expected, got.bytes);
         try std.testing.expectEqual(options.resolve == .markers, !got.isClean());
@@ -785,7 +786,7 @@ test "markers take a carriage return where both sides end their lines with one" 
     for ([_]ConflictStyle{ .merge, .diff3, .zdiff3 }) |style| {
         const expected = try gitMergeFile(gpa, io, &repo, ancestor, ours, theirs, .{ .conflict_style = style });
         defer gpa.free(expected);
-        var got = try blobs(gpa, ancestor, ours, theirs, .{ .conflict_style = style });
+        var got = try blobs(gpa, std.testing.io, .{ .ancestor = ancestor, .ours = ours, .theirs = theirs }, .{ .conflict_style = style });
         defer got.deinit();
         try std.testing.expectEqualStrings(expected, got.bytes);
         try std.testing.expect(std.mem.find(u8, got.bytes, "=======\r\n") != null);
@@ -946,7 +947,7 @@ fn fuzzBlobs(_: void, case: *shakedown.Case) anyerror!void {
     const theirs = theirs_buf[0..shakedown.gen.intRange(case.source, usize, 0, theirs_buf.len)];
     case.source.bytes(theirs);
 
-    if (blobs(gpa, ancestor, ours, theirs, .{})) |result_value| {
+    if (blobs(gpa, std.testing.io, .{ .ancestor = ancestor, .ours = ours, .theirs = theirs }, .{})) |result_value| {
         var result = result_value;
         result.deinit();
     } else |err| switch (err) {
@@ -954,7 +955,7 @@ fn fuzzBlobs(_: void, case: *shakedown.Case) anyerror!void {
         else => |other| return other,
     }
 
-    var unchanged = try blobs(gpa, ancestor, ours, ancestor, .{});
+    var unchanged = try blobs(gpa, std.testing.io, .{ .ancestor = ancestor, .ours = ours, .theirs = ancestor }, .{});
     defer unchanged.deinit();
     try std.testing.expect(unchanged.isClean());
     try std.testing.expectEqualSlices(u8, ours, unchanged.bytes);
