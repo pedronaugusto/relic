@@ -658,7 +658,7 @@ test "a version 1 MIDX with its pack names out of order is refused as git refuse
     try std.testing.expectEqual(@as(usize, 0), db.multiPackIndexCount());
 }
 
-test "a repository with replace refs is repacked with a commit graph of the parents its commits carry, as git writes one" {
+test "a repository with replace refs is repacked; gc writes no commit graph while they are in use, and commit-graph write one of the parents its commits carry, as git does" {
     var repo = try testgit.Repo.init(gpa, io, &.{});
     defer repo.deinit();
     for (0..3) |n| try linearCommit(&repo, n);
@@ -666,7 +666,14 @@ test "a repository with replace refs is repacked with a commit graph of the pare
     var native = try repo_mod.Repository.open(gpa, io, repo.dir, .{});
     defer native.deinit(io);
     _ = try repack_mod.repack(gpa, io, &native, .{ .mode = .all, .delete = true, .pack = .{ .threads = 1 } });
-    _ = try ops.writeConfiguredCommitGraph(gpa, io, &native, .gc);
+    // git's gc writes in its own process, replace refs followed, and
+    // `commit_graph_compatible` refuses: no graph.
+    try std.testing.expectEqual(@as(?Oid, null), try ops.writeConfiguredCommitGraph(gpa, io, &native, .gc));
+    try std.testing.expectError(error.FileNotFound, repo.dir.access(io, ".git/objects/info/commit-graph", .{}));
+    try repo.exec(io, &.{ "-c", "gc.writeCommitGraph=true", "gc", "-q" });
+    try std.testing.expectError(error.FileNotFound, repo.dir.access(io, ".git/objects/info/commit-graph", .{}));
+    // `git commit-graph write` runs with them off.
+    _ = try ops.writeCommitGraph(gpa, io, native.objectDatabase(), &.{try tip(&repo, .sha1)}, .{});
     try repo.exec(io, &.{ "commit-graph", "verify" });
     // git writes these generation bytes from 2.43 on.
     if (!try testgit.gitAtLeast(gpa, io, 2, 43)) return;
