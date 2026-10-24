@@ -29,6 +29,7 @@ const urlmatch = @import("../text.zig").urlmatch;
 const fs = @import("../fs/fs.zig");
 
 const fetch_pack = @import("../wire.zig").fetch_pack;
+const index_pack = @import("../odb/index_pack.zig");
 
 const send_pack = @import("../wire.zig").send_pack;
 const local = @import("local.zig");
@@ -90,6 +91,9 @@ pub const Error = error{
     ProgramsNotGranted,
     /// The URL carries a password and `transfer.credentialsInUrl` is `die`.
     CredentialsInUrl,
+    /// A pack the server named by URI does not have the checksum it named:
+    /// git's "pack downloaded from <uri> does not match expected hash".
+    PackfileUriMismatch,
 } || local.Error || receive_pack.Error || fetch_pack.Error || protocol.Error || program.Error || ssh.Error || smart_http.Error || send_pack.Error || bundle.Error ||
     remote_helper.Error;
 
@@ -211,6 +215,10 @@ pub const Session = struct {
     /// `owned_server_options`.
     server_options: []const []const u8 = &.{},
     owned_server_options: [][]u8 = &.{},
+    /// What the session was opened with, borrowed for its life as
+    /// `server_options` is: a pack the server names by URI is downloaded
+    /// with its `http.*` settings and credentials.
+    transfer: Options = .{},
     impl: union(enum) {
         local: *local.Remote,
         /// A bundle file named by a path, as git's bundle transport reads
@@ -274,6 +282,7 @@ pub const Session = struct {
         const kind = inputs.kind;
         var session = try openUnanswered(gpa, io, remote_url, service, kind, options);
         errdefer session.deinit(io);
+        session.transfer = options;
         try session.answerPromisors(options);
         if (options.server_options) |given| {
             session.server_options = given;
@@ -736,11 +745,27 @@ pub const Session = struct {
         /// The new pack's name, or `null` when nothing new came.
         pack: ?Oid,
         objects: u32,
+        /// The packs the server named by URI (`packfile-uris`), downloaded
+        /// and indexed beside `pack` as git's `http-fetch --packfile` does,
+        /// in the order it named them; `uri_gpa`'s.
+        uri_packs: []UriPack = &.{},
+        uri_gpa: ?Allocator = null,
 
         pub fn deinit(f: *Fetched, io: Io) void {
             if (f.keep) |*token| token.deinit(io);
+            for (f.uri_packs) |*p| if (p.keep) |*token| token.deinit(io);
+            if (f.uri_gpa) |g| g.free(f.uri_packs);
             f.* = undefined;
         }
+    };
+
+    /// A pack a server named by URI, as it was indexed.
+    pub const UriPack = struct {
+        pub const Error = ErrorNamespace.Error;
+
+        name: Oid,
+        objects: u32,
+        keep: ?keep_mod.Token = null,
     };
 
     pub const FetchInputs = struct { db: *odb_mod.Odb, pack_dir: Io.Dir, request: FetchRequest };
@@ -814,10 +839,89 @@ pub const Session = struct {
                 var with_id = request;
                 with_id.session_id = s.sessionId();
                 if (with_id.server_options.len == 0) with_id.server_options = s.server_options;
-                const result = try fetch_pack.fetch(gpa, io, smart.conn, .{ .advertisement = &smart.advertisement, .db = db, .request = with_id }, options);
-                return .{ .pack = result.name, .objects = result.objects, .keep = result.keep };
+                var protocols: std.ArrayList([]const u8) = .empty;
+                defer protocols.deinit(gpa);
+                if (with_id.uri_protocols.len == 0) if (s.transfer.config) |config| if (config.get("fetch.uriprotocols")) |text| {
+                    // git's `string_list_split` at commas, nothing trimmed.
+                    var it = std.mem.splitScalar(u8, text, ',');
+                    while (it.next()) |p| try protocols.append(gpa, p);
+                    with_id.uri_protocols = protocols.items;
+                };
+                var result = try fetch_pack.fetch(gpa, io, smart.conn, .{ .advertisement = &smart.advertisement, .db = db, .request = with_id }, options);
+                defer result.deinitUris(gpa);
+                errdefer result.pack.deinit(io);
+                const uri_packs = try s.receiveUriPacks(gpa, io, db, pack_dir, result.uris, options.receive);
+                errdefer {
+                    for (uri_packs) |*p| if (p.keep) |*token| token.deinit(io);
+                    gpa.free(uri_packs);
+                }
+                // git's `fsck_finish`, once every pack is in.
+                if (result.found) |*found| try index_pack.checkFound(gpa, io, db, found, .{
+                    .rules = options.receive.fsck.?,
+                    .promised = options.receive.promised,
+                    .warnings = options.receive.warnings,
+                    .diagnostic = options.receive.diagnostic,
+                    .max_object_bytes = options.receive.max_object_bytes,
+                });
+                return .{ .pack = result.pack.name, .objects = result.pack.objects, .keep = result.pack.keep, .uri_packs = uri_packs, .uri_gpa = gpa };
             },
         }
+    }
+
+    /// Each of `uris` downloaded into `pack_dir` and indexed with
+    /// `receive`, as git's fetch-pack runs `http-fetch --packfile` for it
+    /// with the main pack's index-pack arguments, and refused unless the
+    /// pack has the checksum the server named. The caller's, on `gpa`.
+    fn receiveUriPacks(
+        s: *Session,
+        gpa: Allocator,
+        io: Io,
+        db: *odb_mod.Odb,
+        pack_dir: Io.Dir,
+        uris: []const fetch_pack.PackfileUri,
+        receive: index_pack.Options,
+    ) Self.Error![]UriPack {
+        var packs: std.ArrayList(UriPack) = .empty;
+        errdefer {
+            for (packs.items) |*p| if (p.keep) |*token| token.deinit(io);
+            packs.deinit(gpa);
+        }
+        for (uris) |named| {
+            try packs.ensureUnusedCapacity(gpa, 1);
+            var result = try s.receiveUriPack(gpa, io, db, pack_dir, named.uri, receive);
+            errdefer result.deinit(io);
+            const name = result.name orelse return error.PackfileUriMismatch;
+            if (!name.eql(named.hash)) return error.PackfileUriMismatch;
+            packs.appendAssumeCapacity(.{ .name = name, .objects = result.objects, .keep = result.keep });
+        }
+        return packs.toOwnedSlice(gpa);
+    }
+
+    /// One pack at `uri`, downloaded to a temporary file in `pack_dir`
+    /// and indexed from it, the file removed after.
+    fn receiveUriPack(s: *Session, gpa: Allocator, io: Io, db: *odb_mod.Odb, pack_dir: Io.Dir, uri: []const u8, receive: index_pack.Options) Self.Error!index_pack.Result {
+        const parsed = try url.Url.parse(uri);
+        if (parsed.scheme != .http and parsed.scheme != .https) return error.UnsupportedTransport;
+        try checkAllowed(s.transfer, @tagName(parsed.scheme));
+        var name_buf: [64]u8 = undefined;
+        const temp = fs.tempName(io, &name_buf, "tmp_uri_pack_");
+        const file = try pack_dir.createFile(io, temp, .{ .read = true, .exclusive = true });
+        defer {
+            file.close(io);
+            pack_dir.deleteFile(io, temp) catch {}; // glint-ignore: Z026 -- the download is indexed into a pack of its own; a temporary file left behind holds nothing the repository uses
+        }
+        var buf: [64 * 1024]u8 = undefined;
+        var w = file.writer(io, &buf);
+        smart_http.download(gpa, io, &w.interface, parsed, httpOptions(s.transfer)) catch |err| return switch (err) {
+            error.WriteFailed => w.err orelse error.WriteFailed,
+            else => |e| e,
+        };
+        w.interface.flush() catch return w.err orelse error.WriteFailed;
+        var r = file.reader(io, &buf);
+        return db.receivePack(io, &r.interface, receive) catch |err| switch (err) {
+            error.ReadFailed => r.err orelse error.ReadFailed,
+            else => |e| e,
+        };
     }
 };
 

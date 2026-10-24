@@ -55,8 +55,8 @@ test "a fetch from git upload-pack negotiates, in v2 and in v0, and brings only 
             try testing.expectEqual(if (v2) protocol.Version.v2 else protocol.Version.v0, adv.version);
             const want = try Oid.parse(.sha1, old);
             var result = try fetch_pack.fetch(gpa, io, conn, .{ .advertisement = &adv, .db = repo.objectDatabase(), .request = .{ .wants = &.{want}, .tips = &.{} } }, .{});
-            defer result.deinit(io);
-            try testing.expect(result.objects > 0);
+            defer result.deinit(gpa, io);
+            try testing.expect(result.pack.objects > 0);
             try object_walk.checkConnected(gpa, io, repo.objectDatabase(), &.{want}, .{ .fresh = null, .missing_out = null });
             try target_git.exec(io, &.{ "update-ref", "refs/heads/main", old });
         }
@@ -75,13 +75,13 @@ test "a fetch from git upload-pack negotiates, in v2 and in v0, and brings only 
                 .wants = &.{want},
                 .tips = &.{try Oid.parse(.sha1, old)},
             } }, .{});
-            defer result.deinit(io);
+            defer result.deinit(gpa, io);
             // Two commits, each with a root tree, three subtrees... far
             // fewer than the whole history; and the tag pointing at the
             // head came with them.
             const whole = try source.line(io, &.{ "rev-list", "--objects", "--count", "--all" });
             defer gpa.free(whole);
-            try testing.expect(result.objects < try std.fmt.parseInt(u32, whole, 10) / 2);
+            try testing.expect(result.pack.objects < try std.fmt.parseInt(u32, whole, 10) / 2);
             const tag_hex = try source.line(io, &.{ "rev-parse", "v1" });
             defer gpa.free(tag_hex);
             try testing.expect(try repo.objectDatabase().exists(io, try Oid.parse(.sha1, tag_hex)));

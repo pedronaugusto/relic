@@ -14,7 +14,11 @@
 //!
 //! The pack comes back on the side-band and goes straight to
 //! `index_pack.receive`; the server's progress goes to the caller's
-//! `Progress`. A v0 server is asked in one round — wants, haves, `done` —
+//! `Progress`. A v2 server that offers `sideband-all` is asked for it, as
+//! git asks, and then every line of its response is on the side band too.
+//! Under `sideband-all` a server may hand parts of the pack over as URIs
+//! (`packfile-uris`, for the protocols `Request.uri_protocols` names),
+//! which `Fetched.uris` lists for the caller to download. A v0 server is asked in one round — wants, haves, `done` —
 //! with no multi-ack, which every server of that dialect understands.
 
 const ErrorNamespace = @This();
@@ -35,6 +39,7 @@ const warning = @import("../report.zig").warning;
 const protocol = @import("protocol.zig");
 const side_band = @import("side_band.zig");
 const index_pack = @import("../odb/index_pack.zig");
+const fsck = @import("../object/fsck.zig");
 const progress_mod = @import("../report.zig").progress;
 const rev_walk = @import("../walk/walk.zig");
 
@@ -49,9 +54,6 @@ pub const Error = error{
     RemoteError,
     /// A section or a line the protocol does not have where it came.
     ProtocolError,
-    /// The server wants to hand part of the pack over as a URI, which
-    /// relic does not fetch.
-    PackfileUrisUnsupported,
     /// A shallow fetch, or a fetch into a shallow repository, from a server
     /// that does not speak of shallow history — or does not have the kind of
     /// deepening asked for.
@@ -101,6 +103,52 @@ pub const Request = struct {
     /// `--negotiation-include` offers them: once before the others in v0,
     /// in every round in v2.
     include_haves: []const Oid = &.{},
+    /// `fetch.uriProtocols`, split at its commas: the protocols a v2 server
+    /// that offers `packfile-uris` may name parts of the pack in. git asks
+    /// for `http` and `https` of them alone, in the order given.
+    uri_protocols: []const []const u8 = &.{},
+};
+
+/// A part of the pack a server hands over as a URI: git's `packfile-uris`
+/// line, `<hash> <uri>`.
+pub const PackfileUri = struct {
+    pub const Error = ErrorNamespace.Error;
+
+    /// The checksum the pack at `uri` must have, which names it.
+    hash: Oid,
+    uri: []const u8,
+};
+
+/// What a fetch brought: the pack the server sent, and the packs it named
+/// by URI, which the caller downloads and indexes beside it.
+pub const Fetched = struct {
+    pub const Error = ErrorNamespace.Error;
+
+    pack: index_pack.Result,
+    /// In the order the server named them; each `uri` is `gpa`'s.
+    uris: []PackfileUri = &.{},
+    /// With `uris` and the objects checked, the blobs the pack's trees
+    /// name as `.gitmodules` and `.gitattributes`, left for the caller to
+    /// check with `index_pack.checkFound` once the named packs are in too,
+    /// as git's fetch-pack calls `fsck_finish` after them. The object
+    /// database's allocator's.
+    found: ?fsck.Found = null,
+    found_gpa: Allocator = undefined,
+
+    /// Release `uris` and `found`, leaving `pack` the caller's.
+    pub fn deinitUris(f: *Fetched, gpa: Allocator) void {
+        for (f.uris) |u| gpa.free(u.uri);
+        gpa.free(f.uris);
+        f.uris = &.{};
+        if (f.found) |*found| found.deinit(f.found_gpa);
+        f.found = null;
+    }
+
+    pub fn deinit(f: *Fetched, gpa: Allocator, io: Io) void {
+        f.deinitUris(gpa);
+        f.pack.deinit(io);
+        f.* = undefined;
+    }
 };
 
 /// git's `fetch.negotiationAlgorithm`: how a fetch chooses the commits it
@@ -255,7 +303,7 @@ pub fn fetch(
     conn: *Connection,
     inputs: Inputs,
     options: Options,
-) Self.Error!index_pack.Result {
+) Self.Error!Fetched {
     const adv = inputs.advertisement;
     const db = inputs.db;
     const request = inputs.request;
@@ -284,7 +332,7 @@ pub fn fetch(
     }
     return switch (adv.version) {
         .v2 => fetchV2(gpa, io, conn, adv, db, asked, &negotiator, options.progress, receive_options, options.shallow_info),
-        .v0, .v1 => fetchV0(gpa, io, conn, adv, db, asked, &negotiator, options.progress, receive_options, options.shallow_info),
+        .v0, .v1 => .{ .pack = try fetchV0(gpa, io, conn, adv, db, asked, &negotiator, options.progress, receive_options, options.shallow_info) },
     };
 }
 
@@ -308,10 +356,12 @@ fn fetchV2(
     progress: ?progress_mod.Progress,
     receive_options: index_pack.Options,
     shallow_info: ?*ShallowInfo,
-) Error!index_pack.Result {
+) Error!Fetched {
     if (request.deepen != null or request.shallow.len != 0) {
         if (!adv.commandHas("fetch", "shallow")) return error.ShallowUnsupportedByServer;
     }
+    // git asks for `sideband-all` wherever it is offered.
+    const all_bands = adv.commandHas("fetch", "sideband-all");
     var common: std.ArrayList(Oid) = .empty;
     defer common.deinit(gpa);
     var haves_to_send: usize = 16;
@@ -321,19 +371,20 @@ fn fetchV2(
     while (true) {
         const w = try conn.request();
         var done = false;
-        writeFetchV2(w, adv, request, common.items, negotiator, haves_to_send, &in_vain, seen_ack, progress == null, &done) catch |err| switch (err) {
+        writeFetchV2(w, adv, request, .{ .common = common.items, .haves_to_send = haves_to_send, .seen_ack = seen_ack, .no_progress = progress == null, .all_bands = all_bands }, negotiator, &in_vain, &done) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.WriteFailed, error.PacketTooLong => return conn.writeFailed(err),
             else => |e| return e,
         };
-        const in = try conn.response();
+        var response: Response = .{ .conn = conn, .in = try conn.response(), .all_bands = all_bands, .demux = undefined };
+        response.demux = .init(response.in, &.{}, progress);
 
         if (!done) {
-            try expectSection(conn, in, "acknowledgments");
+            try response.expectSection("acknowledgments");
             var ready = false;
             var acked = false;
             while (true) {
-                const packet = try conn.readPacket(in);
+                const packet = try response.next();
                 switch (packet) {
                     .flush, .response_end => break,
                     .delim => {
@@ -376,49 +427,71 @@ fn fetchV2(
                 continue;
             }
         }
-        return receivePackfileV2(io, conn, in, db, progress, receive_options, adv.kind, shallow_info);
+        return receivePackfileV2(gpa, io, &response, db, receive_options, adv.kind, shallow_info);
     }
 }
+
+/// What a round of a v2 request says besides the wants.
+const Round = struct {
+    common: []const Oid,
+    haves_to_send: usize,
+    seen_ack: bool,
+    no_progress: bool,
+    /// Ask for `sideband-all`.
+    all_bands: bool,
+};
 
 fn writeFetchV2(
     w: *Io.Writer,
     adv: *const protocol.Advertisement,
     request: Request,
-    common: []const Oid,
+    round: Round,
     negotiator: *Negotiator,
-    haves_to_send: usize,
     in_vain: *usize,
-    seen_ack: bool,
-    no_progress: bool,
     done: *bool,
 ) (pkt_line.WriteError || Negotiator.NegotiateError)!void {
     try protocol.writeCommand(w, adv, "fetch", .{ .session_id = request.session_id, .server_options = request.server_options });
     // Newlines where git's fetch-pack writes them, and none where not.
     try pkt_line.write(w, "thin-pack");
-    if (no_progress) try pkt_line.write(w, "no-progress");
+    if (round.no_progress) try pkt_line.write(w, "no-progress");
     if (request.include_tag) try pkt_line.write(w, "include-tag");
     try pkt_line.write(w, "ofs-delta");
+    if (round.all_bands) try pkt_line.write(w, "sideband-all");
     try writeShallowRequest(w, request, true);
     if (request.filter) |spec| try pkt_line.print(w, "filter {s}", .{spec});
+    if (adv.commandHas("fetch", "packfile-uris")) try writeUriProtocols(w, request.uri_protocols);
     for (request.wants) |oid| try pkt_line.print(w, "want {f}\n", .{oid});
-    for (common) |oid| try pkt_line.print(w, "have {f}\n", .{oid});
+    for (round.common) |oid| try pkt_line.print(w, "have {f}\n", .{oid});
     // git's `add_haves`: the included ones every round, not counted.
     for (request.include_haves) |oid| {
         if (!try negotiator.haveSent(oid)) continue;
         try pkt_line.print(w, "have {f}\n", .{oid});
     }
     var added: usize = 0;
-    while (added < haves_to_send) {
+    while (added < round.haves_to_send) {
         const oid = (try negotiator.next()) orelse break;
         try pkt_line.print(w, "have {f}\n", .{oid});
         added += 1;
     }
     in_vain.* += added;
-    if (added == 0 or (seen_ack and in_vain.* >= max_in_vain)) {
+    if (added == 0 or (round.seen_ack and in_vain.* >= max_in_vain)) {
         try pkt_line.write(w, "done\n");
         done.* = true;
     }
     try pkt_line.flush(w);
+}
+
+/// git's `packfile-uris <protocols>`: the `http` and `https` of
+/// `protocols`, in their order, and no line when there are none.
+fn writeUriProtocols(w: *Io.Writer, protocols: []const []const u8) pkt_line.WriteError!void {
+    var buf: [32]u8 = undefined;
+    var line: Io.Writer = .fixed(&buf);
+    for (protocols) |p| {
+        if (!std.mem.eql(u8, p, "http") and !std.mem.eql(u8, p, "https")) continue;
+        if (line.end != 0) line.writeByte(',') catch return error.WriteFailed;
+        line.writeAll(p) catch return error.WriteFailed;
+    }
+    if (line.end != 0) try pkt_line.print(w, "packfile-uris {s}", .{line.buffered()});
 }
 
 /// git's `add_shallow_requests`: the boundary, then how to move it.
@@ -445,57 +518,130 @@ fn expectSection(conn: *Connection, in: *Io.Reader, name: []const u8) Error!void
     if (!std.mem.eql(u8, line, name)) return error.ProtocolError;
 }
 
-/// Read the sections of a v2 response up to `packfile` and receive the
-/// pack it carries.
-fn receivePackfileV2(
-    io: Io,
+/// A v2 response, read a packet at a time. Under `sideband-all` each line
+/// before the pack is on the side band, as git's packet reader takes it
+/// then: the server's progress goes to the caller as it comes, and its
+/// last words end the response.
+const Response = struct {
     conn: *Connection,
     in: *Io.Reader,
+    all_bands: bool,
+    /// The side band the lines and the pack are read through.
+    demux: side_band.Demux,
+
+    fn next(r: *Response) Error!pkt_line.Packet {
+        while (true) {
+            const packet = try r.conn.readPacket(r.in);
+            if (!r.all_bands) return packet;
+            const unparsed = switch (packet) {
+                .data => |data| data,
+                else => return packet,
+            };
+            const line = r.demux.band(unparsed.readForParse()) catch |err| switch (err) {
+                error.RemoteError => {
+                    r.conn.setMessage(r.demux.message());
+                    return error.RemoteError;
+                },
+                error.BadSideband => return error.ProtocolError,
+            };
+            if (line) |bytes| return .{ .data = .init(bytes) };
+        }
+    }
+
+    fn expectSection(r: *Response, name: []const u8) Error!void {
+        const line = switch (try r.next()) {
+            .data => |raw| std.mem.trimEnd(u8, raw.readForParse(), "\n"),
+            else => return error.ProtocolError,
+        };
+        if (std.mem.startsWith(u8, line, "ERR ")) {
+            r.conn.setMessage(line[4..]);
+            return error.RemoteError;
+        }
+        if (!std.mem.eql(u8, line, name)) return error.ProtocolError;
+    }
+};
+
+/// Read the sections of a v2 response up to `packfile` and receive the
+/// pack it carries, with the URIs a `packfile-uris` section names.
+fn receivePackfileV2(
+    gpa: Allocator,
+    io: Io,
+    response: *Response,
     db: *Odb,
-    progress: ?progress_mod.Progress,
     receive_options: index_pack.Options,
     kind: hash.Kind,
     shallow_info: ?*ShallowInfo,
-) Error!index_pack.Result {
+) Error!Fetched {
+    var uris: std.ArrayList(PackfileUri) = .empty;
+    defer {
+        for (uris.items) |u| gpa.free(u.uri);
+        uris.deinit(gpa);
+    }
     while (true) {
-        const packet = try conn.readPacket(in);
-        const header = switch (packet) {
+        const header = switch (try response.next()) {
             .data => |raw| std.mem.trimEnd(u8, raw.readForParse(), "\n"),
             else => return error.ProtocolError,
         };
         if (std.mem.startsWith(u8, header, "ERR ")) {
-            conn.setMessage(header[4..]);
+            response.conn.setMessage(header[4..]);
             return error.RemoteError;
         }
         if (std.mem.eql(u8, header, "packfile")) break;
-        if (std.mem.eql(u8, header, "packfile-uris")) return error.PackfileUrisUnsupported;
-        // `shallow-info` moves the boundary; `wanted-refs` answers a
-        // question this client does not ask. Each runs to the delimiter.
-        const is_shallow = std.mem.eql(u8, header, "shallow-info");
+        // `shallow-info` moves the boundary; `packfile-uris` names packs
+        // to download; `wanted-refs` answers a question this client does
+        // not ask. Each runs to the delimiter.
+        const section: enum { shallow, uris, other } = if (std.mem.eql(u8, header, "shallow-info"))
+            .shallow
+        else if (std.mem.eql(u8, header, "packfile-uris"))
+            .uris
+        else
+            .other;
         while (true) {
-            switch (try conn.readPacket(in)) {
+            const line = switch (try response.next()) {
                 .delim => break,
-                .data => |raw| if (is_shallow) {
-                    const info = shallow_info orelse return error.ProtocolError;
-                    if (!try info.take(kind, std.mem.trimEnd(u8, raw.readForParse(), "\n"))) return error.ProtocolError;
-                },
+                .data => |raw| std.mem.trimEnd(u8, raw.readForParse(), "\n"),
                 else => return error.ProtocolError,
+            };
+            switch (section) {
+                .shallow => {
+                    const info = shallow_info orelse return error.ProtocolError;
+                    if (!try info.take(kind, line)) return error.ProtocolError;
+                },
+                .uris => {
+                    // git's "expected '<hash> <uri>'".
+                    const hex_len = kind.hexLen();
+                    if (line.len <= hex_len or line[hex_len] != ' ') return error.ProtocolError;
+                    const pack_hash = Oid.parse(kind, line[0..hex_len]) catch return error.ProtocolError;
+                    try uris.ensureUnusedCapacity(gpa, 1);
+                    uris.appendAssumeCapacity(.{ .hash = pack_hash, .uri = try gpa.dupe(u8, line[hex_len + 1 ..]) });
+                },
+                .other => {},
             }
         }
-        if (is_shallow) if (shallow_info) |info| if (info.reject and info.shallow.items.len != 0) return error.ShallowSourceRefused;
+        if (section == .shallow) if (shallow_info) |info| if (info.reject and info.shallow.items.len != 0) return error.ShallowSourceRefused;
     }
-    return receiveSideband(io, conn, in, db, progress, receive_options);
+    // With packs to download, the special blobs are checked once they
+    // are in too.
+    var found: ?fsck.Found = null;
+    errdefer if (found) |*f| f.deinit(db.allocator());
+    var options = receive_options;
+    if (uris.items.len != 0 and options.fsck != null and options.found == null) {
+        found = .{};
+        options.found = &found.?;
+    }
+    var pack = try receiveSideband(io, response.conn, &response.demux, db, options);
+    errdefer pack.deinit(io);
+    const owned = try uris.toOwnedSlice(gpa);
+    return .{ .pack = pack, .uris = owned, .found = found, .found_gpa = db.allocator() };
 }
 
 fn receiveSideband(
     io: Io,
     conn: *Connection,
-    in: *Io.Reader,
+    demux: *side_band.Demux,
     db: *Odb,
-    progress: ?progress_mod.Progress,
     receive_options: index_pack.Options,
 ) Error!index_pack.Result {
-    var demux: side_band.Demux = .init(in, &.{}, progress);
     return db.receivePack(io, &demux.interface, receive_options) catch |err| switch (err) {
         error.ReadFailed => {
             const why = demux.err orelse return conn.failure();
@@ -705,7 +851,8 @@ fn receivePackV0(io: Io, conn: *Connection, in: *Io.Reader, db: *Odb, band: Band
             else => |e| e,
         };
     }
-    return receiveSideband(io, conn, in, db, receive.progress, receive);
+    var demux: side_band.Demux = .init(in, &.{}, receive.progress);
+    return receiveSideband(io, conn, &demux, db, receive);
 }
 
 /// Send `bytes` as the next request and take the response to read.

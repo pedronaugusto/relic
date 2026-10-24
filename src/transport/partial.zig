@@ -308,6 +308,7 @@ pub const Lazy = struct {
         } }, .{ .receive = .{ .keep = true, .fsck = if (rules) |*r| r else null, .promised = true, .reverse_index = rev_index.wanted(repo.configuration()) } });
         defer fetched.deinit(io);
         if (fetched.pack) |pack_name| try writePromisor(l.gpa, io, repo.objectDatabase(), pack_name, &.{});
+        for (fetched.uri_packs) |p| try writePromisor(l.gpa, io, repo.objectDatabase(), p.name, &.{});
     }
 
     /// Fetch, in one request, every blob below `tree` that the repository

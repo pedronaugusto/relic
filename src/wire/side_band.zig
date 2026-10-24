@@ -83,6 +83,27 @@ pub const Demux = struct {
         d.message_len = s.len;
     }
 
+    /// What one packet on the side band carries, as git's
+    /// `demultiplex_sideband` takes it: channel 1's bytes, or `null` once
+    /// channel 2's progress has gone to `progress`. Channel 3 is
+    /// `error.RemoteError`, its text kept for `message`. A response read
+    /// under `sideband-all` takes every line before its pack through it.
+    pub fn band(d: *Demux, data: []const u8) error{ RemoteError, BadSideband }!?[]const u8 {
+        if (data.len == 0) return error.BadSideband;
+        switch (data[0]) {
+            1 => return data[1..],
+            2 => {
+                if (d.progress) |p| emitRemote(p, data[1..]);
+                return null;
+            },
+            3 => {
+                d.keepMessage(data[1..]);
+                return error.RemoteError;
+            },
+            else => return error.BadSideband,
+        }
+    }
+
     fn stream(r: *Io.Reader, w: *Io.Writer, limit: Io.Limit) Io.Reader.StreamError!usize {
         const d: *Demux = @alignCast(@fieldParentPtr("interface", r)); // safe: this function is installed only on a Demux's interface
         while (true) {
@@ -112,24 +133,11 @@ pub const Demux = struct {
                     return error.ReadFailed;
                 },
                 .data => |unparsed| {
-                    const data = unparsed.readForParse();
-                    if (data.len == 0) {
-                        d.err = error.BadSideband;
+                    const data = d.band(unparsed.readForParse()) catch |err| {
+                        d.err = err;
                         return error.ReadFailed;
-                    }
-                    switch (data[0]) {
-                        1 => d.pending = data[1..],
-                        2 => if (d.progress) |p| emitRemote(p, data[1..]),
-                        3 => {
-                            d.keepMessage(data[1..]);
-                            d.err = error.RemoteError;
-                            return error.ReadFailed;
-                        },
-                        else => {
-                            d.err = error.BadSideband;
-                            return error.ReadFailed;
-                        },
-                    }
+                    };
+                    d.pending = data orelse "";
                 },
             }
         }

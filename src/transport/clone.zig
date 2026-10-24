@@ -618,9 +618,12 @@ fn receiveObjects(
     };
     // A partial clone's pack is a promisor pack, and says for which refs —
     // also when the server did not filter it, as git marks it.
-    if (ask.filter != null) if (fetched.pack) |name| {
-        try partial.writePromisor(gpa, io, repo.objectDatabase(), name, try promisorRefs(arena, session, ask.remote_refs, chosen.wants.items));
-    };
+    // A pack named by URI is one too, its file empty as index-pack's
+    // `--promisor` leaves it.
+    if (ask.filter != null) {
+        if (fetched.pack) |name| try partial.writePromisor(gpa, io, repo.objectDatabase(), name, try promisorRefs(arena, session, ask.remote_refs, chosen.wants.items));
+        for (fetched.uri_packs) |p| try partial.writePromisor(gpa, io, repo.objectDatabase(), p.name, &.{});
+    }
     if (ask.deepen == null) try shallow_info.shallow.appendSlice(gpa, session.advertisedShallow());
     if (shallow_info.shallow.items.len != 0) {
         var empty: Oid.Set = .empty;

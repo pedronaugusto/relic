@@ -124,6 +124,12 @@ pub const Options = struct {
     /// `.gitmodules` or `.gitattributes` the pack and the database lack, as
     /// git takes a promisor object as there.
     promised: bool = false,
+    /// Where the blobs trees name as `.gitmodules` and `.gitattributes` go
+    /// instead of being checked as the pack is done, for a fetch whose
+    /// other packs may carry them: the caller checks them with
+    /// `checkFound` once every pack is in, as git's fetch-pack calls
+    /// `fsck_finish` after its packfile URIs.
+    found: ?*fsck.Found = null,
     /// Where what the rules make warnings goes, as git prints them.
     warnings: ?*warning.Warnings = null,
     /// The most bytes the stream may carry, or `null` for no bound.
@@ -290,6 +296,53 @@ pub const Result = struct {
         result.* = undefined;
     }
 };
+
+/// What `checkFound` checks with.
+pub const FoundOptions = struct {
+    pub const Error = ErrorNamespace.Error;
+
+    rules: *const fsck.Rules,
+    /// The packs came from a promisor remote: a blob nobody has is one it
+    /// promises.
+    promised: bool = false,
+    warnings: ?*warning.Warnings = null,
+    diagnostic: ?*Diagnostic = null,
+    /// A blob past it is checked as git checks one it will not hold.
+    max_object_bytes: Bytes = .literal("2GiB"),
+};
+
+/// Check the blobs packs received with `Options.found` collected, from the
+/// database that now holds the packs, as git's `fsck_finish` does once a
+/// fetch's packs are all in: a `.gitmodules` or `.gitattributes` that is
+/// no blob, or that git's `fsck` refuses, or that nobody has and nothing
+/// promises, is `error.MalformedBlob`, `options.diagnostic` naming it.
+pub fn checkFound(gpa: Allocator, io: Io, owner: anytype, found: *const fsck.Found, options: FoundOptions) Error!void {
+    const db: Database = .from(owner);
+    var to_warnings: fsck.ToWarnings = .{ .warnings = options.warnings };
+    const sink: ?fsck.Sink = if (options.warnings != null) to_warnings.sink() else null;
+    for ([_]fsck.Special{ .modules, .attributes }) |as| {
+        const set = switch (as) {
+            .modules => &found.modules,
+            .attributes => &found.attributes,
+        };
+        var it = set.keyIterator();
+        while (it.next()) |oid_ptr| {
+            const oid = oid_ptr.*;
+            const finding = if (try db.exists(io, oid)) blk: {
+                const header = try db.readHeader(io, oid);
+                if (header.type != .blob) break :blk try fsck.checkFoundObject(options.rules, oid, as, false, sink);
+                if (Bytes.fromRaw(header.size).compare(options.max_object_bytes) == .gt) break :blk try fsck.checkBlob(gpa, options.rules, .{ .oid = oid, .as = as, .bytes = null }, .{ .sink = sink });
+                const read = try db.read(io, oid);
+                defer db.allocator().free(read.bytes);
+                break :blk try fsck.checkBlob(gpa, options.rules, .{ .oid = oid, .as = as, .bytes = read.bytes }, .{ .sink = sink });
+            } else if (options.promised) null else try fsck.checkFoundObject(options.rules, oid, as, true, sink);
+            if (finding) |f| {
+                if (options.diagnostic) |d| d.* = .{ .oid = oid, .problem = f.problem };
+                return error.MalformedBlob;
+            }
+        }
+    }
+}
 
 const EntryKind = enum(u2) { whole, ofs_delta, ref_delta };
 
@@ -999,6 +1052,13 @@ const Indexer = struct {
         };
         defer named.deinit(x.gpa);
         if (named.modules.count() == 0 and named.attributes.count() == 0) return;
+        if (x.options.found) |out| {
+            for ([_][2]*Oid.Set{ .{ &out.modules, &named.modules }, .{ &out.attributes, &named.attributes } }) |sets| {
+                var it = sets[1].keyIterator();
+                while (it.next()) |k| try sets[0].put(x.gpa, k.*, {});
+            }
+            return;
+        }
         var by_name: Oid.Map(u32) = .empty;
         defer by_name.deinit(x.gpa);
         try by_name.ensureTotalCapacity(x.gpa, @intCast(x.entries.items.len));

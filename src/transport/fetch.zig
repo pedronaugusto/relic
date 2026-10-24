@@ -700,10 +700,16 @@ const Came = struct {
 /// of their own.
 const Brought = struct {
     packs: [2]Came,
+    /// The packs the server named by URI, kept as the others are; their
+    /// slice `uri_gpa`'s.
+    uri_packs: []transport.Session.UriPack = &.{},
+    uri_gpa: ?Allocator = null,
     backfill: []MapEntry,
 
     fn deinit(b: *Brought, io: Io) void {
         for (&b.packs) |*came| if (came.keep) |*t| t.deinit(io);
+        for (b.uri_packs) |*p| if (p.keep) |*t| t.deinit(io);
+        if (b.uri_gpa) |g| g.free(b.uri_packs);
         b.* = undefined;
     }
 
@@ -714,7 +720,8 @@ const Brought = struct {
     fn settle(b: *Brought, io: Io, repo: *Repository, outcome: *Outcome, kept: bool) Error!void {
         outcome.pack = b.packs[0].name;
         outcome.objects = b.packs[0].objects;
-        if (kept) return;
+        // With packs named by URI, git's `get_pack` keeps the pack.
+        if (kept or b.uri_packs.len != 0) return;
         if (try b.unpackSmall(io, repo, unpackLimit(repo.configuration()))) outcome.pack = null;
     }
 
@@ -812,7 +819,10 @@ fn bringObjects(
     // A remote helper's import learns the values as it goes.
     takeFetchedValues(session, b.map);
     // A fetch's promisor pack names no refs; git's names none either.
-    if (b.promisor) if (fetched.pack) |name| try partial.writePromisor(gpa, io, repo.objectDatabase(), name, &.{});
+    if (b.promisor) {
+        if (fetched.pack) |name| try partial.writePromisor(gpa, io, repo.objectDatabase(), name, &.{});
+        for (fetched.uri_packs) |p| try partial.writePromisor(gpa, io, repo.objectDatabase(), p.name, &.{});
+    }
 
     try boundary_change.take(arena, gpa, repo, &shallow_info, session.advertisedShallow(), b.deepen != null);
 
@@ -847,7 +857,7 @@ fn bringObjects(
     });
 
     if (boundary_change.moved) try repo.writeShallow(io);
-    return .{ .packs = .{ .{ .name = fetched.pack, .objects = fetched.objects, .keep = fetched.keep }, tag_pack }, .backfill = backfill };
+    return .{ .packs = .{ .{ .name = fetched.pack, .objects = fetched.objects, .keep = fetched.keep }, tag_pack }, .uri_packs = fetched.uri_packs, .uri_gpa = fetched.uri_gpa, .backfill = backfill };
 }
 
 /// Which remotes a fetch of several asks for.
