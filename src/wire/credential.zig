@@ -885,10 +885,28 @@ pub const Session = struct {
 
     /// git's `spawn_daemon`: `git credential-cache--daemon <socket>`
     /// started, and whether it said `ok` once it listened. The shell leaves
-    /// it running on its own, as git leaves its daemon behind it.
+    /// it running on its own, as git leaves its daemon behind it. Its `PATH`
+    /// is git's own (`setup_path`), the exec path ahead of the caller's, so
+    /// the `git` that `git_cmd` names is git's: Git for Windows' `git` on
+    /// `PATH` is a wrapper that waits on the git it starts, and so would hold
+    /// the daemon's output open for as long as the daemon runs.
     fn startGitDaemon(gpa: Allocator, io: Io, programs: program.Programs, socket: []const u8) ErrorNamespace.Error!bool {
+        var exec = program.run(gpa, io, programs, .{ .argv = &.{ "git", "--exec-path" } }, .{ .output = .limited(4096) }) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.Canceled => return error.Canceled,
+            else => return false,
+        };
+        defer exec.deinit(gpa);
+        if (!exec.succeeded()) return false;
+        const exec_path = std.mem.trimEnd(u8, exec.stdout, "\r\n");
+        const search = if (programs.environ.get("PATH")) |path|
+            try gpa.print("{s}{c}{s}", .{ exec_path, Io.Dir.path.delimiter, path })
+        else
+            try gpa.dupe(u8, exec_path);
+        defer gpa.free(search);
         var outcome = program.run(gpa, io, programs, .{
             .argv = &.{ "sh", "-c", "git credential-cache--daemon \"$1\" </dev/null &", "sh", socket },
+            .set = &.{.{ .name = "PATH", .value = search }},
             .stderr = .inherit,
         }, .{ .output = .limited(128) }) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
