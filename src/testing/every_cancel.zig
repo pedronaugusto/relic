@@ -13,9 +13,12 @@ const testgit = @import("git.zig");
 const repo_mod = @import("../repo/repo.zig");
 const worktree = @import("../checkout/checkout.zig");
 const describe = @import("../rev_walk/describe.zig");
-const Walk = @import("../walk/walk.zig").Walk;
+const walk_mod = @import("../walk/walk.zig");
+const Walk = walk_mod.Walk;
+const rev_parse = @import("../repo/rev_parse.zig");
+const grep = @import("../grep.zig");
 
-const Op = enum { open, status, describe, log };
+const Op = enum { open, status, describe, log, rev_parse, merge_base, grep };
 
 /// Two commits of three files, a tag on the first, a changed file and a new
 /// one in the working tree.
@@ -72,11 +75,23 @@ const Sweep = struct {
                 try walk.push(head.oid);
                 while (try walk.next(io)) |_| {}
             },
+            .rev_parse => _ = try rev_parse.resolve(gpa, io, repo.revisionSource(), "v1^{tree}:d/b"),
+            .merge_base => {
+                const one = try rev_parse.resolve(gpa, io, repo.revisionSource(), "v1^{commit}");
+                const two = try rev_parse.resolve(gpa, io, repo.revisionSource(), "HEAD");
+                gpa.free(try walk_mod.mergeBases(gpa, io, repo.objectDatabase(), .{ .a = one, .b = two }, .{}));
+            },
+            .grep => {
+                var out: Io.Writer.Allocating = .init(gpa);
+                defer out.deinit();
+                _ = try grep.grep(gpa, io, &out.writer, &repo, .{ .patterns = &.{"e"}, .threads = 1 });
+            },
         }
     }
 
-    /// A lost cancel is counted and its call printed with the three after
-    /// it, which name the fallback that took it in; the sweep goes on.
+    /// A lost cancel is counted and its call printed with the three before
+    /// and after it, which name the fallback that took it in; the sweep goes
+    /// on.
     pub fn check(s: *Sweep, _: Io, result: anyerror!void, injected: ?shakedown.Injected) !void {
         const fault = injected orelse return result;
         if (fault.fault != .cancel) return;
@@ -88,7 +103,7 @@ const Sweep = struct {
         const records = s.fio.?.trace().records();
         for (records, 0..) |r, i| if (r.step == fault.step) {
             std.debug.print("{t}: cancel lost at step {d}:", .{ s.op, r.step });
-            for (records[i..@min(records.len, i + 4)]) |next| std.debug.print(" | {f}", .{next.event});
+            for (records[i -| 3..@min(records.len, i + 4)]) |next| std.debug.print(" | {f}", .{next.event});
             std.debug.print("\n", .{});
             break;
         };
@@ -132,4 +147,16 @@ test "every cancellation point of describe returns error.Canceled (design §11)"
 
 test "every cancellation point of a revision walk returns error.Canceled (design §11)" {
     try sweep(.log);
+}
+
+test "every cancellation point of rev-parse returns error.Canceled (design §11)" {
+    try sweep(.rev_parse);
+}
+
+test "every cancellation point of a merge base returns error.Canceled (design §11)" {
+    try sweep(.merge_base);
+}
+
+test "every cancellation point of grep returns error.Canceled (design §11)" {
+    try sweep(.grep);
 }

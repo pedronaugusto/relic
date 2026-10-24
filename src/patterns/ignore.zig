@@ -144,7 +144,10 @@ pub const Rules = struct {
             std.mem.print(&path_buf, "{s}/.gitignore", .{base}) catch return;
         // An in-tree `.gitignore` is read only as a file, never through a
         // symbolic link, as git's `PATTERN_NOFOLLOW` reads it.
-        const found = (fs.statAt(io, wt, path) catch return) orelse return;
+        const found = (fs.statAt(io, wt, path) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => return,
+        }) orelse return;
         if (found.kind != .file) return;
         try rules.addFileIfPresent(io, wt, path, base, path, depth + 2);
     }

@@ -353,7 +353,10 @@ pub const Attrs = struct {
         // never through a symbolic link, as git's `READ_ATTR_NOFOLLOW` reads
         // it: a link would have the tree's attributes come from anywhere.
         if (links == .no_follow) {
-            const found = fs.statAt(io, dir, path) catch return orelse return;
+            const found = fs.statAt(io, dir, path) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => return,
+            } orelse return;
             if (found.kind != .file) return;
         }
         const a = attrs.arena.allocator();

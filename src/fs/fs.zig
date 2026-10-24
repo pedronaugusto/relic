@@ -1390,7 +1390,10 @@ pub fn deleteFile(io: Io, dir: Io.Dir, sub_path: []const u8) Io.Dir.DeleteFileEr
         },
         error.IsDir => {
             if (builtin.target.os.tag != .windows) return err;
-            const found = (statAt(io, dir, sub_path) catch return err) orelse return error.FileNotFound;
+            const found = (statAt(io, dir, sub_path) catch |e| return switch (e) {
+                error.Canceled => error.Canceled,
+                else => err,
+            }) orelse return error.FileNotFound;
             if (found.kind != .sym_link) return err;
             // A link holds nothing, so it is never `DirNotEmpty`.
             dir.deleteDir(io, sub_path) catch |e| return switch (e) {

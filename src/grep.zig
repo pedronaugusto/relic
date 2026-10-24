@@ -1249,7 +1249,12 @@ const Batch = struct {
                     const found = try repo.objectDatabase().read(io, oid);
                     break :blk found.bytes;
                 },
-                .file => (fs.readFileAlloc(repo.objectDatabase().allocator(), io, repo.workDirectory().?, item.path, 1 << 31) catch null) orelse null,
+                // A file that cannot be read is passed over, as git's `grep_file`
+                // passes it; a cancel is returned.
+                .file => fs.readFileAlloc(repo.objectDatabase().allocator(), io, repo.workDirectory().?, item.path, 1 << 31) catch |err| switch (err) {
+                    error.Canceled => return error.Canceled,
+                    else => null,
+                },
             };
             if (content) |c| {
                 try batch.owned.append(gpa, .{ .bytes = c, .owner = item.owner });
