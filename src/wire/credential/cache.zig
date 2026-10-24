@@ -14,7 +14,6 @@
 const Self = @This();
 
 const std = @import("std");
-const builtin = @import("builtin");
 const reactor = @import("reactor");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -88,10 +87,10 @@ pub const Request = struct {
 pub fn request(gpa: Allocator, io: Io, socket: []const u8, req: Request) Self.Error!?[]u8 {
     const address = Io.net.UnixAddress.init(socket) catch return error.CacheUnreachable;
     const stream = reactor.net.connectUnix(io, &address) catch |err| switch (err) {
+        // Winsock's ENETDOWN for a directory missing on the way, which git
+        // for Windows' `connection_fatally_broken` takes for no daemon, is
+        // reactor's FileNotFound.
         error.FileNotFound, error.ConnectionRefused => return null,
-        // git for Windows' `connection_fatally_broken` takes ENETDOWN for
-        // no daemon there, as ECONNREFUSED is elsewhere.
-        error.NetworkDown => if (builtin.target.os.tag == .windows) return null else return error.CacheUnreachable,
         error.Canceled => return error.Canceled,
         else => return error.CacheUnreachable,
     };
