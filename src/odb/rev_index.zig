@@ -23,7 +23,7 @@ const config_mod = @import("../config/config.zig");
 const Oid = hash.Oid;
 
 /// Errors from writing one.
-pub const Error = Allocator.Error || Io.File.OpenError || fs.SyncError || Io.Writer.Error;
+pub const Error = Allocator.Error || Io.File.OpenError || fs.SyncError || Io.Writer.Error || Io.File.Writer.Error;
 
 /// Whether `config` asks for reverse indexes: `pack.writeReverseIndex`,
 /// true when unset, as git has it since 2.41.
@@ -70,9 +70,17 @@ pub fn write(
         dir.deleteFile(io, sub_path) catch {};
     };
     var fw = file.writer(io, &buffer);
-    const out = &fw.interface;
-    var hasher: hash.Hasher = .init(kind);
+    // The file's own error, not the interface's WriteFailed.
+    writeBody(&fw.interface, kind, positions, pack_checksum) catch return fw.err orelse error.WriteFailed;
+    try fs.syncFile(io, file, .{ .policy = sync });
+    file.close(io);
+    failed = false;
+}
 
+/// The header, each position in pack order, the pack's checksum and the
+/// file's own, through `out` and flushed.
+fn writeBody(out: *Io.Writer, kind: hash.Kind, positions: []const u32, pack_checksum: Oid) Io.Writer.Error!void {
+    var hasher: hash.Hasher = .init(kind);
     var head: [12]u8 = undefined;
     @memcpy(head[0..4], "RIDX");
     std.mem.writeInt(u32, head[4..8], 1, .big);
@@ -94,7 +102,4 @@ pub fn write(
     const own = hasher.final();
     try out.writeAll(own.raw()[0..kind.rawLen()]);
     try out.flush();
-    try fs.syncFile(io, file, .{ .policy = sync });
-    file.close(io);
-    failed = false;
 }

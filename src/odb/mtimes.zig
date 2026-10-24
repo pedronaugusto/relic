@@ -66,7 +66,7 @@ pub fn parse(gpa: Allocator, bytes: []const u8, count: u32) Self.ReadError![]u32
 pub const Error = ReadError || WriteError;
 
 /// Errors from writing one.
-pub const WriteError = Allocator.Error || Io.File.OpenError || fs.SyncError || Io.Writer.Error;
+pub const WriteError = Allocator.Error || Io.File.OpenError || fs.SyncError || Io.Writer.Error || Io.File.Writer.Error;
 
 /// What `write` writes: the times of a pack whose `.idx` holds `entries`,
 /// sorted by name as `pack.writeIndexFile` leaves them, each looked up in
@@ -82,7 +82,6 @@ pub const WriteOptions = struct {
 /// Write the `.mtimes` git's `write_mtimes_file` writes, to `sub_path` in
 /// `dir`; a failed write leaves nothing there.
 pub fn write(io: Io, dir: Io.Dir, sub_path: []const u8, options: WriteOptions) Self.WriteError!void {
-    const kind = options.kind;
     var buffer: [8192]u8 = undefined;
     const file = try dir.createFile(io, sub_path, .{ .exclusive = false, .truncate = true });
     var failed = true;
@@ -92,7 +91,17 @@ pub fn write(io: Io, dir: Io.Dir, sub_path: []const u8, options: WriteOptions) S
         dir.deleteFile(io, sub_path) catch {};
     };
     var fw = file.writer(io, &buffer);
-    const out = &fw.interface;
+    // The file's own error, not the interface's WriteFailed.
+    writeBody(&fw.interface, options) catch return fw.err orelse error.WriteFailed;
+    try fs.syncFile(io, file, .{ .policy = options.sync });
+    file.close(io);
+    failed = false;
+}
+
+/// The header, each entry's time, the pack's checksum and the file's own,
+/// through `out` and flushed.
+fn writeBody(out: *Io.Writer, options: WriteOptions) Io.Writer.Error!void {
+    const kind = options.kind;
     var hasher: hash.Hasher = .init(kind);
     var head: [header_len]u8 = undefined;
     @memcpy(head[0..4], "MTME");
@@ -115,9 +124,6 @@ pub fn write(io: Io, dir: Io.Dir, sub_path: []const u8, options: WriteOptions) S
     const own = hasher.final();
     try out.writeAll(own.raw()[0..kind.rawLen()]);
     try out.flush();
-    try fs.syncFile(io, file, .{ .policy = options.sync });
-    file.close(io);
-    failed = false;
 }
 
 test "parse takes git's layout and refuses what git refuses" {

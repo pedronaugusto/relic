@@ -46,7 +46,7 @@ pub fn read(gpa: Allocator, io: Io, dir: Io.Dir, sub_path: []const u8) ErrorName
 }
 
 /// Errors from `write`.
-pub const WriteError = Io.File.OpenError || Io.Writer.Error;
+pub const WriteError = Io.File.OpenError || Io.Writer.Error || Io.File.Writer.Error;
 
 /// Write `<dir>/.git` naming `path`: `gitdir: <path>` and a line feed, as
 /// git writes it, hidden where `core.hideDotFiles` asks -- shown first when
@@ -59,10 +59,9 @@ pub fn write(io: Io, dir: Io.Dir, path: []const u8, hide: fs.HideDotFiles) Write
     defer file.close(io);
     var buffer: [256]u8 = undefined;
     var writer = file.writer(io, &buffer);
-    try writer.interface.writeAll(prefix);
-    try writer.interface.writeAll(path);
-    try writer.interface.writeAll("\n");
-    try writer.interface.flush();
+    // The file's own error, not the interface's WriteFailed.
+    writer.interface.print("{s}{s}\n", .{ prefix, path }) catch return writer.err orelse error.WriteFailed;
+    writer.interface.flush() catch return writer.err orelse error.WriteFailed;
     fs.hideIfAsked(io, dir, ".git", hide);
 }
 

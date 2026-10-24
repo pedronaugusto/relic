@@ -16,7 +16,7 @@ const repo_mod = @import("../repo/repo.zig");
 const Repository = repo_mod.Repository;
 
 /// Failures of `updateServerInfo`.
-pub const Error = repo_mod.Error || Io.File.OpenError || Io.Dir.CreateDirPathError || Io.Dir.RenameError || Io.Dir.DeleteFileError || Io.Dir.ReadFileAllocError || Io.Writer.Error;
+pub const Error = repo_mod.Error || Io.File.OpenError || Io.Dir.CreateDirPathError || Io.Dir.RenameError || Io.Dir.DeleteFileError || Io.Dir.ReadFileAllocError || Io.Writer.Error || Io.File.Writer.Error;
 
 /// git's `update_server_info` without `--force`: `info/refs` and
 /// `objects/info/packs` written again when what they would hold differs
@@ -171,12 +171,11 @@ fn update(arena: Allocator, io: Io, dir: Io.Dir, sub_dir: []const u8, name: []co
         defer file.close(io);
         var buffer: [4096]u8 = undefined;
         var writer = file.writer(io, &buffer);
-        writer.interface.writeAll(bytes) catch |err| {
+        fs.writeAllFlushed(&writer, bytes) catch |err| {
             // glint-ignore: Z026 -- the write's error is the one to report; a temporary left behind holds nothing anyone reads
             dir.deleteFile(io, temp) catch {};
             return err;
         };
-        try writer.interface.flush();
     }
     fs.adjustShared(io, dir, temp, shared);
     fs.rename(io, dir, temp, path) catch |err| {

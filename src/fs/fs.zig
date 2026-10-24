@@ -1518,7 +1518,14 @@ pub fn lockHeld(io: Io, dir: Io.Dir, sub_path: []const u8) bool {
 }
 
 /// Errors from replacing a file whole.
-pub const AtomicWriteError = airlock.CreateError || Io.Writer.Error || SyncError || Io.Dir.RenameError || Io.Dir.DeleteFileError || airlock.Pending.CommitError;
+pub const AtomicWriteError = airlock.CreateError || Io.Writer.Error || Io.File.Writer.Error || SyncError || Io.Dir.RenameError || Io.Dir.DeleteFileError || airlock.Pending.CommitError;
+
+/// `bytes` through `fw` and flushed, failing with the file's own error, a
+/// cancel among them, where the interface says only `WriteFailed`.
+pub fn writeAllFlushed(fw: *Io.File.Writer, bytes: []const u8) (Io.Writer.Error || Io.File.Writer.Error)!void {
+    fw.interface.writeAll(bytes) catch return fw.err orelse error.WriteFailed;
+    fw.interface.flush() catch return fw.err orelse error.WriteFailed;
+}
 
 pub const AtomicWriteOptions = struct {
     prefix: []const u8,
@@ -1550,8 +1557,7 @@ pub fn atomicWrite(
     defer pending.discard(io);
     var write_buf: [4096]u8 = undefined;
     var fw = pending.file().writer(io, &write_buf);
-    try fw.interface.writeAll(bytes);
-    try fw.interface.flush();
+    try writeAllFlushed(&fw, bytes);
     try syncFile(io, pending.file(), .{ .policy = options.sync });
     _ = try pending.commit(io, .{ .level = .none });
 }
