@@ -177,7 +177,6 @@ fn update(arena: Allocator, io: Io, dir: Io.Dir, sub_dir: []const u8, name: []co
             fs.removeLeftover(io, dir, temp);
             return err;
         };
-        try writer.interface.flush();
     }
     fs.adjustShared(io, dir, temp, shared);
     fs.rename(io, dir, temp, path) catch |err| {
