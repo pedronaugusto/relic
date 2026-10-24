@@ -10,6 +10,7 @@ const pack_mod = @import("../odb/pack.zig");
 const testgit = @import("git.zig");
 const Tasks = @import("io.zig").Tasks;
 const shakedown = @import("shakedown");
+const cancel = @import("cancel.zig");
 
 const Oid = hash.Oid;
 
@@ -881,4 +882,56 @@ test "verifying a database checks its packs' entries on several tasks" {
         // One batch's entries and checksum, shared with the caller.
         try tasks.state.expect(@min(std.Thread.getCpuCount() catch 1, report.packed_objects + 1) - 1, 0);
     }
+}
+
+const CancelRun = struct {
+    corpus: *Corpus,
+
+    fn write(io: Io, c: *Corpus, gpa: std.mem.Allocator, options: odb_mod.PackOptions) !pack_mod.WriteReport {
+        return c.write(gpa, io, options);
+    }
+
+    /// What the pack directory holds: nothing a canceled write left.
+    fn packFiles(c: *Corpus, io: Io) !usize {
+        var dir = try c.objects.openDir(io, "pack", .{ .iterate = true });
+        defer dir.close(io);
+        var it = dir.iterate();
+        var n: usize = 0;
+        while (try it.next(io)) |_| n += 1;
+        return n;
+    }
+
+    fn run(r: *const CancelRun, io: Io) !void {
+        const gpa = std.testing.allocator;
+        const c = r.corpus;
+        const entries = c.entries.items.len;
+        // Alone, one point per object written, before its window is
+        // searched; on tasks, one for each object searched, and one for
+        // each item read (header and body) and deflated.
+        for ([_]u16{ 1, 4 }) |threads| {
+            const plain = try write(io, c, gpa, .{ .threads = threads });
+            var counter = cancel.counted(io);
+            const counted = try write(counter.io(), c, gpa, .{ .threads = threads });
+            try std.testing.expect(counted.name.eql(plain.name));
+            try std.testing.expect(cancel.points(&counter) >= @as(u64, if (threads == 1) 1 else 4) * entries);
+            try c.objects.deleteTree(io, "pack");
+            try c.objects.createDirPath(io, "pack");
+        }
+        // Canceled halfway, the write returns `error.Canceled` and leaves
+        // no file behind. Alone it asks no point after; on tasks the
+        // others each finish the object they hold.
+        try cancel.expectCanceled(io, entries / 2, 0, write, .{ c, gpa, odb_mod.PackOptions{ .threads = 1 } });
+        try std.testing.expectEqual(@as(usize, 0), try packFiles(c, io));
+        try cancel.expectCanceled(io, entries / 2, entries, write, .{ c, gpa, odb_mod.PackOptions{ .threads = 4 } });
+        try std.testing.expectEqual(@as(usize, 0), try packFiles(c, io));
+    }
+};
+
+test "a pack write canceled as a task, alone or on tasks, returns error.Canceled from the object it stops at and leaves no file, on each backend (design §11)" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var corpus = try Corpus.init(gpa, io, 8, 30, 40);
+    defer corpus.deinit(gpa, io);
+    const r: CancelRun = .{ .corpus = &corpus };
+    try cancel.eachBackend(&r, CancelRun.run);
 }

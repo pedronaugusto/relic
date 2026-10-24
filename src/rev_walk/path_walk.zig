@@ -327,6 +327,7 @@ pub const PathWalk = struct {
         };
         pw.release();
         while (pw.queue.pop()) |queued| {
+            try io.checkCancel();
             const list = pw.lists.get(queued.path).?;
             if (list.oids.items.len == 0) {
                 pw.drop(queued.path);

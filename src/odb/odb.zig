@@ -4673,6 +4673,7 @@ const Build = struct {
     /// Every object in pack order on this task alone: the serial writer.
     fn writeSerially(b: *Build, io: Io) Error!void {
         for (b.ordered, 0..) |*item, pos| {
+            try io.checkCancel();
             if (b.group_starts[pos]) b.window.clear(b.gpa);
             if (b.streamed(pos)) {
                 try b.writeStreamed(io, pos);
@@ -4931,9 +4932,10 @@ const Build = struct {
 
     /// One part's delta search, in pack order, exactly as the serial writer
     /// makes it for its group.
-    fn searchPart(b: *const Build, gpa: Allocator, batch: *PackBatch, part: *Part) Error!void {
+    fn searchPart(b: *const Build, io: Io, gpa: Allocator, batch: *PackBatch, part: *Part) Error!void {
         const raw_len = b.odb.backendData().kind.rawLen();
         for (part.start..part.end) |pos| {
+            try io.checkCancel();
             if (b.reusedAt(pos) != null or b.streamed(pos)) continue;
             const p = &batch.pending.items[pos - batch.start];
             p.choice = try part.window.choose(gpa, b.options, b.depthFor(pos), raw_len, .{ .pos = pos, .oid = b.ordered[pos].oid }, p.type, p.bytes.?, true);
@@ -5004,7 +5006,7 @@ const Build = struct {
 
             fn work(task_io: Io, c: Self, worker: usize, i: usize) Error!void {
                 // The parts first: they are the longest items.
-                if (i < c.parts.len) return c.build.searchPart(c.search_gpa, c.searching.?, &c.parts[i]);
+                if (i < c.parts.len) return c.build.searchPart(task_io, c.search_gpa, c.searching.?, &c.parts[i]);
                 const d = i - c.parts.len;
                 if (d < c.deflates.len) {
                     const p = &c.deflates[d];

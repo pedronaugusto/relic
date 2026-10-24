@@ -667,6 +667,7 @@ fn findBisection(c: *Ctx, listed: *const Listed, first_parent: bool, find_all: b
     // Then a strand of pearls one more than the commit below it.
     while (counted < nr) {
         for (list) |oid| {
+            try c.io.checkCancel();
             if (weight.get(oid).? >= 0) continue;
             var below: ?i64 = null;
             for (listed.parents.get(oid).?) |p| {
@@ -745,6 +746,7 @@ fn countDistance(c: *Ctx, listed: *const Listed, from: Oid) Error!i64 {
     try stack.append(c.gpa, from);
     var count: i64 = 0;
     while (stack.pop()) |oid| {
+        try c.io.checkCancel();
         if (listed.hidden.contains(oid)) continue;
         if ((try seen.getOrPut(c.gpa, oid)).found_existing) continue;
         const parents = listed.parents.get(oid) orelse continue;

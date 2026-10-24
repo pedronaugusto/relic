@@ -301,6 +301,7 @@ const Walk = struct {
         defer stack.deinit(w.gpa);
         try stack.append(w.gpa, start);
         while (stack.pop()) |oid| {
+            try w.io.checkCancel();
             const node = w.nodes.getPtr(oid) orelse continue;
             if (node.flags & flag_uninteresting != 0) continue;
             node.flags |= flag_uninteresting;
@@ -329,6 +330,7 @@ const Walk = struct {
         var last_wanted: i64 = std.math.maxInt(i64);
         if (w.wanted_queued == 0) return out.toOwnedSlice(w.gpa);
         while (w.queue.pop()) |item| {
+            try w.io.checkCancel();
             const node = w.nodes.getPtr(item.oid).?;
             node.flags |= flag_popped;
             const uninteresting = node.flags & flag_uninteresting != 0;
@@ -363,6 +365,7 @@ const Walk = struct {
         defer stack.deinit(w.gpa);
         try stack.append(w.gpa, root);
         while (stack.pop()) |oid| {
+            try w.io.checkCancel();
             if (w.had.contains(oid)) continue;
             try w.had.put(w.gpa, oid, {});
             const found = w.db.read(w.io, oid) catch |err| switch (err) {
@@ -395,6 +398,7 @@ const Walk = struct {
         defer stack.deinit(w.gpa);
         try stack.append(w.gpa, .{ .oid = root, .path = root_path });
         while (stack.pop()) |item| {
+            try w.io.checkCancel();
             if (w.had.contains(item.oid) or w.added.contains(item.oid)) continue;
             try w.added.put(w.gpa, item.oid, {});
             try out.append(w.gpa, .{ .oid = item.oid, .hint = item.path });
@@ -485,6 +489,7 @@ pub fn checkConnected(gpa: Allocator, io: Io, db: *Odb, tips: []const Oid, optio
     defer stack.deinit(gpa);
     for (tips) |tip| try stack.append(gpa, .{ .oid = tip });
     while (stack.pop()) |item| {
+        try io.checkCancel();
         const oid = item.oid;
         if (seen.contains(oid)) continue;
         try seen.put(gpa, oid, {});

@@ -174,6 +174,7 @@ const Traversal = struct {
     }
 
     fn tree(t: *Traversal, oid: Oid, path: []const u8, user_given: bool, depth: u32) object_walk.Error!void {
+        try t.io.checkCancel();
         if (depth > object.max_tree_depth) return error.TreeTooDeep;
         if (t.had.contains(oid) or t.seen.contains(oid)) return;
         const begin = if (user_given) Verdict.shown else try t.verdict(&t.state, .begin_tree, oid, path);

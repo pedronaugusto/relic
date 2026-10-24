@@ -367,6 +367,7 @@ pub const Describer = struct {
         (try walk.node(io, cmit)).flags = seen_flag;
         try walk.put(io, cmit);
         while (walk.get()) |c| {
+            try io.checkCancel();
             seen_commits += 1;
             if (match_cnt == d.options.candidates or match_cnt == d.names.count()) {
                 gave_up_on = c;
@@ -665,6 +666,7 @@ fn finishDepth(w: *Walk, io: Io, depth: *u32, within: u32) Error!void {
         if ((try w.node(io, q.oid)).flags & within == 0) try unflagged.put(w.gpa, q.oid, {});
     }
     while (w.get()) |c| {
+        try io.checkCancel();
         const cn = try w.node(io, c);
         if (cn.flags & within != 0) {
             if (unflagged.count() == 0) break;
@@ -922,6 +924,7 @@ const NameRev = struct {
         defer to_queue.deinit(nr.gpa);
         try stack.append(nr.gpa, start);
         while (stack.pop()) |c| {
+            try io.checkCancel();
             const name = nr.names.get(c).?;
             to_queue.clearRetainingCapacity();
             const parents = (try nr.commit(io, c)).parents;

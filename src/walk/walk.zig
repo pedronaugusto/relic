@@ -356,6 +356,7 @@ pub const Walk = struct {
             var slop: u32 = slop_start;
             var date: i64 = std.math.maxInt(i64);
             while (queue.pop()) |q| {
+                try io.checkCancel();
                 const n = q.node;
                 try walk.processParents(io, n, &queue, &seq);
                 if (n.uninteresting) {
@@ -376,13 +377,14 @@ pub const Walk = struct {
             }
         } else {
             while (queue.pop()) |q| {
+                try io.checkCancel();
                 try walk.processParents(io, q.node, &queue, &seq);
                 try list.append(walk.gpa, q.node);
             }
         }
 
-        if (walk.ancestry_path.len != 0) try walk.limitToAncestry(list.items);
-        if (walk.sort != .date) try walk.sortTopologically(&list);
+        if (walk.ancestry_path.len != 0) try walk.limitToAncestry(io, list.items);
+        if (walk.sort != .date) try walk.sortTopologically(io, &list);
         try walk.ordered.ensureTotalCapacity(walk.gpa, list.items.len);
         for (list.items) |n| {
             if (n.uninteresting) continue;
@@ -397,7 +399,7 @@ pub const Walk = struct {
     /// uninteresting. The walk has marked what they reach; what reaches
     /// them is marked here, the list gone through from the oldest, as it
     /// is newest first, until nothing more is marked.
-    fn limitToAncestry(walk: *Walk, list: []const *Node) Allocator.Error!void {
+    fn limitToAncestry(walk: *Walk, io: Io, list: []const *Node) (Allocator.Error || Io.Cancelable)!void {
         var marked: std.AutoHashMapUnmanaged(*Node, void) = .empty;
         defer marked.deinit(walk.gpa);
         for (walk.ancestry_path) |oid| {
@@ -408,6 +410,7 @@ pub const Walk = struct {
             progress = false;
             var i = list.len;
             while (i > 0) {
+                try io.checkCancel();
                 i -= 1;
                 const n = list[i];
                 if (n.uninteresting or marked.contains(n)) continue;
@@ -429,7 +432,7 @@ pub const Walk = struct {
     /// is out. In graph order the ready commits are a stack, the tips on it
     /// in the order the walk found them; in date order they are a queue by
     /// committer date, ties first in first out.
-    fn sortTopologically(walk: *Walk, list: *std.ArrayList(*Node)) ErrorNamespace.Error!void {
+    fn sortTopologically(walk: *Walk, io: Io, list: *std.ArrayList(*Node)) ErrorNamespace.Error!void {
         var indegree: std.AutoHashMapUnmanaged(*Node, u32) = .empty;
         defer indegree.deinit(walk.gpa);
         for (list.items) |n| try indegree.put(walk.gpa, n, 1);
@@ -459,6 +462,7 @@ pub const Walk = struct {
         errdefer out.deinit(walk.gpa);
         try out.ensureTotalCapacity(walk.gpa, list.items.len);
         while (if (by_date) (if (queue.pop()) |q| q.node else null) else stack.pop()) |n| {
+            try io.checkCancel();
             for (n.parents) |parent| {
                 const p = walk.nodes.get(OidKey.of(parent)) orelse continue;
                 const d = indegree.getPtr(p) orelse continue;
@@ -481,6 +485,7 @@ pub const Walk = struct {
     pub fn next(walk: *Walk, io: Io) Self.Error!?Commit {
         try walk.prepare(io);
         if (walk.position >= walk.ordered.items.len) return null;
+        try io.checkCancel();
         const commit = walk.ordered.items[walk.position];
         walk.position += 1;
         return commit;
@@ -605,6 +610,7 @@ pub fn reachableSubset(gpa: Allocator, io: Io, db: *odb_mod.Odb, inputs: Subset,
     defer stack.deinit(gpa);
     for (inputs.from) |oid| try stack.append(gpa, oid);
     while (stack.pop()) |oid| {
+        try io.checkCancel();
         if ((try seen.getOrPut(gpa, oid)).found_existing) continue;
         if (wanted.get(oid)) |positions| {
             for (positions.items) |i| out[i] = true;
@@ -845,6 +851,7 @@ const Painter = struct {
         }
 
         while (p.nonstale != 0) {
+            try p.io.checkCancel();
             const item = queue.pop().?;
             p.dequeued(item.oid);
             if (p.byGeneration() and item.generation < min_generation) break;

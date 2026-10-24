@@ -861,6 +861,7 @@ const Indexer = struct {
 
         var i: u32 = 0;
         while (i < count) : (i += 1) {
+            try x.io.checkCancel();
             const offset = tee.position();
             var entry = try x.readHeader(offset);
             entry.data_at = tee.position();
@@ -1101,6 +1102,7 @@ const Indexer = struct {
         var w: ?Worker = null;
         defer if (w) |*worker| worker.deinit();
         for (x.entries.items, 0..) |entry, at| {
+            try x.io.checkCancel();
             if (!try x.db.exists(x.io, entry.oid)) continue;
             const header = try x.db.readHeader(x.io, entry.oid);
             const sized = entry.kind != .whole or header.size == entry.size;
@@ -1293,6 +1295,7 @@ const Indexer = struct {
                 progressed = false;
                 var i: usize = 0;
                 while (i < x.ref_bases.items.len) {
+                    try x.io.checkCancel();
                     const base = x.ref_bases.items[i].base;
                     const group_items = x.refChildren(base);
                     i += group_items.len;
@@ -1603,6 +1606,7 @@ const Worker = struct {
         w.held += root.bytes.len;
         while (stack.items.len != 0) {
             if (x.failed.load(.monotonic)) return;
+            try x.io.checkCancel();
             const top = &stack.items[stack.items.len - 1];
             const ofs = if (top.at) |at| x.ofsChildren(at) else &.{};
             const refs = x.refChildren(top.oid);
@@ -2753,7 +2757,210 @@ test "the names a pack holds are collected as it is indexed, and one that is now
     try testing.expect(std.mem.find(u8, ls, missing.hex(&hex)) != null);
 }
 
+test "a thin pack canceled as a task while its bases are read from the database returns error.Canceled and leaves no file, on each backend (design §11)" {
+    const cancel = @import("../testing/cancel.zig");
+    const CancelThin = struct {
+        target: *testgit.Repo,
+        thin: []const u8,
+
+        /// Receive the thin pack: how many objects it kept and how many of
+        /// them were bases appended. What it kept is removed again, so the
+        /// next receive appends them too.
+        fn into(io: Io, c: *const @This(), threads: u32, fix_thin: bool) ![2]u32 {
+            var pack_dir = try c.target.dir.openDir(io, "objects/pack", .{ .iterate = true });
+            defer pack_dir.close(io);
+            // Closed before its files go, which Windows refuses while open.
+            const name, const counts = received: {
+                var repo = try odb_mod.Odb.open(testing.allocator, io, c.target.dir, .sha1, .{});
+                defer repo.deinit(io);
+                var in: Io.Reader = .fixed(c.thin);
+                var result = try receive(testing.allocator, io, &repo, .{ .pack_dir = pack_dir, .in = &in }, .{ .threads = threads, .fix_thin = fix_thin });
+                defer result.deinit(io);
+                break :received .{ result.name.?, [2]u32{ result.objects, result.appended } };
+            };
+            var hex: [hash.max_hex_len]u8 = undefined;
+            var name_buf: [64]u8 = undefined;
+            const kept = try std.mem.print(&name_buf, "pack-{s}.", .{name.hex(&hex)});
+            for ([_][]const u8{ "pack", "idx", "rev" }) |extension| {
+                var path_buf: [80]u8 = undefined;
+                pack_dir.deleteFile(io, try std.mem.print(&path_buf, "{s}{s}", .{ kept, extension })) catch |err| switch (err) {
+                    error.FileNotFound => {},
+                    else => |e| return e,
+                };
+            }
+            return counts;
+        }
+
+        fn packFiles(c: *const @This(), io: Io) !usize {
+            var pack_dir = try c.target.dir.openDir(io, "objects/pack", .{ .iterate = true });
+            defer pack_dir.close(io);
+            return countEntries(io, pack_dir);
+        }
+
+        fn run(c: *const @This(), io: Io) !void {
+            const packs = try c.packFiles(io);
+            for ([_]u32{ 1, 4 }) |threads| {
+                // The points before the bases are looked for: those of a
+                // receive not allowed to complete the pack.
+                var refused = cancel.counted(io);
+                try testing.expectError(error.DeltaBaseMissing, into(refused.io(), c, threads, false));
+                const before = cancel.points(&refused);
+                var counter = cancel.counted(io);
+                const objects, const appended = try into(counter.io(), c, threads, true);
+                // Then a point for each base looked for on each pass over
+                // them, the last finding none left to read, and one for each
+                // object kept checked against the database.
+                try testing.expect(appended > 0);
+                try testing.expect(cancel.points(&counter) - before >= 2 * appended + objects);
+                try testing.expectEqual(packs, try c.packFiles(io));
+                // Canceled among the bases: `error.Canceled`, and nothing
+                // left of the pack.
+                try cancel.expectCanceled(io, before + appended / 2, 0, into, .{ c, threads, true });
+                try testing.expectEqual(packs, try c.packFiles(io));
+            }
+        }
+
+        const files = 64;
+    };
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var source = try testgit.Repo.init(gpa, io, &.{});
+    defer source.deinit();
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(gpa);
+    // Each file changed a little: a thin pack carries every new blob as a
+    // delta against the old one, which it does not carry.
+    for ([_][]const u8{ "old", "new" }) |version| {
+        for (0..CancelThin.files) |f| {
+            text.clearRetainingCapacity();
+            for (0..40) |line| try text.print(gpa, "file {d} line {d} of a file that is long enough to delta well\n", .{ f, line });
+            try text.print(gpa, "{s}\n", .{version});
+            var name_buf: [32]u8 = undefined;
+            try source.writeFile(io, try std.mem.print(&name_buf, "f/{d}.txt", .{f}), text.items);
+        }
+        try source.exec(io, &.{ "add", "-A" });
+        try source.exec(io, &.{ "commit", "-q", "-m", version });
+    }
+    var target = try testgit.Repo.init(gpa, io, &.{"--bare"});
+    defer target.deinit();
+    const old = try testremote.gitInput(gpa, io, source.dir, &.{ "pack-objects", "--revs", "--stdout", "-q" }, "HEAD~1\n");
+    defer gpa.free(old);
+    {
+        var repo = try odb_mod.Odb.open(gpa, io, target.dir, .sha1, .{});
+        defer repo.deinit(io);
+        var pack_dir = try target.dir.openDir(io, "objects/pack", .{ .iterate = true });
+        defer pack_dir.close(io);
+        var in: Io.Reader = .fixed(old);
+        var result = try receive(gpa, io, &repo, .{ .pack_dir = pack_dir, .in = &in }, .{});
+        result.deinit(io);
+    }
+    const thin = try testremote.gitInput(gpa, io, source.dir, &.{ "pack-objects", "--revs", "--thin", "--stdout", "-q" }, "HEAD\n^HEAD~1\n");
+    defer gpa.free(thin);
+    const c: CancelThin = .{ .target = &target, .thin = thin };
+    try cancel.eachBackend(&c, CancelThin.run);
+}
+
 fn emptyDatabase(gpa: Allocator, io: Io, dir: Io.Dir) odb_mod.Error!odb_mod.Odb {
     try dir.createDirPath(io, "objects/pack");
     return odb_mod.Odb.open(gpa, io, dir, .sha1, .{});
+}
+
+test "a pack received as a task and canceled, reading its stream or resolving its deltas, returns error.Canceled and leaves no file, on each backend (design §11)" {
+    const cancel = @import("../testing/cancel.zig");
+    // The pack as a network gives it: a little at a time.
+    const Trickle = struct {
+        source: []const u8,
+        at: usize = 0,
+        interface: Io.Reader,
+
+        fn init(source: []const u8, buffer: []u8) @This() {
+            return .{ .source = source, .interface = .{ .vtable = &.{ .stream = stream }, .buffer = buffer, .seek = 0, .end = 0 } };
+        }
+
+        fn stream(r: *Io.Reader, w: *Io.Writer, limit: Io.Limit) Io.Reader.StreamError!usize {
+            const t: *@This() = @alignCast(@fieldParentPtr("interface", r)); // safe: the reader is a Trickle's interface
+            if (t.at == t.source.len) return error.EndOfStream;
+            const dest = limit.slice(try w.writableSliceGreedy(1));
+            const n = @min(dest.len, t.source.len - t.at, 256);
+            @memcpy(dest[0..n], t.source[t.at..][0..n]);
+            w.advance(n);
+            t.at += n;
+            return n;
+        }
+    };
+    const CancelReceive = struct {
+        pack_bytes: []const u8,
+
+        /// Receive the pack into a new bare repository at `dir`: how many
+        /// objects it kept and how many were deltas. `read` says how much
+        /// of the stream it took.
+        fn into(io: Io, gpa: Allocator, dir: Io.Dir, pack_bytes: []const u8, threads: u32, read: *usize) ![2]u32 {
+            var repo = try odb_mod.Odb.open(gpa, io, dir, .sha1, .{});
+            defer repo.deinit(io);
+            var pack_dir = try dir.openDir(io, "objects/pack", .{ .iterate = true });
+            defer pack_dir.close(io);
+            var buffer: [256]u8 = undefined;
+            var in: Trickle = .init(pack_bytes, &buffer);
+            defer read.* = in.at;
+            var result = try receive(gpa, io, &repo, .{ .pack_dir = pack_dir, .in = &in.interface }, .{ .threads = threads });
+            defer result.deinit(io);
+            return .{ result.objects, result.deltas };
+        }
+
+        fn run(c: *const @This(), io: Io) !void {
+            const gpa = testing.allocator;
+            for ([_]u32{ 1, 4 }) |threads| {
+                var target = try testgit.Repo.init(gpa, testing.io, &.{"--bare"});
+                defer target.deinit();
+                var read: usize = 0;
+                var counter = cancel.counted(io);
+                const objects, const deltas = try into(counter.io(), gpa, target.dir, c.pack_bytes, threads, &read);
+                // A point for each object read from the stream, each delta
+                // resolved, and each object checked against the database.
+                const points = cancel.points(&counter);
+                try testing.expect(deltas > 0);
+                try testing.expect(points >= 2 * objects + deltas);
+                try target.dir.deleteTree(io, "objects/pack");
+                try target.dir.createDirPath(io, "objects/pack");
+                // Canceled while it reads the stream, with the stream half
+                // read, then while it resolves, with it all read:
+                // `error.Canceled`, and the temporary pack gone.
+                for ([_]u64{ objects / 2, objects + (points - objects) / 2 }, [_]bool{ false, true }) |at, whole| {
+                    try cancel.expectCanceled(io, at, if (threads == 1) 0 else points, into, .{ gpa, target.dir, c.pack_bytes, threads, &read });
+                    try testing.expectEqual(whole, read == c.pack_bytes.len);
+                    var emptied = try target.dir.openDir(io, "objects/pack", .{ .iterate = true });
+                    defer emptied.close(io);
+                    try testing.expectEqual(@as(usize, 0), try countEntries(io, emptied));
+                }
+            }
+        }
+    };
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var source = try historyRepo(gpa, io, 30);
+    defer source.deinit();
+    // Blobs that do not compress, so the pack is many times what the
+    // receive reads ahead.
+    var prng: std.Random.DefaultPrng = .init(0xca9c);
+    var noise: [8 << 10]u8 = undefined;
+    for (0..64) |i| {
+        prng.random().bytes(&noise);
+        var name_buf: [32]u8 = undefined;
+        try source.writeFile(io, try std.mem.print(&name_buf, "noise/{d}.bin", .{i}), &noise);
+    }
+    try source.exec(io, &.{ "add", "-A" });
+    try source.exec(io, &.{ "commit", "-q", "-m", "noise" });
+    try source.exec(io, &.{ "repack", "-a", "-d", "-f", "-q" });
+    var source_git = try source.gitDir(io);
+    defer source_git.close(io);
+    var source_packs = try source_git.openDir(io, "objects/pack", .{ .iterate = true });
+    defer source_packs.close(io);
+    const base = try onlyPack(gpa, io, source_packs);
+    defer gpa.free(base);
+    const pack_name = try gpa.print("{s}.pack", .{base});
+    defer gpa.free(pack_name);
+    const pack_bytes = try source_packs.readFileAlloc(io, pack_name, gpa, .unlimited);
+    defer gpa.free(pack_bytes);
+    const c: CancelReceive = .{ .pack_bytes = pack_bytes };
+    try cancel.eachBackend(&c, CancelReceive.run);
 }

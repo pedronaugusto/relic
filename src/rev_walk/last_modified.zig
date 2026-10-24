@@ -241,6 +241,7 @@ const LastModified = struct {
         defer scratch.deinit(lm.gpa);
         var popped: usize = 0;
         while (queue.pop()) |q| {
+            try lm.io.checkCancel();
             const c = q.node;
             const active = try lm.activeOf(c);
             popped += 1;
