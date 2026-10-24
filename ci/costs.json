@@ -1,0 +1,28 @@
+{
+  "phases": {
+    "/home/runner/work/relic/relic/.preflight-bin/linux/bay dev check-ci-setup": 15.85,
+    "benchmarks aarch64-linux-gnu": 295.17,
+    "benchmarks aarch64-macos": 234.14,
+    "benchmarks x86_64-linux-gnu": 269.24,
+    "benchmarks x86_64-linux-musl": 247.58,
+    "benchmarks x86_64-windows-gnu": 255.65,
+    "compile aarch64-linux-gnu": 557.95,
+    "compile aarch64-macos": 432.37,
+    "compile aarch64-windows-gnu": 699.38,
+    "compile x86_64-linux-gnu": 140.83,
+    "compile x86_64-linux-musl": 120.47,
+    "compile x86_64-windows-gnu": 675.52,
+    "configure the build": 0.49,
+    "documentation": 0.00,
+    "glint": 8.68,
+    "namespace layout": 0.00,
+    "package paths": 0.00,
+    "release version": 0.00,
+    "test imports": 19.65,
+    "zig build check": 581.47,
+    "zig build ci": 2505.12,
+    "zig build ci-link": 725.23,
+    "zig build lint": 52.27,
+    "zig build test": 1616.72
+  }
+}

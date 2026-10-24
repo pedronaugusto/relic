@@ -20,7 +20,8 @@
   "shards": {
     "macos": 2,
     "windows": 5,
-    "linux_arm": 2
+    "linux_arm": 2,
+    "windows_arm": 5
   },
   "windows_git_latest": true,
   "jobs": [
@@ -30,7 +31,7 @@
       "args": ["-Dci-tsan=true", "-Doptimize=debug", "-Dci-lint=false"],
       "tiers": ["release"],
       "timeout": 30,
-      "shards": 4
+      "shards": 8
     },
     {
       "name": "Objects past 4 GiB (Linux)",
