@@ -267,9 +267,9 @@ const Fixture = struct {
             for (session.state_to_send.items) |v| fx.gpa.free(v);
             session.state_to_send.clearRetainingCapacity();
             std.mem.swap(std.ArrayList([]u8), &session.state, &session.state_to_send);
-            var printed: std.ArrayList(u8) = .empty;
-            defer printed.deinit(fx.gpa);
-            session.write(fx.gpa, &printed, .response) catch |err| switch (err) {
+            var printed: std.Io.Writer.Allocating = .init(fx.gpa);
+            defer printed.deinit();
+            session.write(&printed.writer, .response) catch |err| switch (err) {
                 // git dies printing it.
                 error.CredentialValueUnsafe => {
                     try testing.expect(!git.succeeded());
@@ -279,7 +279,7 @@ const Fixture = struct {
                 else => |e| return e,
             };
             try testing.expect(git.succeeded());
-            try testing.expectEqualStrings(git.stdout, printed.items);
+            try testing.expectEqualStrings(git.stdout, printed.written());
         } else |err| {
             try testing.expect(!git.succeeded());
             // A helper whose `url=` took the helper list away and then said

@@ -365,13 +365,13 @@ fn sendText(io: Io, response: *Response, content_type: []const u8, body: []const
 
 /// `when` as git's `hdr_date` writes it: RFC 2822, in UTC.
 fn rfc2822(arena: Allocator, when: i64) Allocator.Error![]const u8 {
-    var out: std.ArrayList(u8) = .empty;
-    date.show(arena, &out, when, 0, .{ .kind = .rfc2822 }, .{}) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
+    var out: std.Io.Writer.Allocating = .init(arena);
+    date.show(&out.writer, when, 0, .{ .kind = .rfc2822 }, .{}) catch |err| switch (err) {
+        error.WriteFailed => return error.OutOfMemory,
         // unreachable: RFC 2822 needs neither the time now nor a zone
         error.DateNeedsClock => unreachable,
     };
-    return out.items;
+    return out.written();
 }
 
 /// Errors from `openServed`.

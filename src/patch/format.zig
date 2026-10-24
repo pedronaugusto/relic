@@ -1219,15 +1219,19 @@ fn userInfo(ctx: *Ctx, out: *std.ArrayList(u8), name: []const u8, email: []const
     const a = ctx.a;
     var max_length: usize = 78;
     try out.appendSlice(a, "From: ");
-    if (ctx.options.encode_email_headers and mailfmt.needsRfc2047(name)) {
-        try mailfmt.appendRfc2047(a, out, name, encoding, .address);
-        max_length = 76;
-    } else if (mailfmt.needsRfc822Quoting(name)) {
-        var q: std.ArrayList(u8) = .empty;
-        try mailfmt.appendRfc822Quoted(a, &q, name);
-        try mailfmt.appendWrapped(a, out, q.items, -6, 1, @intCast(max_length));
-    } else {
-        try mailfmt.appendWrapped(a, out, name, -6, 1, @intCast(max_length));
+    {
+        var w: Io.Writer.Allocating = .fromArrayList(a, out);
+        defer out.* = w.toArrayList();
+        if (ctx.options.encode_email_headers and mailfmt.needsRfc2047(name)) {
+            mailfmt.writeRfc2047(&w.writer, name, encoding, .address, "From: ".len) catch return error.OutOfMemory;
+            max_length = 76;
+        } else if (mailfmt.needsRfc822Quoting(name)) {
+            var q: Io.Writer.Allocating = .init(a);
+            mailfmt.writeRfc822Quoted(&q.writer, name) catch return error.OutOfMemory;
+            mailfmt.writeWrapped(&w.writer, q.written(), -6, 1, @intCast(max_length)) catch return error.OutOfMemory;
+        } else {
+            mailfmt.writeWrapped(&w.writer, name, -6, 1, @intCast(max_length)) catch return error.OutOfMemory;
+        }
     }
     if (max_length < lastLineLength(out.items) + 2 + email.len + 1) try out.append(a, '\n');
     try out.print(a, " <{s}>\n", .{email});
@@ -1247,10 +1251,15 @@ fn emailSubject(ctx: *Ctx, out: *std.ArrayList(u8), msg: []const u8, need_8bit_c
     var title: std.ArrayList(u8) = .empty;
     const rest = try formatSubject(a, &title, msg, if (ctx.options.keep_subject) "\n" else " ");
     try emailSubjectLead(ctx, out);
-    if (ctx.options.encode_email_headers and mailfmt.needsRfc2047(title.items)) {
-        try mailfmt.appendRfc2047(a, out, title.items, encoding, .subject);
-    } else {
-        try mailfmt.appendWrapped(a, out, title.items, -@as(i32, @intCast(lastLineLength(out.items))), 1, 78);
+    {
+        const column = lastLineLength(out.items);
+        var w: Io.Writer.Allocating = .fromArrayList(a, out);
+        defer out.* = w.toArrayList();
+        if (ctx.options.encode_email_headers and mailfmt.needsRfc2047(title.items)) {
+            mailfmt.writeRfc2047(&w.writer, title.items, encoding, .subject, column) catch return error.OutOfMemory;
+        } else {
+            mailfmt.writeWrapped(&w.writer, title.items, -@as(i32, @intCast(column)), 1, 78) catch return error.OutOfMemory;
+        }
     }
     try out.append(a, '\n');
     var need_8bit_cte = need_8bit_cte_in;
@@ -1514,8 +1523,10 @@ fn writeStat(ctx: *Ctx, out: *std.ArrayList(u8), changes: []const diff.Change) E
         f.name = shown(ctx, f.name);
         if (f.from) |from| f.from = shown(ctx, from);
     }
-    try diff_stat.write(ctx.a, out, files, .{ .widths = .{ .width = 72 }, .quote_path = ctx.quote_path });
-    try diff_stat.writeSummary(ctx.a, out, changes, ctx.quote_path);
+    var w: Io.Writer.Allocating = .fromArrayList(ctx.a, out);
+    defer out.* = w.toArrayList();
+    diff_stat.write(ctx.a, &w.writer, files, .{ .widths = .{ .width = 72 }, .quote_path = ctx.quote_path }) catch return error.OutOfMemory;
+    diff_stat.writeSummary(ctx.a, &w.writer, changes, ctx.quote_path) catch return error.OutOfMemory;
 }
 
 /// A path as a patch's headers and diffstat name it: under `--relative`,
@@ -1577,9 +1588,9 @@ fn coverLetter(ctx: *Ctx, out_list: *std.ArrayList(u8), cover: CoverPlan, origin
                 var line: std.ArrayList(u8) = .empty;
                 try line.print(a, "[{d}/{d}] ", .{ i, n });
                 _ = try formatSubject(a, &line, skipBlankLines(c.message), " ");
-                var wrapped: std.ArrayList(u8) = .empty;
-                try mailfmt.appendWrapped(a, &wrapped, line.items, 0, 0, 72);
-                try out.appendSlice(a, try pretty.toOutput(a, wrapped.items, pretty.outputEncoding(null, utf8.encoding)));
+                var wrapped: Io.Writer.Allocating = .init(a);
+                mailfmt.writeWrapped(&wrapped.writer, line.items, 0, 0, 72) catch return error.OutOfMemory;
+                try out.appendSlice(a, try pretty.toOutput(a, wrapped.written(), pretty.outputEncoding(null, utf8.encoding)));
                 try out.append(a, '\n');
             }
             try out.append(a, '\n');

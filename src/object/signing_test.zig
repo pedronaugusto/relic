@@ -735,11 +735,11 @@ fn logSignatures(format: signing.Format) !void {
         var arena: std.heap.ArenaAllocator = .init(gpa);
         defer arena.deinit();
         const colors: pretty.Colors = .{};
-        var ours: std.ArrayList(u8) = .empty;
+        var ours: std.Io.Writer.Allocating = .init(arena.allocator());
         var lines = std.mem.tokenizeScalar(u8, listed, '\n');
         var first = true;
         while (lines.next()) |text| {
-            try pretty_log.writeEntry(arena.allocator(), io, .{ .db = repo.objectDatabase(), .oid = try Oid.parse(.sha1, text) }, &ours, .{
+            try pretty_log.writeEntry(arena.allocator(), io, &ours.writer, .{ .db = repo.objectDatabase(), .oid = try Oid.parse(.sha1, text) }, .{
                 .context = .{ .signer = &signer, .colors = if (in_color) &colors else null },
                 .show_signature = true,
                 .expand_tabs = 8,
@@ -747,7 +747,7 @@ fn logSignatures(format: signing.Format) !void {
             });
             first = false;
         }
-        testing.expectEqualStrings(theirs, ours.items) catch |err| {
+        testing.expectEqualStrings(theirs, ours.written()) catch |err| {
             std.debug.print("{t}, colour {}\n", .{ format, in_color });
             return err;
         };

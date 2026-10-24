@@ -1674,12 +1674,12 @@ pub const Listing = struct {
             if (k < after.len and (after[k] == '+' or after[k] == '-')) k += 1;
             while (k < after.len and std.ascii.isDigit(after[k])) k += 1;
             const tz = std.math.cast(i32, decimal.strtol(after[j..k], 10, 32).value) orelse 0;
-            var out: std.ArrayList(u8) = .empty;
-            gitdate.show(ar, &out, secs, tz, atom.date orelse .{}, l.context.clock) catch |err| switch (err) {
+            var out: std.Io.Writer.Allocating = .init(ar);
+            gitdate.show(&out.writer, secs, tz, atom.date orelse .{}, l.context.clock) catch |err| switch (err) {
                 error.DateNeedsClock => return error.DateNeedsClock,
-                error.OutOfMemory => return error.OutOfMemory,
+                error.WriteFailed => return error.OutOfMemory,
             };
-            return .{ .s = out.items, .num = @intCast(@max(secs, 0)) };
+            return .{ .s = out.written(), .num = @intCast(@max(secs, 0)) };
         }
         return .{};
     }
@@ -1818,9 +1818,9 @@ pub const Listing = struct {
                 return .{ .s = out.items };
             },
             .sub_sanitize => {
-                var out: std.ArrayList(u8) = .empty;
-                try pretty.sanitizedSubject(ar, &out, pos.sub);
-                return .{ .s = out.items };
+                var out: std.Io.Writer.Allocating = .init(ar);
+                pretty.sanitizedSubject(&out.writer, pos.sub) catch return error.OutOfMemory;
+                return .{ .s = out.written() };
             },
             .body_dep => return .{ .s = pos.body },
             .length => return .{ .s = try ar.print("{d}", .{pos.from_sub.len}), .num = pos.from_sub.len },
@@ -1844,9 +1844,12 @@ pub const Listing = struct {
                 if (l.trailer_settings == null) l.trailer_settings = try message.trailerSettings(ar, l.repo.configuration());
                 // the message without its signature
                 const msg = if (pos.sig.len != 0) pos.from_sub[0 .. pos.from_sub.len - pos.sig.len] else pos.from_sub;
-                var out: std.ArrayList(u8) = .empty;
-                try trailer.format(ar, l.trailer_settings.?, atom.trailers, msg, &out);
-                return .{ .s = out.items };
+                var out: std.Io.Writer.Allocating = .init(ar);
+                trailer.format(ar, &out.writer, l.trailer_settings.?, atom.trailers, msg) catch |err| switch (err) {
+                    error.WriteFailed => return error.OutOfMemory,
+                    else => |e| return e,
+                };
+                return .{ .s = out.written() };
             },
         }
     }
@@ -2191,8 +2194,8 @@ pub const Listing = struct {
     // -- formatting -------------------------------------------------------
 
     /// git's `format_ref_array_item`: the item at `index` in `format`,
-    /// appended to `out`.
-    pub fn formatItem(l: *Listing, gpa: Allocator, index: usize, format: Format, out: *std.ArrayList(u8)) ErrorNamespace.Error!void {
+    /// written to `w`.
+    pub fn formatItem(l: *Listing, gpa: Allocator, w: *Io.Writer, index: usize, format: Format) WriteError!void {
         const item = l.items.items[index];
         try l.prepareFor(format);
         var stack: std.ArrayList(Frame) = .empty;
@@ -2211,7 +2214,7 @@ pub const Listing = struct {
         };
         if (format.reset_at_end) try handle(gpa, &stack, .{ .s = color.reset }, .{ .kind = .color, .name = "", .deref = false, .field = .str }, format.quote);
         if (stack.items.len != 1) return error.UnbalancedBlock;
-        try out.appendSlice(gpa, stack.items[0].output.items);
+        try w.writeAll(stack.items[0].output.items);
     }
 
     fn prepareFor(l: *Listing, format: Format) ErrorNamespace.Error!void {
@@ -2235,13 +2238,16 @@ pub const Listing = struct {
     pub fn write(l: *Listing, writer: *Io.Writer, format: Format, options: WriteOptions) WriteError!void {
         const count = options.count;
         const total = if (count == 0 or l.items.items.len < count) l.items.items.len else count;
-        var line: std.ArrayList(u8) = .empty;
-        defer line.deinit(l.gpa);
+        var line: Io.Writer.Allocating = .init(l.gpa);
+        defer line.deinit();
         for (0..total) |i| {
             line.clearRetainingCapacity();
-            try l.formatItem(l.gpa, i, format, &line);
-            if (line.items.len != 0 or !options.omit_empty) {
-                try writer.writeAll(line.items);
+            l.formatItem(l.gpa, &line.writer, i, format) catch |err| switch (err) {
+                error.WriteFailed => return error.OutOfMemory,
+                else => |e| return e,
+            };
+            if (line.written().len != 0 or !options.omit_empty) {
+                try writer.writeAll(line.written());
                 try writer.writeByte('\n');
             }
         }

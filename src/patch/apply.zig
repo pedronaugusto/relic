@@ -1017,31 +1017,31 @@ fn matchFragment(
     if (st.ws_ignore_change) return lineByLineFuzzyMatch(gpa, img, preimage, postimage, current, current_lno, preimage_limit);
     if (st.ws_action != .correct) return false;
 
-    var fixed: std.ArrayList(u8) = .empty;
-    defer fixed.deinit(gpa);
+    var fixed: std.Io.Writer.Allocating = .init(gpa);
+    defer fixed.deinit();
     var orig: usize = 0;
     var target: usize = current;
     i = 0;
     while (i < preimage_limit) : (i += 1) {
         const oldlen = preimage.lines.items[i].len;
         const tgtlen = img.lines.items[current_lno + i].len;
-        const fixstart = fixed.items.len;
-        _ = try whitespace.fixCopy(gpa, &fixed, preimage.buf.items[orig .. orig + oldlen], ws_rule);
-        var tgtfix: std.ArrayList(u8) = .empty;
-        defer tgtfix.deinit(gpa);
-        _ = try whitespace.fixCopy(gpa, &tgtfix, img.buf.items[target .. target + tgtlen], ws_rule);
-        if (!std.mem.eql(u8, tgtfix.items, fixed.items[fixstart..])) return false;
+        const fixstart = fixed.written().len;
+        _ = whitespace.fixCopy(&fixed.writer, preimage.buf.items[orig .. orig + oldlen], ws_rule) catch return error.OutOfMemory;
+        var tgtfix: std.Io.Writer.Allocating = .init(gpa);
+        defer tgtfix.deinit();
+        _ = whitespace.fixCopy(&tgtfix.writer, img.buf.items[target .. target + tgtlen], ws_rule) catch return error.OutOfMemory;
+        if (!std.mem.eql(u8, tgtfix.written(), fixed.written()[fixstart..])) return false;
         orig += oldlen;
         target += tgtlen;
     }
     while (i < preimage.lines.items.len) : (i += 1) {
-        const fixstart = fixed.items.len;
+        const fixstart = fixed.written().len;
         const oldlen = preimage.lines.items[i].len;
-        _ = try whitespace.fixCopy(gpa, &fixed, preimage.buf.items[orig .. orig + oldlen], ws_rule);
-        for (fixed.items[fixstart..]) |c| if (!ctype.isSpace(c)) return false;
+        _ = whitespace.fixCopy(&fixed.writer, preimage.buf.items[orig .. orig + oldlen], ws_rule) catch return error.OutOfMemory;
+        for (fixed.written()[fixstart..]) |c| if (!ctype.isSpace(c)) return false;
         orig += oldlen;
     }
-    try updatePrePostImages(gpa, preimage, postimage, fixed.items);
+    try updatePrePostImages(gpa, preimage, postimage, fixed.written());
     return true;
 }
 
@@ -1176,7 +1176,10 @@ fn hunkImages(st: *State, frag: patchparse.Fragment, inaccurate_eof: bool, ws_ru
                 if (st.whitespace_error == 0 or st.ws_action != .correct) {
                     try post.buf.appendSlice(gpa, data);
                 } else {
-                    if (try whitespace.fixCopy(gpa, &post.buf, data, ws_rule)) st.applied_after_fixing_ws += 1;
+                    var w: std.Io.Writer.Allocating = .fromArrayList(gpa, &post.buf);
+                    const changed = whitespace.fixCopy(&w.writer, data, ws_rule);
+                    post.buf = w.toArrayList();
+                    if (changed catch return error.OutOfMemory) st.applied_after_fixing_ws += 1;
                 }
                 try post.addLine(gpa, post.buf.items[start..], 0);
                 if (ws_rule & whitespace.blank_at_eof != 0 and whitespace.blankLine(data)) added_blank_line = true;

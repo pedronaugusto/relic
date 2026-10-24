@@ -387,9 +387,9 @@ pub fn toBytes(gpa: Allocator, items: []const Item, options: FormatOptions) Allo
 /// The help git writes after the instructions of a sheet a person is given
 /// to edit, with the `Rebase <range> onto <onto> (<n> commands)` line first,
 /// commented as `strbuf_add_commented_lines` comments it.
-pub fn appendHelp(gpa: Allocator, out: *std.ArrayList(u8), sheet: Sheet) Allocator.Error!void {
-    try out.append(gpa, '\n');
-    try out.print(gpa, "{s} Rebase {s} onto {s} ({d} command{s})\n", .{
+pub fn writeHelp(w: *std.Io.Writer, sheet: Sheet) std.Io.Writer.Error!void {
+    try w.writeByte('\n');
+    try w.print("{s} Rebase {s} onto {s} ({d} command{s})\n", .{
         sheet.comment, sheet.revisions, sheet.onto, sheet.command_count, if (sheet.command_count == 1) "" else "s",
     });
     const help =
@@ -419,13 +419,13 @@ pub fn appendHelp(gpa: Allocator, out: *std.ArrayList(u8), sheet: Sheet) Allocat
         \\These lines can be re-ordered; they are executed from top to bottom.
         \\
     ;
-    try message.appendCommented(gpa, out, help, sheet.comment);
+    try message.writeCommented(w, help, sheet.comment);
     const keep = if (sheet.missing_commits_error)
         "\nDo not remove any line. Use 'drop' explicitly to remove a commit.\n"
     else
         "\nIf you remove a line here THAT COMMIT WILL BE LOST.\n";
-    try message.appendCommented(gpa, out, keep, sheet.comment);
-    try message.appendCommented(gpa, out, "\nHowever, if you remove everything, the rebase will be aborted.\n\n", sheet.comment);
+    try message.writeCommented(w, keep, sheet.comment);
+    try message.writeCommented(w, "\nHowever, if you remove everything, the rebase will be aborted.\n\n", sheet.comment);
 }
 
 /// What the help's first line names.

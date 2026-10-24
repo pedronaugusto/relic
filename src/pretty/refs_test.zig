@@ -689,11 +689,11 @@ test "a format git refuses is refused by name" {
     try std.testing.expectError(error.UnknownCommit, l.parseFormat("%(ahead-behind:nowhere)", .none));
     try l.collect(.{});
     const unbalanced = try l.parseFormat("%(if)%(refname)", .none);
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(gpa);
-    try std.testing.expectError(error.UnbalancedBlock, l.formatItem(gpa, 0, unbalanced, &out));
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    try std.testing.expectError(error.UnbalancedBlock, l.formatItem(gpa, &out.writer, 0, unbalanced));
     const stray = try l.parseFormat("%(end)", .none);
-    try std.testing.expectError(error.UnbalancedBlock, l.formatItem(gpa, 0, stray, &out));
+    try std.testing.expectError(error.UnbalancedBlock, l.formatItem(gpa, &out.writer, 0, stray));
 }
 
 test "for-each-ref from a linked worktree lists what git's lists, in both ref formats" {

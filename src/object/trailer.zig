@@ -602,44 +602,61 @@ fn keyWanted(options: Options, token: []const u8) bool {
     return false;
 }
 
-/// git's `format_trailers`.
-fn formatItems(gpa: Allocator, settings: Settings, options: Options, items: []const Item, out: *std.ArrayList(u8)) Allocator.Error!void {
-    const origlen = out.items.len;
+/// git's `format_trailers`. With a separator git trims the end of what it
+/// has written after a line that is not a trailer; such a line in a block
+/// holds more than white space (a blank one ends the block), so the trim
+/// takes the white space at the end of that line alone.
+fn formatItems(w: *std.Io.Writer, settings: Settings, options: Options, items: []const Item) std.Io.Writer.Error!void {
+    var o: Counted = .{ .w = w };
     for (items) |item| {
         if (item.token) |token| {
             if (options.trim_empty and item.value.len == 0) continue;
             if (!keyWanted(options, token)) continue;
-            if (options.separator) |sep| if (out.items.len != origlen) try out.appendSlice(gpa, sep);
-            if (!options.value_only) try out.appendSlice(gpa, token);
+            if (options.separator) |sep| if (o.n != 0) try o.writeAll(sep);
+            if (!options.value_only) try o.writeAll(token);
             if (!options.key_only and !options.value_only) {
                 if (options.key_value_separator) |kv| {
-                    try out.appendSlice(gpa, kv);
+                    try o.writeAll(kv);
                 } else {
                     const c = lastNonSpace(token);
                     if (c != 0 and std.mem.findScalar(u8, settings.separators, c) == null) {
                         // git writes `separators[0]` with `%c`: an empty
                         // `trailer.separators` gives its terminating NUL
-                        try out.append(gpa, if (settings.separators.len > 0) settings.separators[0] else 0);
-                        try out.append(gpa, ' ');
+                        try o.writeAll(&.{ if (settings.separators.len > 0) settings.separators[0] else 0, ' ' });
                     }
                 }
             }
-            if (!options.key_only) try out.appendSlice(gpa, item.value);
-            if (options.separator == null) try out.append(gpa, '\n');
+            if (!options.key_only) try o.writeAll(item.value);
+            if (options.separator == null) try o.writeAll("\n");
         } else if (!options.only_trailers) {
-            if (options.separator) |sep| if (out.items.len != origlen) try out.appendSlice(gpa, sep);
-            try out.appendSlice(gpa, item.value);
+            if (options.separator) |sep| if (o.n != 0) try o.writeAll(sep);
             if (options.separator != null) {
-                while (out.items.len > 0 and ctype.isSpace(out.items[out.items.len - 1])) _ = out.pop();
-            } else try out.append(gpa, '\n');
+                var end = item.value.len;
+                while (end > 0 and ctype.isSpace(item.value[end - 1])) end -= 1;
+                try o.writeAll(item.value[0..end]);
+            } else {
+                try o.writeAll(item.value);
+                try o.writeAll("\n");
+            }
         }
     }
 }
 
+/// A writer and how much has gone through it: git's `out->len != origlen`.
+const Counted = struct {
+    w: *std.Io.Writer,
+    n: usize = 0,
+
+    fn writeAll(c: *Counted, bytes: []const u8) std.Io.Writer.Error!void {
+        try c.w.writeAll(bytes);
+        c.n += bytes.len;
+    }
+};
+
 /// What `%(trailers)` writes for `msg`, a message from its subject on:
 /// git's `format_trailers_from_commit`. The block as it stands when no
 /// option reshapes it.
-pub fn format(gpa: Allocator, settings: Settings, options: Options, msg: []const u8, out: *std.ArrayList(u8)) Allocator.Error!void {
+pub fn format(gpa: Allocator, w: *std.Io.Writer, settings: Settings, options: Options, msg: []const u8) (Allocator.Error || std.Io.Writer.Error)!void {
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -647,11 +664,11 @@ pub fn format(gpa: Allocator, settings: Settings, options: Options, msg: []const
     if (!options.only_trailers and !options.unfold and options.keys == null and options.separator == null and
         !options.key_only and !options.value_only and options.key_value_separator == null)
     {
-        try out.appendSlice(gpa, msg[b.start..b.end]);
+        try w.writeAll(msg[b.start..b.end]);
         return;
     }
     const items = try parseItems(arena, settings, options, b);
-    try formatItems(gpa, settings, options, items.items, out);
+    try formatItems(w, settings, options, items.items);
 }
 
 /// git's `apply_command`: the value a rule's command gives for `arg`, or
@@ -793,7 +810,7 @@ fn ruleFor(settings: Settings, parsed: Parsed) Rule {
 /// `trailer.<name>.command` and `.cmd`; without it, one that applies is
 /// `error.TrailerCommandNeedsPrograms`.
 pub const ProcessOptions = struct { settings: Settings = .{}, commands: ?Commands = null, formatting: Options = .{}, new: []const New = &.{} };
-pub fn process(gpa: Allocator, io: Io, input: []const u8, out: *std.ArrayList(u8), request: ProcessOptions) Error!void {
+pub fn process(gpa: Allocator, io: Io, w: *std.Io.Writer, input: []const u8, request: ProcessOptions) (Error || std.Io.Writer.Error)!void {
     const settings = request.settings;
     const commands = request.commands;
     const options = request.formatting;
@@ -803,8 +820,8 @@ pub fn process(gpa: Allocator, io: Io, input: []const u8, out: *std.ArrayList(u8
     const arena = arena_state.allocator();
     const b = try block(arena, settings, input, .{ .no_divider = options.no_divider });
     var items = try parseItems(arena, settings, options, b);
-    if (!options.only_trailers) try out.appendSlice(gpa, input[0..b.start]);
-    if (!options.only_trailers and !b.blank_line_before) try out.append(gpa, '\n');
+    if (!options.only_trailers) try w.writeAll(input[0..b.start]);
+    if (!options.only_trailers and !b.blank_line_before) try w.writeByte('\n');
     if (!options.only_input) {
         var args: std.ArrayList(Arg) = .empty;
         // the configured commands first, then the arguments
@@ -818,28 +835,28 @@ pub fn process(gpa: Allocator, io: Io, input: []const u8, out: *std.ArrayList(u8
             if (sep != null and sep.? == 0) continue;
             const parsed = parseTrailer(settings, n.text, sep);
             var rule = ruleFor(settings, parsed);
-            if (n.where) |w| rule.where = w;
+            if (n.where) |where| rule.where = where;
             if (n.if_exists) |e| rule.if_exists = e;
             if (n.if_missing) |m| rule.if_missing = m;
             try args.append(arena, .{ .token = parsed.token, .value = parsed.value, .rule = rule });
         }
         try apply(arena, io, commands, &items, args.items);
     }
-    try formatItems(gpa, settings, options, items.items, out);
-    if (!options.only_trailers) try out.appendSlice(gpa, input[b.end..]);
+    try formatItems(w, settings, options, items.items);
+    if (!options.only_trailers) try w.writeAll(input[b.end..]);
 }
 
 /// Errors from processing a file.
 pub const FileError = errors: {
-    break :errors Error || fs.AtomicWriteError || Io.Dir.ReadFileAllocError || Io.Dir.OpenError ||
+    break :errors Error || std.Io.Writer.Error || fs.AtomicWriteError || Io.Dir.ReadFileAllocError || Io.Dir.OpenError ||
         Io.File.StatError || Io.Dir.SetFilePermissionsError;
 };
 
 /// `git interpret-trailers <file>`, or `--in-place`: the file read, ended
 /// with a newline as git ends it, and processed; with `in_place` the result
 /// replaces the file, keeping its permissions, through a new file beside it,
-/// and otherwise it is appended to `out`.
-pub const FileOptions = struct { settings: Settings = .{}, commands: ?Commands = null, processing: Options = .{}, new: []const New = &.{}, in_place: bool = false, out: *std.ArrayList(u8) };
+/// and otherwise it is written to `out`.
+pub const FileOptions = struct { settings: Settings = .{}, commands: ?Commands = null, processing: Options = .{}, new: []const New = &.{}, in_place: bool = false, out: *std.Io.Writer };
 pub fn processFile(gpa: Allocator, io: Io, dir: Io.Dir, path: []const u8, file_options: FileOptions) FileError!void {
     const settings = file_options.settings;
     const commands = file_options.commands;
@@ -850,15 +867,18 @@ pub fn processFile(gpa: Allocator, io: Io, dir: Io.Dir, path: []const u8, file_o
     var input: std.ArrayList(u8) = .fromOwnedSlice(try dir.readFileAlloc(io, path, gpa, .unlimited));
     defer input.deinit(gpa);
     try completeLine(gpa, &input);
-    if (!in_place) return process(gpa, io, input.items, out, .{ .settings = settings, .commands = commands, .formatting = options, .new = new });
-    var result: std.ArrayList(u8) = .empty;
-    defer result.deinit(gpa);
-    try process(gpa, io, input.items, &result, .{ .settings = settings, .commands = commands, .formatting = options, .new = new });
+    if (!in_place) return process(gpa, io, out, input.items, .{ .settings = settings, .commands = commands, .formatting = options, .new = new });
+    var result: std.Io.Writer.Allocating = .init(gpa);
+    defer result.deinit();
+    process(gpa, io, &result.writer, input.items, .{ .settings = settings, .commands = commands, .formatting = options, .new = new }) catch |err| switch (err) {
+        error.WriteFailed => return error.OutOfMemory,
+        else => |e| return e,
+    };
     const slash = std.mem.findLastAny(u8, path, "/\\");
     var parent = if (slash) |at| try dir.openDir(io, path[0..at], .{}) else dir;
     defer if (slash != null) parent.close(io);
     const base = if (slash) |at| path[at + 1 ..] else path;
-    try fs.atomicWrite(io, parent, base, result.items, .{ .prefix = "git-interpret-trailers-", .permissions = .destination });
+    try fs.atomicWrite(io, parent, base, result.written(), .{ .prefix = "git-interpret-trailers-", .permissions = .destination });
 }
 
 /// git's `strbuf_complete_line`.
@@ -877,10 +897,13 @@ pub fn amend(gpa: Allocator, io: Io, message: []const u8, request: AmendOptions)
     var new: std.ArrayList(New) = .empty;
     defer new.deinit(gpa);
     for (trailers) |text| try new.append(gpa, .{ .text = text });
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(gpa);
-    try process(gpa, io, message, &out, .{ .settings = settings, .commands = commands, .formatting = .{ .no_divider = true }, .new = new.items });
-    return out.toOwnedSlice(gpa);
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    errdefer out.deinit();
+    process(gpa, io, &out.writer, message, .{ .settings = settings, .commands = commands, .formatting = .{ .no_divider = true }, .new = new.items }) catch |err| switch (err) {
+        error.WriteFailed => return error.OutOfMemory,
+        else => |e| return e,
+    };
+    return out.toOwnedSlice() catch return error.OutOfMemory;
 }
 
 /// git's `format_set_trailers_options`: the options of `%(trailers:...)`,

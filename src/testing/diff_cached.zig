@@ -212,9 +212,9 @@ fn porcelain(gpa: Allocator, io: Io, git: *testgit.Repo, form: []const u8, relat
     };
     if (std.mem.eql(u8, form, "--stat")) {
         // `write` allocates as it goes, from an arena.
-        var text: std.ArrayList(u8) = .empty;
-        try stat.write(a, &text, files, .{});
-        return out.appendSlice(gpa, text.items);
+        var text: std.Io.Writer.Allocating = .init(a);
+        try stat.write(a, &text.writer, files, .{});
+        return out.appendSlice(gpa, text.written());
     }
     for (files) |f| {
         if (f.kind == .binary) try out.appendSlice(gpa, "-\t-\t") else try out.print(gpa, "{d}\t{d}\t", .{ f.added, f.deleted });

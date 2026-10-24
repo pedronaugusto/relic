@@ -1267,17 +1267,15 @@ fn sheetText(r: *Run, gpa: Allocator, items: []const todo.Item, upstream: Oid, o
         if (item.command != .comment) count += 1;
     }
     const revisions = try r.arena.print("{s}..{s}", .{ try r.short(upstream), try r.short(orig_head) });
-    var sheet = out.toArrayList();
-    errdefer sheet.deinit(gpa);
     const check = r.repo.configuration().get("rebase.missingcommitscheck") orelse "";
-    try todo.appendHelp(gpa, &sheet, .{
+    todo.writeHelp(&out.writer, .{
         .command_count = count,
         .revisions = revisions,
         .onto = try r.short(onto),
         .comment = r.comment,
         .missing_commits_error = std.ascii.eqlIgnoreCase(check, "error"),
-    });
-    return sheet.toOwnedSlice(gpa);
+    }) catch return error.OutOfMemory;
+    return out.toOwnedSlice() catch return error.OutOfMemory;
 }
 
 /// Rebase the current branch, or `options.branch`, onto `upstream` (or

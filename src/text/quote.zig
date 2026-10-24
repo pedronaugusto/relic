@@ -15,17 +15,25 @@ fn needsBackslash(c: u8) bool {
     return c == '\'' or c == '!';
 }
 
-/// git's `sq_quote_buf`: `text` single-quoted, appended to `out`.
-pub fn sq(gpa: Allocator, out: *std.ArrayList(u8), text: []const u8) Allocator.Error!void {
-    try out.append(gpa, '\'');
+/// git's `sq_quote_buf`: `text` single-quoted, written to `w`.
+pub fn sq(w: *std.Io.Writer, text: []const u8) std.Io.Writer.Error!void {
+    try w.writeByte('\'');
     for (text) |c| {
         if (needsBackslash(c)) {
-            try out.appendSlice(gpa, "'\\");
-            try out.append(gpa, c);
-            try out.append(gpa, '\'');
-        } else try out.append(gpa, c);
+            try w.writeAll("'\\");
+            try w.writeByte(c);
+            try w.writeByte('\'');
+        } else try w.writeByte(c);
     }
-    try out.append(gpa, '\'');
+    try w.writeByte('\'');
+}
+
+/// git's `sq_quote_argv`: each of `args` single-quoted after a space.
+pub fn sqArgv(w: *std.Io.Writer, args: []const []const u8) std.Io.Writer.Error!void {
+    for (args) |arg| {
+        try w.writeByte(' ');
+        try sq(w, arg);
+    }
 }
 
 /// One word `sqDequoteStep` read.
@@ -106,10 +114,10 @@ test "single quotes round trip, a quote and a bang backslashed outside them" {
     var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
-    var out: std.ArrayList(u8) = .empty;
-    try sq(a, &out, "it's here!");
-    try std.testing.expectEqualStrings("'it'\\''s here'\\!''", out.items);
-    try std.testing.expectEqualStrings("it's here!", (try sqDequote(a, out.items)).?);
+    var out: std.Io.Writer.Allocating = .init(a);
+    try sq(&out.writer, "it's here!");
+    try std.testing.expectEqualStrings("'it'\\''s here'\\!''", out.written());
+    try std.testing.expectEqualStrings("it's here!", (try sqDequote(a, out.written())).?);
     try std.testing.expect(try sqDequote(a, "'a' 'b'") == null);
     try std.testing.expect(try sqDequote(a, "'open") == null);
     const words = (try sqDequoteWords(a, "'a' \t'b c'")).?;

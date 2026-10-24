@@ -251,11 +251,11 @@ pub fn blankLine(line: []const u8) bool {
     return true;
 }
 
-/// Append `src` to `dst` with the errors `rule` names fixed: trailing
+/// Write `src` to `w` with the errors `rule` names fixed: trailing
 /// whitespace removed, a missing final newline added, spaces before a tab
 /// and runs of spaces in the indent made tabs, or tabs in the indent made
 /// spaces. Returns whether anything changed.
-pub fn fixCopy(gpa: Allocator, dst: *std.ArrayList(u8), src_in: []const u8, rule: Rule) Allocator.Error!bool {
+pub fn fixCopy(w: *std.Io.Writer, src_in: []const u8, rule: Rule) std.Io.Writer.Error!bool {
     var src = src_in;
     var len = src.len;
     var add_nl_to_tail = false;
@@ -306,36 +306,40 @@ pub fn fixCopy(gpa: Allocator, dst: *std.ArrayList(u8), src_in: []const u8, rule
         for (src[0..last]) |ch| {
             if (ch != ' ') {
                 consecutive_spaces = 0;
-                try dst.append(gpa, ch);
+                try w.writeByte(ch);
             } else {
                 consecutive_spaces += 1;
                 if (consecutive_spaces == tw) {
-                    try dst.append(gpa, '\t');
+                    try w.writeByte('\t');
                     consecutive_spaces = 0;
                 }
             }
         }
-        while (consecutive_spaces > 0) : (consecutive_spaces -= 1) try dst.append(gpa, ' ');
+        while (consecutive_spaces > 0) : (consecutive_spaces -= 1) try w.writeByte(' ');
         len -= last;
         src = src[last..];
         fixed = true;
     } else if (rule & tab_in_indent != 0 and last_tab_in_indent >= 0) {
-        const start = dst.items.len;
+        var column: usize = 0;
         const last: usize = @intCast(last_tab_in_indent + 1);
         for (src[0..last]) |ch| {
             if (ch == '\t') {
                 // git's do-while: at least one space, then up to the stop
-                try dst.append(gpa, ' ');
-                while ((dst.items.len - start) % @as(usize, @intCast(tw)) != 0) try dst.append(gpa, ' ');
-            } else try dst.append(gpa, ch);
+                try w.writeByte(' ');
+                column += 1;
+                while (column % @as(usize, @intCast(tw)) != 0) : (column += 1) try w.writeByte(' ');
+            } else {
+                try w.writeByte(ch);
+                column += 1;
+            }
         }
         len -= last;
         src = src[last..];
         fixed = true;
     }
-    try dst.appendSlice(gpa, src[0..len]);
-    if (add_cr_to_tail) try dst.append(gpa, '\r');
-    if (add_nl_to_tail) try dst.append(gpa, '\n');
+    try w.writeAll(src[0..len]);
+    if (add_cr_to_tail) try w.writeByte('\r');
+    if (add_nl_to_tail) try w.writeByte('\n');
     return fixed;
 }
 
@@ -349,10 +353,10 @@ test "rules parse as git's do and errors are found and fixed" {
     try std.testing.expectEqual(blank_at_eol, check("a  \n", default_rule));
     try std.testing.expectEqual(space_before_tab, check(" \tx\n", default_rule));
     const gpa = std.testing.allocator;
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(gpa);
-    try std.testing.expect(try fixCopy(gpa, &out, " \tx  \n", default_rule));
-    try std.testing.expectEqualStrings("\tx\n", out.items);
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    try std.testing.expect(try fixCopy(&out.writer, " \tx  \n", default_rule));
+    try std.testing.expectEqualStrings("\tx\n", out.written());
     const msg = try errorString(gpa, blank_at_eol | space_before_tab);
     defer gpa.free(msg);
     try std.testing.expectEqualStrings("trailing whitespace, space before tab in indent", msg);

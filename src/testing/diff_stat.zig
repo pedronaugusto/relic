@@ -117,10 +117,10 @@ test "a diffstat is git diff --stat's at each width the options and diff.statNam
         const list = try stat.files(a, io, .{ .db = db, .changes = changes.items }, .{});
         const widths = try stat.Widths.configured(repo.configuration(), .{ .width = v.width, .count = v.count });
         const colors: diff.Colors = .{};
-        var ours: std.ArrayList(u8) = .empty;
-        try stat.write(a, &ours, list, .{ .widths = widths, .quote_path = v.quote_path, .colors = if (v.color) &colors else null });
-        try stat.writeSummary(a, &ours, changes.items, v.quote_path);
-        std.testing.expectEqualStrings(theirs, ours.items) catch |err| {
+        var ours: std.Io.Writer.Allocating = .init(a);
+        try stat.write(a, &ours.writer, list, .{ .widths = widths, .quote_path = v.quote_path, .colors = if (v.color) &colors else null });
+        try stat.writeSummary(a, &ours.writer, changes.items, v.quote_path);
+        std.testing.expectEqualStrings(theirs, ours.written()) catch |err| {
             std.debug.print("{any}\n", .{v});
             return err;
         };

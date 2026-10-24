@@ -111,7 +111,7 @@ pub fn files(a: Allocator, io: Io, inputs: diff.NumstatInputs, options: diff.Opt
 /// Append the diffstat of `list` to `out`, as git's `show_stats` writes
 /// it: a line for each file, at most `count` of them and then ` ...`,
 /// then the totals. Nothing for no files.
-pub fn write(a: Allocator, out: *std.ArrayList(u8), list: []const File, options: WriteOptions) Allocator.Error!void {
+pub fn write(a: Allocator, w: *std.Io.Writer, list: []const File, options: WriteOptions) (Allocator.Error || std.Io.Writer.Error)!void {
     if (list.len == 0) return;
     const widths = options.widths;
     const shown = @min(widths.count orelse list.len, list.len);
@@ -151,20 +151,20 @@ pub fn write(a: Allocator, out: *std.ArrayList(u8), list: []const File, options:
     const add_c: []const u8 = if (options.colors) |c| c.new.bytes() else "";
     const del_c: []const u8 = if (options.colors) |c| c.old.bytes() else "";
     for (list[0..shown], names) |f, full| {
-        try writeName(a, out, full, name_width);
+        try writeName(w, full, name_width);
         switch (f.kind) {
             .binary => {
-                try out.appendNTimes(a, ' ', number_width -| 3);
-                try out.appendSlice(a, "Bin");
+                try w.splatByteAll(' ', number_width -| 3);
+                try w.writeAll("Bin");
                 if (f.added == 0 and f.deleted == 0) {
-                    try out.append(a, '\n');
+                    try w.writeByte('\n');
                     continue;
                 }
-                try out.print(a, " {s}{d}{s} -> {s}{d}{s} bytes\n", .{ del_c, f.deleted, reset, add_c, f.added, reset });
+                try w.print(" {s}{d}{s} -> {s}{d}{s} bytes\n", .{ del_c, f.deleted, reset, add_c, f.added, reset });
             },
             .unmerged => {
-                try out.appendNTimes(a, ' ', number_width -| 8);
-                try out.appendSlice(a, "Unmerged\n");
+                try w.splatByteAll(' ', number_width -| 8);
+                try w.writeAll("Unmerged\n");
             },
             .text => {
                 var add = f.added;
@@ -181,11 +181,11 @@ pub fn write(a: Allocator, out: *std.ArrayList(u8), list: []const File, options:
                     }
                 }
                 const changed = f.added + f.deleted;
-                try out.appendNTimes(a, ' ', number_width -| decimalWidth(changed));
-                try out.print(a, "{d}{s}", .{ changed, if (changed != 0) " " else "" });
-                try graph(a, out, '+', add, add_c, reset);
-                try graph(a, out, '-', del, del_c, reset);
-                try out.append(a, '\n');
+                try w.splatByteAll(' ', number_width -| decimalWidth(changed));
+                try w.print("{d}{s}", .{ changed, if (changed != 0) " " else "" });
+                try graph(w, '+', add, add_c, reset);
+                try graph(w, '-', del, del_c, reset);
+                try w.writeByte('\n');
             },
         }
     }
@@ -201,14 +201,14 @@ pub fn write(a: Allocator, out: *std.ArrayList(u8), list: []const File, options:
             deletions += f.deleted;
         },
     };
-    if (shown < list.len) try out.appendSlice(a, " ...\n");
-    try writeTotals(a, out, counted, insertions, deletions);
+    if (shown < list.len) try w.writeAll(" ...\n");
+    try writeTotals(w, counted, insertions, deletions);
 }
 
 /// ` <name><padding> | `, the name cut from the left to `name_width`
 /// columns behind `...` and then to its first `/`, as git's `show_stats`
 /// scales it.
-fn writeName(a: Allocator, out: *std.ArrayList(u8), full: []const u8, name_width: usize) Allocator.Error!void {
+fn writeName(w: *std.Io.Writer, full: []const u8, name_width: usize) std.Io.Writer.Error!void {
     var prefix: []const u8 = "";
     var name = full;
     var len: isize = @intCast(name_width);
@@ -226,30 +226,30 @@ fn writeName(a: Allocator, out: *std.ArrayList(u8), full: []const u8, name_width
         if (std.mem.findScalar(u8, name, '/')) |slash| name = name[slash..];
     }
     const name_w: isize = @intCast(unicode_width.strWidth(name));
-    try out.print(a, " {s}{s}", .{ prefix, name });
-    try out.appendNTimes(a, ' ', if (len - name_w < 0) 0 else @intCast(len - name_w));
-    try out.appendSlice(a, " | ");
+    try w.print(" {s}{s}", .{ prefix, name });
+    try w.splatByteAll(' ', if (len - name_w < 0) 0 else @intCast(len - name_w));
+    try w.writeAll(" | ");
 }
 
-fn graph(a: Allocator, out: *std.ArrayList(u8), ch: u8, n: usize, set: []const u8, reset: []const u8) Allocator.Error!void {
+fn graph(w: *std.Io.Writer, ch: u8, n: usize, set: []const u8, reset: []const u8) std.Io.Writer.Error!void {
     if (n == 0) return;
-    try out.appendSlice(a, set);
-    try out.appendNTimes(a, ch, n);
-    try out.appendSlice(a, reset);
+    try w.writeAll(set);
+    try w.splatByteAll(ch, n);
+    try w.writeAll(reset);
 }
 
 /// git's `print_stat_summary`: ` N files changed, N insertions(+), N
 /// deletions(-)`, the insertions or deletions left out where they are none
 /// and the other is not.
-pub fn writeTotals(a: Allocator, out: *std.ArrayList(u8), changed: usize, insertions: usize, deletions: usize) Allocator.Error!void {
+pub fn writeTotals(w: *std.Io.Writer, changed: usize, insertions: usize, deletions: usize) std.Io.Writer.Error!void {
     if (changed == 0) {
-        try out.appendSlice(a, " 0 files changed\n");
+        try w.writeAll(" 0 files changed\n");
         return;
     }
-    try out.print(a, " {d} file{s} changed", .{ changed, if (changed == 1) "" else "s" });
-    if (insertions != 0 or deletions == 0) try out.print(a, ", {d} insertion{s}(+)", .{ insertions, if (insertions == 1) "" else "s" });
-    if (deletions != 0 or insertions == 0) try out.print(a, ", {d} deletion{s}(-)", .{ deletions, if (deletions == 1) "" else "s" });
-    try out.append(a, '\n');
+    try w.print(" {d} file{s} changed", .{ changed, if (changed == 1) "" else "s" });
+    if (insertions != 0 or deletions == 0) try w.print(", {d} insertion{s}(+)", .{ insertions, if (insertions == 1) "" else "s" });
+    if (deletions != 0 or insertions == 0) try w.print(", {d} deletion{s}(-)", .{ deletions, if (deletions == 1) "" else "s" });
+    try w.writeByte('\n');
 }
 
 /// The name a diffstat shows, as git's `fill_print_name`: quoted where it
@@ -306,7 +306,7 @@ pub fn renamed(a: Allocator, a_name: []const u8, b_name: []const u8, quote_path:
 /// Append the `--summary` lines of `changes`, as git's `diff_summary`
 /// writes each: ` create mode`, ` delete mode`, ` rename`, ` copy` and `
 /// mode change`. Nothing where none of them has one.
-pub fn writeSummary(a: Allocator, out: *std.ArrayList(u8), changes: []const diff.Change, quote_path: bool) Allocator.Error!void {
+pub fn writeSummary(a: Allocator, w: *std.Io.Writer, changes: []const diff.Change, quote_path: bool) (Allocator.Error || std.Io.Writer.Error)!void {
     for (changes) |c| switch (c.status) {
         .added, .deleted, .renamed, .copied => break,
         .unmerged => {},
@@ -314,14 +314,14 @@ pub fn writeSummary(a: Allocator, out: *std.ArrayList(u8), changes: []const diff
     } else return;
     for (changes) |c| switch (c.status) {
         .unmerged => {},
-        .deleted => try out.print(a, " delete mode {o:0>6} {s}\n", .{ modeNum(c.old.?.mode), try c_quote.alloc(a, c.old.?.path, quote_path) }),
-        .added => try out.print(a, " create mode {o:0>6} {s}\n", .{ modeNum(c.new.?.mode), try c_quote.alloc(a, c.new.?.path, quote_path) }),
+        .deleted => try w.print(" delete mode {o:0>6} {s}\n", .{ modeNum(c.old.?.mode), try c_quote.alloc(a, c.old.?.path, quote_path) }),
+        .added => try w.print(" create mode {o:0>6} {s}\n", .{ modeNum(c.new.?.mode), try c_quote.alloc(a, c.new.?.path, quote_path) }),
         .renamed, .copied => {
-            try out.print(a, " {s} {s} ({d}%)\n", .{ if (c.status == .copied) "copy" else "rename", try renamed(a, c.old.?.path, c.new.?.path, quote_path), c.similarity });
-            if (c.old.?.mode != c.new.?.mode) try out.print(a, " mode change {o:0>6} => {o:0>6}\n", .{ modeNum(c.old.?.mode), modeNum(c.new.?.mode) });
+            try w.print(" {s} {s} ({d}%)\n", .{ if (c.status == .copied) "copy" else "rename", try renamed(a, c.old.?.path, c.new.?.path, quote_path), c.similarity });
+            if (c.old.?.mode != c.new.?.mode) try w.print(" mode change {o:0>6} => {o:0>6}\n", .{ modeNum(c.old.?.mode), modeNum(c.new.?.mode) });
         },
         else => if (c.old.?.mode != c.new.?.mode) {
-            try out.print(a, " mode change {o:0>6} => {o:0>6} {s}\n", .{ modeNum(c.old.?.mode), modeNum(c.new.?.mode), try c_quote.alloc(a, c.new.?.path, quote_path) });
+            try w.print(" mode change {o:0>6} => {o:0>6} {s}\n", .{ modeNum(c.old.?.mode), modeNum(c.new.?.mode), try c_quote.alloc(a, c.new.?.path, quote_path) });
         },
     };
 }

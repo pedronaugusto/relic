@@ -843,7 +843,7 @@ pub const ShowError = errors: {
         /// A mode that needs the time now or the local zone, and a `Clock`
         /// without it.
         DateNeedsClock,
-    } || std.mem.Allocator.Error;
+    } || std.Io.Writer.Error;
 };
 
 const short_weekdays = [_][]const u8{ "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
@@ -867,43 +867,43 @@ pub fn tzInt(offset_minutes: i32) i32 {
     return if (offset_minutes < 0) -v else v;
 }
 
-fn printTz(gpa: std.mem.Allocator, out: *std.ArrayList(u8), tz: i32) std.mem.Allocator.Error!void {
+fn printTz(w: *std.Io.Writer, tz: i32) std.Io.Writer.Error!void {
     // C's `%+05d`
     const sign: u8 = if (tz < 0) '-' else '+';
-    try out.print(gpa, "{c}{d:0>4}", .{ sign, @abs(tz) });
+    try w.print("{c}{d:0>4}", .{ sign, @abs(tz) });
 }
 
 /// git's `show_date_relative`.
-pub fn showRelative(gpa: std.mem.Allocator, out: *std.ArrayList(u8), secs: i64, now_at: std.Io.Timestamp) std.mem.Allocator.Error!void {
+pub fn showRelative(w: *std.Io.Writer, secs: i64, now_at: std.Io.Timestamp) std.Io.Writer.Error!void {
     const now = now_at.toSeconds();
-    if (now < secs) return out.appendSlice(gpa, "in the future");
+    if (now < secs) return w.writeAll("in the future");
     // Saturating: a date an object carries may be as far back as an i64
     // goes, and the difference past it is still "many years ago".
     var diff: i64 = now -| secs;
-    if (diff < 90) return plural(gpa, out, diff, "second", " ago");
+    if (diff < 90) return plural(w, diff, "second", " ago");
     diff = @divTrunc(diff +| 30, 60);
-    if (diff < 90) return plural(gpa, out, diff, "minute", " ago");
+    if (diff < 90) return plural(w, diff, "minute", " ago");
     diff = @divTrunc(diff + 30, 60);
-    if (diff < 36) return plural(gpa, out, diff, "hour", " ago");
+    if (diff < 36) return plural(w, diff, "hour", " ago");
     diff = @divTrunc(diff + 12, 24);
-    if (diff < 14) return plural(gpa, out, diff, "day", " ago");
-    if (diff < 70) return plural(gpa, out, @divTrunc(diff + 3, 7), "week", " ago");
-    if (diff < 365) return plural(gpa, out, @divTrunc(diff + 15, 30), "month", " ago");
+    if (diff < 14) return plural(w, diff, "day", " ago");
+    if (diff < 70) return plural(w, @divTrunc(diff + 3, 7), "week", " ago");
+    if (diff < 365) return plural(w, @divTrunc(diff + 15, 30), "month", " ago");
     if (diff < 1825) {
         const total_months = @divTrunc(diff * 12 * 2 + 365, 365 * 2);
         const years = @divTrunc(total_months, 12);
         const months = @rem(total_months, 12);
         if (months != 0) {
-            try plural(gpa, out, years, "year", ", ");
-            return plural(gpa, out, months, "month", " ago");
+            try plural(w, years, "year", ", ");
+            return plural(w, months, "month", " ago");
         }
-        return plural(gpa, out, years, "year", " ago");
+        return plural(w, years, "year", " ago");
     }
-    return plural(gpa, out, @divTrunc(diff + 183, 365), "year", " ago");
+    return plural(w, @divTrunc(diff + 183, 365), "year", " ago");
 }
 
-fn plural(gpa: std.mem.Allocator, out: *std.ArrayList(u8), n: i64, unit: []const u8, after: []const u8) std.mem.Allocator.Error!void {
-    try out.print(gpa, "{d} {s}{s}{s}", .{ n, unit, if (n == 1) "" else "s", after });
+fn plural(w: *std.Io.Writer, n: i64, unit: []const u8, after: []const u8) std.Io.Writer.Error!void {
+    try w.print("{d} {s}{s}{s}", .{ n, unit, if (n == 1) "" else "s", after });
 }
 
 /// The calendar fields of `secs` shown in zone `tz`, as git's `time_to_tm`,
@@ -919,9 +919,9 @@ fn tmIn(secs: i64, tz: i32) ?Tm {
 
 /// `secs`, in the zone `tz` (git's `+0100` as 100), as `mode` shows it:
 /// git's `show_date`, appended to `out`.
-pub fn show(gpa: std.mem.Allocator, out: *std.ArrayList(u8), secs: i64, tz_in: i32, mode: Mode, clock: Clock) ShowError!void {
+pub fn show(w: *std.Io.Writer, secs: i64, tz_in: i32, mode: Mode, clock: Clock) ShowError!void {
     var tz = tz_in;
-    if (mode.kind == .unix) return out.print(gpa, "{d}", .{secs});
+    if (mode.kind == .unix) return w.print("{d}", .{secs});
     var human_tm: Tm = .{ .year = 0, .mon = 0, .mday = 0, .hour = 0, .min = 0, .sec = 0 };
     var human_tz: i32 = -1;
     if (mode.kind == .human) {
@@ -941,10 +941,10 @@ pub fn show(gpa: std.mem.Allocator, out: *std.ArrayList(u8), secs: i64, tz_in: i
         zone_name = local.name;
     }
     if (mode.kind == .raw) {
-        try out.print(gpa, "{d} ", .{secs});
-        return printTz(gpa, out, tz);
+        try w.print("{d} ", .{secs});
+        return printTz(w, tz);
     }
-    if (mode.kind == .relative) return showRelative(gpa, out, secs, clock.now orelse return error.DateNeedsClock);
+    if (mode.kind == .relative) return showRelative(w, secs, clock.now orelse return error.DateNeedsClock);
     // A time with no calendar date is shown as the epoch in UTC, as git's
     // `show_date` shows it.
     const tm = tmIn(secs, tz) orelse epoch: {
@@ -953,31 +953,31 @@ pub fn show(gpa: std.mem.Allocator, out: *std.ArrayList(u8), secs: i64, tz_in: i
     };
     const year: i64 = tm.year + 1900;
     switch (mode.kind) {
-        .short => try out.print(gpa, "{d:0>4}-{d:0>2}-{d:0>2}", .{ @as(u64, @intCast(@max(year, 0))), @as(u64, @intCast(tm.mon + 1)), @as(u64, @intCast(tm.mday)) }),
+        .short => try w.print("{d:0>4}-{d:0>2}-{d:0>2}", .{ @as(u64, @intCast(@max(year, 0))), @as(u64, @intCast(tm.mon + 1)), @as(u64, @intCast(tm.mday)) }),
         .iso8601 => {
-            try out.print(gpa, "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2} ", .{ @as(u64, @intCast(@max(year, 0))), @as(u64, @intCast(tm.mon + 1)), @as(u64, @intCast(tm.mday)), @as(u64, @intCast(tm.hour)), @as(u64, @intCast(tm.min)), @as(u64, @intCast(tm.sec)) });
-            try printTz(gpa, out, tz);
+            try w.print("{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2} ", .{ @as(u64, @intCast(@max(year, 0))), @as(u64, @intCast(tm.mon + 1)), @as(u64, @intCast(tm.mday)), @as(u64, @intCast(tm.hour)), @as(u64, @intCast(tm.min)), @as(u64, @intCast(tm.sec)) });
+            try printTz(w, tz);
         },
         .iso8601_strict => {
-            try out.print(gpa, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}", .{ @as(u64, @intCast(@max(year, 0))), @as(u64, @intCast(tm.mon + 1)), @as(u64, @intCast(tm.mday)), @as(u64, @intCast(tm.hour)), @as(u64, @intCast(tm.min)), @as(u64, @intCast(tm.sec)) });
+            try w.print("{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}", .{ @as(u64, @intCast(@max(year, 0))), @as(u64, @intCast(tm.mon + 1)), @as(u64, @intCast(tm.mday)), @as(u64, @intCast(tm.hour)), @as(u64, @intCast(tm.min)), @as(u64, @intCast(tm.sec)) });
             if (tz == 0) {
-                try out.append(gpa, 'Z');
+                try w.writeByte('Z');
             } else {
                 const abs: u32 = @abs(tz);
-                try out.print(gpa, "{c}{d:0>2}:{d:0>2}", .{ @as(u8, if (tz >= 0) '+' else '-'), abs / 100, abs % 100 });
+                try w.print("{c}{d:0>2}:{d:0>2}", .{ @as(u8, if (tz >= 0) '+' else '-'), abs / 100, abs % 100 });
             }
         },
         .rfc2822 => {
-            try out.print(gpa, "{s}, {d} {s} {d} {d:0>2}:{d:0>2}:{d:0>2} ", .{ short_weekdays[@intCast(tm.wday)], tm.mday, short_months[@intCast(tm.mon)], year, @as(u64, @intCast(tm.hour)), @as(u64, @intCast(tm.min)), @as(u64, @intCast(tm.sec)) });
-            try printTz(gpa, out, tz);
+            try w.print("{s}, {d} {s} {d} {d:0>2}:{d:0>2}:{d:0>2} ", .{ short_weekdays[@intCast(tm.wday)], tm.mday, short_months[@intCast(tm.mon)], year, @as(u64, @intCast(tm.hour)), @as(u64, @intCast(tm.min)), @as(u64, @intCast(tm.sec)) });
+            try printTz(w, tz);
         },
-        .strftime => try strftime(gpa, out, mode.strftime, secs, tm, tz, .{ .zone_name = if (mode.local) zone_name else null, .date_full_year = clock.locale_date_full_year }),
-        else => try showNormal(gpa, out, secs, tm, tz, human_tm, human_tz, mode.local, clock),
+        .strftime => try strftime(w, mode.strftime, secs, tm, tz, .{ .zone_name = if (mode.local) zone_name else null, .date_full_year = clock.locale_date_full_year }),
+        else => try showNormal(w, secs, tm, tz, human_tm, human_tz, mode.local, clock),
     }
 }
 
 /// git's `show_date_normal`, which `human` shares.
-fn showNormal(gpa: std.mem.Allocator, out: *std.ArrayList(u8), secs: i64, tm: Tm, tz: i32, human_tm: Tm, human_tz: i32, local: bool, clock: Clock) ShowError!void {
+fn showNormal(w: *std.Io.Writer, secs: i64, tm: Tm, tz: i32, human_tm: Tm, human_tz: i32, local: bool, clock: Clock) ShowError!void {
     var hide_year = false;
     var hide_date = false;
     var hide_wday = false;
@@ -997,25 +997,29 @@ fn showNormal(gpa: std.mem.Allocator, out: *std.ArrayList(u8), secs: i64, tm: Tm
             }
         }
     }
-    if (hide_wday) return showRelative(gpa, out, secs, clock.now orelse return error.DateNeedsClock);
+    if (hide_wday) return showRelative(w, secs, clock.now orelse return error.DateNeedsClock);
     if (human_tm.year != 0) {
         hide_seconds = true;
         hide_tz = hide_tz or !hide_date;
         hide_wday = !hide_year;
         hide_time = !hide_year;
     }
-    if (!hide_wday) try out.print(gpa, "{s} ", .{short_weekdays[@intCast(tm.wday)]});
-    if (!hide_date) try out.print(gpa, "{s} {d} ", .{ short_months[@intCast(tm.mon)], tm.mday });
-    if (!hide_time) {
-        try out.print(gpa, "{d:0>2}:{d:0>2}", .{ @as(u64, @intCast(tm.hour)), @as(u64, @intCast(tm.min)) });
-        if (!hide_seconds) try out.print(gpa, ":{d:0>2}", .{@as(u64, @intCast(tm.sec))});
-    } else {
-        while (out.items.len > 0 and ctype.isSpace(out.items[out.items.len - 1])) _ = out.pop();
+    // git writes each part with a space after it and trims the last
+    // when the time is hidden: the parts, spaces between them.
+    if (!hide_wday) try w.writeAll(short_weekdays[@intCast(tm.wday)]);
+    if (!hide_date) {
+        if (!hide_wday) try w.writeByte(' ');
+        try w.print("{s} {d}", .{ short_months[@intCast(tm.mon)], tm.mday });
     }
-    if (!hide_year) try out.print(gpa, " {d}", .{tm.year + 1900});
+    if (!hide_time) {
+        if (!hide_wday or !hide_date) try w.writeByte(' ');
+        try w.print("{d:0>2}:{d:0>2}", .{ @as(u64, @intCast(tm.hour)), @as(u64, @intCast(tm.min)) });
+        if (!hide_seconds) try w.print(":{d:0>2}", .{@as(u64, @intCast(tm.sec))});
+    }
+    if (!hide_year) try w.print(" {d}", .{tm.year + 1900});
     if (!hide_tz) {
-        try out.append(gpa, ' ');
-        try printTz(gpa, out, tz);
+        try w.writeByte(' ');
+        try printTz(w, tz);
     }
 }
 
@@ -1057,12 +1061,12 @@ pub const StrftimeContext = struct {
 /// git's `strbuf_addftime` over the C library's `strftime` in the C
 /// locale: `%z`, `%Z` and `%s` as git rewrites them, every other
 /// conversion the C library's, with machine details supplied in `context`.
-pub fn strftime(gpa: std.mem.Allocator, out: *std.ArrayList(u8), fmt: []const u8, secs: i64, tm: Tm, tz: i32, context: StrftimeContext) std.mem.Allocator.Error!void {
+pub fn strftime(w: *std.Io.Writer, fmt: []const u8, secs: i64, tm: Tm, tz: i32, context: StrftimeContext) std.Io.Writer.Error!void {
     var i: usize = 0;
     while (i < fmt.len) {
         const c = fmt[i];
         if (c != '%' or i + 1 >= fmt.len) {
-            try out.append(gpa, c);
+            try w.writeByte(c);
             i += 1;
             continue;
         }
@@ -1074,76 +1078,76 @@ pub fn strftime(gpa: std.mem.Allocator, out: *std.ArrayList(u8), fmt: []const u8
         const year = tm.year + 1900;
         const hour12: i64 = if (@mod(tm.hour, 12) == 0) 12 else @mod(tm.hour, 12);
         switch (conv) {
-            '%' => try out.append(gpa, '%'),
-            'a' => try out.appendSlice(gpa, short_weekdays[@intCast(tm.wday)]),
-            'A' => try out.appendSlice(gpa, long_weekdays[@intCast(tm.wday)]),
-            'b', 'h' => try out.appendSlice(gpa, short_months[@intCast(tm.mon)]),
-            'B' => try out.appendSlice(gpa, month_names[@intCast(tm.mon)]),
-            'c' => try out.print(gpa, "{s} {s} {d: >2} {d:0>2}:{d:0>2}:{d:0>2} {d}", .{ short_weekdays[@intCast(tm.wday)], short_months[@intCast(tm.mon)], @as(u64, @intCast(tm.mday)), @as(u64, @intCast(tm.hour)), @as(u64, @intCast(tm.min)), @as(u64, @intCast(tm.sec)), year }),
-            'C' => try out.print(gpa, "{d:0>2}", .{@as(u64, @intCast(@divFloor(year, 100)))}),
-            'd' => try out.print(gpa, "{d:0>2}", .{@as(u64, @intCast(tm.mday))}),
-            'D' => try out.print(gpa, "{d:0>2}/{d:0>2}/{d:0>2}", .{ @as(u64, @intCast(tm.mon + 1)), @as(u64, @intCast(tm.mday)), @as(u64, @intCast(@mod(year, 100))) }),
-            'e' => try out.print(gpa, "{d: >2}", .{@as(u64, @intCast(tm.mday))}),
-            'F' => try out.print(gpa, "{d:0>4}-{d:0>2}-{d:0>2}", .{ @as(u64, @intCast(@max(year, 0))), @as(u64, @intCast(tm.mon + 1)), @as(u64, @intCast(tm.mday)) }),
-            'g' => try out.print(gpa, "{d:0>2}", .{@as(u64, @intCast(@mod(isoWeek(tm).year, 100)))}),
-            'G' => try out.print(gpa, "{d}", .{isoWeek(tm).year}),
-            'H' => try out.print(gpa, "{d:0>2}", .{@as(u64, @intCast(tm.hour))}),
-            'I' => try out.print(gpa, "{d:0>2}", .{@as(u64, @intCast(hour12))}),
-            'j' => try out.print(gpa, "{d:0>3}", .{@as(u64, @intCast(yearDay(tm) + 1))}),
-            'k' => try out.print(gpa, "{d: >2}", .{@as(u64, @intCast(tm.hour))}),
-            'l' => try out.print(gpa, "{d: >2}", .{@as(u64, @intCast(hour12))}),
-            'm' => try out.print(gpa, "{d:0>2}", .{@as(u64, @intCast(tm.mon + 1))}),
-            'M' => try out.print(gpa, "{d:0>2}", .{@as(u64, @intCast(tm.min))}),
-            'n' => try out.append(gpa, '\n'),
-            'p' => try out.appendSlice(gpa, if (tm.hour < 12) "AM" else "PM"),
-            'r' => try out.print(gpa, "{d:0>2}:{d:0>2}:{d:0>2} {s}", .{ @as(u64, @intCast(hour12)), @as(u64, @intCast(tm.min)), @as(u64, @intCast(tm.sec)), if (tm.hour < 12) "AM" else "PM" }),
-            'R' => try out.print(gpa, "{d:0>2}:{d:0>2}", .{ @as(u64, @intCast(tm.hour)), @as(u64, @intCast(tm.min)) }),
-            's' => try out.print(gpa, "{d}", .{secs}),
-            'S' => try out.print(gpa, "{d:0>2}", .{@as(u64, @intCast(tm.sec))}),
-            't' => try out.append(gpa, '\t'),
-            'T', 'X' => try out.print(gpa, "{d:0>2}:{d:0>2}:{d:0>2}", .{ @as(u64, @intCast(tm.hour)), @as(u64, @intCast(tm.min)), @as(u64, @intCast(tm.sec)) }),
-            'u' => try out.print(gpa, "{d}", .{if (tm.wday == 0) 7 else tm.wday}),
-            'U' => try out.print(gpa, "{d:0>2}", .{@as(u64, @intCast(@divFloor(yearDay(tm) + 7 - tm.wday, 7)))}),
-            'V' => try out.print(gpa, "{d:0>2}", .{@as(u64, @intCast(isoWeek(tm).week))}),
-            'w' => try out.print(gpa, "{d}", .{tm.wday}),
-            'W' => try out.print(gpa, "{d:0>2}", .{@as(u64, @intCast(@divFloor(yearDay(tm) + 7 - @mod(tm.wday + 6, 7), 7)))}),
+            '%' => try w.writeByte('%'),
+            'a' => try w.writeAll(short_weekdays[@intCast(tm.wday)]),
+            'A' => try w.writeAll(long_weekdays[@intCast(tm.wday)]),
+            'b', 'h' => try w.writeAll(short_months[@intCast(tm.mon)]),
+            'B' => try w.writeAll(month_names[@intCast(tm.mon)]),
+            'c' => try w.print("{s} {s} {d: >2} {d:0>2}:{d:0>2}:{d:0>2} {d}", .{ short_weekdays[@intCast(tm.wday)], short_months[@intCast(tm.mon)], @as(u64, @intCast(tm.mday)), @as(u64, @intCast(tm.hour)), @as(u64, @intCast(tm.min)), @as(u64, @intCast(tm.sec)), year }),
+            'C' => try w.print("{d:0>2}", .{@as(u64, @intCast(@divFloor(year, 100)))}),
+            'd' => try w.print("{d:0>2}", .{@as(u64, @intCast(tm.mday))}),
+            'D' => try w.print("{d:0>2}/{d:0>2}/{d:0>2}", .{ @as(u64, @intCast(tm.mon + 1)), @as(u64, @intCast(tm.mday)), @as(u64, @intCast(@mod(year, 100))) }),
+            'e' => try w.print("{d: >2}", .{@as(u64, @intCast(tm.mday))}),
+            'F' => try w.print("{d:0>4}-{d:0>2}-{d:0>2}", .{ @as(u64, @intCast(@max(year, 0))), @as(u64, @intCast(tm.mon + 1)), @as(u64, @intCast(tm.mday)) }),
+            'g' => try w.print("{d:0>2}", .{@as(u64, @intCast(@mod(isoWeek(tm).year, 100)))}),
+            'G' => try w.print("{d}", .{isoWeek(tm).year}),
+            'H' => try w.print("{d:0>2}", .{@as(u64, @intCast(tm.hour))}),
+            'I' => try w.print("{d:0>2}", .{@as(u64, @intCast(hour12))}),
+            'j' => try w.print("{d:0>3}", .{@as(u64, @intCast(yearDay(tm) + 1))}),
+            'k' => try w.print("{d: >2}", .{@as(u64, @intCast(tm.hour))}),
+            'l' => try w.print("{d: >2}", .{@as(u64, @intCast(hour12))}),
+            'm' => try w.print("{d:0>2}", .{@as(u64, @intCast(tm.mon + 1))}),
+            'M' => try w.print("{d:0>2}", .{@as(u64, @intCast(tm.min))}),
+            'n' => try w.writeByte('\n'),
+            'p' => try w.writeAll(if (tm.hour < 12) "AM" else "PM"),
+            'r' => try w.print("{d:0>2}:{d:0>2}:{d:0>2} {s}", .{ @as(u64, @intCast(hour12)), @as(u64, @intCast(tm.min)), @as(u64, @intCast(tm.sec)), if (tm.hour < 12) "AM" else "PM" }),
+            'R' => try w.print("{d:0>2}:{d:0>2}", .{ @as(u64, @intCast(tm.hour)), @as(u64, @intCast(tm.min)) }),
+            's' => try w.print("{d}", .{secs}),
+            'S' => try w.print("{d:0>2}", .{@as(u64, @intCast(tm.sec))}),
+            't' => try w.writeByte('\t'),
+            'T', 'X' => try w.print("{d:0>2}:{d:0>2}:{d:0>2}", .{ @as(u64, @intCast(tm.hour)), @as(u64, @intCast(tm.min)), @as(u64, @intCast(tm.sec)) }),
+            'u' => try w.print("{d}", .{if (tm.wday == 0) 7 else tm.wday}),
+            'U' => try w.print("{d:0>2}", .{@as(u64, @intCast(@divFloor(yearDay(tm) + 7 - tm.wday, 7)))}),
+            'V' => try w.print("{d:0>2}", .{@as(u64, @intCast(isoWeek(tm).week))}),
+            'w' => try w.print("{d}", .{tm.wday}),
+            'W' => try w.print("{d:0>2}", .{@as(u64, @intCast(@divFloor(yearDay(tm) + 7 - @mod(tm.wday + 6, 7), 7)))}),
             'x' => {
-                try out.print(gpa, "{d:0>2}/{d:0>2}/", .{ @as(u64, @intCast(tm.mon + 1)), @as(u64, @intCast(tm.mday)) });
-                if (context.date_full_year) try out.print(gpa, "{d:0>4}", .{@as(u64, @intCast(@max(year, 0)))}) else try out.print(gpa, "{d:0>2}", .{@as(u64, @intCast(@mod(year, 100)))});
+                try w.print("{d:0>2}/{d:0>2}/", .{ @as(u64, @intCast(tm.mon + 1)), @as(u64, @intCast(tm.mday)) });
+                if (context.date_full_year) try w.print("{d:0>4}", .{@as(u64, @intCast(@max(year, 0)))}) else try w.print("{d:0>2}", .{@as(u64, @intCast(@mod(year, 100)))});
             },
-            'y' => try out.print(gpa, "{d:0>2}", .{@as(u64, @intCast(@mod(year, 100)))}),
-            'Y' => try out.print(gpa, "{d}", .{year}),
-            'z' => try printTz(gpa, out, tz),
-            'Z' => if (context.zone_name) |name| try out.appendSlice(gpa, name),
-            else => try out.appendSlice(gpa, fmt[i - 2 .. i]),
+            'y' => try w.print("{d:0>2}", .{@as(u64, @intCast(@mod(year, 100)))}),
+            'Y' => try w.print("{d}", .{year}),
+            'z' => try printTz(w, tz),
+            'Z' => if (context.zone_name) |name| try w.writeAll(name),
+            else => try w.writeAll(fmt[i - 2 .. i]),
         }
     }
 }
 
 test "locale date year width changes percent x without changing percent D" {
     const gpa = std.testing.allocator;
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(gpa);
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
     const secs: i64 = 1700270000;
     const mode: Mode = .{ .kind = .strftime, .strftime = "%x|%D" };
-    try show(gpa, &out, secs, 0, mode, .{});
-    try std.testing.expectEqualStrings("11/18/23|11/18/23", out.items);
+    try show(&out.writer, secs, 0, mode, .{});
+    try std.testing.expectEqualStrings("11/18/23|11/18/23", out.written());
     out.clearRetainingCapacity();
-    try show(gpa, &out, secs, 0, mode, .{ .locale_date_full_year = true });
-    try std.testing.expectEqualStrings("11/18/2023|11/18/23", out.items);
+    try show(&out.writer, secs, 0, mode, .{ .locale_date_full_year = true });
+    try std.testing.expectEqualStrings("11/18/2023|11/18/23", out.written());
 }
 
 test "a date with no calendar day is shown as the epoch in UTC, and an extreme zone does not crash" {
     const gpa = std.testing.allocator;
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(gpa);
-    try show(gpa, &out, std.math.maxInt(i64), 100, .{ .kind = .iso8601 }, .{});
-    try std.testing.expectEqualStrings("1970-01-01 00:00:00 +0000", out.items);
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    try show(&out.writer, std.math.maxInt(i64), 100, .{ .kind = .iso8601 }, .{});
+    try std.testing.expectEqualStrings("1970-01-01 00:00:00 +0000", out.written());
     for ([_]i32{ std.math.minInt(i32), std.math.maxInt(i32), -1 }) |tz| {
         for ([_]i64{ std.math.minInt(i64), -1, 0, std.math.maxInt(i64) }) |secs| {
             inline for (.{ Mode{ .kind = .iso8601 }, Mode{ .kind = .rfc2822 }, Mode{ .kind = .short }, Mode{ .kind = .raw }, Mode{ .kind = .iso8601_strict }, Mode{ .kind = .relative } }) |mode| {
                 out.clearRetainingCapacity();
-                try show(gpa, &out, secs, tz, mode, .{ .now = timestamp(1_700_000_000) });
+                try show(&out.writer, secs, tz, mode, .{ .now = timestamp(1_700_000_000) });
             }
         }
     }

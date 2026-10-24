@@ -405,7 +405,10 @@ const Run = struct {
             },
             .revert => blk: {
                 const end = std.mem.findScalar(u8, source.message, '\n') orelse source.message.len;
-                try sequencer.revertMessage(r.a, &text, source.message[0..end], based_on, null);
+                var w: std.Io.Writer.Allocating = .fromArrayList(r.a, &text);
+                const written = sequencer.revertMessage(&w.writer, source.message[0..end], based_on, null);
+                text = w.toArrayList();
+                written catch return error.OutOfMemory;
                 break :blk r.options.who;
             },
         };

@@ -233,7 +233,7 @@ pub const EntryOptions = struct {
     terminator: bool = false,
 };
 
-/// Append the entry for `inputs.oid` to `out`, as git's `show_log`
+/// Write the entry for `inputs.oid` to `w`, as git's `show_log`
 /// writes it in a built-in format: the `commit` line in
 /// `Context.colors`' commit colour, its decorations from
 /// `Context.decorations`, the signatures `show_signature` asks for, the
@@ -241,7 +241,7 @@ pub const EntryOptions = struct {
 /// their dates in `Context.date_mode`, the message in
 /// `Context.output_encoding` — and `Context.notes`, which are the notes as
 /// git writes them for such a format (`commit.notes`' `raw = false`).
-pub fn writeEntry(a: Allocator, io: Io, inputs: EntryInputs, out: *std.ArrayList(u8), options: EntryOptions) Self.Error!void {
+pub fn writeEntry(a: Allocator, io: Io, w: *std.Io.Writer, inputs: EntryInputs, options: EntryOptions) (Self.Error || std.Io.Writer.Error)!void {
     const ctx = options.context;
     const db = inputs.db;
     const found = try db.read(io, inputs.oid);
@@ -249,28 +249,28 @@ pub fn writeEntry(a: Allocator, io: Io, inputs: EntryInputs, out: *std.ArrayList
     if (found.type != .commit) return error.NotACommit;
     const raw = try a.dupe(u8, found.bytes);
     const commit = try object.Commit.parse(a, db.objectFormat(), raw);
-    if (options.after_another and !options.terminator) try out.append(a, '\n');
+    if (options.after_another and !options.terminator) try w.writeByte('\n');
 
     const reset: []const u8 = if (ctx.colors != null) color.reset else "";
     const fmt = options.format;
-    if (ctx.colors) |c| try out.appendSlice(a, c.commit.bytes());
-    if (fmt != .oneline) try out.appendSlice(a, "commit ");
-    try out.appendSlice(a, try commitName(a, io, db, inputs.oid, ctx, options.abbrev_commit));
-    if (options.from) |parent| try out.print(a, " (from {s})", .{try commitName(a, io, db, parent, ctx, options.abbrev_commit)});
-    try out.appendSlice(a, reset);
-    if (ctx.decorations) |d| try d.write(a, out, inputs.oid, .{ .colors = ctx.colors });
-    try out.append(a, if (fmt == .oneline) ' ' else '\n');
+    if (ctx.colors) |c| try w.writeAll(c.commit.bytes());
+    if (fmt != .oneline) try w.writeAll("commit ");
+    try w.writeAll(try commitName(a, io, db, inputs.oid, ctx, options.abbrev_commit));
+    if (options.from) |parent| try w.print(" (from {s})", .{try commitName(a, io, db, parent, ctx, options.abbrev_commit)});
+    try w.writeAll(reset);
+    if (ctx.decorations) |d| try d.write(w, inputs.oid, .{ .colors = ctx.colors });
+    try w.writeByte(if (fmt == .oneline) ' ' else '\n');
 
     if (options.show_signature) {
-        try showSignature(a, io, db, out, raw, ctx);
-        try showMergetags(a, io, db, out, commit, ctx);
+        try showSignature(a, io, db, w, raw, ctx);
+        try showMergetags(a, io, db, w, commit, ctx);
     }
 
     var body: std.ArrayList(u8) = .empty;
     try prettyPrint(a, io, db, &body, raw, commit, ctx, options);
     if (ctx.notes) |notes| try body.appendSlice(a, notes);
-    try out.appendSlice(a, body.items);
-    if (options.terminator) try out.append(a, '\n');
+    try w.writeAll(body.items);
+    if (options.terminator) try w.writeByte('\n');
 }
 
 fn commitName(a: Allocator, io: Io, db: *odb_mod.Odb, oid: Oid, ctx: Context, short: bool) Self.Error![]const u8 {
@@ -281,14 +281,14 @@ fn commitName(a: Allocator, io: Io, db: *odb_mod.Odb, oid: Oid, ctx: Context, sh
 
 /// git's `show_sig_lines`: each line in the frag colour for a good
 /// signature, the whitespace one for any other.
-fn sigLines(a: Allocator, out: *std.ArrayList(u8), good: bool, text: []const u8, ctx: Context) Allocator.Error!void {
+fn sigLines(w: *std.Io.Writer, good: bool, text: []const u8, ctx: Context) std.Io.Writer.Error!void {
     const set: []const u8 = if (ctx.colors) |c| (if (good) c.frag.bytes() else c.whitespace.bytes()) else "";
     const reset: []const u8 = if (ctx.colors != null) color.reset else "";
     var rest = text;
     while (rest.len > 0) {
         const eol = std.mem.findScalar(u8, rest, '\n');
         const line = rest[0 .. eol orelse rest.len];
-        try out.print(a, "{s}{s}{s}{s}", .{ set, line, reset, if (eol != null) "\n" else "" });
+        try w.print("{s}{s}{s}{s}", .{ set, line, reset, if (eol != null) "\n" else "" });
         rest = if (eol) |e| rest[e + 1 ..] else rest[rest.len..];
     }
 }
@@ -300,7 +300,7 @@ fn passes(v: *const signing.Verdict, signer: *const signing.Signer) bool {
 }
 
 /// git's `show_signature`: nothing for a commit with no signature.
-fn showSignature(a: Allocator, io: Io, db: *odb_mod.Odb, out: *std.ArrayList(u8), raw: []const u8, ctx: Context) Self.Error!void {
+fn showSignature(a: Allocator, io: Io, db: *odb_mod.Odb, w: *std.Io.Writer, raw: []const u8, ctx: Context) (Self.Error || std.Io.Writer.Error)!void {
     const kind = db.objectFormat();
     var split = (try signing.splitCommit(a, kind, raw)) orelse return;
     split.deinit(a);
@@ -308,12 +308,12 @@ fn showSignature(a: Allocator, io: Io, db: *odb_mod.Odb, out: *std.ArrayList(u8)
     var verdict = try signing.verifyCommit(io, signer, kind, raw);
     defer verdict.deinit();
     const ok = passes(&verdict, signer);
-    try sigLines(a, out, ok, if (!ok and verdict.output.len == 0) "No signature\n" else verdict.output, ctx);
+    try sigLines(w, ok, if (!ok and verdict.output.len == 0) "No signature\n" else verdict.output, ctx);
 }
 
 /// git's `show_mergetag`: for each tag a merge records, what it tags
 /// among the parents and its signature's lines.
-fn showMergetags(a: Allocator, io: Io, db: *odb_mod.Odb, out: *std.ArrayList(u8), commit: object.Commit, ctx: Context) Self.Error!void {
+fn showMergetags(a: Allocator, io: Io, db: *odb_mod.Odb, w: *std.Io.Writer, commit: object.Commit, ctx: Context) (Self.Error || std.Io.Writer.Error)!void {
     const kind = db.objectFormat();
     for (commit.extra) |h| {
         if (!std.mem.eql(u8, h.name, "mergetag")) continue;
@@ -339,7 +339,7 @@ fn showMergetags(a: Allocator, io: Io, db: *odb_mod.Odb, out: *std.ArrayList(u8)
             ok = passes(&verdict, signer);
             try message.appendSlice(a, if (verdict.output.len != 0) verdict.output else "No signature\n");
         }
-        try sigLines(a, out, ok, message.items, ctx);
+        try sigLines(w, ok, message.items, ctx);
     }
 }
 
@@ -405,8 +405,13 @@ fn userInfo(a: Allocator, out: *std.ArrayList(u8), what: []const u8, line: []con
         .fuller => try out.print(a, "{s}Date: ", .{what}),
         else => return,
     }
-    try date.show(a, out, ident.when_secs, date.tzInt(ident.offset_minutes), ctx.date_mode, ctx.clock);
-    try out.append(a, '\n');
+    var w: std.Io.Writer.Allocating = .fromArrayList(a, out);
+    defer out.* = w.toArrayList();
+    date.show(&w.writer, ident.when_secs, date.tzInt(ident.offset_minutes), ctx.date_mode, ctx.clock) catch |err| switch (err) {
+        error.WriteFailed => return error.OutOfMemory,
+        else => |e| return e,
+    };
+    w.writer.writeByte('\n') catch return error.OutOfMemory;
 }
 
 /// git's `format_subject` with a space between lines: the first

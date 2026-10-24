@@ -120,14 +120,14 @@ test "a log in each built-in format is git log --pretty's" {
         var display = try notes_mod.DisplayNotes.load(gpa, io, &repo, .{});
         defer display.deinit();
         const colors: pretty.Colors = .{};
-        var ours: std.ArrayList(u8) = .empty;
+        var ours: Io.Writer.Allocating = .init(a);
         var lines = std.mem.tokenizeScalar(u8, listed, '\n');
         var first = true;
         while (lines.next()) |hex| {
             const oid = try hash.Oid.parse(.sha1, hex);
             var note_text: Io.Writer.Allocating = .init(a);
             if (case.notes) try display.format(io, oid, &note_text.writer, .{});
-            try log.writeEntry(a, io, .{ .db = repo.objectDatabase(), .oid = oid }, &ours, .{
+            try log.writeEntry(a, io, &ours.writer, .{ .db = repo.objectDatabase(), .oid = oid }, .{
                 .context = .{
                     .mailmap = &mailmap,
                     .decorations = if (case.decorate) &decorations else null,
@@ -143,7 +143,7 @@ test "a log in each built-in format is git log --pretty's" {
             });
             first = false;
         }
-        std.testing.expectEqualStrings(theirs, ours.items) catch |err| {
+        std.testing.expectEqualStrings(theirs, ours.written()) catch |err| {
             std.debug.print("--pretty={s} {s}\n", .{ case.pretty, case.config });
             return err;
         };

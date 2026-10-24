@@ -559,7 +559,10 @@ fn pickOne(r: *Replay, oid: Oid) Error!Picked {
             base_label = label;
             next_tree = if (parent) |p| try repo.commitTree(io, p) else null;
             next_label = if (parent != null) parent_label else "(empty tree)";
-            try revertMessage(r.arena, &msg, subject, oid, if (commit.parents.len > 1) parent else null);
+            var w: std.Io.Writer.Allocating = .fromArrayList(r.arena, &msg);
+            const written = revertMessage(&w.writer, subject, oid, if (commit.parents.len > 1) parent else null);
+            msg = w.toArrayList();
+            written catch return error.OutOfMemory;
         },
         .pick => {
             base_tree = if (parent) |p| try repo.commitTree(io, p) else null;
@@ -718,25 +721,25 @@ fn firstLine(text: []const u8) []const u8 {
 /// `sequencer_format_revert_message`: `Revert "<subject>"`, or `Reapply
 /// "<subject>"` for a revert of a revert, and the commit reverted, and for
 /// a merge the parent its changes are reversed against.
-pub fn revertMessage(arena: Allocator, msg: *std.ArrayList(u8), subject: []const u8, oid: Oid, merge_parent: ?Oid) Allocator.Error!void {
+pub fn revertMessage(w: *std.Io.Writer, subject: []const u8, oid: Oid, merge_parent: ?Oid) std.Io.Writer.Error!void {
     const prefix = "Revert \"";
     if (std.mem.startsWith(u8, subject, prefix) and !std.mem.startsWith(u8, subject[prefix.len..], prefix)) {
-        try msg.appendSlice(arena, "Reapply \"");
-        try msg.appendSlice(arena, subject[prefix.len..]);
-        try msg.append(arena, '\n');
+        try w.writeAll("Reapply \"");
+        try w.writeAll(subject[prefix.len..]);
+        try w.writeByte('\n');
     } else {
-        try msg.appendSlice(arena, prefix);
-        try msg.appendSlice(arena, subject);
-        try msg.appendSlice(arena, "\"\n");
+        try w.writeAll(prefix);
+        try w.writeAll(subject);
+        try w.writeAll("\"\n");
     }
     var hex: [hash.max_hex_len]u8 = undefined;
-    try msg.appendSlice(arena, "\nThis reverts commit ");
-    try msg.appendSlice(arena, oid.hex(&hex));
+    try w.writeAll("\nThis reverts commit ");
+    try w.writeAll(oid.hex(&hex));
     if (merge_parent) |p| {
-        try msg.appendSlice(arena, ", reversing\nchanges made to ");
-        try msg.appendSlice(arena, p.hex(&hex));
+        try w.writeAll(", reversing\nchanges made to ");
+        try w.writeAll(p.hex(&hex));
     }
-    try msg.appendSlice(arena, ".\n");
+    try w.writeAll(".\n");
 }
 
 //=========================================================================

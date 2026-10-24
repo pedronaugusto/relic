@@ -94,13 +94,13 @@ pub fn needsRfc822Quoting(s: []const u8) bool {
 }
 
 /// `"name"`, with `"` and `\` escaped.
-pub fn appendRfc822Quoted(gpa: Allocator, out: *std.ArrayList(u8), s: []const u8) Allocator.Error!void {
-    try out.append(gpa, '"');
+pub fn writeRfc822Quoted(w: *std.Io.Writer, s: []const u8) std.Io.Writer.Error!void {
+    try w.writeByte('"');
     for (s) |c| {
-        if (c == '"' or c == '\\') try out.append(gpa, '\\');
-        try out.append(gpa, c);
+        if (c == '"' or c == '\\') try w.writeByte('\\');
+        try w.writeByte(c);
     }
-    try out.append(gpa, '"');
+    try w.writeByte('"');
 }
 
 /// Whether a header value must become encoded words.
@@ -126,20 +126,16 @@ fn isRfc2047Special(c: u8, kind: Rfc2047Kind) bool {
     return !(std.ascii.isAlphanumeric(c) or c == '!' or c == '*' or c == '+' or c == '-' or c == '/');
 }
 
-fn lastLineLength(buf: []const u8) usize {
-    const nl = std.mem.findScalarLast(u8, buf, '\n') orelse return buf.len;
-    return buf.len - (nl + 1);
-}
-
-/// Append `line`, text in `encoding`, as RFC 2047 `Q`-encoded words
-/// naming it, breaking before 76 columns as git's `add_rfc2047` does,
+/// `line`, text in `encoding`, as RFC 2047 `Q`-encoded words naming it,
+/// on a line `column` columns in, breaking before 76 columns as git's
+/// `add_rfc2047` does,
 /// never inside a UTF-8 character; text in another encoding is taken a
 /// byte to a character, as git takes it.
-pub fn appendRfc2047(gpa: Allocator, out: *std.ArrayList(u8), line: []const u8, encoding: []const u8, kind: Rfc2047Kind) Allocator.Error!void {
+pub fn writeRfc2047(out: *std.Io.Writer, line: []const u8, encoding: []const u8, kind: Rfc2047Kind, column: usize) std.Io.Writer.Error!void {
     const max_encoded_length = 76;
     const utf8 = text_encoding.isUtf8(encoding);
-    var line_len = lastLineLength(out.items);
-    try out.print(gpa, "=?{s}?q?", .{encoding});
+    var line_len = column;
+    try out.print("=?{s}?q?", .{encoding});
     line_len += encoding.len + 5;
     var at: usize = 0;
     while (at < line.len) {
@@ -148,31 +144,32 @@ pub fn appendRfc2047(gpa: Allocator, out: *std.ArrayList(u8), line: []const u8, 
         const special = chrlen > 1 or isRfc2047Special(p[0], kind);
         const encoded_len: usize = if (special) 3 * chrlen else 1;
         if (line_len + encoded_len + 2 > max_encoded_length) {
-            try out.print(gpa, "?=\n =?{s}?q?", .{encoding});
+            try out.print("?=\n =?{s}?q?", .{encoding});
             line_len = encoding.len + 5 + 1;
         }
         for (p) |b| {
-            if (special) try out.print(gpa, "={X:0>2}", .{b}) else try out.append(gpa, b);
+            if (special) try out.print("={X:0>2}", .{b}) else try out.writeByte(b);
         }
         line_len += encoded_len;
         at += chrlen;
     }
-    try out.appendSlice(gpa, "?=");
+    try out.writeAll("?=");
 }
 
 /// git's `strbuf_add_wrapped_text`: `text` wrapped at `width` columns, the
 /// first line indented by `indent1` (negative: that many columns are
 /// already used) and the rest by `indent2`. A zero `width` indents only.
-pub fn appendWrapped(gpa: Allocator, out: *std.ArrayList(u8), text_in: []const u8, indent1: i32, indent2: i32, width: i32) Allocator.Error!void {
+pub fn writeWrapped(out: *std.Io.Writer, text_in: []const u8, indent1: i32, indent2: i32, width: i32) std.Io.Writer.Error!void {
     // the text as git sees it: up to its first NUL
     const text = if (std.mem.findScalar(u8, text_in, 0)) |z| text_in[0..z] else text_in;
     if (width <= 0) {
-        try appendIndented(gpa, out, text, indent1, indent2);
+        try writeIndented(out, text, indent1, indent2);
         return;
     }
-    const orig_len = out.items.len;
-    var assume_utf8 = true;
-    retry: while (true) {
+    // git starts again counting bytes at the first character that does
+    // not decode, dropping what it wrote: asked once, before writing.
+    const assume_utf8 = decodable(text);
+    {
         var pos: usize = 0;
         var bol: usize = 0;
         var indent = indent1;
@@ -191,8 +188,8 @@ pub fn appendWrapped(gpa: Allocator, out: *std.ArrayList(u8), text_in: []const u
                     if (c == 0 and pos == start) return;
                     if (space) |s| {
                         start = s;
-                    } else try out.appendNTimes(gpa, ' ', @intCast(@max(indent, 0)));
-                    try out.appendSlice(gpa, text[start..pos]);
+                    } else try out.splatByteAll(' ', @intCast(@max(indent, 0)));
+                    try out.writeAll(text[start..pos]);
                     if (c == 0) return;
                     space = pos;
                     if (c == '\t') {
@@ -202,9 +199,9 @@ pub fn appendWrapped(gpa: Allocator, out: *std.ArrayList(u8), text_in: []const u
                         space = next;
                         const nc: u8 = if (next < text.len) text[next] else 0;
                         if (nc == '\n') {
-                            try out.append(gpa, '\n');
+                            try out.writeByte('\n');
                             // new_line
-                            try out.append(gpa, '\n');
+                            try out.writeByte('\n');
                             pos = next + @intFromBool(ctype.isSpace(nc));
                             bol = pos;
                             space = null;
@@ -212,7 +209,7 @@ pub fn appendWrapped(gpa: Allocator, out: *std.ArrayList(u8), text_in: []const u
                             w = indent2;
                             continue;
                         } else if (!std.ascii.isAlphanumeric(nc)) {
-                            try out.append(gpa, '\n');
+                            try out.writeByte('\n');
                             pos = next + @intFromBool(next < text.len and ctype.isSpace(text[next]));
                             bol = pos;
                             space = null;
@@ -220,14 +217,14 @@ pub fn appendWrapped(gpa: Allocator, out: *std.ArrayList(u8), text_in: []const u
                             w = indent2;
                             continue;
                         } else {
-                            try out.append(gpa, ' ');
+                            try out.writeByte(' ');
                         }
                     }
                     w += 1;
                     pos += 1;
                 } else {
                     // new_line
-                    try out.append(gpa, '\n');
+                    try out.writeByte('\n');
                     const s = space.?;
                     pos = s + @intFromBool(s < text.len and ctype.isSpace(text[s]));
                     bol = pos;
@@ -238,11 +235,8 @@ pub fn appendWrapped(gpa: Allocator, out: *std.ArrayList(u8), text_in: []const u
                 continue;
             }
             if (assume_utf8) {
-                const decoded = unicode_width.decode(text[pos..]) orelse {
-                    assume_utf8 = false;
-                    out.shrinkRetainingCapacity(orig_len);
-                    continue :retry;
-                };
+                // unreachable: `decodable` decoded every character the wrap measures
+                const decoded = unicode_width.decode(text[pos..]) orelse unreachable;
                 w += unicode_width.width(decoded.char);
                 pos += decoded.len;
             } else {
@@ -250,6 +244,22 @@ pub fn appendWrapped(gpa: Allocator, out: *std.ArrayList(u8), text_in: []const u
                 pos += 1;
             }
         }
+    }
+}
+
+/// Whether every character `strbuf_add_wrapped_text` measures decodes as
+/// UTF-8: those it skips (colour escapes, white space) aside, in order.
+fn decodable(text: []const u8) bool {
+    var pos: usize = 0;
+    while (true) {
+        while (escapeLen(text[pos..])) |skip| pos += skip;
+        if (pos >= text.len) return true;
+        if (ctype.isSpace(text[pos])) {
+            pos += 1;
+            continue;
+        }
+        const decoded = unicode_width.decode(text[pos..]) orelse return false;
+        pos += decoded.len;
     }
 }
 
@@ -261,14 +271,14 @@ fn escapeLen(s: []const u8) ?usize {
     return i + 1;
 }
 
-fn appendIndented(gpa: Allocator, out: *std.ArrayList(u8), text_in: []const u8, indent_in: i32, indent2: i32) Allocator.Error!void {
+fn writeIndented(out: *std.Io.Writer, text_in: []const u8, indent_in: i32, indent2: i32) std.Io.Writer.Error!void {
     var indent: i32 = if (indent_in < 0) 0 else indent_in;
     var text = text_in;
     while (text.len > 0) {
         const eol = std.mem.findScalar(u8, text, '\n');
         const len = if (eol) |e| e + 1 else text.len;
-        try out.appendNTimes(gpa, ' ', @intCast(indent));
-        try out.appendSlice(gpa, text[0..len]);
+        try out.splatByteAll(' ', @intCast(indent));
+        try out.writeAll(text[0..len]);
         text = text[len..];
         indent = indent2;
     }
@@ -286,14 +296,15 @@ test "an RFC 2822 date is the author's local time with git's zone text" {
 
 test "encoded words, quoting and wrapping come out as git's" {
     const gpa = std.testing.allocator;
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(gpa);
-    try out.appendSlice(gpa, "From: ");
-    try appendRfc2047(gpa, &out, "J\xc3\xb6hn D\xc5\x93", "UTF-8", .address);
-    try std.testing.expectEqualStrings("From: =?UTF-8?q?J=C3=B6hn=20D=C5=93?=", out.items);
-    out.clearRetainingCapacity();
-    try appendWrapped(gpa, &out, "a b c", -9, 1, 78);
-    try std.testing.expectEqualStrings("a b c", out.items);
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    try out.writer.writeAll("From: ");
+    try writeRfc2047(&out.writer, "J\xc3\xb6hn D\xc5\x93", "UTF-8", .address, "From: ".len);
+    try std.testing.expectEqualStrings("From: =?UTF-8?q?J=C3=B6hn=20D=C5=93?=", out.written());
+    var wrapped: std.Io.Writer.Allocating = .init(gpa);
+    defer wrapped.deinit();
+    try writeWrapped(&wrapped.writer, "a b c", -9, 1, 78);
+    try std.testing.expectEqualStrings("a b c", wrapped.written());
 }
 
 /// All errors reported by this namespace.

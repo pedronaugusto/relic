@@ -476,7 +476,7 @@ pub const Decorations = struct {
     }
 
     /// git's `format_decorations` for `oid`, in `opts.colors` where there are.
-    pub fn write(d: *const Decorations, a: Allocator, out: *std.ArrayList(u8), oid: Oid, opts: Options) Allocator.Error!void {
+    pub fn write(d: *const Decorations, w: *std.Io.Writer, oid: Oid, opts: Options) std.Io.Writer.Error!void {
         const colors = opts.colors;
         const first = d.by_object.get(oid) orelse return;
         // HEAD and the branch it is on, where both are here, are one entry
@@ -503,16 +503,16 @@ pub const Decorations = struct {
         while (node) |n| : (node = n.next) {
             if (n == head_and_current) continue;
             const own: []const u8 = if (colors) |c| c.of(n.kind) else "";
-            if (prefix.len != 0) try out.print(a, "{s}{s}{s}", .{ commit, prefix, reset });
-            if (opts.tag.len != 0 and n.kind == .tag) try out.print(a, "{s}{s}{s}", .{ own, opts.tag, reset });
-            try out.print(a, "{s}{s}{s}", .{ own, d.named(n.name), reset });
+            if (prefix.len != 0) try w.print("{s}{s}{s}", .{ commit, prefix, reset });
+            if (opts.tag.len != 0 and n.kind == .tag) try w.print("{s}{s}{s}", .{ own, opts.tag, reset });
+            try w.print("{s}{s}{s}", .{ own, d.named(n.name), reset });
             if (head_and_current) |current| if (n.kind == .head) {
-                try out.print(a, "{s}{s}{s}", .{ commit, opts.pointer, reset });
-                try out.print(a, "{s}{s}{s}", .{ if (colors) |c| c.of(current.kind) else "", d.named(current.name), reset });
+                try w.print("{s}{s}{s}", .{ commit, opts.pointer, reset });
+                try w.print("{s}{s}{s}", .{ if (colors) |c| c.of(current.kind) else "", d.named(current.name), reset });
             };
             prefix = opts.separator;
         }
-        if (opts.suffix.len != 0) try out.print(a, "{s}{s}{s}", .{ commit, opts.suffix, reset });
+        if (opts.suffix.len != 0) try w.print("{s}{s}{s}", .{ commit, opts.suffix, reset });
     }
 
     /// A ref's name as the style shows it.
@@ -545,7 +545,12 @@ pub const Decorations = struct {
 
 /// git's `show_ident_date`: `sig`'s date as `mode` shows it.
 fn showDate(a: Allocator, ctx: Context, out: *std.ArrayList(u8), sig: object.Signature, mode: date.Mode) Error!void {
-    try date.show(a, out, sig.when_secs, date.tzInt(sig.offset_minutes), mode, ctx.clock);
+    var w: std.Io.Writer.Allocating = .fromArrayList(a, out);
+    defer out.* = w.toArrayList();
+    date.show(&w.writer, sig.when_secs, date.tzInt(sig.offset_minutes), mode, ctx.clock) catch |err| switch (err) {
+        error.WriteFailed => return error.OutOfMemory,
+        else => |e| return e,
+    };
 }
 
 /// `log.date`: the mode `%ad` and `%cd` show a date in, git's default
@@ -625,24 +630,27 @@ fn person(a: Allocator, ctx: Context, out: *std.ArrayList(u8), sig: object.Signa
 }
 
 /// git's `format_sanitized_subject`, what `%f` writes: the letters, digits,
-/// dots and underscores of `msg`, every other run one `-`, none at either
+/// dots and underscores of `subject`, every other run one `-`, none at either
 /// end, and no run of dots.
-pub fn sanitizedSubject(a: Allocator, out: *std.ArrayList(u8), msg: []const u8) Allocator.Error!void {
-    const start = out.items.len;
+pub fn sanitizedSubject(w: *std.Io.Writer, subject: []const u8) std.Io.Writer.Error!void {
+    // git trims the dots and dashes it writes last: what it keeps ends at
+    // the subject's last letter, digit or underscore
+    var end = subject.len;
+    while (end > 0 and !(std.ascii.isAlphanumeric(subject[end - 1]) or subject[end - 1] == '_')) end -= 1;
+    const msg = subject[0..end];
     var space: u2 = 2;
     var i: usize = 0;
     while (i < msg.len) : (i += 1) {
         const c = msg[i];
         if (std.ascii.isAlphanumeric(c) or c == '.' or c == '_') {
-            if (space == 1) try out.append(a, '-');
+            if (space == 1) try w.writeByte('-');
             space = 0;
-            try out.append(a, c);
+            try w.writeByte(c);
             if (c == '.') {
                 while (i + 1 < msg.len and msg[i + 1] == '.') i += 1;
             }
         } else space |= 1;
     }
-    while (out.items.len > start and (out.items[out.items.len - 1] == '.' or out.items[out.items.len - 1] == '-')) _ = out.pop();
 }
 
 /// One commit's formatting: the commit, and its signature once checked.
@@ -727,7 +735,11 @@ fn decorate(st: *State, out: *std.ArrayList(u8), ph: []const u8) Error!usize {
     }
     if (at >= ph.len or ph[at] != ')') return 0;
     opts.colors = st.autoColors();
-    if (st.ctx.decorations) |d| try d.write(st.a, out, st.p.oid, opts);
+    if (st.ctx.decorations) |d| {
+        var w: std.Io.Writer.Allocating = .fromArrayList(st.a, out);
+        defer out.* = w.toArrayList();
+        d.write(&w.writer, st.p.oid, opts) catch return error.OutOfMemory;
+    }
     return at + 1;
 }
 
@@ -778,7 +790,12 @@ fn trailers(st: *State, out: *std.ArrayList(u8), ph: []const u8) Error!usize {
         at += parsed.len;
     }
     if (at >= ph.len or ph[at] != ')') return 0;
-    try trailer.format(st.a, st.ctx.trailers, options, skipBlankLines(cstr(st.p.message)), out);
+    var w: std.Io.Writer.Allocating = .fromArrayList(st.a, out);
+    defer out.* = w.toArrayList();
+    trailer.format(st.a, &w.writer, st.ctx.trailers, options, skipBlankLines(cstr(st.p.message))) catch |err| switch (err) {
+        error.WriteFailed => return error.OutOfMemory,
+        else => |e| return e,
+    };
     return at + 1;
 }
 
@@ -862,7 +879,9 @@ fn rewrap(st: *State, out: *std.ArrayList(u8), width: usize, indent1: usize, ind
     if (st.wrap_start < out.items.len) {
         const tail = try st.a.dupe(u8, out.items[st.wrap_start..]);
         out.shrinkRetainingCapacity(st.wrap_start);
-        try mailfmt.appendWrapped(st.a, out, tail, @intCast(st.indent1), @intCast(st.indent2), @intCast(st.width));
+        var w: std.Io.Writer.Allocating = .fromArrayList(st.a, out);
+        defer out.* = w.toArrayList();
+        mailfmt.writeWrapped(&w.writer, tail, @intCast(st.indent1), @intCast(st.indent2), @intCast(st.width)) catch return error.OutOfMemory;
     }
     st.wrap_start = out.items.len;
     st.width = width;
@@ -938,7 +957,11 @@ fn one(st: *State, out: *std.ArrayList(u8), ph: []const u8) Error!usize {
         },
         'm' => return 0,
         'd', 'D' => {
-            if (ctx.decorations) |d| try d.write(a, out, p.oid, if (ph[0] == 'd') .{ .colors = st.autoColors() } else .{ .prefix = "", .suffix = "", .colors = st.autoColors() });
+            if (ctx.decorations) |d| {
+                var w: std.Io.Writer.Allocating = .fromArrayList(a, out);
+                defer out.* = w.toArrayList();
+                d.write(&w.writer, p.oid, if (ph[0] == 'd') .{ .colors = st.autoColors() } else .{ .prefix = "", .suffix = "", .colors = st.autoColors() }) catch return error.OutOfMemory;
+            }
             return 1;
         },
         'N' => {
@@ -996,7 +1019,9 @@ fn messagePart(a: Allocator, out: *std.ArrayList(u8), msg: []const u8, which: u8
         },
         'f' => {
             const eol = std.mem.findScalar(u8, subject, '\n') orelse subject.len;
-            try sanitizedSubject(a, out, subject[0..eol]);
+            var w: std.Io.Writer.Allocating = .fromArrayList(a, out);
+            defer out.* = w.toArrayList();
+            sanitizedSubject(&w.writer, subject[0..eol]) catch return error.OutOfMemory;
         },
         'b' => try out.appendSlice(a, body),
         else => unreachable,

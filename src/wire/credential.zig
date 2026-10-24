@@ -690,10 +690,10 @@ pub const Session = struct {
     /// git's `credential_write`: what a helper is handed, in git's order,
     /// or with `.response` the credential as `git credential fill` prints
     /// it.
-    pub fn write(s: *Session, gpa: Allocator, out: *std.ArrayList(u8), audience: Audience) Self.Error!void {
+    pub fn write(s: *Session, out: *std.Io.Writer, audience: Audience) (Self.Error || std.Io.Writer.Error)!void {
         try s.fromOrigin();
         const protect = if (s.settings) |settings| settings.protect_protocol else true;
-        const w: ItemWriter = .{ .gpa = gpa, .out = out, .protect_protocol = protect };
+        const w: ItemWriter = .{ .out = out, .protect_protocol = protect };
         const authtype = hasCapability(s.capa_authtype, audience);
         const state = hasCapability(s.capa_state, audience);
         if (authtype) try w.item("capability[]", "authtype");
@@ -724,20 +724,43 @@ pub const Session = struct {
     /// git's `credential_write_item`: `key=value` and a newline, refused
     /// when the value could end its line early.
     const ItemWriter = struct {
-        gpa: Allocator,
-        out: *std.ArrayList(u8),
+        out: *std.Io.Writer,
         protect_protocol: bool,
 
-        fn item(w: ItemWriter, key: []const u8, value: []const u8) Self.Error!void {
+        fn item(w: ItemWriter, key: []const u8, value: []const u8) (Self.Error || std.Io.Writer.Error)!void {
             if (std.mem.findScalar(u8, value, '\n') != null) return error.CredentialValueUnsafe;
             if (w.protect_protocol and std.mem.findScalar(u8, value, '\r') != null) return error.CredentialValueUnsafe;
-            try w.out.print(w.gpa, "{s}={s}\n", .{ key, value });
+            try w.out.print("{s}={s}\n", .{ key, value });
         }
 
-        fn optional(w: ItemWriter, key: []const u8, value: ?[]const u8) Self.Error!void {
+        fn optional(w: ItemWriter, key: []const u8, value: ?[]const u8) (Self.Error || std.Io.Writer.Error)!void {
             if (value) |v| try w.item(key, v);
         }
     };
+
+    /// What a helper is handed (`write`), in secret memory of exactly its
+    /// size: written once to count it and once into place, so no copy of a
+    /// password is left in memory a growing buffer freed.
+    fn helperInput(s: *Session, audience: Audience) Self.Error!SecretBytes {
+        var counting: std.Io.Writer.Discarding = .init(&.{});
+        s.write(&counting.writer, audience) catch |err| switch (err) {
+            // unreachable: counting writes nothing
+            error.WriteFailed => unreachable,
+            else => |e| return e,
+        };
+        const size: usize = @intCast(counting.fullCount());
+        var input = try SecretBytes.init(s.gpa, size);
+        errdefer input.deinit();
+        // unreachable: the owner was made with exactly this capacity.
+        input.resizeWithinCapacity(size) catch unreachable;
+        var fixed: std.Io.Writer = .fixed(input.exposeMut());
+        s.write(&fixed, audience) catch |err| switch (err) {
+            // unreachable: the same session writes the same bytes, which fit
+            error.WriteFailed => unreachable,
+            else => |e| return e,
+        };
+        return input;
+    }
 
     const Outcome = struct {
         /// The helper could not be run, or ended in failure; what it wrote
@@ -769,18 +792,14 @@ pub const Session = struct {
         else
             try arena.print("git credential-{s} {t}", .{ helper, operation });
 
-        var input: std.ArrayList(u8) = .empty;
-        defer {
-            std.crypto.secureZero(u8, input.items);
-            input.deinit(s.gpa);
-        }
-        try s.write(s.gpa, &input, if (operation == .get) .helper else .response);
+        var input = try s.helperInput(if (operation == .get) .helper else .response);
+        defer input.deinit();
 
         var outcome = try program.run(s.gpa, io, programs, .{
             .argv = &.{command},
             .shell = true,
             .stderr = .inherit,
-        }, .{ .input = input.items, .output = .limited(64 * 1024) });
+        }, .{ .input = input.expose(), .output = .limited(64 * 1024) });
         defer {
             std.crypto.secureZero(u8, outcome.stdout);
             outcome.deinit(s.gpa);
@@ -856,13 +875,22 @@ pub const Session = struct {
         if (action == .exit) return .{ .failed = false, .any = false };
         // git's "unable to find a suitable socket path; use --socket".
         const socket = helper.socket orelse (try cache.defaultSocket(arena, io, environ)) orelse return failed;
-        var input: std.ArrayList(u8) = .empty;
-        defer {
-            std.crypto.secureZero(u8, input.items);
-            input.deinit(s.gpa);
-        }
-        try s.write(s.gpa, &input, if (operation == .get) .helper else .response);
-        const req: cache.Request = .{ .action = action, .timeout = helper.timeout, .input = input.items };
+        var input = try s.helperInput(if (operation == .get) .helper else .response);
+        defer input.deinit();
+        return s.askCache(io, programs, cache_daemon, .{ .socket = socket, .operation = operation, .request = .{ .action = action, .timeout = helper.timeout, .input = input.expose() } });
+    }
+
+    /// What `runCache` asks the daemon: at `socket`, `request` for `operation`.
+    const CacheQuestion = struct { socket: []const u8, operation: Operation, request: cache.Request };
+
+    /// `question` relayed to the daemon, started as `runCache` says when a
+    /// `store` finds none.
+    fn askCache(s: *Session, io: Io, programs: program.Programs, cache_daemon: ?cache.Starter, question: CacheQuestion) ErrorNamespace.Error!Outcome {
+        const failed: Outcome = .{ .failed = true, .any = false };
+        const socket = question.socket;
+        const req = question.request;
+        const action = req.action;
+        const operation = question.operation;
         const answered = cache.request(s.gpa, io, socket, req) catch |err| return cacheFailed(err);
         const got = answered orelse retry: {
             if (action != .store) return .{ .failed = false, .any = false };
@@ -1460,12 +1488,12 @@ test "a value with a newline is never written to a helper, nor one with a carria
             try session.configure(with);
             try replace(testing.allocator, &session.path, case.path);
             if (case.username) |u| try replace(testing.allocator, &session.username, u);
-            var out: std.ArrayList(u8) = .empty;
-            defer out.deinit(testing.allocator);
+            var out: std.Io.Writer.Allocating = .init(testing.allocator);
+            defer out.deinit();
             if (with != null and case.cr) {
-                try session.write(testing.allocator, &out, .helper);
+                try session.write(&out.writer, .helper);
             } else {
-                try testing.expectError(error.CredentialValueUnsafe, session.write(testing.allocator, &out, .helper));
+                try testing.expectError(error.CredentialValueUnsafe, session.write(&out.writer, .helper));
             }
         }
     }
@@ -1519,9 +1547,9 @@ fn fuzzAnswer(_: void, case: *shakedown.Case) anyerror!void {
     // not written.
     if (session.protocol == null or session.host == null) return;
     // Whatever was taken is handed back to a helper as git would.
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(testing.allocator);
-    session.write(testing.allocator, &out, .response) catch |err| switch (err) {
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    session.write(&out.writer, .response) catch |err| switch (err) {
         // A carriage return inside a value is refused, as git refuses it.
         error.CredentialValueUnsafe => {},
         else => |e| return e,

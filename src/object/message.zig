@@ -190,18 +190,27 @@ pub const Comment = union(enum) {
 /// The scissors line, after the comment string and a space.
 pub const cut_line = trailer.cut_line;
 
-/// `strbuf_add_commented_lines`: each line of `text` after the comment
+/// git's `add_lines` for comments: each line of `text` after the comment
 /// string, a space between them unless the line is empty or starts with a
-/// tab, and `out` ended with a newline.
-pub fn appendCommented(gpa: Allocator, out: *std.ArrayList(u8), text: []const u8, comment: []const u8) Allocator.Error!void {
+/// tab; a last line without a newline is written without one.
+pub fn writeCommented(w: *std.Io.Writer, text: []const u8, comment: []const u8) std.Io.Writer.Error!void {
     var at: usize = 0;
     while (at < text.len) {
         const next = if (std.mem.findScalarPos(u8, text, at, '\n')) |nl| nl + 1 else text.len;
-        try out.appendSlice(gpa, comment);
-        if (text[at] != '\n' and text[at] != '\t') try out.append(gpa, ' ');
-        try out.appendSlice(gpa, text[at..next]);
+        try w.writeAll(comment);
+        if (text[at] != '\n' and text[at] != '\t') try w.writeByte(' ');
+        try w.writeAll(text[at..next]);
         at = next;
     }
+}
+
+/// `strbuf_add_commented_lines`: `text` commented (`writeCommented`), and
+/// `out` ended with a newline, which reads what `out` held before.
+pub fn appendCommented(gpa: Allocator, out: *std.ArrayList(u8), text: []const u8, comment: []const u8) Allocator.Error!void {
+    var w: std.Io.Writer.Allocating = .fromArrayList(gpa, out);
+    const written = writeCommented(&w.writer, text, comment);
+    out.* = w.toArrayList();
+    written catch return error.OutOfMemory;
     if (out.items.len != 0 and out.items[out.items.len - 1] != '\n') try out.append(gpa, '\n');
 }
 

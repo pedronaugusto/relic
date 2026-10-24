@@ -451,12 +451,9 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, mailboxes: []const []con
     try s.writeBool("messageid", s.message_id);
     try s.writeText("scissors", if (s.scissors) |v| (if (v) "t" else "f") else "");
     try s.writeText("quoted-cr", if (s.quoted_cr) |q| @tagName(q) else "");
-    var opt_text: std.ArrayList(u8) = .empty;
-    for (s.apply_opt) |w| {
-        try opt_text.append(a, ' ');
-        try quote.sq(a, &opt_text, w);
-    }
-    try s.writeText("apply-opt", opt_text.items);
+    var opt_text: std.Io.Writer.Allocating = .init(a);
+    quote.sqArgv(&opt_text.writer, s.apply_opt) catch return error.OutOfMemory;
+    try s.writeText("apply-opt", opt_text.written());
     try s.writeText(if (s.rebasing) "rebasing" else "applying", "");
 
     var head = try head_mod.read(gpa, io, repo);
@@ -528,15 +525,19 @@ fn reload(s: *Session) Error!void {
 //=========================================================================
 
 fn writeAuthorScript(s: *Session) Error!void {
-    var out: std.ArrayList(u8) = .empty;
-    try out.appendSlice(s.a, "GIT_AUTHOR_NAME=");
-    try quote.sq(s.a, &out, s.author_name.?);
-    try out.appendSlice(s.a, "\nGIT_AUTHOR_EMAIL=");
-    try quote.sq(s.a, &out, s.author_email.?);
-    try out.appendSlice(s.a, "\nGIT_AUTHOR_DATE=");
-    try quote.sq(s.a, &out, s.author_date.?);
-    try out.append(s.a, '\n');
-    try s.writeText("author-script", out.items);
+    var out: std.Io.Writer.Allocating = .init(s.a);
+    authorScript(&out.writer, s) catch return error.OutOfMemory;
+    try s.writeText("author-script", out.written());
+}
+
+fn authorScript(w: *std.Io.Writer, s: *const Session) std.Io.Writer.Error!void {
+    try w.writeAll("GIT_AUTHOR_NAME=");
+    try quote.sq(w, s.author_name.?);
+    try w.writeAll("\nGIT_AUTHOR_EMAIL=");
+    try quote.sq(w, s.author_email.?);
+    try w.writeAll("\nGIT_AUTHOR_DATE=");
+    try quote.sq(w, s.author_date.?);
+    try w.writeByte('\n');
 }
 
 /// `parse_mail`: take mail `name` apart into `info`, `msg` and `patch`,
@@ -609,12 +610,12 @@ fn parseMailRebase(s: *Session, name: []const u8) Error!bool {
     defer commit.deinit();
     s.author_name = try s.a.dupe(u8, commit.author.name);
     s.author_email = try s.a.dupe(u8, commit.author.email);
-    var date: std.ArrayList(u8) = .empty;
-    gitdate.show(s.a, &date, commit.author.when_secs, gitdate.tzInt(commit.author.offset_minutes), .{}, .{}) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
+    var date: std.Io.Writer.Allocating = .init(s.a);
+    gitdate.show(&date.writer, commit.author.when_secs, gitdate.tzInt(commit.author.offset_minutes), .{}, .{}) catch |err| switch (err) {
+        error.WriteFailed => return error.OutOfMemory,
         else => return error.MalformedState,
     };
-    s.author_date = date.items;
+    s.author_date = date.written();
     const body = std.mem.find(u8, shown.bytes, "\n\n") orelse return error.MalformedState;
     s.msg = shown.bytes[body + 2 ..];
     try writeCommitPatch(s, commit.parents, commit.tree);

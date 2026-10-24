@@ -977,6 +977,13 @@ fn checkoutName(c: *Ctx, name: []const u8) Error!void {
 // ---------------------------------------------------------------------------
 // The commands: git's `builtin/bisect.c`.
 
+/// The log's line for a start: the command and its arguments as git quotes them.
+fn startLine(w: *std.Io.Writer, args: []const []const u8) std.Io.Writer.Error!void {
+    try w.writeAll("git bisect start");
+    try quote.sqArgv(w, args);
+    try w.writeByte('\n');
+}
+
 /// `git bisect start [--term-{bad,new}=<term> --term-{good,old}=<term>]
 /// [--no-checkout] [--first-parent] [--reset-when-found[=<where>]] [<bad>
 /// [<good>...]] [--] [<pathspec>...]`, `args` as git is given them: they
@@ -1046,13 +1053,8 @@ fn startWith(c: *Ctx, t: *Terms, args: []const []const u8) Error!Step {
     const pathspec_pos = i;
     // git's `sq_quote_argv` of what follows the revisions, the `--` among
     // it, and only from two arguments on (`argc - 1`).
-    var names: std.ArrayList(u8) = .empty;
-    if (args.len > 0 and pathspec_pos < args.len - 1) {
-        for (args[pathspec_pos..]) |arg| {
-            try names.append(c.a, ' ');
-            try quote.sq(c.a, &names, arg);
-        }
-    }
+    var names: std.Io.Writer.Allocating = .init(c.a);
+    if (args.len > 0 and pathspec_pos < args.len - 1) quote.sqArgv(&names.writer, args[pathspec_pos..]) catch return error.OutOfMemory;
 
     if (revs.items.len != 0) must_write_terms = true;
 
@@ -1079,21 +1081,16 @@ fn startWith(c: *Ctx, t: *Terms, args: []const []const u8) Error!Step {
         const oid = rev_parse.resolve(c.gpa, c.io, c.repo.revisionSource(), start_head) catch return error.BadHead;
         try c.roots().write(c.gpa, c.io, .bisect_head, oid);
     }
-    try names.append(c.a, '\n');
-    try c.writeState("BISECT_NAMES", names.items);
+    names.writer.writeByte('\n') catch return error.OutOfMemory;
+    try c.writeState("BISECT_NAMES", names.written());
 
     for (revs.items, 0..) |rev, k| {
         try bisectWrite(c, if (k == 0) t.bad else t.good, rev, t.*, true);
     }
     if (must_write_terms) try writeTerms(c, t.bad, t.good);
-    var log_line: std.ArrayList(u8) = .empty;
-    try log_line.appendSlice(c.a, "git bisect start");
-    for (args) |arg| {
-        try log_line.append(c.a, ' ');
-        try quote.sq(c.a, &log_line, arg);
-    }
-    try log_line.append(c.a, '\n');
-    try c.appendState("BISECT_LOG", log_line.items);
+    var log_line: std.Io.Writer.Allocating = .init(c.a);
+    startLine(&log_line.writer, args) catch return error.OutOfMemory;
+    try c.appendState("BISECT_LOG", log_line.written());
     // A bisection that cannot go on is not left half started.
     return autoNext(c, t.*) catch |err| {
         // glint-ignore: Z026 -- the step's error is the one to report; a state left behind is what `git bisect reset` removes
@@ -1310,12 +1307,9 @@ pub fn run(gpa: Allocator, io: Io, repo: *Repository, argv_in: []const []const u
         argv = argv[1..];
     }
     if (argv.len == 0) return error.NoCommand;
-    var command: std.ArrayList(u8) = .empty;
-    for (argv) |arg| {
-        try command.append(c.a, ' ');
-        try quote.sq(c.a, &command, arg);
-    }
-    const line = std.mem.trimStart(u8, command.items, " \t\n\r");
+    var command: std.Io.Writer.Allocating = .init(c.a);
+    quote.sqArgv(&command.writer, argv) catch return error.OutOfMemory;
+    const line = std.mem.trimStart(u8, command.written(), " \t\n\r");
     var first = true;
     while (true) {
         const code = try runCommand(&c, line, options);
@@ -1405,14 +1399,14 @@ fn fuzzQuote(_: void, case: *shakedown.Case) anyerror!void {
     case.source.bytes(input);
     _ = try quote.sqDequoteWords(a, input);
     var words = std.mem.splitScalar(u8, input, 0);
-    var quoted: std.ArrayList(u8) = .empty;
+    var quoted: std.Io.Writer.Allocating = .init(a);
     var expected: std.ArrayList([]const u8) = .empty;
     while (words.next()) |w| {
-        if (quoted.items.len != 0) try quoted.append(a, ' ');
-        try quote.sq(a, &quoted, w);
+        if (quoted.written().len != 0) try quoted.writer.writeByte(' ');
+        try quote.sq(&quoted.writer, w);
         try expected.append(a, w);
     }
-    const back = (try quote.sqDequoteWords(a, quoted.items)).?;
+    const back = (try quote.sqDequoteWords(a, quoted.written())).?;
     try std.testing.expectEqual(expected.items.len, back.len);
     for (expected.items, back) |x, y| try std.testing.expectEqualStrings(x, y);
 }

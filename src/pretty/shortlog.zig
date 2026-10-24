@@ -279,8 +279,6 @@ pub const Shortlog = struct {
         for (order, 0..) |*o, i| o.* = i;
         std.sort.pdq(usize, order, RecordOrder{ .keys = s.records.keys(), .values = s.records.values(), .numbered = s.options.numbered }, RecordOrder.lessThan);
 
-        var wrapped: std.ArrayList(u8) = .empty;
-        defer wrapped.deinit(s.gpa);
         for (order) |i| {
             const ident = s.records.keys()[i];
             const record = &s.records.values()[i];
@@ -294,9 +292,7 @@ pub const Shortlog = struct {
                 j -= 1;
                 const msg = record.subjects.items[j];
                 if (s.options.wrap) |opt| {
-                    wrapped.clearRetainingCapacity();
-                    try mailfmt.appendWrapped(s.gpa, &wrapped, msg, @intCast(opt.indent1), @intCast(opt.indent2), @intCast(opt.width));
-                    try w.writeAll(wrapped.items);
+                    try mailfmt.writeWrapped(w, msg, @intCast(opt.indent1), @intCast(opt.indent2), @intCast(opt.width));
                     try w.writeByte('\n');
                 } else {
                     try w.print("      {s}\n", .{msg});
@@ -328,10 +324,10 @@ pub fn configured(arena: Allocator, config: *const config_mod.Config, base: Opti
 
 test "a subject folds where git's -w folds it" {
     const gpa = std.testing.allocator;
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(gpa);
-    try mailfmt.appendWrapped(gpa, &out, "a b c d e f g h i j k l m n o p q r s t u v w x y z", 2, 4, 12);
-    try std.testing.expectEqualStrings("  a b c d e\n    f g h i\n    j k l m\n    n o p q\n    r s t u\n    v w x y\n    z", out.items);
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    try mailfmt.writeWrapped(&out.writer, "a b c d e f g h i j k l m n o p q r s t u v w x y z", 2, 4, 12);
+    try std.testing.expectEqualStrings("  a b c d e\n    f g h i\n    j k l m\n    n o p q\n    r s t u\n    v w x y\n    z", out.written());
 }
 
 const testgit = @import("../testing/git.zig");

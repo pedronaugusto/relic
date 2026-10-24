@@ -113,10 +113,10 @@ const Fixture = struct {
         var completed: std.ArrayList(u8) = .empty;
         try completed.appendSlice(arena, input);
         if (input.len != 0 and input[input.len - 1] != '\n') try completed.append(arena, '\n');
-        var ours: std.ArrayList(u8) = .empty;
-        defer ours.deinit(gpa);
-        try trailer.process(gpa, io, completed.items, &ours, .{ .settings = settings, .commands = .{ .programs = .{ .environ = &f.environ }, .cwd = .{ .dir = f.git.dir } }, .formatting = parsed.options, .new = parsed.new });
-        std.testing.expectEqualStrings(theirs, ours.items) catch |err| {
+        var ours: std.Io.Writer.Allocating = .init(gpa);
+        defer ours.deinit();
+        try trailer.process(gpa, io, &ours.writer, completed.items, .{ .settings = settings, .commands = .{ .programs = .{ .environ = &f.environ }, .cwd = .{ .dir = f.git.dir } }, .formatting = parsed.options, .new = parsed.new });
+        std.testing.expectEqualStrings(theirs, ours.written()) catch |err| {
             std.debug.print("interpret-trailers", .{});
             for (args) |arg| std.debug.print(" {s}", .{arg});
             std.debug.print(" on {f}\n", .{std.zig.fmtString(input)});
@@ -212,17 +212,17 @@ test "in-place editing replaces the file as git's does, and keeps it as it was o
     try f.git.writeFile(io, "msg-git", "subject\n\nbody");
     try f.git.writeFile(io, "msg-relic", "subject\n\nbody");
     try f.git.exec(io, &.{ "interpret-trailers", "--in-place", "--trailer", "Acked-by: Ann", "msg-git" });
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(gpa);
-    try trailer.processFile(gpa, io, f.git.dir, "msg-relic", .{ .new = &.{.{ .text = "Acked-by: Ann" }}, .in_place = true, .out = &out });
-    try std.testing.expectEqual(@as(usize, 0), out.items.len);
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    try trailer.processFile(gpa, io, f.git.dir, "msg-relic", .{ .new = &.{.{ .text = "Acked-by: Ann" }}, .in_place = true, .out = &out.writer });
+    try std.testing.expectEqual(@as(usize, 0), out.written().len);
     const theirs = try f.git.readFile(io, "msg-git");
     defer gpa.free(theirs);
     const ours = try f.git.readFile(io, "msg-relic");
     defer gpa.free(ours);
     try std.testing.expectEqualStrings(theirs, ours);
     // a command needs the programs to run it
-    try std.testing.expectError(error.TrailerCommandNeedsPrograms, trailer.process(gpa, io, "s\n", &out, .{ .settings = .{ .rules = &.{.{ .name = "x", .command = "true", .where = .end, .if_exists = .add, .if_missing = .add }} }, .commands = null, .formatting = .{}, .new = &.{} }));
+    try std.testing.expectError(error.TrailerCommandNeedsPrograms, trailer.process(gpa, io, &out.writer, "s\n", .{ .settings = .{ .rules = &.{.{ .name = "x", .command = "true", .where = .end, .if_exists = .add, .if_missing = .add }} }, .commands = null, .formatting = .{}, .new = &.{} }));
 }
 
 /// A repository whose commits carry trailers of every shape.
