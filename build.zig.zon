@@ -54,8 +54,8 @@
             .hash = "xenoglyph-0.4.1-YKXZlbAoGwCDz2rgL2E8FDIYuuzo2iAi_ZskokH6K1E1",
         },
         .reactor = .{
-            .url = "git+https://github.com/pedronaugusto/reactor?ref=v0.8.1#4d84e4183190bdb6e42086669f1d8f2811b249fd",
-            .hash = "reactor-0.8.1-MjQ-WExBFABvKrcNMDqQ2K6hFcnSc6-ORe0x5xP62gKK",
+            .url = "git+https://github.com/pedronaugusto/reactor?ref=fix-unix-unnamed-bind#86d132e1b66ee9cc97d6cd832834cd8b23dfa5f0",
+            .hash = "reactor-0.8.1-MjQ-WKdDFAAEetufKc6IgP9HUkK8RKAJl767erCyCRM4",
         },
     },
     .minimum_zig_version = "0.17.0",
