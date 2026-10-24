@@ -94,6 +94,7 @@ test {
         _ = @import("checkout/checkout_test.zig");
         _ = @import("repo/repo_test.zig");
         _ = @import("testing/concurrency.zig");
+        _ = @import("testing/cancel.zig");
         _ = @import("testing/work_count.zig");
         _ = @import("testing/pack_write.zig");
         _ = @import("diff/diff_test.zig");
