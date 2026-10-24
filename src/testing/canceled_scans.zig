@@ -92,8 +92,9 @@ fn asTask(io: Io, comptime op: fn (Io, *const Scan) anyerror!usize, s: *const Sc
 fn scans(s: *const Scan, io: Io) !void {
     inline for (.{ statusCount, addCount, grepCount, checkoutCount }) |op| {
         const expected = try op(std.testing.io, s);
-        try std.testing.expectEqual(expected, try asTask(cancel.counted(io), op, s));
-        try std.testing.expect(cancel.points() >= files);
+        var counter = cancel.counted(io);
+        try std.testing.expectEqual(expected, try asTask(counter.io(), op, s));
+        try std.testing.expect(cancel.points(&counter) >= files);
         try cancel.expectCanceled(io, files / 2, 0, op, .{s});
     }
 }

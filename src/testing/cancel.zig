@@ -13,58 +13,52 @@
 //! a test can check that the answer is unchanged and the points are one per
 //! step.
 //!
-//! One wrapper at a time, as in `io.zig`: the counts are this file's, and a
-//! test awaits its task before arming another.
+//! Each run holds its own counts in a `Counter`, a layer over the caller's
+//! `Io`.
 
 const std = @import("std");
 const Io = std.Io;
 const testing = std.testing;
 const reactor = @import("reactor");
+const shakedown = @import("shakedown");
 
-var base: Io = undefined;
-var vtable: Io.VTable = undefined;
-/// The point to stop at, counted from 1; 0 never stops.
-var stop_at: u64 = 0;
-var points_seen: std.atomic.Value(u64) = .init(0);
-var after_stop: std.atomic.Value(u64) = .init(0);
-/// Set when the task reaches `stop_at` or returns, whichever is first.
-var reached: Io.Event = .unset;
-var finished: std.atomic.Value(bool) = .init(false);
-/// Never changed: the stopped point waits on it until the cancel wakes it.
-var parked: u32 = 0;
+pub const Points = struct {
+    /// The point to stop at, counted from 1; 0 never stops.
+    stop_at: u64 = 0,
+    seen: std.atomic.Value(u64) = .init(0),
+    after_stop: std.atomic.Value(u64) = .init(0),
+    /// Set when the task reaches `stop_at` or returns, whichever is first.
+    reached: Io.Event = .unset,
+    finished: std.atomic.Value(bool) = .init(false),
+    /// Never changed: the stopped point waits on it until the cancel wakes it.
+    parked: u32 = 0,
+};
 
-fn wrap(io: Io, at: u64) Io {
-    base = io;
-    stop_at = at;
-    points_seen.store(0, .monotonic);
-    after_stop.store(0, .monotonic);
-    reached.reset();
-    finished.store(false, .monotonic);
-    vtable = io.vtable.*;
-    vtable.checkCancel = checkCancel;
-    return .{ .userdata = io.userdata, .vtable = &vtable };
-}
+/// The caller's `Io` with every `checkCancel` counted, stopping at
+/// `Points.stop_at`.
+pub const Counter = shakedown.Layer(Points, .{ .checkCancel = checkCancel });
 
 fn checkCancel(userdata: ?*anyopaque) Io.Cancelable!void {
-    const n = points_seen.fetchAdd(1, .monotonic) + 1;
-    if (stop_at != 0 and n > stop_at) _ = after_stop.fetchAdd(1, .monotonic);
-    if (n != stop_at) return base.vtable.checkCancel(userdata);
-    reached.set(base);
+    const l = Counter.of(userdata);
+    const n = l.state.seen.fetchAdd(1, .monotonic) + 1;
+    if (l.state.stop_at != 0 and n > l.state.stop_at) _ = l.state.after_stop.fetchAdd(1, .monotonic);
+    if (n != l.state.stop_at) return l.base.vtable.checkCancel(l.base.userdata);
+    l.state.reached.set(l.base);
     // A futex wait is a cancellation point: it returns `error.Canceled`
     // once the test cancels, and before that only on a spurious wake.
-    while (true) try base.futexWait(u32, &parked, 0);
+    while (true) try l.base.futexWait(u32, &l.state.parked, 0);
 }
 
 /// `io` wrapped to count the cancellation points the computation asks,
-/// without ever stopping; `points` reads the count.
-pub fn counted(io: Io) Io {
-    return wrap(io, 0);
+/// without ever stopping; `points` reads the count. Run it through the
+/// counter's `io()`, the counter held where it stays put.
+pub fn counted(io: Io) Counter {
+    return .init(io, .{});
 }
 
-/// How many cancellation points the computation run under `counted` or
-/// `expectCanceled` asked.
-pub fn points() u64 {
-    return points_seen.load(.monotonic);
+/// How many cancellation points the computation run under `counter` asked.
+pub fn points(counter: *const Counter) u64 {
+    return counter.state.seen.load(.monotonic);
 }
 
 /// Run `function(io, args...)` as a task on `io`, cancel it at its `at`-th
@@ -76,20 +70,20 @@ pub fn expectCanceled(io: Io, at: u64, after: u64, function: anytype, args: anyt
     const Fn = @TypeOf(function);
     const Result = @typeInfo(Fn).@"fn".return_type.?;
     const Task = struct {
-        fn run(task_io: Io, task_args: @TypeOf(args)) Result {
+        fn run(task_io: Io, state: *Points, base: Io, task_args: @TypeOf(args)) Result {
             defer {
-                finished.store(true, .monotonic);
-                reached.set(base);
+                state.finished.store(true, .monotonic);
+                state.reached.set(base);
             }
             return @call(.auto, function, .{task_io} ++ task_args);
         }
     };
-    const wrapped = wrap(io, at);
-    var future = try io.concurrent(Task.run, .{ wrapped, args });
-    reached.waitUncancelable(io);
-    if (finished.load(.monotonic)) {
+    var counter: Counter = .init(io, .{ .stop_at = at });
+    var future = try io.concurrent(Task.run, .{ counter.io(), &counter.state, io, args });
+    counter.state.reached.waitUncancelable(io);
+    if (counter.state.finished.load(.monotonic)) {
         _ = future.await(io) catch {}; // glint-ignore: Z026 -- what it returned does not matter: ending at all is the failure
-        std.debug.print("the computation ended after {d} cancellation points, before point {d}\n", .{ points(), at });
+        std.debug.print("the computation ended after {d} cancellation points, before point {d}\n", .{ points(&counter), at });
         return error.TestUnexpectedResult;
     }
     const result = future.cancel(io);
@@ -97,7 +91,7 @@ pub fn expectCanceled(io: Io, at: u64, after: u64, function: anytype, args: anyt
         std.debug.print("the computation stopped at point {d} was canceled and finished all the same\n", .{at});
         return error.TestUnexpectedResult;
     } else |err| try testing.expectEqual(error.Canceled, err);
-    try testing.expect(after_stop.load(.monotonic) <= after);
+    try testing.expect(counter.state.after_stop.load(.monotonic) <= after);
 }
 
 /// Run `body(context, io)` on each backend the host has: `std.Io.Threaded`,
@@ -137,8 +131,9 @@ fn spinNoPoints(io: Io, steps: u64) Io.Cancelable!u64 {
 }
 
 fn selfTest(_: void, io: Io) !void {
-    try testing.expectEqual(@as(u64, 1000), try spin(counted(io), 1000));
-    try testing.expectEqual(@as(u64, 1000), points());
+    var counter = counted(io);
+    try testing.expectEqual(@as(u64, 1000), try spin(counter.io(), 1000));
+    try testing.expectEqual(@as(u64, 1000), points(&counter));
     try expectCanceled(io, 500, 0, spin, .{1000});
     // A loop that ends before the point asked for, and one with none.
     try testing.expectError(error.TestUnexpectedResult, expectCanceled(io, 2000, 0, spin, .{1000}));

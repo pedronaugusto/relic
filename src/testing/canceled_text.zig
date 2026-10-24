@@ -75,8 +75,9 @@ fn asTask(io: Io, comptime op: anytype, context: anytype) !usize {
 /// `least`, then canceled at the middle one of them.
 fn halfway(io: Io, comptime op: anytype, context: anytype, least: u64) !void {
     const expected = try op(std.testing.io, context);
-    try std.testing.expectEqual(expected, try asTask(cancel.counted(io), op, context));
-    const points = cancel.points();
+    var counter = cancel.counted(io);
+    try std.testing.expectEqual(expected, try asTask(counter.io(), op, context));
+    const points = cancel.points(&counter);
     try std.testing.expect(points >= least);
     try cancel.expectCanceled(io, points / 2, 0, op, .{context});
 }
