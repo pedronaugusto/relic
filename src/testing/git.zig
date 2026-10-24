@@ -373,6 +373,9 @@ pub fn testsRoot(buffer: []u8) ![]const u8 {
 pub const GnupgHome = struct {
     gpa: Allocator,
     name: []u8,
+    /// `name` as `GNUPGHOME` gives it to the `gpg` on the path: see
+    /// `environValue`. `name` itself where the forms agree.
+    value: []u8,
 
     /// Make one private scratch home for GnuPG.
     pub fn init(gpa: Allocator, io: Io) !GnupgHome {
@@ -397,7 +400,8 @@ pub const GnupgHome = struct {
         std.debug.assert(std.Io.Dir.path.isAbsolute(home_path));
         errdefer gpa.free(home_path);
         try Io.Dir.createDirAbsolute(io, home_path, if (builtin.target.os.tag == .windows) .default_dir else .fromMode(0o700));
-        return .{ .gpa = gpa, .name = home_path };
+        const value = if (builtin.target.os.tag == .windows and try gpgNamesHomesAsMsys(gpa, io)) try msysPath(gpa, home_path) else try gpa.dupe(u8, home_path);
+        return .{ .gpa = gpa, .name = home_path, .value = value };
     }
 
     /// Absolute path to the scratch home.
@@ -405,14 +409,64 @@ pub const GnupgHome = struct {
         return home.name;
     }
 
+    /// The home as `GNUPGHOME` is to name it to the `gpg` on the path.
+    /// Git for Windows' gpg is an MSYS program, which takes a home that
+    /// does not start with `/` as relative to where it runs, so it is
+    /// given `D:\a\b` as `/d/a/b`, the form git's test suite gives it from
+    /// its shell's `$(pwd)`; elsewhere, and to a gpg of Windows' own, the
+    /// path as it is.
+    pub fn environValue(home: *const GnupgHome) []const u8 {
+        return home.value;
+    }
+
     /// Remove the scratch home after its GnuPG daemons have stopped.
     pub fn deinit(home: *GnupgHome, io: Io) void {
         // glint-ignore: Z026 -- deinit cannot fail; a home left behind is a random name under the fixture root, holding only test keys
         Io.Dir.cwd().deleteTree(io, home.path()) catch {};
         home.gpa.free(home.name);
+        home.gpa.free(home.value);
         home.* = undefined;
     }
 };
+
+/// Whether the `gpg` on the path names its homes as MSYS paths, as
+/// Git for Windows' does: the home `gpg --version` reports starts with
+/// `/`. `false` when there is no gpg to ask.
+fn gpgNamesHomesAsMsys(gpa: Allocator, io: Io) !bool {
+    const result = std.process.run(gpa, io, .{ .argv = &.{ "gpg", "--version" } }) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return false,
+    };
+    defer gpa.free(result.stdout);
+    defer gpa.free(result.stderr);
+    var lines = std.mem.tokenizeAny(u8, result.stdout, "\r\n");
+    while (lines.next()) |line| {
+        const home = std.mem.cutPrefix(u8, line, "Home: ") orelse continue;
+        return home.len != 0 and home[0] == '/';
+    }
+    return false;
+}
+
+/// `D:\a\b` as MSYS names it: `/d/a/b`. Anything without a drive is
+/// only turned to `/`.
+fn msysPath(gpa: Allocator, windows_path: []const u8) Allocator.Error![]u8 {
+    const drive = windows_path.len >= 2 and windows_path[1] == ':' and std.ascii.isAlphabetic(windows_path[0]);
+    const out = if (drive)
+        try std.mem.concat(gpa, u8, &.{ "/", &.{std.ascii.toLower(windows_path[0])}, windows_path[2..] })
+    else
+        try gpa.dupe(u8, windows_path);
+    std.mem.replaceScalar(u8, out, '\\', '/');
+    return out;
+}
+
+test "a Windows path is named as MSYS names it" {
+    const gpa = std.testing.allocator;
+    for ([_][2][]const u8{ .{ "D:\\a\\relic\\gpg", "/d/a/relic/gpg" }, .{ "c:/x/y", "/c/x/y" }, .{ "\\\\server\\share", "//server/share" } }) |case| {
+        const got = try msysPath(gpa, case[0]);
+        defer gpa.free(got);
+        try std.testing.expectEqualStrings(case[1], got);
+    }
+}
 
 /// What Windows itself needs in the environment of a program it starts, and
 /// a person does not set: `SystemRoot`, without which Winsock cannot load,

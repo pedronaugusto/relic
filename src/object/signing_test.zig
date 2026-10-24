@@ -81,7 +81,7 @@ const Keyed = struct {
         try k.environ.put("TMPDIR", k.home);
         k.gnupg = try .init(gpa, io);
         errdefer k.gnupg.deinit(io);
-        try k.environ.put("GNUPGHOME", k.gnupg.path());
+        try k.environ.put("GNUPGHOME", k.gnupg.environValue());
         try k.environ.put("GIT_AUTHOR_DATE", "@1700000000 +0000");
         try k.environ.put("GIT_COMMITTER_DATE", "@1700000000 +0000");
         k.repo.environ = &k.environ;

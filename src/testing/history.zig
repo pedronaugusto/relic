@@ -3997,7 +3997,7 @@ fn signedHistory(format: signing.Format) !void {
     // `testgit.GnupgHome`. Removed after the daemons below are stopped.
     var gnupg: testgit.GnupgHome = try .init(gpa, io);
     defer gnupg.deinit(io);
-    if (!try makeSigningKey(&pair, io, dir, gnupg.path(), format)) return error.SkipZigTest;
+    if (!try makeSigningKey(&pair, io, dir, gnupg.environValue(), format)) return error.SkipZigTest;
     defer if (format == .openpgp) {
         const stopped = std.process.run(gpa, io, .{ .argv = &.{ "gpgconf", "--kill", "all" }, .environ_map = &pair.env }) catch null;
         if (stopped) |s| {
@@ -4164,7 +4164,7 @@ test "a merge verifying signatures takes a good one and refuses a missing, unkno
             defer gpa.free(dir);
             var gnupg: testgit.GnupgHome = try .init(gpa, io);
             defer gnupg.deinit(io);
-            if (!try makeSigningKey(&pair, io, dir, gnupg.path(), .ssh)) return error.SkipZigTest;
+            if (!try makeSigningKey(&pair, io, dir, gnupg.environValue(), .ssh)) return error.SkipZigTest;
             // A key the allowed signers do not name.
             const stranger = try std.Io.Dir.path.join(gpa, &.{ dir, "stranger" });
             defer gpa.free(stranger);

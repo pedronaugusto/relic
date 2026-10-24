@@ -120,7 +120,10 @@ fn extDiff(arena: std.mem.Allocator, io: Io, environ: *const std.process.Environ
             shown = try std.mem.concat(arena, u8, &.{ stem, "XXXXXX/", std.Io.Dir.path.basename(file) });
         }
         try out.print("file={s} hex={s} mode={s}\n", .{ shown, args[at + 1], args[at + 2] });
-        if (!std.mem.eql(u8, file, "/dev/null")) {
+        // A side that is not there is `.` for its object, its file
+        // `/dev/null` -- `nul` once Git for Windows' shell has passed it
+        // to a program of its own.
+        if (!std.mem.eql(u8, args[at + 1], ".")) {
             const bytes = try Io.Dir.cwd().readFileAlloc(io, file, arena, .limited(1 << 20));
             try out.print("<<{s}>>\n", .{bytes});
         }
