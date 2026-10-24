@@ -1757,7 +1757,11 @@ pub fn readSecretFile(
     };
     defer file.close(io);
     // The length is a first guess: the file may change as it is read.
-    const guess = std.math.cast(usize, file.length(io) catch 0) orelse max_bytes;
+    const length = file.length(io) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => 0,
+    };
+    const guess = std.math.cast(usize, length) orelse max_bytes;
     var secret = try aegis.SecretBytes.init(gpa, @min(guess, max_bytes) + 1);
     errdefer secret.deinit(gpa);
     var at: Reading = .offset;
