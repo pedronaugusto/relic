@@ -14,6 +14,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const shakedown = @import("shakedown");
@@ -23,12 +24,13 @@ const refs_mod = @import("../refs/refs.zig");
 const repository_format = @import("format.zig");
 const gitfile = @import("gitfile.zig");
 const directory = @import("directory.zig");
+const fs = @import("../fs/fs.zig");
 
 const Oid = hash.Oid;
 
 /// Errors from looking at a gitlink's directory: the filesystem's. A ref
 /// that does not parse is a `HEAD` that names nothing, not an error.
-pub const Error = Allocator.Error || Io.Dir.ReadFileAllocError || Io.Dir.OpenError || Io.Dir.Iterator.Error ||
+pub const Error = Allocator.Error || aegis.own.ReadFileError || Io.Dir.OpenError || Io.Dir.Iterator.Error ||
     refs_mod.ReadError;
 
 /// A submodule's repository, found from its working tree.
@@ -36,29 +38,38 @@ pub const GitDir = struct {
     pub const Error = ErrorNamespace.Error;
 
     /// Its `.git` directory, wherever that is.
-    git_dir: Io.Dir,
-    /// Where its shared state lives: `git_dir` itself, unless a `commondir`
-    /// file names another.
-    common_dir: Io.Dir,
-    common_is_separate: bool,
+    git_dir: fs.OwnedDir,
+    /// Where its shared state lives when a `commondir` file names another
+    /// directory than `git_dir`; `null` where it is `git_dir` itself.
+    common_dir: ?fs.OwnedDir,
     /// Whether `<path>/.git` was a file naming the directory rather than the
     /// directory itself, which is what an absorbed submodule has.
     via_file: bool,
 
     /// Close both directories.
     pub fn deinit(g: *GitDir, io: Io) void {
-        if (g.common_is_separate) g.common_dir.close(io);
-        g.git_dir.close(io);
+        if (g.common_dir) |*common| common.deinit(io);
+        g.git_dir.deinit(io);
         g.* = undefined;
+    }
+
+    /// Its `.git` directory, lent until it is closed.
+    pub fn gitDirectory(g: *GitDir) fs.LentDir {
+        return g.git_dir.lend();
+    }
+
+    /// Where its shared state lives, lent until it is closed.
+    pub fn commonDirectory(g: *GitDir) fs.LentDir {
+        return if (g.common_dir) |*common| common.lend() else g.git_dir.lend();
     }
 
     /// A store over its refs, which borrows the two directories, in the
     /// format the repository's own configuration names: the hash its
     /// objects are named with, and loose files and `packed-refs` or a
     /// stack under `reftable/`. What is on the disk has no say.
-    pub fn refStore(g: *const GitDir, gpa: Allocator, io: Io) repository_format.ReadError!refs_mod.Store {
-        const format = try repository_format.read(gpa, io, g.common_dir, null);
-        return refs_mod.Store.init(gpa, format.kind, g.git_dir, g.common_dir, .{ .format = format.ref_storage });
+    pub fn refStore(g: *GitDir, gpa: Allocator, io: Io) repository_format.ReadError!refs_mod.Store {
+        const format = try repository_format.read(gpa, io, g.commonDirectory().get(), null);
+        return refs_mod.Store.init(gpa, format.kind, g.gitDirectory(), g.commonDirectory(), .{ .format = format.ref_storage });
     }
 };
 
@@ -73,7 +84,7 @@ pub fn open(gpa: Allocator, io: Io, wt: Io.Dir, path: []const u8) Self.Error!?Gi
     defer work.close(io);
 
     var via_file = false;
-    const git_dir = if (work.openDir(io, ".git", .{ .iterate = true })) |dir| dir else |_| blk: {
+    var git_dir: fs.OwnedDir = if (work.openDir(io, ".git", .{ .iterate = true })) |dir| fs.OwnedDir.init(dir) else |_| blk: {
         const target = (gitfile.read(gpa, io, work, ".git") catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return null,
@@ -82,24 +93,14 @@ pub fn open(gpa: Allocator, io: Io, wt: Io.Dir, path: []const u8) Self.Error!?Gi
         via_file = true;
         break :blk gitfile.open(io, work, target, .{ .iterate = true }) catch return null;
     };
-    if (!directory.isGitDirectory(io, git_dir)) {
-        git_dir.close(io);
+    if (!directory.isGitDirectory(io, git_dir.lend().get())) {
+        git_dir.deinit(io);
         return null;
     }
-
-    var result: GitDir = .{
-        .git_dir = git_dir,
-        .common_dir = git_dir,
-        .common_is_separate = false,
-        .via_file = via_file,
-    };
     // `isGitDirectory` opened it already: one that does not open is not a
     // git directory, and was refused there.
-    if (directory.openCommon(io, git_dir) catch null) |dir| {
-        result.common_dir = dir;
-        result.common_is_separate = true;
-    }
-    return result;
+    const common = directory.openCommon(io, git_dir.lend().get()) catch null;
+    return .{ .git_dir = git_dir.move(), .common_dir = common, .via_file = via_file };
 }
 
 /// Whether the directory `path` under `wt` holds a repository of its own:
@@ -184,7 +185,7 @@ test "a gitlink's refs are read in the format its own configuration names, whate
 
 test "a gitlink's format refusals are no commit, and its filesystem refusals are errors" {
     const Probe = struct {
-        fn store(g: *const GitDir, io: Io) !void {
+        fn store(g: *GitDir, io: Io) !void {
             var refs = try g.refStore(std.testing.allocator, io);
             defer refs.deinit();
         }
@@ -195,7 +196,8 @@ test "a gitlink's format refusals are no commit, and its filesystem refusals are
     const faults = try shakedown.FaultIo.init(std.testing.allocator, Io.failing, .{});
     defer faults.deinit();
     const io = faults.io();
-    const g: GitDir = .{ .git_dir = tmp.dir, .common_dir = tmp.dir, .common_is_separate = false, .via_file = false };
+    var g: GitDir = .{ .git_dir = fs.OwnedDir.init(try tmp.dir.openDir(std.testing.io, ".", .{})), .common_dir = null, .via_file = false };
+    defer g.deinit(std.testing.io);
     for ([_]Io.File.OpenError{ error.AccessDenied, error.Canceled, error.FileNotFound }) |err| {
         const plan = [_]shakedown.IoPlan.Entry{.{ .at = .{ .nth = .{ .call = .dirOpenFile, .n = 1 } }, .fault = .{ .fail = err }, .times = 0 }};
         try faults.setPlan(&plan);

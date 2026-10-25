@@ -131,13 +131,13 @@ pub const Remote = struct {
 
         var urls: std.ArrayList([]const u8) = .empty;
         for (configured) |raw| try urls.append(arena, try rewrite(arena, config, raw, .fetch) orelse raw);
-        remote.urls = urls.items;
+        remote.urls = try urls.toOwnedSlice(arena);
 
         const pushurls = try resetList(arena, config, try key("pushurl", arena, name));
         if (pushurls.len != 0) {
             var rewritten: std.ArrayList([]const u8) = .empty;
             for (pushurls) |raw| try rewritten.append(arena, try rewrite(arena, config, raw, .fetch) orelse raw);
-            remote.push_urls = rewritten.items;
+            remote.push_urls = try rewritten.toOwnedSlice(arena);
         } else {
             remote.push_urls = try pushUrlsFor(arena, config, configured);
         }

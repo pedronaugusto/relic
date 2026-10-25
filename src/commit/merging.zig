@@ -536,7 +536,7 @@ fn parseMergeOptions(arena: Allocator, text: []const u8, set: *Options) Error!vo
         }
     }
     if (messages.items.len != 0) set.message = try std.mem.join(arena, "\n\n", messages.items);
-    set.strategy_options = xopts.items;
+    set.strategy_options = try xopts.toOwnedSlice(arena);
 }
 
 const MergeOption = enum {
@@ -793,7 +793,7 @@ pub fn verify(gpa: Allocator, io: Io, repo: *Repository, heads: []const Target, 
 fn verifySignatures(gpa: Allocator, arena: Allocator, io: Io, repo: *Repository, heads: []const Target, options: Options) Error![]const Verified {
     if (!(options.verify_signatures orelse false)) return &.{};
     const programs = options.signing.programs orelse return error.SigningRequiresPrograms;
-    var signer = try signing_mod.Signer.init(gpa, io, repo.configuration(), repo.topDirectory(), programs);
+    var signer = try signing_mod.Signer.init(gpa, io, repo.configuration(), repo.topDirectory().get(), programs);
     defer signer.deinit();
     const check_trust = !repo.configuration().has("gpg.mintrustlevel");
     const verified = try arena.alloc(Verified, heads.len);
@@ -1114,11 +1114,11 @@ fn commitOrStop(
                 .{ .name = "GIT_EDITOR", .value = ":" },
             } });
             try repo.refStore().special().write(repo.allocator(), io, .merge_head, merge_heads.items);
-            try state_file.write(io, repo.gitDirectory(), "MERGE_MSG", text);
+            try state_file.write(io, repo.gitDirectory().get(), "MERGE_MSG", text);
             const message_path = try h.path(arena, "MERGE_MSG");
             _ = try runner.prepareCommitMsg(io, e, message_path, .{ .source = .merge, .commit = null });
             if (h.verify) _ = try runner.commitMsg(io, e, message_path);
-            text = (try state_file.read(arena, io, repo.gitDirectory(), "MERGE_MSG")) orelse "";
+            text = (try state_file.read(arena, io, repo.gitDirectory().get(), "MERGE_MSG")) orelse "";
         }
         const cleaned = try message.cleanup(arena, text, options.cleanup.?, comment);
         if (cleaned.len == 0) return error.EmptyMessage;
@@ -1148,8 +1148,8 @@ fn commitOrStop(
         for (conflicts, paths) |conflict, *path| path.* = conflict.path;
         try message.appendConflictsHint(arena, &msg, paths, comment, made.hint_cleanup);
     }
-    try state_file.write(io, repo.gitDirectory(), "MERGE_MSG", msg.items);
-    try state_file.write(io, repo.gitDirectory(), "MERGE_MODE", if (made.fast_forward == .never) "no-ff" else "");
+    try state_file.write(io, repo.gitDirectory().get(), "MERGE_MSG", msg.items);
+    try state_file.write(io, repo.gitDirectory().get(), "MERGE_MODE", if (made.fast_forward == .never) "no-ff" else "");
     var reused: []const []const u8 = &.{};
     if (!outcome.isClean()) reused = try rerere.afterStop(gpa, io, repo, .{ .arena = arena, .autoupdate = options.rerere_autoupdate });
     return .{
@@ -1230,7 +1230,7 @@ pub fn conclude(gpa: Allocator, io: Io, repo: *Repository, options: ConcludeOpti
     }
     // `git commit` drops a parent another reaches unless the merge was
     // asked not to fast-forward: an octopus that went past `HEAD`.
-    const mode = (try state_file.read(arena, io, repo.gitDirectory(), "MERGE_MODE")) orelse "";
+    const mode = (try state_file.read(arena, io, repo.gitDirectory().get(), "MERGE_MODE")) orelse "";
     const kept: []const Oid = if (std.mem.eql(u8, mode, "no-ff")) parents.items else try reduceHeads(gpa, arena, io, repo, parents.items);
 
     var locked_index = try repo.lockIndex(io);
@@ -1244,7 +1244,7 @@ pub fn conclude(gpa: Allocator, io: Io, repo: *Repository, options: ConcludeOpti
 
     const h = try commit_hooks.Hooks.init(arena, io, repo, .{ .runner = options.hooks, .verify = options.verify });
     const author = options.author orelse options.who;
-    const given = options.message orelse ((try state_file.read(arena, io, repo.gitDirectory(), "MERGE_MSG")) orelse "");
+    const given = options.message orelse ((try state_file.read(arena, io, repo.gitDirectory().get(), "MERGE_MSG")) orelse "");
     // `git commit`'s `prepare_to_commit`: an `auto` comment character is
     // chosen against the message as given, whitespace cleaned, before the
     // hook sees it.
@@ -1331,7 +1331,7 @@ pub fn abort(gpa: Allocator, io: Io, repo: *Repository, options: AbortOptions) S
 pub fn removeMergeState(io: Io, repo: *Repository, who: object.Signature) Self.Error!void {
     try repo.refStore().special().delete(io, .merge_head);
     for ([_][]const u8{ "MERGE_RR", "MERGE_MSG", "MERGE_MODE", "SQUASH_MSG" }) |name| {
-        try state_file.remove(io, repo.gitDirectory(), name);
+        try state_file.remove(io, repo.gitDirectory().get(), name);
     }
     try repo.refStore().root().delete(repo.allocator(), io, .auto_merge);
     _ = try stash.restoreAutostash(io, repo, autostash_place, .{ .who = who, .apply = false });
@@ -1377,7 +1377,7 @@ pub const MessageSettings = struct {
                 .integer => |n| std.math.cast(u31, n) orelse return error.InvalidMergeLog,
             };
         }
-        if (suppress_seen) out.suppress_dest = patterns.items;
+        if (suppress_seen) out.suppress_dest = try patterns.toOwnedSlice(arena);
         return out;
     }
 };

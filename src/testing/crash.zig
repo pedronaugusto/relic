@@ -299,7 +299,7 @@ pub const Case = struct {
             },
             .index_write => {
                 var locked = try repo.lockIndex(io);
-                _ = try checkout.addAll(gpa, io, repo.workDirectory().?, .{ .index = &locked.index, .db = repo.objectDatabase() }, .{ .rules = try repo.worktreeRules() });
+                _ = try checkout.addAll(gpa, io, repo.workDirectory().?.get(), .{ .index = &locked.index, .db = repo.objectDatabase() }, .{ .rules = try repo.worktreeRules() });
                 try locked.commit(io);
                 locked.deinit(io);
                 // The same size in the same second: only the content
@@ -309,7 +309,7 @@ pub const Case = struct {
             .checkout => {
                 var locked = try repo.lockIndex(io);
                 const tree = try repo.commitTree(io, try Oid.parse(.sha1, &c.seeds.second));
-                _ = try checkout.checkout(gpa, io, repo.workDirectory().?, .{ .index = &locked.index, .db = repo.objectDatabase(), .tree = tree }, .{
+                _ = try checkout.checkout(gpa, io, repo.workDirectory().?.get(), .{ .index = &locked.index, .db = repo.objectDatabase(), .tree = tree }, .{
                     .durability = .durable,
                     .rules = try repo.worktreeRules(),
                 });
@@ -374,7 +374,7 @@ pub const Case = struct {
         defer repo.deinit(io);
         var index = try repo.openIndex(io);
         defer index.deinit();
-        const wt = repo.workDirectory().?;
+        const wt = repo.workDirectory().?.get();
         var status = try checkout.status(gpa, io, wt, .{ .index = &index, .db = repo.objectDatabase() }, .{
             .rules = try repo.worktreeRules(),
             .head_tree = try repo.headTree(io),

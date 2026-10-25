@@ -27,6 +27,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const config_mod = @import("../config/config.zig");
 const decimal = @import("../text.zig").decimal;
 const Allocator = std.mem.Allocator;
@@ -122,7 +123,7 @@ pub const Error = error{
     /// git's own walks then refuse; relic stops at the stream.
     TreeTooDeep,
 } || Allocator.Error || config_mod.ValueError || odb_mod.Error || refs_mod.ReadError || refs_mod.TransactionError || rev_walk.Error ||
-    Io.Reader.Error || Io.Writer.Error || Io.Dir.ReadFileAllocError || Io.Dir.CreateDirPathError || fs.LockError || fs.CommitError;
+    Io.Reader.Error || Io.Writer.Error || aegis.own.ReadFileError || Io.Dir.CreateDirPathError || fs.LockError || fs.CommitError;
 
 /// How the dates in identities are written: git's `--date-format`.
 pub const DateFormat = enum {
@@ -268,7 +269,7 @@ pub const Marks = struct {
     pub fn put(m: *Marks, gpa: Allocator, mark: u64, oid: Oid) Allocator.Error!void {
         // Mark zero is no mark: `parse` refuses it, and a stream that names
         // none puts nothing.
-        assert(mark != 0);
+        aegis.assert.invariant(mark != 0, "mark != 0");
         try m.map.put(gpa, mark, oid);
     }
 
@@ -302,7 +303,7 @@ pub const Marks = struct {
         while (it.next()) |k| : (i += 1) keys[i] = k.*;
         std.mem.sort(u64, keys, {}, std.sort.asc(u64));
         for (keys) |k| {
-            assert(k != 0);
+            aegis.assert.invariant(k != 0, "k != 0");
             try w.print(":{d} {f}\n", .{ k, m.map.get(k).? });
         }
     }
@@ -389,9 +390,9 @@ const Importer = struct {
     rejected: std.ArrayList(Rejected) = .empty,
     next_mark: u64 = 0,
 
-    date_format: DateFormat,
+    date_format: DateFormat, // aegis: no-danger: an option, from the command line or a feature line
     signed_commits: SignMode,
-    signed_tags: SignMode,
+    signed_tags: SignMode, // aegis: no-danger: an option, from the command line or a feature line
     force: bool,
     require_done: bool,
     relative_marks: bool,
@@ -579,15 +580,16 @@ const Importer = struct {
         return imp.arena().print("info/fast-import/{s}", .{path});
     }
 
-    /// The directory a marks path is relative to.
-    fn marksDir(imp: *Importer, path: []const u8) Io.Dir {
-        if (std.mem.startsWith(u8, path, "info/fast-import/") and imp.relative_marks) return imp.repo.commonDirectory();
-        return imp.options.cwd orelse Io.Dir.cwd();
+    /// Whether a marks path is relative to the repository rather than to
+    /// the working directory.
+    fn marksInRepository(imp: *Importer, path: []const u8) bool {
+        return std.mem.startsWith(u8, path, "info/fast-import/") and imp.relative_marks;
     }
 
     fn readMarks(imp: *Importer) Error!void {
         const path = imp.import_marks.?;
-        const bytes = imp.marksDir(path).readFileAlloc(imp.io, path, imp.gpa, .unlimited) catch |err| switch (err) {
+        const dir = if (imp.marksInRepository(path)) imp.repo.commonDirectory().get() else imp.options.cwd orelse Io.Dir.cwd();
+        const bytes = aegis.own.readFile(imp.io, dir, path, imp.gpa, aegis.units.Bytes(u64).fromRaw(std.math.maxInt(u64))) catch |err| switch (err) {
             error.FileNotFound => {
                 if (!imp.import_marks_if_exists) return error.FileNotFound;
                 imp.import_marks_done = true;
@@ -611,7 +613,7 @@ const Importer = struct {
     fn dumpMarks(imp: *Importer) Error!void {
         const path = imp.export_marks orelse return;
         if (imp.import_marks != null and !imp.import_marks_done) return;
-        const dir = imp.marksDir(path);
+        const dir = if (imp.marksInRepository(path)) imp.repo.commonDirectory().get() else imp.options.cwd orelse Io.Dir.cwd();
         if (std.Io.Dir.path.dirname(path)) |parent| try dir.createDirPath(imp.io, parent);
         var buffer: [4096]u8 = undefined;
         var lock = try fs.LockFile.open(imp.gpa, imp.io, dir, .{ .sub_path = path, .buffer = &buffer }, .{ .sync = .none });
@@ -1350,7 +1352,7 @@ const Importer = struct {
             },
             .now => {
                 if (!std.mem.eql(u8, when, "now")) return error.InvalidDate;
-                const now = imp.options.now orelse Now{ .secs = Io.Clock.real.now(imp.io).toSeconds() };
+                const now = imp.options.now orelse Now{ .secs = gitdate.seconds(Io.Clock.real.now(imp.io)) };
                 return imp.withDate(head, now.secs, now.offset_minutes);
             },
         }

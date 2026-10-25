@@ -83,7 +83,7 @@ pub fn ofTrees(gpa: Allocator, io: Io, db: *odb_mod.Odb, inputs: diff.TreeInputs
             carry >>= 8;
         }
     }
-    // unreachable: the slice is cut to the format's raw length
+    // aegis: no-danger: the slice is cut to the format's raw length
     return Oid.fromRaw(db.objectFormat(), result[0..raw_len]) catch unreachable;
 }
 
@@ -107,7 +107,7 @@ fn addPath(h: *hash.Hasher, path: []const u8) void {
 
 fn addMode(h: *hash.Hasher, mode: object.Mode) void {
     var buf: [16]u8 = undefined;
-    // unreachable: a u32 is at most 11 octal digits
+    // aegis: no-danger: a u32 is at most 11 octal digits
     h.update(std.mem.print(&buf, "{o:0>6}", .{mode.raw()}) catch unreachable);
 }
 

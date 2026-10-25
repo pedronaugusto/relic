@@ -355,12 +355,12 @@ fn writeOpts(gpa: Allocator, io: Io, repo: *Repository, action: Action, options:
         any = true;
         w.print("\tdefault-msg-cleanup = {s}\n", .{@tagName(mode)}) catch return error.OutOfMemory;
     }
-    if (any) try state_file.write(io, repo.gitDirectory(), opts_path, out.written());
+    if (any) try state_file.write(io, repo.gitDirectory().get(), opts_path, out.written());
 }
 
 /// Apply what `.git/sequencer/opts` says on top of `options`.
 fn readOpts(gpa: Allocator, arena: Allocator, io: Io, repo: *Repository, options: *Options) Error!void {
-    const text = (try state_file.read(gpa, io, repo.gitDirectory(), opts_path)) orelse return;
+    const text = (try state_file.read(gpa, io, repo.gitDirectory().get(), opts_path)) orelse return;
     defer gpa.free(text);
     try parseOpts(gpa, arena, text, options);
 }
@@ -378,7 +378,6 @@ fn parseOpts(gpa: Allocator, arena: Allocator, text: []const u8, options: *Optio
     defer parsed.deinit();
     var words: std.ArrayList([]const u8) = .empty;
     try words.appendSlice(arena, options.strategy_options);
-    defer options.strategy_options = words.items;
     // git's `populate_opts_cb`: every key is `options.<name>`, every
     // value given, and the switches booleans and nothing else (a count is
     // "invalid value" there).
@@ -429,23 +428,24 @@ fn parseOpts(gpa: Allocator, arena: Allocator, text: []const u8, options: *Optio
             options.rerere_autoupdate = on;
         } else return error.MalformedState;
     }
+    options.strategy_options = try words.toOwnedSlice(arena);
 }
 
 /// Write `abort-safety`: where `HEAD` is now, so an abort can tell whether
 /// something else has moved it since.
 fn updateAbortSafety(gpa: Allocator, io: Io, repo: *Repository) Error!void {
-    if (!state_file.exists(io, repo.gitDirectory(), seq_dir)) return;
+    if (!state_file.exists(io, repo.gitDirectory().get(), seq_dir)) return;
     var head = try head_mod.read(gpa, io, repo);
     defer head.deinit(gpa);
     var buf: [hash.max_hex_len + 1]u8 = undefined;
     var hex: [hash.max_hex_len]u8 = undefined;
     // unreachable: a hex name is at most max_hex_len digits, the buffer with its newline
     const text = std.mem.print(&buf, "{s}\n", .{if (head.oid) |oid| oid.hex(&hex) else ""}) catch unreachable;
-    try state_file.write(io, repo.gitDirectory(), safety_path, text);
+    try state_file.write(io, repo.gitDirectory().get(), safety_path, text);
 }
 
 fn removeSequencerState(io: Io, repo: *Repository) Error!void {
-    try repo.gitDirectory().deleteTree(io, seq_dir);
+    try repo.gitDirectory().get().deleteTree(io, seq_dir);
 }
 
 //=========================================================================
@@ -596,7 +596,7 @@ fn pickOne(r: *Replay, oid: Oid) Error!Picked {
     try repo.refStore().root().write(repo.allocator(), io, .auto_merge, outcome.auto_merge);
 
     if (!outcome.isClean()) try noteConflicts(r, &msg, outcome.conflicts);
-    try state_file.write(io, repo.gitDirectory(), "MERGE_MSG", msg.items);
+    try state_file.write(io, repo.gitDirectory().get(), "MERGE_MSG", msg.items);
 
     // The pseudo-ref a continuation reads the commit back from.
     const clean = outcome.isClean();
@@ -662,7 +662,7 @@ fn finishPick(r: *Replay, head: head_mod.Head, commit: object.Commit, tree: Oid,
             .keep => allow_empty_commit = true,
             .drop => {
                 try repo.refStore().root().delete(repo.allocator(), io, .cherry_pick_head);
-                try state_file.remove(io, repo.gitDirectory(), "MERGE_MSG");
+                try state_file.remove(io, repo.gitDirectory().get(), "MERGE_MSG");
                 try repo.refStore().root().delete(repo.allocator(), io, .auto_merge);
                 try updateAbortSafety(gpa, io, repo);
                 return .dropped;
@@ -688,9 +688,9 @@ fn finishPick(r: *Replay, head: head_mod.Head, commit: object.Commit, tree: Oid,
     const commit_hooks = try commit_hooks_mod.Hooks.init(arena, io, repo, .{ .runner = r.options.hooks, .verify = r.options.verify });
     var text: []const u8 = msg;
     if (commit_hooks.exists(io, "prepare-commit-msg")) {
-        try state_file.write(io, repo.gitDirectory(), "COMMIT_EDITMSG", text);
+        try state_file.write(io, repo.gitDirectory().get(), "COMMIT_EDITMSG", text);
         _ = try commit_hooks.runner.?.prepareCommitMsg(io, try commit_hooks.env(arena, null), try commit_hooks.path(arena, "COMMIT_EDITMSG"), .{ .source = .message, .commit = null });
-        text = (try state_file.read(arena, io, repo.gitDirectory(), "COMMIT_EDITMSG")) orelse "";
+        text = (try state_file.read(arena, io, repo.gitDirectory().get(), "COMMIT_EDITMSG")) orelse "";
     }
     const cleaned = try message.cleanup(arena, text, message.uncut(cleanup), r.comment);
     if (cleaned.len == 0 and !r.options.allow_empty_message) return error.EmptyMessage;
@@ -706,7 +706,7 @@ fn finishPick(r: *Replay, head: head_mod.Head, commit: object.Commit, tree: Oid,
     try head_mod.advance(io, repo, head, made, .{ .who = r.options.who, .message = log });
     try commit_hooks.postCommit(arena, io, null);
     try repo.refStore().root().delete(repo.allocator(), io, .cherry_pick_head);
-    try state_file.remove(io, repo.gitDirectory(), "MERGE_MSG");
+    try state_file.remove(io, repo.gitDirectory().get(), "MERGE_MSG");
     try updateAbortSafety(gpa, io, repo);
     try r.made.append(arena, made);
     return .committed;
@@ -784,13 +784,13 @@ fn start(gpa: Allocator, io: Io, repo: *Repository, action: Action, commits: []c
     var head = try head_mod.read(gpa, io, repo);
     defer head.deinit(gpa);
     if (head.oid == null and action == .revert) return error.UnbornBranch;
-    repo.gitDirectory().createDir(io, seq_dir, .default_dir) catch |err| switch (err) {
+    repo.gitDirectory().get().createDir(io, seq_dir, .default_dir) catch |err| switch (err) {
         error.PathAlreadyExists => return error.SequencerInProgress,
         else => |e| return e,
     };
     var hex: [hash.max_hex_len]u8 = undefined;
     const head_text = if (head.oid) |oid| try arena.print("{s}\n", .{oid.hex(&hex)}) else "\n";
-    try state_file.write(io, repo.gitDirectory(), head_path, head_text);
+    try state_file.write(io, repo.gitDirectory().get(), head_path, head_text);
     try writeOpts(gpa, io, repo, action, options);
     try updateAbortSafety(gpa, io, repo);
     return runSequence(&r, &arena_instance, items.items);
@@ -831,13 +831,13 @@ fn finishOutcome(r: *Replay, arena_instance: *std.heap.ArenaAllocator, picked: P
 fn saveTodo(r: *Replay, items: []const todo.Item) Error!void {
     const Shorten = struct {
         fn shorten(context: *anyopaque, oid: Oid, buf: *[hash.max_hex_len]u8) []const u8 {
-            const replay: *Replay = @ptrCast(@alignCast(context)); // safe: the context handed out with this function is a Replay
+            const replay: *Replay = @ptrCast(@alignCast(context)); // aegis: no-danger: the context handed out with this function is a Replay
             const text = abbrev.unique(replay.io, replay.repo.objectDatabase(), oid, replay.abbrev_len, buf) catch return oid.hex(buf);
             return text;
         }
     };
     const bytes = try todo.toBytes(r.arena, items, .{ .short = .{ .context = r, .shortenFn = Shorten.shorten } });
-    try state_file.write(r.io, r.repo.gitDirectory(), todo_path, bytes);
+    try state_file.write(r.io, r.repo.gitDirectory().get(), todo_path, bytes);
 }
 
 /// How a sheet's names are resolved: any name a commit goes by, with its
@@ -856,7 +856,7 @@ pub const ResolverContext = struct {
     }
 
     fn resolveName(context: *anyopaque, text: []const u8) ?todo.Resolver.Resolved {
-        const c: *ResolverContext = @ptrCast(@alignCast(context)); // safe: the context handed out with this function is a ResolverContext
+        const c: *ResolverContext = @ptrCast(@alignCast(context)); // aegis: no-danger: the context handed out with this function is a ResolverContext
         const gpa = c.repo.allocator();
         var oid: ?Oid = null;
         if (text.len == c.repo.objectFormat().hexLen()) oid = Oid.parse(c.repo.objectFormat(), text) catch null;
@@ -878,7 +878,7 @@ pub const ResolverContext = struct {
 
 /// Read `.git/sequencer/todo`.
 fn readTodo(r: *Replay) Error!todo.List {
-    const text = (try state_file.read(r.arena, r.io, r.repo.gitDirectory(), todo_path)) orelse return error.NoSequencerInProgress;
+    const text = (try state_file.read(r.arena, r.io, r.repo.gitDirectory().get(), todo_path)) orelse return error.NoSequencerInProgress;
     var context: ResolverContext = .{ .repo = r.repo, .io = r.io };
     const list = try todo.parse(r.arena, text, context.resolver(), .{ .comment = r.comment });
     if (list.count() == 0) return error.MalformedState;
@@ -918,7 +918,7 @@ fn commitStaged(r: *Replay) Error!Oid {
     if (tree.eql(head_tree) and !r.options.allow_empty and r.options.empty != .keep) return error.EmptyCommit;
 
     const commit_hooks = try commit_hooks_mod.Hooks.init(arena, io, repo, .{ .runner = r.options.hooks, .verify = r.options.verify });
-    const given = (try state_file.read(arena, io, repo.gitDirectory(), "MERGE_MSG")) orelse "";
+    const given = (try state_file.read(arena, io, repo.gitDirectory().get(), "MERGE_MSG")) orelse "";
     const raw = try commit_hooks.beforeCommit(arena, io, repo, .{ .text = given, .source = .merge, .author = author });
     const cleaned = try message.cleanup(arena, raw, .strip, r.comment);
     if (cleaned.len == 0 and !r.options.allow_empty_message) return error.EmptyMessage;
@@ -958,7 +958,7 @@ pub fn proceed(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self
     try readOpts(gpa, arena, io, repo, &opts);
     var r = try newReplay(gpa, arena, io, repo, action, opts);
 
-    if (!state_file.exists(io, repo.gitDirectory(), todo_path)) {
+    if (!state_file.exists(io, repo.gitDirectory().get(), todo_path)) {
         _ = try commitStaged(&r);
         return finishOutcome(&r, &arena_instance, .committed, null);
     }
@@ -1009,7 +1009,7 @@ pub fn skip(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Er
         if (!try abortIsSafe(gpa, io, repo)) return error.NothingToSkip;
     }
     try resetMerge(gpa, io, repo, try currentHead(gpa, io, repo), .{ .who = options.who, .blocked = options.blocked });
-    if (!state_file.exists(io, repo.gitDirectory(), seq_dir)) {
+    if (!state_file.exists(io, repo.gitDirectory().get(), seq_dir)) {
         const arena_instance: std.heap.ArenaAllocator = .init(gpa);
         return .{ .gpa = gpa, .arena = arena_instance.state };
     }
@@ -1022,7 +1022,7 @@ pub fn skip(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Er
 /// is, as git leaves it. The state goes either way.
 pub fn abort(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature, blocked: ?*three_way.Blocked) Self.Error!void {
     try initConfig(repo);
-    const text = (try state_file.read(gpa, io, repo.gitDirectory(), head_path)) orelse {
+    const text = (try state_file.read(gpa, io, repo.gitDirectory().get(), head_path)) orelse {
         if (!repo.refStore().root().exists(repo.allocator(), io, .cherry_pick_head) and
             !repo.refStore().root().exists(repo.allocator(), io, .revert_head)) return error.NoSequencerInProgress;
         return resetMerge(gpa, io, repo, try currentHead(gpa, io, repo), .{ .who = who, .blocked = blocked });
@@ -1055,7 +1055,7 @@ fn currentHead(gpa: Allocator, io: Io, repo: *Repository) Error!Oid {
 fn abortIsSafe(gpa: Allocator, io: Io, repo: *Repository) Error!bool {
     var head = try head_mod.read(gpa, io, repo);
     defer head.deinit(gpa);
-    const text = (try state_file.read(gpa, io, repo.gitDirectory(), safety_path)) orelse {
+    const text = (try state_file.read(gpa, io, repo.gitDirectory().get(), safety_path)) orelse {
         return head.oid == null;
     };
     defer gpa.free(text);

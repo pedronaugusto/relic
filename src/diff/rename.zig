@@ -19,6 +19,7 @@
 const rename = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const Io = std.Io;
@@ -712,7 +713,7 @@ pub fn GitMap(comptime V: type) type {
             try self.index.put(arena, owned, i);
             self.size += 1;
             if (self.size > self.grow_at) try self.rehash(arena, @intCast(self.table.len << 2));
-            assert(self.size == self.index.count());
+            aegis.assert.invariant(self.size == self.index.count(), "self.size == self.index.count()");
         }
 
         /// `strmap_remove`.

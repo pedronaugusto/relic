@@ -470,7 +470,7 @@ fn tookLock(arena: Allocator, io: Io, server: *lfsapi.Server, repo: *Repository,
     var cache = try Cache.load(arena, io, server, ref);
     cache.addOurs(arena, taken) catch return error.OutOfMemory;
     try cache.save(arena, io, server, ref);
-    if (repo.workDirectory()) |wt| _ = try setWritable(io, wt, path, true);
+    if (repo.workDirectory()) |wt| _ = try setWritable(io, wt.get(), path, true);
 }
 
 /// Give back the lock with `id`, or break someone else's with `force`, as
@@ -543,7 +543,8 @@ fn gaveBack(arena: Allocator, io: Io, server: *lfsapi.Server, repo: *Repository,
     try cache.remove(arena, id);
     try cache.save(arena, io, server, ref);
     const path = asked orelse if (checkPath(released.path)) released.path else |_| return;
-    if (repo.workDirectory()) |wt| {
+    if (repo.workDirectory()) |lent_wt| {
+        const wt = lent_wt.get();
         if (readOnlyWanted(&server.settings)) {
             var lockables = try Lockables.load(io, repo);
             defer lockables.deinit();
@@ -655,7 +656,7 @@ pub fn list(io: Io, server: *lfsapi.Server, repo: *Repository, filter: Filter, o
         if (filter.limit != 0 and locks.items.len >= filter.limit) break;
         cursor = try pages.next(arena, page.next_cursor) orelse break;
     }
-    out.locks = locks.items;
+    out.locks = try locks.toOwnedSlice(arena);
     if (filter.path == null and filter.id == null and filter.limit == 0) {
         var cache = try Cache.load(arena, io, server, ref);
         cache.remote = out.locks;
@@ -718,8 +719,8 @@ pub fn verify(io: Io, server: *lfsapi.Server, repo: *Repository, options: Option
         try theirs.appendSlice(arena, page.theirs);
         cursor = try pages.next(arena, page.next_cursor) orelse break;
     }
-    out.ours = ours.items;
-    out.theirs = theirs.items;
+    out.ours = try ours.toOwnedSlice(arena);
+    out.theirs = try theirs.toOwnedSlice(arena);
     var cache = try Cache.load(arena, io, server, ref);
     cache.ours = out.ours;
     cache.theirs = out.theirs;
@@ -1076,7 +1077,7 @@ pub const Lockables = struct {
 
     /// Load them for `repo`.
     pub fn load(io: Io, repo: *Repository) Self.Error!Lockables {
-        return .{ .attrs = try repo.loadAttrs(io), .work_dir = repo.workDirectory() };
+        return .{ .attrs = try repo.loadAttrs(io), .work_dir = if (repo.workDirectory()) |work| work.get() else null };
     }
 
     /// Whether `path` has the `lockable` attribute.
@@ -1115,17 +1116,17 @@ pub const Fixed = struct {
 /// `lfs.setlockablereadonly` is false.
 pub fn fixWriteFlags(gpa: Allocator, io: Io, repo: *Repository, paths: ?[]const []const u8, options: Options) Self.Error!Fixed {
     var fixed: Fixed = .{};
-    const wt = repo.workDirectory() orelse return fixed;
-    var settings = try lfsapi.Settings.load(gpa, io, repo.configuration(), repo.workDirectory());
+    const wt = (repo.workDirectory() orelse return fixed).get();
+    var settings = try lfsapi.Settings.load(gpa, io, repo.configuration(), if (repo.workDirectory()) |work| work.get() else null);
     defer settings.deinit();
     if (!readOnlyWanted(&settings)) return fixed;
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     var store_settings = try lfs.Lfs.load(gpa, io, repo.configuration(), .{
-        .common_dir = repo.commonDirectory(),
+        .common_dir = repo.commonDirectory().get(),
         .shared = repo.sharedPermissions(),
-        .work_dir = repo.workDirectory(),
+        .work_dir = if (repo.workDirectory()) |work| work.get() else null,
     });
     defer store_settings.deinit();
     const ref = try refFor(arena, io, repo, options);

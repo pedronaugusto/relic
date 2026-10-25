@@ -15,6 +15,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -41,7 +42,7 @@ pub const Error = error{
     CorruptCommitGraph,
     /// A detached split layer passed to parse without its base graphs.
     SplitGraphUnsupported,
-} || Allocator.Error || Io.Dir.ReadFileAllocError;
+} || Allocator.Error || aegis.own.ReadFileError;
 
 /// One commit, as the graph stores it.
 pub const Commit = struct {
@@ -262,7 +263,7 @@ pub const Graph = struct {
 
     /// The trailing digest, checked when the graph is parsed.
     pub fn checksum(graph: *const Graph) Oid {
-        // unreachable: the slice is the last raw length of bytes, which parse checked are there
+        // aegis: no-danger: the slice is the last raw length of bytes, which parse checked are there
         return Oid.fromRaw(graph.kind, graph.bytes[graph.bytes.len - graph.kind.rawLen() ..]) catch unreachable;
     }
 
@@ -318,7 +319,7 @@ pub const Graph = struct {
         if (position < graph.base_count) return graph.base.?.nameAt(position);
         const local = position - graph.base_count;
         const raw_len = graph.kind.rawLen();
-        // unreachable: the slice is cut to the format's raw length
+        // aegis: no-danger: the slice is cut to the format's raw length
         return Oid.fromRaw(graph.kind, graph.bytes[graph.names_at + @as(usize, local) * raw_len ..][0..raw_len]) catch unreachable;
     }
 
@@ -350,7 +351,7 @@ pub const Graph = struct {
         const local = position - graph.base_count;
         const raw_len = graph.kind.rawLen();
         const row = graph.bytes[graph.data_at + @as(usize, local) * (raw_len + 16) ..];
-        // unreachable: the slice is cut to the format's raw length
+        // aegis: no-danger: the slice is cut to the format's raw length
         const tree = Oid.fromRaw(graph.kind, row[0..raw_len]) catch unreachable;
         const first = std.mem.readInt(u32, row[raw_len..][0..4], .big);
         const second = std.mem.readInt(u32, row[raw_len + 4 ..][0..4], .big);

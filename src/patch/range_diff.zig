@@ -193,7 +193,7 @@ const Reader = struct {
             .a = a,
             .diff_options = try diff.configured(config, .{}),
             .renames = (try diff.RenameSettings.read(config)).options(),
-            .order = try diff.Order.configured(a, io, repo.topDirectory(), config),
+            .order = try diff.Order.configured(a, io, repo.topDirectory().get(), config),
             .show_root = config.getBool("log.showroot", true) catch true,
             .quote_path = config.getBool("core.quotepath", true) catch true,
             .textconv = options.textconv,
@@ -280,7 +280,7 @@ const Reader = struct {
                 } else try r.appendFile(&text, &patch, change, .{ .old = change.old, .new = change.new });
             }
         }
-        patch.text = text.items;
+        patch.text = try text.toOwnedSlice(a);
         return patch;
     }
 
@@ -295,7 +295,7 @@ const Reader = struct {
         const same = (if (old) |o| o.oid else zero).eql(if (new) |n| n.oid else zero);
         var pair: diff.FilePair = undefined;
         if (!same) {
-            const drivers: driver.Drivers = .{ .attrs = if (r.attrs) |*attrs| attrs else null, .work_dir = r.repo.workDirectory(), .config = r.repo.configuration() };
+            const drivers: driver.Drivers = .{ .attrs = if (r.attrs) |*attrs| attrs else null, .work_dir = if (r.repo.workDirectory()) |work| work.get() else null, .config = r.repo.configuration() };
             try pair.init(r.gpa, r.io, .{ .db = r.repo.objectDatabase(), .drivers = drivers, .textconv = r.textconv }, sides);
             if (pair.silent(change.status)) {
                 pair.deinit();

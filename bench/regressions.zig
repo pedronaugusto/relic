@@ -96,7 +96,7 @@ fn row0() !void {
     defer index.deinit();
 
     const cold_start = benchmarkNow(io);
-    const cold = try worktree.addAll(gpa, io, repo.workDirectory().?, .{ .index = &index, .db = repo.objectDatabase() }, .{ .rules = wt_rules });
+    const cold = try worktree.addAll(gpa, io, repo.workDirectory().?.get(), .{ .index = &index, .db = repo.objectDatabase() }, .{ .rules = wt_rules });
     const cold_add_ms = elapsedMs(io, cold_start);
     const cold_stats = repo.objectDatabase().stats;
 
@@ -104,12 +104,12 @@ fn row0() !void {
     const tree = try worktree.writeTree(gpa, io, &index, repo.objectDatabase());
     const cold_tree_ms = elapsedMs(io, cold_tree_start);
 
-    try index.write(io, repo.gitDirectory(), "index", .{});
+    try index.write(io, repo.gitDirectory().get(), "index", .{});
     index.deinit();
     index = try repo.openIndex(io);
 
     const warm_start = benchmarkNow(io);
-    const warm = try worktree.addAll(gpa, io, repo.workDirectory().?, .{ .index = &index, .db = repo.objectDatabase() }, .{ .rules = wt_rules });
+    const warm = try worktree.addAll(gpa, io, repo.workDirectory().?.get(), .{ .index = &index, .db = repo.objectDatabase() }, .{ .rules = wt_rules });
     const warm_add_ms = elapsedMs(io, warm_start);
 
     const warm_tree_start = benchmarkNow(io);
@@ -125,7 +125,7 @@ fn row0() !void {
         try repo_git.writeFile(io, path, text);
     }
     const status_start = benchmarkNow(io);
-    var result = try worktree.status(gpa, io, repo.workDirectory().?, .{ .index = &index, .db = repo.objectDatabase() }, .{
+    var result = try worktree.status(gpa, io, repo.workDirectory().?.get(), .{ .index = &index, .db = repo.objectDatabase() }, .{
         .rules = wt_rules,
         .head_tree = null,
     });
@@ -146,7 +146,7 @@ fn row0() !void {
         @tagName(builtin.optimize),
         fileCount(),
         directoryCount(),
-        dir_scan.armFor(gpa, io, repo.workDirectory().?),
+        dir_scan.armFor(gpa, io, repo.workDirectory().?.get()),
         repo.objectDatabase().timestamp_resolution.ns,
         cold_add_ms,
         warm_add_ms,
@@ -409,7 +409,7 @@ fn row3() !void {
         defer index.deinit();
 
         const start = benchmarkNow(io);
-        const outcome = try worktree.addAll(gpa, io, repo.workDirectory().?, .{ .index = &index, .db = repo.objectDatabase() }, .{
+        const outcome = try worktree.addAll(gpa, io, repo.workDirectory().?.get(), .{ .index = &index, .db = repo.objectDatabase() }, .{
             .rules = wt_rules,
             .new_blobs = where,
         });
@@ -668,7 +668,7 @@ fn row5() !void {
             var wt_rules = try p.repo.worktreeRules();
             wt_rules.ignore = &rules;
             wt_rules.attrs = &attrs;
-            var result = try worktree.status(std.heap.smp_allocator, benchmark_io, p.repo.workDirectory().?, .{ .index = p.index, .db = p.repo.objectDatabase() }, .{
+            var result = try worktree.status(std.heap.smp_allocator, benchmark_io, p.repo.workDirectory().?.get(), .{ .index = p.index, .db = p.repo.objectDatabase() }, .{
                 .rules = wt_rules,
                 .head_tree = null,
             });

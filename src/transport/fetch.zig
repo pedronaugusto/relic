@@ -399,7 +399,7 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
     defer remote.deinit();
 
     var to_warnings: fsck.ToWarnings = .{ .warnings = options.warnings };
-    var rules = try fsck.forTransfer(gpa, io, repo.configuration(), .{ .kind = repo.objectFormat(), .scope = .fetch, .base = repo.topDirectory() }, .{ .explicit = options.check_objects, .sink = to_warnings.sink() });
+    var rules = try fsck.forTransfer(gpa, io, repo.configuration(), .{ .kind = repo.objectFormat(), .scope = .fetch, .base = repo.topDirectory().get() }, .{ .explicit = options.check_objects, .sink = to_warnings.sink() });
     defer if (rules) |*r| r.deinit(gpa);
     const checks: ?*const fsck.Rules = if (rules) |*r| r else null;
 
@@ -665,7 +665,7 @@ fn fetchSubmodule(gpa: Allocator, io: Io, run: *SubmoduleRun, options: Options, 
             missing.append(arena, arena.dupe(u8, oid.hex(&hex)) catch |err| return run.fail(err)) catch |err| return run.fail(err);
         }
         if (missing.items.len == 0) return;
-        each.refspecs = missing.items;
+        each.refspecs = missing.toOwnedSlice(arena) catch |err| return run.fail(err);
     }
     const remote = submodule.defaultRemote(arena, io, sub) catch |err| return run.fail(err);
     run.outcomes[pass] = fetch(gpa, io, sub, remote, each) catch |err| return run.fail(err);
@@ -789,8 +789,11 @@ fn bringObjects(
     const tips = try negotiationTips(arena, gpa, io, repo, b.local_refs, if (advertised) |list| list.refs else b.remote_refs, b.options, .{ .restrict = restrict, .deepen = b.deepen != null });
     const include = try resolveTips(arena, gpa, io, repo, b.options.negotiation_include orelse b.remote.negotiation_include, "--negotiation-include", b.options.warnings);
 
-    var pack_dir = try repo.objectDatabase().openPackDirectory(io);
-    defer pack_dir.close(io);
+    var opened_pack_dir = try repo.objectDatabase().openPackDirectory(io);
+
+    defer opened_pack_dir.deinit(io);
+
+    const pack_dir = opened_pack_dir.lend().get();
     const boundary = try shallowList(arena, &repo.objectDatabase().shallow);
     var shallow_info: fetch_pack.ShallowInfo = .{ .gpa = gpa };
     defer shallow_info.deinit();
@@ -1097,7 +1100,7 @@ const BoundaryChange = struct {
             for (info.shallow.items) |oid| {
                 if (!b.old.contains(oid)) try roots.append(arena, oid);
             }
-            b.remote_roots = roots.items;
+            b.remote_roots = try roots.toOwnedSlice(arena);
         }
         repo.objectDatabase().shallow = try shallow_mod.apply(gpa, &b.old, info.shallow.items, info.unshallow.items);
         b.moved = true;
@@ -2058,7 +2061,7 @@ fn deepenRequest(repo: *Repository, options: Options) Error!?fetch_pack.Deepen {
     return .{
         .depth = options.depth orelse options.deepen,
         .relative = options.deepen != null,
-        .since = if (options.shallow_since) |t| t.toSeconds() else null,
+        .since = if (options.shallow_since) |t| gitdate.seconds(t) else null,
         .not = options.shallow_exclude,
     };
 }
@@ -2789,7 +2792,7 @@ pub const Prefetcher = struct {
     }
 
     fn run(context: *anyopaque, io: Io, repo: *Repository) error{PrefetchFailed}!void {
-        const p: *Prefetcher = @ptrCast(@alignCast(context)); // safe: the context handed out with this function is a Prefetcher
+        const p: *Prefetcher = @ptrCast(@alignCast(context)); // aegis: no-danger: the context handed out with this function is a Prefetcher
         prefetchAll(p.gpa, io, repo, p.options) catch |err| {
             p.failure = err;
             return error.PrefetchFailed;

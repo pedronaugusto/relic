@@ -100,8 +100,8 @@ pub fn changedSubmodules(arena: Allocator, gpa: Allocator, io: Io, repo: *Reposi
             if (!contains(commits.items[at].items, link.oid)) try commits.items[at].append(arena, link.oid);
         }
     }
-    for (found.items, commits.items) |*c, list| c.commits = list.items;
-    return found.items;
+    for (found.items, commits.items) |*c, *list| c.commits = try list.toOwnedSlice(arena);
+    return found.toOwnedSlice(arena);
 }
 
 /// The name of the submodule at `path` in `commit`: its `.gitmodules`
@@ -121,7 +121,7 @@ fn nameAt(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, modules: 
 /// git's `default_name_or_path`: `path` while a repository is checked out
 /// there, else `null`.
 fn populatedPath(gpa: Allocator, io: Io, repo: *Repository, path: []const u8) Self.Error!?[]const u8 {
-    const wt = repo.workDirectory() orelse return null;
+    const wt = (repo.workDirectory() orelse return null).get();
     return if (try gitlink.isRepository(gpa, io, wt, path)) path else null;
 }
 
@@ -273,7 +273,7 @@ pub fn planFetch(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, ch
     var inaccessible: std.ArrayList([]const u8) = .empty;
     var missing: std.ArrayList(Changed) = .empty;
     var plan: FetchPlan = .{ .explicit = choice.explicit, .jobs = 1, .tasks = &.{}, .inaccessible = &.{}, .missing = &.{} };
-    const wt = repo.workDirectory() orelse return plan;
+    const wt = (repo.workDirectory() orelse return plan).get();
     var index = try repo.openIndex(io);
     defer index.deinit();
     var listing = try submodule.list(gpa, io, repo, &index, null);
@@ -319,9 +319,9 @@ pub fn planFetch(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, ch
         try seen.append(arena, c.name);
         try tasks.append(arena, .{ .name = c.name, .path = c.path, .default = default, .commit = c.commit, .wanted = c.commits });
     }
-    plan.tasks = tasks.items;
-    plan.inaccessible = inaccessible.items;
-    plan.missing = missing.items;
+    plan.tasks = try tasks.toOwnedSlice(arena);
+    plan.inaccessible = try inaccessible.toOwnedSlice(arena);
+    plan.missing = try missing.toOwnedSlice(arena);
     return plan;
 }
 
@@ -380,7 +380,7 @@ fn hasRepository(gpa: Allocator, io: Io, repo: *Repository, path: []const u8, na
 
 /// git's `repo_has_absorbed_submodules`: `modules/` holds something.
 fn hasAbsorbed(io: Io, repo: *Repository) Self.Error!bool {
-    var dir = repo.gitDirectory().openDir(io, "modules", .{ .iterate = true }) catch return false;
+    var dir = repo.gitDirectory().get().openDir(io, "modules", .{ .iterate = true }) catch return false;
     defer dir.close(io);
     var it = dir.iterate();
     return try it.next(io) != null;

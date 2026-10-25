@@ -267,7 +267,7 @@ test "revision parsing preserves allocation resource failures" {
     const commit = try repo.objectDatabase().write(io, .commit, "tree " ++ @as([40]u8, @splat('0')) ++ "\nparent " ++ @as([40]u8, @splat('1')) ++ "\nauthor A <a@b> 0 +0000\ncommitter A <a@b> 0 +0000\n\nsubject\n");
     var hex: [hash.max_hex_len]u8 = undefined;
     const text = commit.hex(&hex);
-    try repo.gitDirectory().writeFile(io, .{ .sub_path = "refs/heads/main", .data = text });
+    try repo.gitDirectory().get().writeFile(io, .{ .sub_path = "refs/heads/main", .data = text });
     const Check = struct {
         fn run(allocator: Allocator, repository: *Repository, expr: []const u8, expected: Oid) !void {
             const got = try rev_parse.resolve(allocator, std.testing.io, repository.revisionSource(), expr);

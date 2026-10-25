@@ -81,7 +81,7 @@ pub const Store = struct {
     pub const Error = ErrorNamespace.Error;
 
     gpa: Allocator,
-    dir: Io.Dir,
+    dir: fs.OwnedDir,
     db: odb.Odb,
     durability: fs.Durability,
     /// Only inserted after the entire subtree has been taken into db.
@@ -91,19 +91,20 @@ pub const Store = struct {
     /// Open or create a private store in `dir`. Its own handle is retained;
     /// the caller may close the supplied handle. No Git repository is needed.
     pub fn open(gpa: Allocator, io: Io, dir: Io.Dir, options: OpenOptions) Self.Error!Store {
-        const owned = try dir.openDir(io, ".", .{ .iterate = true });
-        errdefer owned.close(io);
-        try owned.createDirPath(io, "objects/pack");
-        try owned.createDirPath(io, "objects/info");
-        var db = try opening.openOwn(odb.Odb, gpa, io, owned, options.kind, options.odb);
+        var owned: fs.OwnedDir = .init(try dir.openDir(io, ".", .{ .iterate = true }));
+        errdefer owned.deinit(io);
+        const own_dir = owned.lend().get();
+        try own_dir.createDirPath(io, "objects/pack");
+        try own_dir.createDirPath(io, "objects/info");
+        var db = try opening.openOwn(odb.Odb, gpa, io, own_dir, options.kind, options.odb);
         errdefer db.deinit(io);
-        return .{ .gpa = gpa, .dir = owned, .db = db, .durability = options.durability };
+        return .{ .gpa = gpa, .dir = owned.move(), .db = db, .durability = options.durability };
     }
 
     pub fn deinit(store: *Store, io: Io) void {
         store.complete.deinit(store.gpa);
         store.db.deinit(io);
-        store.dir.close(io);
+        store.dir.deinit(io);
         store.* = undefined;
     }
 
@@ -122,7 +123,7 @@ pub const Store = struct {
             if (r.objectFormat() != store.db.objectFormat()) return error.ObjectFormatMismatch;
         }
         const wt = switch (source) {
-            .repository => |r| r.workDirectory() orelse return error.BareRepository,
+            .repository => |r| (r.workDirectory() orelse return error.BareRepository).get(),
             .folder => |dir| dir,
         };
         var ignored = if (source_repo) |r| try r.loadIgnore(io) else try ignore_mod.Rules.init(store.gpa, .{ .case_fold = false });
@@ -135,18 +136,18 @@ pub const Store = struct {
             const lfsconfig = try r.lfsconfigText(io);
             defer if (lfsconfig) |text| r.allocator().free(text);
             // Native LFS writes to the private store, never to the source.
-            drivers = try filter.Drivers.load(store.gpa, io, r.configuration(), .{ .common = store.dir, .work = wt, .shared = r.sharedPermissions() }, .{ .config_text = lfsconfig, .native_provider = options.native_provider });
+            drivers = try filter.Drivers.load(store.gpa, io, r.configuration(), .{ .common = store.dir.lend().get(), .work = wt, .shared = r.sharedPermissions() }, .{ .config_text = lfsconfig, .native_provider = options.native_provider });
             // lfs.storage belongs to the source's storage policy. Its rules
             // still apply, but even an absolute storage path cannot redirect
             // a snapshot write out of the private store.
-            if (drivers.?.native_driver) |implementation| implementation.retarget(store.dir);
+            if (drivers.?.native_driver) |implementation| implementation.retarget(store.dir.lend().get());
         }
         var rules = if (source_repo) |r| try r.worktreeRules() else worktree.Rules{};
         rules.ignore = &ignored;
         rules.attrs = &attrs;
         rules.filters = if (drivers) |*d| d else null;
         var staged = if (source_repo) |r|
-            try index.Index.read(store.gpa, io, r.gitDirectory(), "index", .{ .git_dir = r.gitDirectory(), .kind = r.objectFormat(), .timestamp_resolution = r.objectDatabase().timestamp_resolution })
+            try index.Index.read(store.gpa, io, r.gitDirectory().get(), "index", .{ .git_dir = r.gitDirectory().get(), .kind = r.objectFormat(), .timestamp_resolution = r.objectDatabase().timestamp_resolution })
         else
             index.Index.initEmpty(store.gpa, store.db.objectFormat());
         defer staged.deinit();
@@ -203,7 +204,7 @@ pub const Store = struct {
         try store.db.syncBatch(io);
         if (store.durability == .durable) {
             try store.db.makeDurable(io, &.{tree});
-            try fs.syncDirectory(io, store.dir, ".");
+            try fs.syncDirectory(io, store.dir.lend().get(), ".");
         }
         return .{ .tree = tree };
     }

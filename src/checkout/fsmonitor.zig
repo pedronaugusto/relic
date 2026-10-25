@@ -27,6 +27,7 @@
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -35,6 +36,7 @@ const index_mod = @import("../index/index.zig");
 const hash = @import("../hash/hash.zig");
 const program = @import("../process.zig").program;
 const config_mod = @import("../config/config.zig");
+const fs = @import("../fs/fs.zig");
 const pkt_line = @import("../codec.zig").pkt_line;
 const airlock = @import("airlock");
 const reactor = @import("reactor");
@@ -342,8 +344,9 @@ fn converseWithDaemon(arena: Allocator, io: Io, daemon: Daemon, since: []const u
         return exchange(arena, &writer.interface, &reader.interface, since);
     }
     if (!Io.net.has_unix_sockets) return null;
-    var stream = (try connectSocket(arena, io, daemon)) orelse return null;
-    defer stream.close(io);
+    var owned = (try connectSocket(arena, io, daemon)) orelse return null;
+    defer owned.deinit(io);
+    const stream = owned.lend().get();
     var writer = stream.writer(io, &write_buffer);
     var reader = stream.reader(io, read_buffer);
     return exchange(arena, &writer.interface, &reader.interface, since);
@@ -387,11 +390,11 @@ else
 /// git's `connect_to_server`: a refused connection is a daemon too busy to
 /// take it, tried again every 50 ms for a second; anything else, a socket
 /// that is not there among them, is no daemon.
-fn connectSocket(arena: Allocator, io: Io, daemon: Daemon) Error!?Io.net.Stream {
+fn connectSocket(arena: Allocator, io: Io, daemon: Daemon) Error!?fs.OwnedStream {
     const address: Io.net.UnixAddress = .{ .path = (try socketPath(arena, io, daemon)) orelse return null };
     var waited_ms: u32 = 0;
     while (true) {
-        return reactor.net.connectUnix(io, &address) catch |err| switch (err) {
+        return .init(reactor.net.connectUnix(io, &address) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             error.ConnectionRefused, error.WouldBlock => {
                 if (waited_ms >= 1000) return null;
@@ -400,7 +403,7 @@ fn connectSocket(arena: Allocator, io: Io, daemon: Daemon) Error!?Io.net.Stream 
                 continue;
             },
             else => return null,
-        };
+        });
     }
 }
 
@@ -506,9 +509,12 @@ fn lowerBound(items: []const index_mod.Entry, path: []const u8) usize {
 }
 
 /// git's `getnanotime`, as text.
+/// The real clock to the nanosecond, as the hook's token counts it.
+const Nanoseconds = aegis.units.Instant(.real, .nanosecond, i96);
+
 fn nanoseconds(arena: Allocator, io: Io) Allocator.Error![]const u8 {
     const now = Io.Clock.real.now(io);
-    return arena.print("{d}", .{@max(now.nanoseconds, 0)});
+    return arena.print("{d}", .{@max(Nanoseconds.fromTimestamp(now, .exact).raw(), 0)});
 }
 
 test "an answer's paths and a directory's entries are taken out of what is vouched for" {

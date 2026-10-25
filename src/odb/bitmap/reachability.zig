@@ -3,6 +3,7 @@
 const ErrorNamespace = @This();
 const Self = @This();
 const std = @import("std");
+const aegis = @import("aegis");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const hash = @import("../../hash/hash.zig");
@@ -13,7 +14,7 @@ const bitmap = @import("../bitmap.zig");
 const object = @import("../../object/object.zig");
 const Oid = hash.Oid;
 
-pub const Error = bitmap.Error || midx.Error || pack.IndexError || Io.Dir.AccessError || Io.Dir.OpenError || Io.Dir.Iterator.Error || Io.Dir.ReadFileAllocError;
+pub const Error = bitmap.Error || midx.Error || pack.IndexError || Io.Dir.AccessError || Io.Dir.OpenError || Io.Dir.Iterator.Error || aegis.own.ReadFileError;
 
 /// The two orders a bitmap uses: selected commits are in name order, bits in pack order.
 pub const Store = struct {

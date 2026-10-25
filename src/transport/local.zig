@@ -175,7 +175,7 @@ pub const Remote = struct {
             }
             try out.append(arena, ref);
         }
-        list.refs = out.items;
+        list.refs = try out.toOwnedSlice(arena);
         return list;
     }
 

@@ -8,6 +8,7 @@ pub const PathError = @import("config/config.zig").PathError;
 pub const PathSettingError = @import("config/config.zig").PathSettingError;
 pub const Level = @import("config/config.zig").Level;
 pub const SourceFile = @import("config/config.zig").SourceFile;
+pub const FileId = @import("config/config.zig").FileId;
 pub const Entry = @import("config/config.zig").Entry;
 pub const Sources = @import("config/config.zig").Sources;
 pub const Context = @import("config/config.zig").Context;

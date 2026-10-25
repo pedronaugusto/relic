@@ -521,8 +521,8 @@ pub fn deleteMerged(gpa: Allocator, io: Io, repo: *Repository, inputs: MergedInp
     };
     deletable.sort(Order{ .keys = deletable.keys() });
     std.mem.sort([]const u8, kept.items, {}, lessThanName);
-    outcome.deleted = deletable.values();
-    outcome.kept = kept.items;
+    outcome.deleted = try a.dupe(Deleted, deletable.values());
+    outcome.kept = try kept.toOwnedSlice(a);
     if (options.dry_run or deletable.count() == 0) return outcome;
 
     var edits: std.ArrayList(Repository.ConfigEdit) = .empty;

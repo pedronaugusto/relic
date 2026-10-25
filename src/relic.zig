@@ -232,6 +232,7 @@ comptime {
 
 const std = @import("std");
 const conduit = @import("conduit");
+const fs = @import("fs/fs.zig");
 
 /// The module names a table's rows begin with: each line starting with
 /// `row`, its name to the closing backtick.
@@ -288,7 +289,7 @@ fn checkNamespaces(comptime ns: type, comptime prefix: []const u8, comptime dept
 
 /// Types relic publishes as the family package's own, whose conventions
 /// are that package's.
-const foreign = .{conduit.Child};
+const foreign = .{ conduit.Child, fs.OwnedDir, fs.OwnedFile, fs.OwnedStream, fs.OwnedServer };
 
 fn isForeign(comptime T: type) bool {
     inline for (foreign) |F| if (T == F) return true;

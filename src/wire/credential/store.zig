@@ -15,6 +15,8 @@
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
+const SecretBytes = aegis.SecretBytes;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -25,7 +27,7 @@ pub const Error = error{
     /// A file could not be locked within the timeout: git's "unable to
     /// get credential storage lock in <n> ms".
     LockTimeout,
-} || Allocator.Error || Io.Cancelable || fs.LockFile.OpenError || fs.CommitError || Io.Dir.ReadFileAllocError || Io.Writer.Error;
+} || Allocator.Error || Io.Cancelable || fs.LockFile.OpenError || fs.CommitError || Io.File.OpenError || Io.File.StatError || Io.File.Reader.Error || Io.Writer.Error;
 
 /// The parts of a credential the helper is handed, borrowed.
 pub const Credential = struct {
@@ -38,7 +40,7 @@ pub const Credential = struct {
 
 /// What `get` found, in the caller's allocator; the caller wipes the
 /// password.
-pub const Found = struct { username: []u8, password: []u8 };
+pub const Found = struct { username: []u8, password: SecretBytes };
 
 /// Which files, and how long a lock is waited for.
 pub const Files = struct {
@@ -64,12 +66,28 @@ pub fn defaultFiles(arena: Allocator, environ: *const std.process.Environ.Map) A
 }
 
 /// The file's text, or `null` when it cannot be read for not being there
-/// or for want of permission, which git passes over.
-fn readFile(gpa: Allocator, io: Io, path: []const u8) Self.Error!?[]u8 {
-    return Io.Dir.cwd().readFileAlloc(io, path, gpa, .unlimited) catch |err| switch (err) {
-        error.FileNotFound, error.AccessDenied, error.PermissionDenied => null,
-        else => |e| e,
+/// or for want of permission, which git passes over: `gpa`'s, read
+/// straight into storage that is wiped as it grows and when it is let go.
+fn readFile(gpa: Allocator, io: Io, path: []const u8) Self.Error!?SecretBytes {
+    const file = Io.Dir.cwd().openFile(io, path, .{}) catch |err| switch (err) {
+        error.FileNotFound, error.AccessDenied, error.PermissionDenied => return null,
+        else => |e| return e,
     };
+    defer file.close(io);
+    const size = std.math.cast(usize, (try file.stat(io)).size) orelse return error.OutOfMemory;
+    // The whole file and a last read that finds its end, as it stands now.
+    var text = try SecretBytes.init(gpa, size +| 1);
+    errdefer text.deinit();
+    var into = SecretBytes.Writer.init(&text);
+    // No buffer of the reader's: each read lands in `text`'s own storage.
+    var reader = file.reader(io, &.{});
+    _ = reader.interface.streamRemaining(&into.interface) catch |err| switch (err) {
+        error.ReadFailed => return reader.err.?,
+        // The writer fails only for want of memory.
+        error.WriteFailed => return error.OutOfMemory,
+    };
+    into.interface.flush() catch return error.OutOfMemory;
+    return text;
 }
 
 /// One line of a file: its text, and the credential in it when it holds
@@ -90,19 +108,18 @@ fn entryOf(gpa: Allocator, line: []const u8) Allocator.Error!?parts_mod.UrlParts
 /// a credential with every part of `want`'s but its password.
 pub fn get(gpa: Allocator, io: Io, files: Files, want: Credential) Self.Error!?Found {
     for (files.paths) |path| {
-        const text = (try readFile(gpa, io, path)) orelse continue;
-        defer {
-            std.crypto.secureZero(u8, text);
-            gpa.free(text);
-        }
-        var lines = std.mem.splitScalar(u8, text, '\n');
+        var text = (try readFile(gpa, io, path)) orelse continue;
+        defer text.deinit();
+        var lines = std.mem.splitScalar(u8, text.expose(), '\n');
         while (lines.next()) |line| {
             var entry = (try entryOf(gpa, line)) orelse continue;
             defer entry.deinit(gpa);
             if (!parts_mod.credentialMatch(want, &entry, false)) continue;
             const username = try gpa.dupe(u8, entry.username.?);
-            errdefer gpa.free(username);
-            return .{ .username = username, .password = try gpa.dupe(u8, entry.password.?.expose()) };
+            var password: SecretBytes = undefined;
+            entry.password.?.moveInto(&password);
+            entry.password = null;
+            return .{ .username = username, .password = password };
         }
     }
     return null;
@@ -114,25 +131,13 @@ pub fn get(gpa: Allocator, io: Io, files: Files, want: Credential) Self.Error!?F
 pub fn store(gpa: Allocator, io: Io, files: Files, c: Credential) Self.Error!void {
     if (c.protocol == null or (c.host == null and c.path == null) or c.username == null or c.password == null) return;
     if (files.paths.len == 0) return;
-    var line: std.ArrayList(u8) = .empty;
-    defer {
-        std.crypto.secureZero(u8, line.items);
-        line.deinit(gpa);
-    }
-    try line.print(gpa, "{s}://", .{c.protocol.?});
-    try encode(gpa, &line, c.username.?, false);
-    try line.append(gpa, ':');
-    try encode(gpa, &line, c.password.?, false);
-    try line.append(gpa, '@');
-    if (c.host) |host| try encode(gpa, &line, host, false);
-    if (c.path) |path| {
-        try line.append(gpa, '/');
-        try encode(gpa, &line, path, true);
-    }
+    var line = try SecretBytes.init(gpa, 0);
+    defer line.deinit();
+    try writeLine(&line, c);
     const target = for (files.paths) |path| {
         if (exists(io, path)) break path;
     } else files.paths[0];
-    try rewrite(gpa, io, target, files.lock_timeout_ms, .{ .first = line.items, .drop = c, .match_password = false });
+    try rewrite(gpa, io, target, files.lock_timeout_ms, .{ .first = line.expose(), .drop = c, .match_password = false });
 }
 
 /// git's `remove_credential`: nothing for a pattern with none of the
@@ -174,12 +179,10 @@ fn rewrite(gpa: Allocator, io: Io, path: []const u8, timeout_ms: u32, how: Rewri
         try w.writeAll(line);
         try w.writeByte('\n');
     }
-    if (try readFile(gpa, io, path)) |text| {
-        defer {
-            std.crypto.secureZero(u8, text);
-            gpa.free(text);
-        }
-        var lines = std.mem.splitScalar(u8, text, '\n');
+    var read = try readFile(gpa, io, path);
+    defer if (read) |*text| text.deinit();
+    if (read) |*text| {
+        var lines = std.mem.splitScalar(u8, text.expose(), '\n');
         while (lines.next()) |line| {
             // The text after the last newline is no line: git's getline.
             if (lines.index == null and line.len == 0) break;
@@ -195,13 +198,33 @@ fn rewrite(gpa: Allocator, io: Io, path: []const u8, timeout_ms: u32, how: Rewri
     try lock.commit(io);
 }
 
+/// A credential as `store` keeps it: `protocol://user:password@host/path`, each
+/// part encoded, after `line`'s live bytes.
+fn writeLine(line: *SecretBytes, c: Credential) Allocator.Error!void {
+    try parts_mod.appendParts(line, &.{ c.protocol.?, "://" });
+    try encode(line, c.username.?, false);
+    try parts_mod.appendParts(line, &.{":"});
+    try encode(line, c.password.?, false);
+    try parts_mod.appendParts(line, &.{"@"});
+    if (c.host) |host| try encode(line, host, false);
+    if (c.path) |path| {
+        try parts_mod.appendParts(line, &.{"/"});
+        try encode(line, path, true);
+    }
+}
+
 /// git's `strbuf_addstr_urlencode`: every byte but RFC 3986's unreserved
 /// ones -- and, for a path, its reserved ones -- as `%xx`.
-fn encode(gpa: Allocator, out: *std.ArrayList(u8), text: []const u8, reserved_too: bool) Allocator.Error!void {
+fn encode(line: *SecretBytes, text: []const u8, reserved_too: bool) Allocator.Error!void {
     for (text) |c| {
         const plain = std.ascii.isAlphanumeric(c) or std.mem.findScalar(u8, "-._~", c) != null or
             (reserved_too and std.mem.findScalar(u8, "!*'();:@&=+$,/?#[]", c) != null);
         // In lower case, as git's `strbuf_addf("%%%02x")`.
-        if (plain) try out.append(gpa, c) else try out.print(gpa, "%{x:0>2}", .{c});
+        if (plain) {
+            try parts_mod.appendParts(line, &.{&.{c}});
+        } else {
+            const hex = std.fmt.hex(c);
+            try parts_mod.appendParts(line, &.{ "%", &hex });
+        }
     }
 }

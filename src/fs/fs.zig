@@ -31,6 +31,36 @@ const conduit = @import("conduit");
 pub const Durability = enum { none, durable };
 const airlock = @import("airlock");
 const aegis = @import("aegis");
+
+/// A directory handle with its one owner, which closes it once: what an
+/// opener hands its caller, and what a struct keeping a handle open holds.
+pub const OwnedDir = aegis.own.OwnedIo(Io.Dir, closeDir);
+/// A file handle with its one owner, as `OwnedDir`.
+pub const OwnedFile = aegis.own.OwnedIo(Io.File, closeFile);
+/// A directory handle lent out of the owner that keeps it: not the
+/// holder's to close, and good until that owner closes it.
+pub const LentDir = aegis.own.Lent(Io.Dir);
+/// A connected socket with its one owner, as `OwnedDir`.
+pub const OwnedStream = aegis.own.OwnedIo(Io.net.Stream, closeStream);
+/// A listening socket with its one owner, as `OwnedDir`.
+pub const OwnedServer = aegis.own.OwnedIo(Io.net.Server, closeServer);
+
+fn closeDir(dir: *Io.Dir, io: Io) void {
+    dir.close(io);
+}
+
+fn closeFile(file: *Io.File, io: Io) void {
+    file.close(io);
+}
+
+fn closeStream(stream: *Io.net.Stream, io: Io) void {
+    stream.close(io);
+}
+
+fn closeServer(server: *Io.net.Server, io: Io) void {
+    server.deinit(io);
+}
+
 /// A requested durability level was refused by the filesystem.
 pub const SyncError = airlock.DirSyncError || airlock.SyncPathError || error{LevelUnavailable};
 
@@ -77,12 +107,12 @@ pub fn syncAll(gpa: Allocator, io: Io, files: []const Named, directories: []cons
     defer gpa.free(slots);
     var batch: airlock.Batch = .init(slots);
     defer batch.reset(io);
-    // unreachable: a slot for each file and each directory
+    // aegis: no-danger: a slot for each file and each directory
     for (files) |file| batch.addPath(file.dir, file.sub_path) catch unreachable;
-    // unreachable: a slot for each file and each directory
+    // aegis: no-danger: a slot for each file and each directory
     for (directories) |directory| batch.addDirPath(directory.dir, directory.sub_path) catch unreachable;
     _ = batch.commitOrRefuse(io, .{ .level = .data }) catch |err| switch (err) {
-        error.BatchFull => unreachable, // unreachable: nothing was added past the slots
+        error.BatchFull => unreachable, // aegis: no-danger: nothing was added past the slots
         else => |e| return e,
     };
 }
@@ -339,7 +369,7 @@ pub fn probeTimestampResolution(io: Io, dir: Io.Dir) Resolution {
         // A write whose time cannot be put on the file is a sample not taken.
         if (builtin.target.os.tag == .windows) syncFile(io, file, .{ .policy = .per_file }) catch break;
         const s = file.stat(io) catch break;
-        const nsec: u64 = @intCast(@mod(s.mtime.toNanoseconds(), std.time.ns_per_s));
+        const nsec: u64 = Stat.splitNsec(s.mtime);
         // A zero is divisible by anything: it narrows nothing, and gcd
         // takes no pair of zeros.
         if (nsec != 0) divisor = std.math.gcd(divisor, nsec);
@@ -354,7 +384,7 @@ pub fn probeTimestampResolution(io: Io, dir: Io.Dir) Resolution {
     while (unit > 1 and divisor % unit != 0) unit /= 10;
     // A power of ten no coarser than a second, which is what a stat
     // comparison rounds a nanosecond field down to.
-    assert(std.time.ns_per_s % unit == 0);
+    assert(std.time.ns_per_s % unit == 0); // aegis: no-danger: a resolution, a power of ten of nanoseconds within a second
     return .{ .ns = unit, .measured = true };
 }
 
@@ -382,8 +412,8 @@ pub const Stat = struct {
     /// platform.
     pub fn fromIo(s: Io.File.Stat, extra: platstat.Extra) Stat {
         return fromParts(
-            s.mtime.toNanoseconds(),
-            s.ctime.toNanoseconds(),
+            s.mtime,
+            s.ctime,
             @bitCast(@as(i64, @intCast(s.inode))),
             s.size,
             extra,
@@ -392,10 +422,10 @@ pub const Stat = struct {
 
     /// Take every field from one platform stat.
     pub fn fromFull(f: platstat.Full) Stat {
-        return fromParts(@intCast(f.mtime_ns), @intCast(f.ctime_ns), f.inode, f.size, f.extra);
+        return fromParts(f.mtime, f.ctime, f.inode, f.size, f.extra);
     }
 
-    fn fromParts(mtime: i96, ctime: i96, inode: u64, size: u64, extra: platstat.Extra) Stat {
+    fn fromParts(mtime: Io.Timestamp, ctime: Io.Timestamp, inode: u64, size: u64, extra: platstat.Extra) Stat {
         return .{
             .ctime_sec = splitSec(ctime),
             .ctime_nsec = splitNsec(ctime),
@@ -464,14 +494,18 @@ pub const Stat = struct {
         return true;
     }
 
-    fn splitSec(ns: i96) u32 {
-        const sec = @divFloor(ns, std.time.ns_per_s);
+    const WholeSeconds = aegis.units.Instant(.real, .second, i96);
+
+    // git's index keeps a time as its whole seconds and the nanoseconds
+    // within them: the one place a time is split so.
+    fn splitSec(t: Io.Timestamp) u32 {
+        const sec = WholeSeconds.fromTimestamp(t, .down).raw();
         if (sec < 0) return 0;
         return @truncate(@as(u96, @intCast(sec)));
     }
 
-    fn splitNsec(ns: i96) u32 {
-        const rem = @mod(ns, std.time.ns_per_s);
+    fn splitNsec(t: Io.Timestamp) u32 {
+        const rem = @mod(t.nanoseconds, std.time.ns_per_s); // aegis: no-danger: the index's nanoseconds within the second
         return @intCast(rem);
     }
 };
@@ -930,6 +964,9 @@ fn baseStart(path: []const u8) usize {
 
 /// Create `lock` (the base name `lock_base` beside `target`) exclusively,
 /// waiting for a holder as `on_contention` says.
+/// How long `createLock` waits for a lock held elsewhere.
+const WaitMillis = aegis.units.Duration(.millisecond, u32);
+
 fn createLock(
     io: Io,
     dir: Io.Dir,
@@ -939,7 +976,8 @@ fn createLock(
 ) LockError!airlock.Pending {
     const deadline_ms: u32 = switch (on_contention) {
         .fail => 0,
-        .wait => |d| std.math.cast(u32, @max(0, d.toMilliseconds())) orelse std.math.maxInt(u32),
+        .wait => |d| (WaitMillis.fromIoDuration(d, .down) catch
+            WaitMillis.fromRaw(if (d.nanoseconds < 0) 0 else std.math.maxInt(u32))).raw(),
     };
     var waited: u32 = 0;
     var attempt: u32 = 0;
@@ -992,7 +1030,7 @@ test "the backoff grows as git's does, by squares to a second, with spread" {
 /// Windows retried while a scanner or indexer holds either name.
 pub fn rename(io: Io, dir: Io.Dir, old_name: []const u8, new_name: []const u8) Io.Dir.RenameError!void {
     _ = airlock.rename(io, dir, old_name, dir, new_name, .{ .sync = .{ .level = .none } }) catch |err| switch (err) {
-        error.PublishedNotDurable => unreachable, // unreachable: a rename asked to sync nothing reports no failed sync
+        error.PublishedNotDurable => unreachable, // aegis: no-danger: a rename asked to sync nothing reports no failed sync
         else => |e| return e,
     };
 }
@@ -1089,8 +1127,8 @@ pub const Shared = union(enum) {
                 const mode: u16 = @intCast(n & 0o666);
                 // What `calc` builds on: the owner reads and writes, and
                 // nobody is given execute, which `calc` copies from the file.
-                assert(mode & 0o600 == 0o600);
-                assert(mode & 0o111 == 0);
+                aegis.assert.invariant(mode & 0o600 == 0o600, "mode & 0o600 == 0o600");
+                aegis.assert.invariant(mode & 0o111 == 0, "mode & 0o111 == 0");
                 return .{ .mode = mode };
             },
         };
@@ -1192,8 +1230,8 @@ pub fn makeDirs(io: Io, dir: Io.Dir, sub_path: []const u8, shared: Shared) Io.Di
 /// on a read-only file too.
 pub fn setFilePermissions(io: Io, dir: Io.Dir, sub_path: []const u8, permissions: Io.File.Permissions) Io.Dir.SetFilePermissionsError!void {
     if (builtin.target.os.tag != .windows) return dir.setFilePermissions(io, sub_path, permissions, .{});
-    const file = try openAttributesWindows(dir, sub_path);
-    defer file.close(io);
+    var file = try openAttributesWindows(dir, sub_path);
+    defer file.deinit(io);
     // Only the attributes a program may set are written, as
     // `SetFileAttributes` takes them; what the file system keeps for itself
     // (a directory, a reparse point, compression) is not the caller's.
@@ -1201,7 +1239,7 @@ pub fn setFilePermissions(io: Io, dir: Io.Dir, sub_path: []const u8, permissions
     const wanted = @backingInt(permissions) & settable;
     // A zero would leave the attributes as they are: no attributes at all is
     // `FILE_ATTRIBUTE_NORMAL`.
-    try file.setPermissions(io, @fromBackingInt(if (wanted == 0) 0x80 else wanted));
+    try file.lend().get().setPermissions(io, @fromBackingInt(if (wanted == 0) 0x80 else wanted));
 }
 
 /// `Dir.setTimestamps`, on Windows as well, where the standard library's
@@ -1214,9 +1252,9 @@ pub fn setTimestamps(io: Io, dir: Io.Dir, sub_path: []const u8, options: Io.File
         .access_timestamp = options.access_timestamp,
         .modify_timestamp = options.modify_timestamp,
     });
-    const file = try openAttributesWindows(dir, sub_path);
-    defer file.close(io);
-    try file.setTimestamps(io, options);
+    var file = try openAttributesWindows(dir, sub_path);
+    defer file.deinit(io);
+    try file.lend().get().setTimestamps(io, options);
 }
 
 /// Link two paths in a directory. Zig 0.17's threaded I/O has no Windows
@@ -1237,6 +1275,7 @@ pub fn hardLink(io: Io, dir: Io.Dir, old_path: []const u8, new_path: []const u8)
     if (!CreateHardLinkW(new_w.span().ptr, old_w.span().ptr, null).toBool()) return error.OperationUnsupported;
 }
 
+// aegis: boundary: Win32's CreateHardLinkW, the raw call
 extern "kernel32" fn CreateHardLinkW(new_path: [*:0]const u16, old_path: [*:0]const u16, security_attributes: ?*anyopaque) callconv(.winapi) std.os.windows.BOOL;
 
 /// Whether `sub_path` in `dir` is the current user's: git's
@@ -1274,15 +1313,25 @@ const token_user: c_int = 1;
 const token_linked_token: c_int = 19;
 const win_builtin_administrators_sid: c_int = 26;
 
+// aegis: boundary: Win32's GetNamedSecurityInfoW, the raw call
 extern "advapi32" fn GetNamedSecurityInfoW(object_name: [*:0]const u16, object_type: c_int, info: u32, owner: ?*?*anyopaque, group: ?*?*anyopaque, dacl: ?*?*anyopaque, sacl: ?*?*anyopaque, descriptor: ?*?*anyopaque) callconv(.winapi) u32;
+// aegis: boundary: Win32's OpenProcessToken, the raw call
 extern "advapi32" fn OpenProcessToken(process: std.os.windows.HANDLE, access: u32, token: *std.os.windows.HANDLE) callconv(.winapi) std.os.windows.BOOL;
+// aegis: boundary: Win32's GetTokenInformation, the raw call
 extern "advapi32" fn GetTokenInformation(token: std.os.windows.HANDLE, class: c_int, info: ?*anyopaque, length: u32, returned: *u32) callconv(.winapi) std.os.windows.BOOL;
+// aegis: boundary: Win32's IsValidSid, the raw call
 extern "advapi32" fn IsValidSid(sid: *anyopaque) callconv(.winapi) std.os.windows.BOOL;
+// aegis: boundary: Win32's EqualSid, the raw call
 extern "advapi32" fn EqualSid(a: *anyopaque, b: *anyopaque) callconv(.winapi) std.os.windows.BOOL;
+// aegis: boundary: Win32's IsWellKnownSid, the raw call
 extern "advapi32" fn IsWellKnownSid(sid: *anyopaque, kind: c_int) callconv(.winapi) std.os.windows.BOOL;
+// aegis: boundary: Win32's CheckTokenMembership, the raw call
 extern "advapi32" fn CheckTokenMembership(token: ?std.os.windows.HANDLE, sid: *anyopaque, member: *std.os.windows.BOOL) callconv(.winapi) std.os.windows.BOOL;
+// aegis: boundary: Win32's LocalFree, the raw call
 extern "kernel32" fn LocalFree(memory: ?*anyopaque) callconv(.winapi) ?*anyopaque;
+// aegis: boundary: Win32's GetCurrentProcess, the raw call
 extern "kernel32" fn GetCurrentProcess() callconv(.winapi) std.os.windows.HANDLE;
+// aegis: boundary: Win32's CloseHandle, the raw call
 extern "kernel32" fn CloseHandle(handle: std.os.windows.HANDLE) callconv(.winapi) std.os.windows.BOOL;
 
 fn ownedWindows(io: Io, dir: Io.Dir, sub_path: []const u8, home: ?[]const u8) bool {
@@ -1311,14 +1360,14 @@ fn ownedWindows(io: Io, dir: Io.Dir, sub_path: []const u8, home: ?[]const u8) bo
     var size: u32 = 0;
     if (GetTokenInformation(token, token_user, &user_buf, user_buf.len, &size).toBool()) {
         // TOKEN_USER begins with the user's SID
-        const user_sid: *anyopaque = @as(*const *anyopaque, @ptrCast(&user_buf)).*; // safe: TOKEN_USER's first field is a SID pointer, and the buffer is aligned for it
+        const user_sid: *anyopaque = @as(*const *anyopaque, @ptrCast(&user_buf)).*; // aegis: no-danger: TOKEN_USER's first field is a SID pointer, and the buffer is aligned for it
         if (IsValidSid(user_sid).toBool() and EqualSid(sid, user_sid).toBool()) return true;
     }
     if (IsWellKnownSid(sid, win_builtin_administrators_sid).toBool()) {
         var member: std.os.windows.BOOL = .FALSE;
         if (CheckTokenMembership(null, sid, &member).toBool() and member.toBool()) return true;
         var linked: std.os.windows.HANDLE = undefined;
-        if (GetTokenInformation(token, token_linked_token, @ptrCast(&linked), @sizeOf(std.os.windows.HANDLE), &size).toBool()) { // safe: TOKEN_LINKED_TOKEN is one handle, which this receives
+        if (GetTokenInformation(token, token_linked_token, @ptrCast(&linked), @sizeOf(std.os.windows.HANDLE), &size).toBool()) { // aegis: no-danger: TOKEN_LINKED_TOKEN is one handle, which this receives
             defer _ = CloseHandle(linked);
             if (CheckTokenMembership(linked, sid, &member).toBool() and member.toBool()) return true;
         }
@@ -1328,7 +1377,7 @@ fn ownedWindows(io: Io, dir: Io.Dir, sub_path: []const u8, home: ?[]const u8) bo
 
 /// A handle to `sub_path`, a file or a directory, that may read and write
 /// its attributes and times and do nothing else.
-fn openAttributesWindows(dir: Io.Dir, sub_path: []const u8) (Io.Dir.PathNameError || Io.Cancelable || error{ FileNotFound, AccessDenied, Unexpected })!Io.File {
+fn openAttributesWindows(dir: Io.Dir, sub_path: []const u8) (Io.Dir.PathNameError || Io.Cancelable || error{ FileNotFound, AccessDenied, Unexpected })!OwnedFile {
     const windows = std.os.windows;
     const path_w = try Io.Threaded.sliceToPrefixedFileW(dir.handle, sub_path, .{});
     const span = path_w.span();
@@ -1354,7 +1403,7 @@ fn openAttributesWindows(dir: Io.Dir, sub_path: []const u8) (Io.Dir.PathNameErro
         null,
         0,
     )) {
-        .SUCCESS => return .{ .handle = handle, .flags = .{ .nonblocking = false } },
+        .SUCCESS => return .init(.{ .handle = handle, .flags = .{ .nonblocking = false } }),
         .OBJECT_NAME_NOT_FOUND, .OBJECT_PATH_NOT_FOUND => return error.FileNotFound,
         .ACCESS_DENIED, .SHARING_VIOLATION => return error.AccessDenied,
         else => |status| return windows.unexpectedStatus(status),
@@ -1606,7 +1655,7 @@ pub const TempFile = struct {
 
 /// Errors from reading a file whose length is already known.
 pub const ReadSizedError = Io.File.OpenError || Io.File.ReadPositionalError ||
-    Io.Dir.ReadFileAllocError || Allocator.Error;
+    aegis.own.ReadFileError || Allocator.Error;
 
 pub const ReadSizedOptions = struct { size: u64, max_bytes: usize };
 
@@ -1642,7 +1691,7 @@ pub fn readFileSized(
         if (try file.readPositional(io, &.{&probe}, size) == 0) return buf;
     }
     gpa.free(buf);
-    return dir.readFileAlloc(io, sub_path, gpa, .limited(max_bytes));
+    return aegis.own.readFile(io, dir, sub_path, gpa, aegis.units.Bytes(u64).fromRaw(max_bytes));
 }
 
 /// Read a whole file, or `null` if it is not there.
@@ -1655,8 +1704,8 @@ pub fn readFileAlloc(
     dir: Io.Dir,
     sub_path: []const u8,
     max_bytes: usize,
-) (Io.Dir.ReadFileAllocError)!?[]u8 {
-    return dir.readFileAlloc(io, sub_path, gpa, .limited(max_bytes)) catch |err| switch (err) {
+) (aegis.own.ReadFileError)!?[]u8 {
+    return aegis.own.readFile(io, dir, sub_path, gpa, aegis.units.Bytes(u64).fromRaw(max_bytes)) catch |err| switch (err) {
         error.FileNotFound, error.NotDir, error.IsDir => return null,
         else => |e| return e,
     };
@@ -1672,7 +1721,7 @@ pub fn readSecretFile(
     dir: Io.Dir,
     sub_path: []const u8,
     max_bytes: usize,
-) (Io.Dir.ReadFileAllocError)!?aegis.SecretBytes {
+) (aegis.own.ReadFileError)!?aegis.SecretBytes {
     var file = dir.openFile(io, sub_path, .{ .allow_directory = builtin.os.tag != .windows }) catch |err| switch (err) {
         error.FileNotFound, error.NotDir, error.IsDir => return null,
         else => |e| return e,

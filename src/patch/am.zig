@@ -21,6 +21,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const quote = @import("../text.zig").quote;
 const decimal = @import("../text.zig").decimal;
 const config_mod = @import("../config/config.zig");
@@ -94,7 +95,7 @@ pub const Error = error{
     LocalChangesWouldBeOverwritten,
 } || mailinfo.Error || apply_mod.Error || three_way.Error || rerere.Error || hooks_mod.Error ||
     repo_mod.WriteError || head_mod.Error || index_mod.ReadError || index_mod.WriteError || worktree.Error ||
-    Io.Dir.ReadFileAllocError || Io.Dir.DeleteTreeError || Io.Dir.RealPathError || notes.Error || diff.UnifiedError || text_encoding.ReencodeError;
+    aegis.own.ReadFileError || Io.Dir.DeleteTreeError || Io.Dir.RealPathError || notes.Error || diff.UnifiedError || text_encoding.ReencodeError;
 
 /// `-k` and `--keep-non-patch`.
 pub const Keep = enum { no, subject, non_patch };
@@ -210,7 +211,7 @@ pub const Outcome = struct {
 /// Whether an `am` session is in progress: `rebase-apply` with `next` and
 /// `last` in it.
 pub fn inProgress(io: Io, repo: *Repository) bool {
-    return state_file.exists(io, repo.gitDirectory(), state_dir ++ "/next") and state_file.exists(io, repo.gitDirectory(), state_dir ++ "/last");
+    return state_file.exists(io, repo.gitDirectory().get(), state_dir ++ "/next") and state_file.exists(io, repo.gitDirectory().get(), state_dir ++ "/last");
 }
 
 const Session = struct {
@@ -227,7 +228,7 @@ const Session = struct {
     quiet: bool = false,
     signoff: bool = false,
     utf8: bool = true,
-    keep: Keep = .no,
+    keep: Keep = .no, // aegis: no-danger: an option
     message_id: bool = false,
     scissors: ?bool = null,
     quoted_cr: ?mailinfo.QuotedCr = null,
@@ -248,7 +249,7 @@ const Session = struct {
     }
 
     fn write(s: *Session, name: []const u8, bytes: []const u8) Error!void {
-        try state_file.write(s.io, s.repo.gitDirectory(), try s.path(name), bytes);
+        try state_file.write(s.io, s.repo.gitDirectory().get(), try s.path(name), bytes);
     }
 
     /// git's `write_file`: the text with its line completed.
@@ -262,7 +263,7 @@ const Session = struct {
     }
 
     fn read(s: *Session, name: []const u8) Error!?[]const u8 {
-        const bytes = (try state_file.read(s.a, s.io, s.repo.gitDirectory(), try s.path(name))) orelse return null;
+        const bytes = (try state_file.read(s.a, s.io, s.repo.gitDirectory().get(), try s.path(name))) orelse return null;
         return bytes;
     }
 
@@ -272,11 +273,11 @@ const Session = struct {
     }
 
     fn remove(s: *Session, name: []const u8) Error!void {
-        try state_file.remove(s.io, s.repo.gitDirectory(), try s.path(name));
+        try state_file.remove(s.io, s.repo.gitDirectory().get(), try s.path(name));
     }
 
     fn exists(s: *Session, name: []const u8) Error!bool {
-        return state_file.exists(s.io, s.repo.gitDirectory(), try s.path(name));
+        return state_file.exists(s.io, s.repo.gitDirectory().get(), try s.path(name));
     }
 
     fn msgnum(s: *Session) Allocator.Error![]const u8 {
@@ -388,7 +389,7 @@ fn applyOptionsFrom(a: Allocator, words: []const []const u8) Error!apply_mod.Opt
             o.reject = true;
         } else return error.UnsupportedApplyOption;
     }
-    o.limits = limits.items;
+    o.limits = try limits.toOwnedSlice(a);
     return o;
 }
 
@@ -398,16 +399,16 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, mailboxes: []const []con
     if (repo.workDirectory() == null) return error.BareRepository;
     if (inProgress(io, repo)) return error.AmInProgress;
     // A rebase made the directory for its autostash.
-    if (!options.rebasing and state_file.exists(io, repo.gitDirectory(), state_dir)) return error.RebaseInProgress;
+    if (!options.rebasing and state_file.exists(io, repo.gitDirectory().get(), state_dir)) return error.RebaseInProgress;
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_instance.deinit();
     const a = arena_instance.allocator();
     const config = repo.configuration();
-    var s: Session = .{ .gpa = gpa, .a = a, .io = io, .repo = repo, .options = options, .dir = repo.gitDirectory(), .rebasing = options.rebasing };
+    var s: Session = .{ .gpa = gpa, .a = a, .io = io, .repo = repo, .options = options, .dir = repo.gitDirectory().get(), .rebasing = options.rebasing };
 
     const format: Format = if (options.mboxrd) .mboxrd else if (mailboxes.len == 0) .mbox else try detectFormat(mailboxes[0]);
 
-    try repo.gitDirectory().createDirPath(io, state_dir);
+    try repo.gitDirectory().get().createDirPath(io, state_dir);
     try repo.refStore().root().delete(repo.allocator(), io, .rebase_head);
 
     // the mails, cut as `git mailsplit -d4 -b` cuts them
@@ -473,7 +474,7 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, mailboxes: []const []con
 }
 
 fn destroy(io: Io, repo: *Repository) Error!void {
-    try repo.gitDirectory().deleteTree(io, state_dir);
+    try repo.gitDirectory().get().deleteTree(io, state_dir);
 }
 
 //=========================================================================
@@ -482,7 +483,7 @@ fn destroy(io: Io, repo: *Repository) Error!void {
 
 fn load(gpa: Allocator, a: Allocator, io: Io, repo: *Repository, options: Options) Error!Session {
     if (!inProgress(io, repo)) return error.NoAmInProgress;
-    var s: Session = .{ .gpa = gpa, .a = a, .io = io, .repo = repo, .options = options, .dir = repo.gitDirectory() };
+    var s: Session = .{ .gpa = gpa, .a = a, .io = io, .repo = repo, .options = options, .dir = repo.gitDirectory().get() };
     try reload(&s);
     return s;
 }
@@ -615,7 +616,7 @@ fn parseMailRebase(s: *Session, name: []const u8) Error!bool {
         error.WriteFailed => return error.OutOfMemory,
         else => return error.MalformedState,
     };
-    s.author_date = date.written();
+    s.author_date = try date.toOwnedSlice();
     const body = std.mem.find(u8, shown.bytes, "\n\n") orelse return error.MalformedState;
     s.msg = shown.bytes[body + 2 ..];
     try writeCommitPatch(s, commit.parents, commit.tree);
@@ -642,7 +643,7 @@ fn writeCommitPatch(s: *Session, parents: []const Oid, tree: Oid) Error!void {
     diff.unified(s.gpa, s.io, &out.writer, .{
         .db = db,
         .changes = changes.items,
-        .drivers = .{ .attrs = &attrs, .work_dir = s.repo.workDirectory(), .config = s.repo.configuration() },
+        .drivers = .{ .attrs = &attrs, .work_dir = if (s.repo.workDirectory()) |work| work.get() else null, .config = s.repo.configuration() },
     }, .{
         .full_index = true,
         .binary_patches = true,
@@ -684,7 +685,7 @@ fn hasUnmerged(index: *const Index) bool {
 
 fn absolutePath(s: *Session, name: []const u8) Error![]const u8 {
     var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const len = try s.repo.gitDirectory().realPath(s.io, &buf);
+    const len = try s.repo.gitDirectory().get().realPath(s.io, &buf);
     return std.Io.Dir.path.join(s.a, &.{ buf[0..len], state_dir, name });
 }
 
@@ -788,7 +789,7 @@ fn fallBackThreeway(s: *Session, patch: []const u8, apply_options: apply_mod.Opt
         return err;
     }
     const their_tree = try worktree.writeTree(gpa, io, &fake, db);
-    try fake.write(io, repo.gitDirectory(), state_dir ++ "/patch-merge-index", .{});
+    try fake.write(io, repo.gitDirectory().get(), state_dir ++ "/patch-merge-index", .{});
 
     const our_tree = if (head.oid) |oid| try repo.commitTree(io, oid) else s.repo.objectFormat().emptyTree();
     const label = try s.a.print("{s}", .{subjectOf(s.msg.?)});
@@ -916,7 +917,7 @@ fn run(s: *Session, arena: *std.heap.ArenaAllocator, resume_in: bool) Error!Outc
                     var msg: std.ArrayList(u8) = .empty;
                     try msg.appendSlice(s.a, s.msg.?);
                     try message.appendSignoff(s.a, &msg, s.options.committer, try message.trailerSettings(s.a, s.repo.configuration()));
-                    s.msg = msg.items;
+                    s.msg = try msg.toOwnedSlice(s.a);
                 }
                 try writeAuthorScript(s);
                 try s.write("final-commit", s.msg.?);
@@ -1044,7 +1045,7 @@ pub fn abort(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature) S
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
     const a = arena_instance.allocator();
-    var s: Session = .{ .gpa = gpa, .a = a, .io = io, .repo = repo, .options = .{ .committer = who }, .dir = repo.gitDirectory() };
+    var s: Session = .{ .gpa = gpa, .a = a, .io = io, .repo = repo, .options = .{ .committer = who }, .dir = repo.gitDirectory().get() };
     var head = try head_mod.read(gpa, io, repo);
     defer head.deinit(gpa);
     // safe to abort only when the index was clean and HEAD has not moved
@@ -1091,6 +1092,6 @@ pub fn quit(io: Io, repo: *Repository) Self.Error!void {
 /// and `--quit` remove a stray one; with none there either, there is
 /// nothing to end.
 fn destroyStray(io: Io, repo: *Repository) Self.Error!void {
-    if (!state_file.exists(io, repo.gitDirectory(), state_dir)) return error.NoAmInProgress;
+    if (!state_file.exists(io, repo.gitDirectory().get(), state_dir)) return error.NoAmInProgress;
     try destroy(io, repo);
 }

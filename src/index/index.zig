@@ -19,6 +19,7 @@ const Self = @This();
 const ewah = @import("../codec.zig").ewah;
 
 const std = @import("std");
+const aegis = @import("aegis");
 const decimal = @import("../text.zig").decimal;
 const date = @import("../text.zig").date;
 const shakedown = @import("shakedown");
@@ -80,7 +81,7 @@ pub const ReadError = error{
     /// An entry's extended flags hold a bit git does not know: "unknown
     /// index entry format".
     UnknownEntryFlags,
-} || Allocator.Error || Io.Dir.ReadFileAllocError || ewah.Error || varint.Error;
+} || Allocator.Error || aegis.own.ReadFileError || ewah.Error || varint.Error;
 
 /// Errors from writing an index.
 pub const WriteError = error{
@@ -109,7 +110,7 @@ pub const Entry = struct {
     /// index.
     path: []const u8,
     oid: Oid,
-    mode: object.Mode,
+    mode: object.Mode, // aegis: no-danger: an entry's file mode, a value
     /// The mode as the file spelled it, where that is not `mode.raw()`:
     /// git reads an entry's mode as it is (`create_from_disk`) and writes
     /// it back unchanged, where relic takes the mode git's consumers take
@@ -389,7 +390,7 @@ pub const CacheTree = struct {
         if (entry_count >= 0) {
             const raw_len = kind.rawLen();
             if (offset.* + raw_len > data.len) return error.CorruptCacheTree;
-            // unreachable: the slice is cut to the format's raw length
+            // aegis: no-danger: the slice is cut to the format's raw length
             oid = Oid.fromRaw(kind, data[offset.*..][0..raw_len]) catch unreachable;
             offset.* += raw_len;
         }
@@ -629,7 +630,7 @@ pub const ResolveUndo = struct {
             for (modes, 0..) |mode, i| {
                 if (mode == 0) continue;
                 if (offset + raw_len > data.len) return error.CorruptResolveUndo;
-                // unreachable: the slice is cut to the format's raw length
+                // aegis: no-danger: the slice is cut to the format's raw length
                 oids[i] = Oid.fromRaw(kind, data[offset..][0..raw_len]) catch unreachable;
                 offset += raw_len;
             }
@@ -886,7 +887,7 @@ pub const Index = struct {
             var hasher: hash.Hasher = .init(kind);
             hasher.update(body);
             const computed = hasher.final();
-            // unreachable: the trailer is cut to the format's raw length
+            // aegis: no-danger: the trailer is cut to the format's raw length
             const stored = Oid.fromRaw(kind, trailer) catch unreachable;
             if (!computed.eql(stored)) return error.ChecksumMismatch;
         }
@@ -1047,7 +1048,7 @@ pub const Index = struct {
     fn parseLink(index: *Index, gpa: Allocator, data: []const u8) ReadError!void {
         const raw_len = index.kind.rawLen();
         if (data.len < raw_len) return error.TruncatedIndex;
-        // unreachable: the slice is cut to the format's raw length
+        // aegis: no-danger: the slice is cut to the format's raw length
         const base = Oid.fromRaw(index.kind, data[0..raw_len]) catch unreachable;
         index.was_split = true;
         if (index.split) |*old| old.deinit(gpa);
@@ -1251,7 +1252,7 @@ pub const Index = struct {
         return .{
             .entry = .{
                 .path = path,
-                // unreachable: the slice is cut to the format's raw length
+                // aegis: no-danger: the slice is cut to the format's raw length
                 .oid = Oid.fromRaw(kind, b[40..][0..raw_len]) catch unreachable,
                 .mode = mode,
                 .raw_mode = if (mode_raw == mode.raw()) null else mode_raw,
@@ -1692,7 +1693,7 @@ pub const Index = struct {
                 std.log.warn("could not stat '{s}': {t}", .{ entry.name, err });
                 continue;
             };
-            if (date.Expiry.fromRaw(stat.mtime.toSeconds()).compare(expire) == .gt) continue;
+            if (date.instant(stat.mtime).compare(expire) == .gt) continue;
             dir.deleteFile(io, entry.name) catch |err| std.log.warn("unable to unlink: {s}: {t}", .{ entry.name, err });
         }
     }
@@ -1813,8 +1814,8 @@ pub const Index = struct {
     fn writeBody(index: *Index, w: *Io.Writer, options: WriteOptions, spec: Body) WriteToError!void {
         const entries = spec.entries;
         const version = index.versionOver(entries, options);
-        std.debug.assert(version >= 2);
-        std.debug.assert(version <= 4);
+        aegis.assert.invariant(version >= 2, "version >= 2");
+        aegis.assert.invariant(version <= 4, "version <= 4");
         index.version = version;
         // The entries rise, each path and stage once: what reading the
         // index back checks. The entries are the caller's to change, so
@@ -1908,7 +1909,7 @@ pub const Index = struct {
     /// bytes before it.
     fn writeEntry(index: *const Index, out: *Io.Writer, entry: Entry, name: []const u8, version: u32, previous: []const u8, starts_block: bool, options: WriteOptions) Io.Writer.Error!void {
         std.debug.assert(name.len <= std.math.maxInt(u16));
-        std.debug.assert(version >= 3 or !entry.needsExtendedFlags());
+        aegis.assert.invariant(version >= 3 or !entry.needsExtendedFlags(), "version >= 3 or !entry.needsExtendedFlags()");
         const raw_len = index.kind.rawLen();
         var fixed: [40 + hash.max_raw_len + 4]u8 = @splat(0);
 

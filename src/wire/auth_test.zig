@@ -437,9 +437,9 @@ test "named helpers run as git runs them: Git Credential Manager, and git's own 
         defer repo.deinit(io);
         defer locations.deinit();
         const Asker = struct {
-            fn ask(allocator: Allocator, _: ?*anyopaque, field: credential.Field, _: []const u8) Allocator.Error!?[]u8 {
-                const answer = try allocator.dupe(u8, if (field == .username) "ada" else "secret");
-                return answer;
+            fn ask(_: ?*anyopaque, field: credential.Field, _: []const u8, answer: *std.Io.Writer) (Allocator.Error || std.Io.Writer.Error)!bool {
+                try answer.writeAll(if (field == .username) "ada" else "secret");
+                return true;
             }
         };
         var first = try fetch_mod.fetch(gpa, io, &repo, "origin", .{

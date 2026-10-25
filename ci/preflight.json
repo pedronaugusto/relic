@@ -48,10 +48,6 @@
   "glint": {
     "rules": [
       {
-        "id": "P001",
-        "level": "gate"
-      },
-      {
         "id": "P003",
         "level": "gate"
       },

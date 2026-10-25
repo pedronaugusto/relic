@@ -102,7 +102,7 @@ pub fn missing(gpa: Allocator, io: Io, db: *Odb, include: []const Oid, options: 
                     remaining &= remaining - 1;
                 }
             }
-            collected.entries = entries.items;
+            collected.entries = try entries.toOwnedSlice(arena);
             db.stats.bitmap_hits += 1;
             return collected;
         }

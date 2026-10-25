@@ -15,6 +15,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -31,7 +32,7 @@ const Repository = repo_mod.Repository;
 
 /// Errors from moving `HEAD` or writing a state file.
 pub const Error = refs_mod.TransactionError || fs.AtomicWriteError ||
-    Io.Dir.CreateDirPathError || Io.Dir.DeleteTreeError || Io.Dir.ReadFileAllocError;
+    Io.Dir.CreateDirPathError || Io.Dir.DeleteTreeError || aegis.own.ReadFileError;
 
 /// Where `HEAD` is.
 pub const Head = struct {
@@ -161,14 +162,14 @@ pub fn checkedOutBranches(arena: Allocator, io: Io, repo: *Repository) CheckedOu
     const bare = repo.configuration().getBool("core.bare", false) catch false;
     if (!bare) main: {
         var buf: [4096]u8 = undefined;
-        const common = fs.realPath(io, repo.commonDirectory(), &buf) catch break :main;
+        const common = fs.realPath(io, repo.commonDirectory().get(), &buf) catch break :main;
         const main_path = if (std.mem.endsWith(u8, common, "/.git")) common[0 .. common.len - "/.git".len] else common;
-        try addWorktreeBranches(arena, io, repo, &map, repo.commonDirectory(), "main-worktree/HEAD", try arena.dupe(u8, main_path));
+        try addWorktreeBranches(arena, io, repo, &map, repo.commonDirectory().get(), "main-worktree/HEAD", try arena.dupe(u8, main_path));
     }
     const listing = try worktrees.list(arena, io, repo.refStore());
     for (listing.entries) |entry| {
         const sub = try arena.print("worktrees/{s}", .{entry.name});
-        var admin = repo.commonDirectory().openDir(io, sub, .{}) catch continue;
+        var admin = repo.commonDirectory().get().openDir(io, sub, .{}) catch continue;
         defer admin.close(io);
         try addWorktreeBranches(arena, io, repo, &map, admin, try arena.print("{s}/HEAD", .{sub}), try arena.dupe(u8, entry.path));
     }
@@ -176,7 +177,7 @@ pub fn checkedOutBranches(arena: Allocator, io: Io, repo: *Repository) CheckedOu
 }
 
 /// Errors from `checkedOutBranches`.
-pub const CheckedOutError = refs_mod.ReadError || worktrees.Error || Io.Dir.ReadFileAllocError;
+pub const CheckedOutError = refs_mod.ReadError || worktrees.Error || aegis.own.ReadFileError;
 
 /// Where the worktree is whose bisection started from `ref`, a branch's
 /// full name, or `null` when none did: git's `branch_bisecting`, which
@@ -185,15 +186,15 @@ pub const CheckedOutError = refs_mod.ReadError || worktrees.Error || Io.Dir.Read
 pub fn bisectingBranch(arena: Allocator, io: Io, repo: *Repository, ref: []const u8) CheckedOutError!?[]const u8 {
     const bare = repo.configuration().getBool("core.bare", false) catch false;
     if (!bare) main: {
-        const from = (try bisectedFrom(arena, io, repo, repo.commonDirectory())) orelse break :main;
+        const from = (try bisectedFrom(arena, io, repo, repo.commonDirectory().get())) orelse break :main;
         if (!std.mem.eql(u8, from, ref)) break :main;
         var buf: [4096]u8 = undefined;
-        const common = fs.realPath(io, repo.commonDirectory(), &buf) catch break :main;
+        const common = fs.realPath(io, repo.commonDirectory().get(), &buf) catch break :main;
         return try arena.dupe(u8, if (std.mem.endsWith(u8, common, "/.git")) common[0 .. common.len - "/.git".len] else common);
     }
     const listing = try worktrees.list(arena, io, repo.refStore());
     for (listing.entries) |entry| {
-        var admin = repo.commonDirectory().openDir(io, try arena.print("worktrees/{s}", .{entry.name}), .{}) catch continue;
+        var admin = repo.commonDirectory().get().openDir(io, try arena.print("worktrees/{s}", .{entry.name}), .{}) catch continue;
         defer admin.close(io);
         const from = (try bisectedFrom(arena, io, repo, admin)) orelse continue;
         if (std.mem.eql(u8, from, ref)) return try arena.dupe(u8, entry.path);

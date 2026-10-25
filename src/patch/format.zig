@@ -19,7 +19,9 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const ctype = @import("../text.zig").ctype;
+const gitdate = @import("../text.zig").date;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -86,7 +88,7 @@ pub const Error = error{
     /// which git dies on.
     InvalidEncodingSetting,
 } || notes_mod.FormatNoteError || shortlog.Error || rev_walk.Error || diff.Error || diff.UnifiedError || diff.ConfigError || diff.Order.ConfiguredError || patch_id.Error || rev_parse.Error || odb_mod.Error || repo_mod.Error || attributes.Error || Allocator.Error ||
-    Io.Dir.ReadFileAllocError;
+    aegis.own.ReadFileError;
 
 /// A name and an address.
 pub const Ident = struct {
@@ -432,7 +434,7 @@ const Ctx = struct {
 
     /// The drivers the files take, which say which are binary.
     fn drivers(ctx: *const Ctx) driver.Drivers {
-        return .{ .attrs = ctx.attrs, .work_dir = ctx.repo.workDirectory(), .config = ctx.repo.configuration() };
+        return .{ .attrs = ctx.attrs, .work_dir = if (ctx.repo.workDirectory()) |work| work.get() else null, .config = ctx.repo.configuration() };
     }
 };
 
@@ -664,7 +666,7 @@ fn resolve(a: Allocator, io: Io, repo: *Repository, options: Options) Error!Plan
         .on => |text| text,
         .configured => if (st.signature) |text| text else if (st.signature_file) |path| sig: {
             const full = config_mod.interpolatePath(a, path, config.context.home) catch return error.InvalidFormatSetting;
-            break :sig try Io.Dir.cwd().readFileAlloc(io, full, a, .unlimited);
+            break :sig try aegis.own.readFile(io, Io.Dir.cwd(), full, a, aegis.units.Bytes(u64).fromRaw(std.math.maxInt(u64)));
         } else null,
     };
     const from: ?Ident = switch (options.from) {
@@ -684,7 +686,7 @@ fn resolve(a: Allocator, io: Io, repo: *Repository, options: Options) Error!Plan
     } else null;
     const message_ids: ?MessageIds = if (thread) |style| m: {
         const who = try needWho(options);
-        break :m .{ .style = style, .now = .fromNanoseconds(@as(i96, who.when_secs) * std.time.ns_per_s), .email = who.email };
+        break :m .{ .style = style, .now = gitdate.timestamp(who.when_secs), .email = who.email };
     } else null;
     const cover: ?CoverPlan = if (want_cover == .on or want_cover == .auto) .{
         .sender = options.cover.sender orelse try needWho(options),
@@ -771,7 +773,7 @@ pub fn format(gpa: Allocator, io: Io, repo: *Repository, range: Range, given: Op
     defer if (own_attrs) |*x| x.deinit();
     if (repo.workDirectory() != null) own_attrs = try repo.loadAttrs(io);
     defer if (own_attrs) |*x| x.leave();
-    const drivers: driver.Drivers = .{ .attrs = if (own_attrs) |*x| x else null, .work_dir = repo.workDirectory(), .config = config };
+    const drivers: driver.Drivers = .{ .attrs = if (own_attrs) |*x| x else null, .work_dir = if (repo.workDirectory()) |work| work.get() else null, .config = config };
 
     const selected = try selectCommits(gpa, a, io, db, range, options, drivers) orelse return emptySeries(gpa, &arena_instance, options.output_directory);
     const list = selected.list;
@@ -805,7 +807,7 @@ pub fn format(gpa: Allocator, io: Io, repo: *Repository, range: Range, given: Op
         .encoding = try message.logOutputEncoding(config),
         .diff_options = diff_options,
         .renames = renames,
-        .order = options.order orelse try diff.Order.configured(a, io, repo.topDirectory(), config),
+        .order = options.order orelse try diff.Order.configured(a, io, repo.topDirectory().get(), config),
         .relative_to = relative_to,
         .quote_path = quote_path,
         .attrs = if (own_attrs) |*x| x else null,
@@ -1050,7 +1052,7 @@ fn commitParents(gpa: Allocator, io: Io, db: *odb_mod.Odb, oid: Oid) Error![]Oid
 }
 
 fn genMessageId(a: Allocator, base: []const u8, t: MessageIds) Allocator.Error![]const u8 {
-    return a.print("{s}.{d}.git.{s}", .{ base, t.now.toSeconds(), t.email });
+    return a.print("{s}.{d}.git.{s}", .{ base, gitdate.seconds(t.now), t.email });
 }
 
 fn cleanMessageId(a: Allocator, id: []const u8) Allocator.Error![]const u8 {

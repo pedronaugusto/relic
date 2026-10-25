@@ -50,6 +50,7 @@ const transfer = @This();
 
 const std = @import("std");
 const decimal = @import("../text.zig").decimal;
+const date = @import("../text.zig").date;
 const shakedown = @import("shakedown");
 const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
@@ -118,7 +119,7 @@ pub const Result = struct {
     oid: [64]u8,
     size: u64,
     name: []const u8,
-    status: Status,
+    status: Status, // aegis: no-danger: an object's outcome, every value final; the latest attempt's is kept
     /// Why it failed: the server's words, or the transfer's.
     message: ?[]const u8 = null,
 
@@ -521,6 +522,9 @@ const Event = union(enum) {
 };
 
 const Run = struct {
+    const Claims = aegis.units.Count(Job, usize);
+    const Claimed = aegis.Atomic(Claims);
+
     operation_io: Io,
     server: *lfsapi.Server,
     operation: lfsapi.Operation,
@@ -535,7 +539,9 @@ const Run = struct {
     /// Where what outlives a job is kept: messages and fresh actions.
     arena: aegis.BlockingGuarded(Allocator),
     jobs: []Job,
-    next: std.atomic.Value(usize) = .init(0),
+    /// How many jobs the workers have claimed: each takes the next by its
+    /// index until none is left.
+    next: Claimed = Claimed.init(Claims.fromRaw(0)),
     events: ?*Io.Queue(Event) = null,
     /// The first error that stops every worker.
     fatal: aegis.BlockingGuarded(?Error) = .init(null),
@@ -680,7 +686,7 @@ pub const SweepError = Allocator.Error || Io.Dir.OpenError || Io.Dir.Iterator.Er
 /// directory under it changed within the hour, whose files may be links
 /// something is still using. Directories stay.
 pub fn sweepTmp(gpa: Allocator, io: Io, store: *const lfs.Store, now_at: Io.Timestamp) transfer.SweepError!void {
-    const now = now_at.toSeconds();
+    const now = date.instant(now_at);
     var path_buf: [lfs.Store.max_path]u8 = undefined;
     const tmp_path = std.mem.print(&path_buf, "{s}/tmp", .{store.root}) catch return error.NameTooLong;
     var tmp = store.base.openDir(io, tmp_path, .{ .iterate = true }) catch |err| switch (err) {
@@ -690,7 +696,7 @@ pub fn sweepTmp(gpa: Allocator, io: Io, store: *const lfs.Store, now_at: Io.Time
     defer tmp.close(io);
     var walker = try tmp.walk(gpa);
     defer walker.deinit();
-    const hour: i64 = 3600;
+    const hour = date.spanHours(1);
     while (try walker.next(io)) |entry| {
         if (entry.kind == .directory) continue;
         const name = entry.basename;
@@ -707,15 +713,11 @@ pub fn sweepTmp(gpa: Allocator, io: Io, store: *const lfs.Store, now_at: Io.Time
         }
         if (std.Io.Dir.path.dirname(entry.path)) |parent| {
             const dir_stat = tmp.statFile(io, parent, .{}) catch continue;
-            if (now - epochSeconds(dir_stat.mtime) <= hour) continue;
+            if (date.instant(dir_stat.mtime).saturatingDurationTo(now).compare(hour) != .gt) continue;
         }
         const st = tmp.statFile(io, entry.path, .{}) catch continue;
-        if (now - epochSeconds(st.mtime) > hour) try tmp.deleteFile(io, entry.path);
+        if (date.instant(st.mtime).saturatingDurationTo(now).compare(hour) == .gt) try tmp.deleteFile(io, entry.path);
     }
-}
-
-fn epochSeconds(t: Io.Timestamp) i64 {
-    return @intCast(@divFloor(t.nanoseconds, std.time.ns_per_s));
 }
 
 fn runTransfers(io: Io, server: *lfsapi.Server, operation: lfsapi.Operation, objects: []const Object, given: Options) Error!Outcome {
@@ -738,7 +740,7 @@ fn runTransfers(io: Io, server: *lfsapi.Server, operation: lfsapi.Operation, obj
             try results.append(arena, .{ .oid = o.oid, .size = o.size, .name = try arena.dupe(u8, o.name), .status = .failed });
         }
     }
-    outcome.results = results.items;
+    outcome.results = try results.toOwnedSlice(arena);
     const store = server.store();
 
     // A download of what the store has, or a reference directory has, or
@@ -774,7 +776,7 @@ fn runTransfers(io: Io, server: *lfsapi.Server, operation: lfsapi.Operation, obj
     {
         var offered: std.ArrayList([]const u8) = .empty;
         for (adapters) |a| if (a.moves(operation)) try offered.append(arena, a.name);
-        limits.transfers = offered.items;
+        limits.transfers = try offered.toOwnedSlice(arena);
     }
     if (endpoint.isLocal()) {
         try copyLocal(io, server, endpoint, operation, &outcome, pending.items, missing_here.items, limits, options);
@@ -802,9 +804,9 @@ fn runTransfers(io: Io, server: *lfsapi.Server, operation: lfsapi.Operation, obj
     if (jobs.items.len == 0) return outcome;
     // Each job settles one pending object's result, once.
     assert(jobs.items.len <= pending.items.len);
-    state.jobs = jobs.items;
-    state.total_objects = jobs.items.len;
-    for (jobs.items) |j| state.total_bytes += j.result.size;
+    state.jobs = try jobs.toOwnedSlice(arena);
+    state.total_objects = state.jobs.len;
+    for (state.jobs) |j| state.total_bytes += j.result.size;
 
     if (chosen) |adapter| try startAgents(&state, adapter);
     defer stopAgents(&state);
@@ -956,9 +958,9 @@ fn runStandalone(
         try jobs.append(arena, .{ .result = r, .action = .{ .href = "" }, .verify = null, .authenticated = false, .custom = true, .standalone = true });
     }
     if (jobs.items.len == 0) return;
-    state.jobs = jobs.items;
-    state.total_objects = jobs.items.len;
-    for (jobs.items) |j| state.total_bytes += j.result.size;
+    state.jobs = try jobs.toOwnedSlice(arena);
+    state.total_objects = state.jobs.len;
+    for (state.jobs) |j| state.total_bytes += j.result.size;
     try startAgents(&state, adapter);
     defer stopAgents(&state);
     try runJobs(&state);
@@ -1146,7 +1148,7 @@ test "a transfer worker observes a fatal error under its publication lock" {
     state.operation_io = control.io();
     work(&state, 0);
     try std.testing.expect(control.state.waited);
-    try std.testing.expectEqual(@as(usize, 0), state.next.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), state.next.load(.acquire).raw());
     state.setFatal(error.Canceled);
     try std.testing.expectEqual(error.OutOfMemory, state.failure().?);
 }
@@ -1159,7 +1161,7 @@ fn workerTask(state: *Run, worker: usize) void {
 fn work(state: *Run, worker: usize) void {
     while (true) {
         if (state.failure() != null) return;
-        const i = state.next.fetchAdd(1, .monotonic);
+        const i = state.next.fetchAddWrapping(Run.Claims.fromRaw(1), .monotonic).raw();
         if (i >= state.jobs.len) return;
         runJob(state, &state.jobs[i], worker) catch |err| state.setFatal(err);
         state.say(.object);
@@ -1333,13 +1335,13 @@ fn attemptDownload(state: *Run, r: *Result, action: Action, authenticated: bool)
         error.FileNotFound => resumed = false,
         else => |e| return e,
     };
-    var partial: Partial = .{ .file = if (resumed)
+    var partial: Partial = .{ .file = .init(if (resumed)
         try store.base.openFile(io, temp_path, .{ .mode = .read_write })
     else
-        try store.base.createFile(io, temp_path, .{ .exclusive = true, .read = true }) };
+        try store.base.createFile(io, temp_path, .{ .exclusive = true, .read = true })) };
     var installed = false;
     defer {
-        partial.file.close(io);
+        partial.file.deinit(io);
         if (!installed) {
             if (partial.keep) {
                 // glint-ignore: Z026 -- keeping the partial for a resume is best effort; the download's own error is the one to report
@@ -1403,7 +1405,7 @@ fn downloadAccept(state: *Run, scratch: Allocator, href: []const u8) Error!Downl
 
 /// A download's file in `<lfs>/incomplete`, and how far it has come.
 const Partial = struct {
-    file: Io.File,
+    file: fs.OwnedFile,
     /// The hash of the file's first `from` bytes.
     sha: std.crypto.hash.sha2.Sha256 = .init(.{}),
     from: u64 = 0,
@@ -1417,7 +1419,7 @@ const Partial = struct {
         assert(p.from == 0);
         var buf: [64 * 1024]u8 = undefined;
         while (true) {
-            const n = try p.file.readPositionalAll(io, &buf, p.from);
+            const n = try p.file.lend().get().readPositionalAll(io, &buf, p.from);
             if (n == 0) break;
             p.sha.update(buf[0..n]);
             p.from += n;
@@ -1428,7 +1430,7 @@ const Partial = struct {
 
     /// Start again from nothing.
     fn restart(p: *Partial, io: Io) Error!void {
-        try p.file.setLength(io, 0);
+        try p.file.lend().get().setLength(io, 0);
         p.from = 0;
         p.sha = .init(.{});
     }
@@ -1471,7 +1473,7 @@ const Partial = struct {
             }
             if (at + n > size) return .{ .fail = "the server sent more than the object's size" };
             p.sha.update(buf[0..n]);
-            try p.file.writePositionalAll(io, buf[0..n], at);
+            try p.file.lend().get().writePositionalAll(io, buf[0..n], at);
             at += n;
             if (broken) {
                 // Broken off: what came is kept for the next attempt.
@@ -1486,7 +1488,7 @@ const Partial = struct {
             p.keep = true;
             return .{ .retry = .{ .message = "the download broke off" } };
         }
-        assert(at == size);
+        aegis.assert.invariant(at == size, "at == size");
         return null;
     }
 };
@@ -1521,7 +1523,7 @@ fn requestFrom(state: *Run, scratch: Allocator, partial: *Partial, req: Download
         var all: std.ArrayList(http.Header) = .empty;
         try all.appendSlice(scratch, req.headers);
         // `hashResumed` starts again from a file as long as the object.
-        if (attempt_range) assert(partial.from < req.size);
+        if (attempt_range) aegis.assert.invariant(partial.from < req.size, "partial.from < req.size");
         if (attempt_range) try all.append(scratch, .{ .name = "Range", .value = try std.mem.print(&range_buf, "bytes={d}-{d}", .{ partial.from, req.size - 1 }) });
         const sent = server.client.send(io, .{
             .method = .GET,
@@ -1654,7 +1656,7 @@ fn verifyUpload(state: *Run, r: *Result, action: Action, authenticated: bool) Er
 }
 
 fn addBytes(context: *anyopaque, n: u64) void {
-    const state: *Run = @ptrCast(@alignCast(context)); // safe: the context handed out with this function is a Run
+    const state: *Run = @ptrCast(@alignCast(context)); // aegis: no-danger: the context handed out with this function is a Run
     state.say(.{ .bytes = n });
 }
 
@@ -1674,7 +1676,7 @@ const Counting = struct {
     }
 
     fn stream(r: *Io.Reader, w: *Io.Writer, limit: Io.Limit) Io.Reader.StreamError!usize {
-        const c: *Counting = @alignCast(@fieldParentPtr("interface", r)); // safe: this function is installed only on a Counting's interface
+        const c: *Counting = @alignCast(@fieldParentPtr("interface", r)); // aegis: no-danger: this function is installed only on a Counting's interface
         const n = c.inner.stream(w, limit) catch |err| {
             c.flush();
             return err;
@@ -1927,8 +1929,9 @@ fn attemptUploadSsh(state: *Run, t: *lfsssh.Transfer, worker: usize, r: *Result,
     const scratch = scratch_state.allocator();
     const store = state.server.store();
     const pointer: lfs.Pointer = .{ .oid = r.oid, .size = r.size };
-    const file = (try store.open(io, &pointer)) orelse return .{ .fail = "the object is not in the store" };
-    defer file.close(io);
+    var owned = (try store.open(io, &pointer)) orelse return .{ .fail = "the object is not in the store" };
+    defer owned.deinit(io);
+    const file = owned.lend().get();
     const line = t.connection(io, worker) catch |err| return sshRetry(state, err);
     var held = try line.acquire(io);
     defer held.deinit(io);
@@ -2009,7 +2012,7 @@ const SshData = struct {
     }
 
     fn stream(r: *Io.Reader, w: *Io.Writer, limit: Io.Limit) Io.Reader.StreamError!usize {
-        const d: *SshData = @alignCast(@fieldParentPtr("interface", r)); // safe: this function is installed only on a SshData's interface
+        const d: *SshData = @alignCast(@fieldParentPtr("interface", r)); // aegis: no-danger: this function is installed only on a SshData's interface
         while (d.pending.len == 0) {
             if (d.done) return error.EndOfStream;
             const next = d.conn.nextData(d.operation.io()) catch |err| {
@@ -2051,7 +2054,7 @@ fn copyLocal(
     var remote = Repository.open(gpa, io, dir, .{ .discover = false }) catch return error.LfsLocalRemoteUnreadable;
     defer remote.deinit(io);
     var remote_lfs = lfs.Lfs.load(gpa, io, remote.configuration(), .{
-        .common_dir = remote.commonDirectory(),
+        .common_dir = remote.commonDirectory().get(),
         .shared = remote.sharedPermissions(),
         .work_dir = null,
     }) catch return error.LfsLocalRemoteUnreadable;
@@ -2077,12 +2080,13 @@ fn copyLocal(
             r.message = "the object is not in the store, and the remote does not have it";
             continue;
         }
-        const file = (try from.open(io, &pointer)) orelse {
+        var owned = (try from.open(io, &pointer)) orelse {
             r.status = .refused;
             r.message = "the remote does not have the object";
             continue;
         };
-        defer file.close(io);
+        defer owned.deinit(io);
+        const file = owned.lend().get();
         var buf: [64 * 1024]u8 = undefined;
         var fr = file.reader(io, &buf);
         _ = to.install(io, &fr.interface, &pointer) catch |err| switch (err) {
@@ -2139,7 +2143,7 @@ pub const Fetcher = struct {
     fn fetchFn(io: Io, context: *anyopaque, store: *const lfs.Store, settings: *const lfs.Settings, wanted: []const lfs.Wanted) lfs.FetchError!void {
         _ = store;
         _ = settings;
-        const f: *Fetcher = @ptrCast(@alignCast(context)); // safe: the context handed out with this function is a Fetcher
+        const f: *Fetcher = @ptrCast(@alignCast(context)); // aegis: no-danger: the context handed out with this function is a Fetcher
         var objects: std.ArrayList(Object) = .empty;
         defer objects.deinit(f.server.gpa);
         for (wanted) |w| objects.append(f.server.gpa, .of(w.pointer, w.path)) catch return error.OutOfMemory;
@@ -2232,7 +2236,7 @@ pub fn fetch(io: Io, server: *lfsapi.Server, repo: *Repository, options: FetchOp
 /// What `git lfs fetch --recent` adds: the tips of the recent refs, and the
 /// versions the recent commits before each tip replaced.
 fn recentPointers(arena: Allocator, io: Io, server: *lfsapi.Server, repo: *Repository, tips: []const Oid, now_at: ?Io.Timestamp) FetchError![]Object {
-    const now: ?i64 = if (now_at) |t| t.toSeconds() else null;
+    const now: ?i64 = if (now_at) |t| date.seconds(t) else null;
     const settings = &server.settings;
     const refs_days = settings.getInt("lfs.fetchrecentrefsdays", 7);
     const commits_days = settings.getInt("lfs.fetchrecentcommitsdays", 0);
@@ -2444,7 +2448,7 @@ pub fn pull(io: Io, server: *lfsapi.Server, repo: *Repository, options: FetchOpt
 /// has it, and its index entry is refreshed so git and relic both call it
 /// clean.
 pub fn checkoutPointers(gpa: Allocator, io: Io, repo: *Repository, store: *const lfs.Store) transfer.FetchError!struct { replaced: u32, left: u32 } {
-    const wt = repo.workDirectory() orelse return .{ .replaced = 0, .left = 0 };
+    const wt = (repo.workDirectory() orelse return .{ .replaced = 0, .left = 0 }).get();
     var locked_index = try repo.lockIndex(io);
     defer locked_index.deinit(io);
     const index = &locked_index.index;
@@ -2472,11 +2476,12 @@ pub fn checkoutPointers(gpa: Allocator, io: Io, repo: *Repository, store: *const
             var canonical_buf: [lfs.Pointer.max_encoded_len]u8 = undefined;
             if (!std.mem.eql(u8, on_disk, pointer.encodeBuf(&canonical_buf))) continue;
         }
-        const file = (try store.open(io, &pointer)) orelse {
+        var owned = (try store.open(io, &pointer)) orelse {
             left += 1;
             continue;
         };
-        defer file.close(io);
+        defer owned.deinit(io);
+        const file = owned.lend().get();
         try replaceWith(io, wt, entry.path, file, entry.mode == .exec);
         if (try fs.statAt(io, wt, entry.path)) |after| entry.stat = after.stat;
         replaced += 1;

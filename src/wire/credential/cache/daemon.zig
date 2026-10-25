@@ -10,6 +10,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -17,6 +18,8 @@ const parts_mod = @import("../parts.zig");
 const cache = @import("../cache.zig");
 const credential = @import("../../credential.zig");
 const decimal = @import("../../../text.zig").decimal;
+const date = @import("../../../text.zig").date;
+const fs = @import("../../../fs/fs.zig");
 
 const Session = credential.Session;
 const Action = cache.Action;
@@ -64,7 +67,7 @@ pub const Daemon = struct {
 
     gpa: Allocator,
     io: Io,
-    server: Io.net.Server,
+    server: fs.OwnedServer,
     socket_path: []u8,
     entries: std.ArrayList(Entry) = .empty,
     /// git's `wait_for_entry_until`: when a daemon holding nothing ends.
@@ -96,7 +99,8 @@ pub const Daemon = struct {
             else => return error.CacheSocketUnbound,
         };
         errdefer server.deinit(io);
-        return .{ .gpa = gpa, .io = io, .server = server, .socket_path = try gpa.dupe(u8, socket_path) };
+        const path = try gpa.dupe(u8, socket_path);
+        return .{ .gpa = gpa, .io = io, .server = .init(server), .socket_path = path };
     }
 
     /// The socket closed and removed, and every credential forgotten, its
@@ -119,9 +123,9 @@ pub const Daemon = struct {
         defer removeSocket(d.io, d.socket_path);
         while (true) {
             const wait = d.checkExpirations() orelse return;
-            const stream = (try d.acceptWithin(wait)) orelse continue;
-            defer stream.close(d.io);
-            if (try d.serveOne(stream) == .exit) {
+            var stream = (try d.acceptWithin(wait)) orelse continue;
+            defer stream.deinit(d.io);
+            if (try d.serveOne(stream.lend().get()) == .exit) {
                 // The socket goes before the client hears the end, as
                 // git's daemon removes it at exit and only then closes.
                 removeSocket(d.io, d.socket_path);
@@ -131,7 +135,7 @@ pub const Daemon = struct {
     }
 
     fn now(d: *const Daemon) i64 {
-        return @intCast(@divFloor(Io.Clock.real.now(d.io).nanoseconds, std.time.ns_per_s));
+        return date.seconds(Io.Clock.real.now(d.io));
     }
 
     /// git's `check_expirations`: each credential past its time let go,
@@ -168,10 +172,10 @@ pub const Daemon = struct {
     };
 
     /// A client, or `null` when `seconds` pass with none.
-    fn acceptWithin(d: *Daemon, seconds: i64) RunError!?Io.net.Stream {
+    fn acceptWithin(d: *Daemon, seconds: i64) RunError!?fs.OwnedStream {
         var buffer: [2]Woken = undefined;
         var select: Io.Select(Woken) = .init(d.io, &buffer);
-        try select.concurrent(.accepted, Io.net.Server.accept, .{ &d.server, d.io });
+        try select.concurrent(.accepted, Io.net.Server.accept, .{ d.server.borrowMut(), d.io });
         // Concurrently too: `async` runs inline once the `Io`'s async
         // threads are taken, and the daemon would sleep through its wait
         // before it accepted anyone.
@@ -183,9 +187,9 @@ pub const Daemon = struct {
             d.cancelRest(&select);
             return err;
         };
-        const stream: ?Io.net.Stream = switch (first) {
+        const stream: ?fs.OwnedStream = switch (first) {
             // A failed accept is passed over, as git's "accept failed".
-            .accepted => |r| r catch null,
+            .accepted => |r| if (r) |accepted| .init(accepted) else |_| null,
             .slept => null,
         };
         d.cancelRest(&select);
@@ -203,23 +207,30 @@ pub const Daemon = struct {
 
     /// git's `serve_one_client`.
     fn serveOne(d: *Daemon, stream: Io.net.Stream) RunError!Served {
-        var read_buffer: [1024]u8 = undefined;
-        var r = stream.reader(d.io, &read_buffer);
-        const text = r.interface.allocRemaining(d.gpa, .limited(max_request)) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return .served,
-        };
-        defer {
-            std.crypto.secureZero(u8, text);
-            d.gpa.free(text);
+        // Room for a usual request, so it seldom grows.
+        var text = try aegis.SecretBytes.init(d.gpa, 1024);
+        defer text.deinit();
+        {
+            var into = aegis.SecretBytes.Writer.init(&text);
+            // No buffer of the reader's: each read lands in `text`'s own
+            // storage, wiped as it grows and when it is let go.
+            var r = stream.reader(d.io, &.{});
+            // One byte past the most a request may be says it is longer.
+            while (into.interface.end <= max_request) {
+                _ = r.interface.stream(&into.interface, Io.Limit.limited(max_request + 1 - into.interface.end)) catch |err| switch (err) {
+                    error.EndOfStream => break,
+                    error.ReadFailed => return .served,
+                    // The writer fails only for want of memory.
+                    error.WriteFailed => return error.OutOfMemory,
+                };
+            } else return .served;
+            into.interface.flush() catch return error.OutOfMemory;
         }
-        var req = (try readRequest(d.gpa, text)) orelse return .served;
+        var req = (try readRequest(d.gpa, text.expose())) orelse return .served;
         defer req.session.deinit();
-        var write_buffer: [1024]u8 = undefined;
-        var w = stream.writer(d.io, &write_buffer);
         switch (req.action) {
             .get => if (d.lookup(&req.session)) |e| {
-                sendAnswer(&w.interface, &e.item, req.session.capa_authtype.helper);
+                try sendAnswer(d.gpa, d.io, stream, &e.item, req.session.capa_authtype.helper);
             },
             .exit => return .exit,
             .erase => d.remove(&req.session, true),
@@ -307,10 +318,20 @@ fn nextLine(rest: *[]const u8) []const u8 {
 
 /// The answer written and sent; a client gone before it is git's write to
 /// a closed socket, which the daemon goes on from.
-fn sendAnswer(w: *Io.Writer, e: *const Session, authtype_asked: bool) void {
-    answer(w, e, authtype_asked) catch return;
+/// `answer`, built in storage that is wiped when it is let go and sent
+/// whole, so the credential in it is held nowhere else.
+fn sendAnswer(gpa: Allocator, io: Io, stream: Io.net.Stream, e: *const Session, authtype_asked: bool) Allocator.Error!void {
+    var text = try aegis.SecretBytes.init(gpa, 256);
+    defer text.deinit();
+    {
+        var into = aegis.SecretBytes.Writer.init(&text);
+        // The writer fails only for want of memory.
+        answer(&into.interface, e, authtype_asked) catch return error.OutOfMemory;
+        into.interface.flush() catch return error.OutOfMemory;
+    }
+    var w = stream.writer(io, &.{});
     // glint-ignore: Z026 -- the client left; nothing waits for this answer
-    w.flush() catch {};
+    w.interface.writeAll(text.expose()) catch {};
 }
 
 /// The socket file removed: one already gone is what was wanted.
@@ -344,8 +365,9 @@ pub const InProcess = struct {
     gpa: Allocator,
     io: Io,
     group: Io.Group = .init,
-    mutex: Io.Mutex = .init,
-    daemons: std.ArrayList(*Daemon) = .empty,
+    daemons: Daemons = Daemons.init(.empty),
+
+    const Daemons = aegis.BlockingGuarded(std.ArrayList(*Daemon));
 
     pub fn init(gpa: Allocator, io: Io) InProcess {
         return .{ .gpa = gpa, .io = io };
@@ -354,11 +376,12 @@ pub const InProcess = struct {
     /// Every daemon stopped and forgotten, its secrets wiped.
     pub fn deinit(p: *InProcess) void {
         p.group.cancel(p.io);
-        for (p.daemons.items) |d| {
+        const daemons = p.daemons.teardown();
+        for (daemons.items) |d| {
             d.deinit();
             p.gpa.destroy(d);
         }
-        p.daemons.deinit(p.gpa);
+        daemons.deinit(p.gpa);
         p.* = undefined;
     }
 
@@ -367,16 +390,20 @@ pub const InProcess = struct {
     }
 
     fn start(context: ?*anyopaque, io: Io, socket: []const u8) cache.StartError!void {
-        const p: *InProcess = @ptrCast(@alignCast(context.?)); // safe: the context `starter` hands out is this `InProcess`
+        const p: *InProcess = @ptrCast(@alignCast(context.?)); // aegis: no-danger: the context `starter` hands out is this `InProcess`
         const d = p.gpa.create(Daemon) catch return error.CacheDaemonNotStarted;
         d.* = Daemon.listen(p.gpa, io, socket) catch |err| {
             p.gpa.destroy(d);
             return if (err == error.Canceled) error.Canceled else error.CacheDaemonNotStarted;
         };
         {
-            try p.mutex.lock(io);
-            defer p.mutex.unlock(io);
-            p.daemons.append(p.gpa, d) catch {
+            var guard = p.daemons.acquire(io) catch |err| {
+                d.deinit();
+                p.gpa.destroy(d);
+                return err;
+            };
+            defer guard.deinit(io);
+            guard.value().append(p.gpa, d) catch {
                 d.deinit();
                 p.gpa.destroy(d);
                 return error.CacheDaemonNotStarted;

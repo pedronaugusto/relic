@@ -251,7 +251,7 @@ test "snapshot keeps native LFS writes inside the private store" {
     const pointer_text = try dest.dir.readFileAlloc(io, "large.bin", gpa, .limited(1024));
     defer gpa.free(pointer_text);
     const pointer = try lfs.Pointer.decode(pointer_text);
-    const payloads: lfs.Store = .{ .base = store.dir, .root = "lfs" };
+    const payloads: lfs.Store = .{ .base = store.dir.lend().get(), .root = "lfs" };
     try testing.expect(try payloads.contains(io, &pointer));
 }
 

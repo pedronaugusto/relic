@@ -321,7 +321,7 @@ pub const Session = struct {
 
     fn lock(s: *Session, arena: Allocator, req: Request, user: Who) Error!void {
         const path = req.arg("path") orelse return s.status(400, &.{}, &.{"no path"});
-        var table = try lock_store.Table.take(s.gpa, arena, s.io, s.remote.repo.gitDirectory());
+        var table = try lock_store.Table.take(s.gpa, arena, s.io, s.remote.repo.gitDirectory().get());
         defer table.deinit();
         for (table.list) |l| if (std.mem.eql(u8, l.path, path)) {
             return s.status(409, try lockArgs(arena, l), &.{"already locked"});
@@ -339,7 +339,7 @@ pub const Session = struct {
     }
 
     fn listLocks(s: *Session, arena: Allocator, req: Request, user: Who) Error!void {
-        const all = try lock_store.read(arena, s.io, s.remote.repo.gitDirectory());
+        const all = try lock_store.read(arena, s.io, s.remote.repo.gitDirectory().get());
         var matching: std.ArrayList(locks.Lock) = .empty;
         for (all) |l| {
             if (req.arg("path")) |p| if (!std.mem.eql(u8, l.path, p)) continue;
@@ -362,7 +362,7 @@ pub const Session = struct {
     }
 
     fn unlock(s: *Session, arena: Allocator, req: Request, id: []const u8, user: Who) Error!void {
-        var table = try lock_store.Table.take(s.gpa, arena, s.io, s.remote.repo.gitDirectory());
+        var table = try lock_store.Table.take(s.gpa, arena, s.io, s.remote.repo.gitDirectory().get());
         defer table.deinit();
         const at = for (table.list, 0..) |l, i| {
             if (std.mem.eql(u8, l.id, id)) break i;
@@ -471,7 +471,7 @@ const DataReader = struct {
     }
 
     fn stream(r: *Io.Reader, w: *Io.Writer, limit: Io.Limit) Io.Reader.StreamError!usize {
-        const d: *DataReader = @alignCast(@fieldParentPtr("interface", r)); // safe: installed only on a DataReader's interface
+        const d: *DataReader = @alignCast(@fieldParentPtr("interface", r)); // aegis: no-danger: installed only on a DataReader's interface
         while (true) {
             if (d.pending.len != 0) {
                 const n = limit.minInt(d.pending.len);
@@ -518,7 +518,7 @@ const DataWriter = struct {
     }
 
     fn drain(w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
-        const d: *DataWriter = @alignCast(@fieldParentPtr("interface", w)); // safe: installed only on a DataWriter's interface
+        const d: *DataWriter = @alignCast(@fieldParentPtr("interface", w)); // aegis: no-danger: installed only on a DataWriter's interface
         try d.packets(w.buffered());
         w.end = 0;
         var n: usize = 0;

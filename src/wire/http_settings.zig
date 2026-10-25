@@ -311,13 +311,13 @@ pub const Settings = struct {
                 try unparsed.append(arena, entry[0]);
                 continue;
             }
-            const value: i64 = @intCast(read.value); // safe: strtol of 64 bits fits an i64
+            const value: i64 = @intCast(read.value); // aegis: no-danger: strtol of 64 bits fits an i64
             switch (entry[1]) {
                 .count => |to| to.* = value,
                 .time => |to| to.* = .fromRaw(value),
             }
         }
-        settings.env_unparsed = unparsed.items;
+        settings.env_unparsed = try unparsed.toOwnedSlice(arena);
         if (!proxy_set) settings.proxy = uplink.Proxy.environmentValue(env, url.scheme == .https, .lowercase);
         if (settings.proxy) |_| {
             // git supplies an explicitly set lowercase list to curl even
@@ -434,7 +434,7 @@ pub fn resolve(arena: Allocator, io: Io, url: url_mod.Url, sources: Sources) Sel
             try s.take(arena, io, .{ .home = home, .base = sources.base }, name, value, origin, &headers);
         }
     }
-    s.extra_headers = headers.items;
+    s.extra_headers = try headers.toOwnedSlice(arena);
 
     if (config) |c| if (remote_name) |name| {
         const key = try arena.print("remote.{s}.proxy", .{name});

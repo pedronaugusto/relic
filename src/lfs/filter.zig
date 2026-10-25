@@ -1,6 +1,7 @@
 //! Native LFS filtering. Checkout knows only the native filter protocol;
 //! this provider owns LFS commands, pointers, stores and batched fetches.
 const std = @import("std");
+const aegis = @import("aegis");
 const shakedown_mod = @import("shakedown");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -19,7 +20,7 @@ pub const Options = struct { fetch: ?lfs.Fetcher = null, skip_smudge: bool = fal
 pub fn load(gpa: Allocator, io: Io, repository: *repo.Repository, options: Options) Error!filter.Drivers {
     const text = try repository.lfsconfigText(io);
     defer if (text) |bytes| repository.allocator().free(bytes);
-    return filter.Drivers.load(gpa, io, repository.configuration(), .{ .common = repository.commonDirectory(), .work = repository.workDirectory(), .shared = repository.sharedPermissions() }, .{
+    return filter.Drivers.load(gpa, io, repository.configuration(), .{ .common = repository.commonDirectory().get(), .work = if (repository.workDirectory()) |work| work.get() else null, .shared = repository.sharedPermissions() }, .{
         .native_provider = provider(&options),
         .skip_smudge = options.skip_smudge,
         .config_text = text,
@@ -32,7 +33,7 @@ pub fn provider(options: *const Options) native.Provider {
 }
 
 fn loadDriver(gpa: Allocator, io: Io, context: ?*const anyopaque, configuration: *const config.Config, options: native.LoadOptions) native.Error!native.Driver {
-    const with: *const Options = @ptrCast(@alignCast(context.?)); // safe: the provider context is the Options passed to provider
+    const with: *const Options = @ptrCast(@alignCast(context.?)); // aegis: no-danger: the provider context is the Options passed to provider
     const backend = try gpa.create(Backend);
     errdefer gpa.destroy(backend);
     var commands: native.Commands = .{};
@@ -63,15 +64,15 @@ const Backend = struct {
     }
     fn open(gpa: Allocator, _: Io, context: *anyopaque, options: native.SessionOptions) native.Error!native.Session {
         const session = try gpa.create(Session);
-        session.* = .{ .gpa = gpa, .backend = @ptrCast(@alignCast(context)), .options = options, .arena = .init(gpa) }; // safe: the driver context is the Backend its loader created
+        session.* = .{ .gpa = gpa, .backend = @ptrCast(@alignCast(context)), .options = options, .arena = .init(gpa) }; // aegis: no-danger: the driver context is the Backend its loader created
         return .{ .context = session, .vtable = &Session.vtable };
     }
     fn retarget(context: *anyopaque, dir: Io.Dir) void {
-        const b: *Backend = @ptrCast(@alignCast(context)); // safe: the driver context is the Backend its loader created
+        const b: *Backend = @ptrCast(@alignCast(context)); // aegis: no-danger: the driver context is the Backend its loader created
         b.lfs.store = .{ .base = dir, .root = "lfs" };
     }
     fn releaseContext(_: Io, context: *anyopaque) void {
-        const b: *Backend = @ptrCast(@alignCast(context)); // safe: the driver context is the Backend its loader created
+        const b: *Backend = @ptrCast(@alignCast(context)); // aegis: no-danger: the driver context is the Backend its loader created
         const gpa = b.gpa;
         b.lfs.deinit();
         gpa.destroy(b);
@@ -90,7 +91,7 @@ const Session = struct {
     const Deferred = struct { path: []const u8, pointer: lfs.Pointer, pointer_bytes: []const u8 };
     const vtable: native.Session.VTable = .{ .clean = clean, .clean_file = cleanFile, .smudge = smudge, .canonical = canonical, .next_ready = nextReady, .fallbacks = fallbacks, .deinit = releaseContext };
     fn get(context: *anyopaque) *Session {
-        const s: *Session = @ptrCast(@alignCast(context)); // safe: the session context is the Session open created
+        const s: *Session = @ptrCast(@alignCast(context)); // aegis: no-danger: the session context is the Session open created
         return s;
     }
     fn clean(a: Allocator, io: Io, context: *anyopaque, input: native.CleanInput) native.Error![]const u8 {
@@ -112,11 +113,11 @@ const Session = struct {
         return get(context).nextDeferred(io);
     }
     fn fallbacks(context: *const anyopaque) u32 {
-        const s: *const Session = @ptrCast(@alignCast(context)); // safe: the session context is the Session open created
+        const s: *const Session = @ptrCast(@alignCast(context)); // aegis: no-danger: the session context is the Session open created
         return s.lfs_pointers;
     }
     fn releaseContext(_: Io, context: *anyopaque) void {
-        const s: *Session = @ptrCast(@alignCast(context)); // safe: the session context is the Session open created
+        const s: *Session = @ptrCast(@alignCast(context)); // aegis: no-danger: the session context is the Session open created
         const gpa = s.gpa;
         s.deferred.deinit(gpa);
         s.arena.deinit();
@@ -149,7 +150,7 @@ const Session = struct {
         const n = try file.readPositionalAll(io, &head, 0);
         if (lfs.Pointer.decode(head[0..n])) |_| {
             if (n < head.len) return a.dupe(u8, head[0..n]);
-            return s.options.wt.readFileAlloc(io, path, a, .limited(1 << 31));
+            return aegis.own.readFile(io, s.options.wt, path, a, aegis.units.Bytes(u64).fromRaw(1 << 31));
         } else |_| {}
 
         var buf: [64 * 1024]u8 = undefined;
@@ -289,7 +290,7 @@ test "git-lfs's own commands are recognised and a person's own are not" {
 pub fn settings(drivers: *const filter.Drivers) *const lfs.Settings {
     const driver = drivers.native_driver.?;
     assert(driver.vtable == &Backend.vtable);
-    const b: *const Backend = @ptrCast(@alignCast(driver.context)); // safe: the driver was checked against Backend.vtable, so its context is a Backend
+    const b: *const Backend = @ptrCast(@alignCast(driver.context)); // aegis: no-danger: the driver was checked against Backend.vtable, so its context is a Backend
     return &b.lfs.settings;
 }
 
@@ -322,11 +323,11 @@ test "native LFS selection owns settings, preserves custom commands and hash-onl
     defer gpa.free(installed_bytes);
     try testing.expectEqualStrings(pointer_bytes, installed_bytes);
     try testing.expect(try store.contains(io, &pointer));
-    const content = try session.smudge(gpa, io, .{ .path = "large.bin", .bytes = pointer_bytes });
+    var content = try session.smudge(gpa, io, .{ .path = "large.bin", .bytes = pointer_bytes });
     try testing.expect(content == .file);
-    defer content.file.close(io);
+    defer content.file.deinit(io);
     var buffer: [64]u8 = undefined;
-    const n = try content.file.readPositionalAll(io, &buffer, 0);
+    const n = try content.file.lend().get().readPositionalAll(io, &buffer, 0);
     try testing.expectEqualStrings("large content", buffer[0..n]);
 }
 
@@ -363,10 +364,10 @@ test "native LFS batches delayed files once and isolates session state" {
     try testing.expect((try session.smudge(gpa, io, .{ .path = "one", .bytes = bytes, .can_delay = true })) == .delayed);
     try testing.expect((try session.smudge(gpa, io, .{ .path = "two", .bytes = bytes, .can_delay = true })) == .delayed);
     for ([_][]const u8{ "one", "two" }) |path| {
-        const ready = (try session.nextReady(gpa, io)).?;
+        var ready = (try session.nextReady(gpa, io)).?;
         try testing.expectEqualStrings(path, ready.path);
         try testing.expect(ready.content == .file);
-        ready.content.file.close(io);
+        ready.content.file.deinit(io);
     }
     try testing.expect((try session.nextReady(gpa, io)) == null);
     try testing.expectEqual(@as(usize, 1), fetch.calls);

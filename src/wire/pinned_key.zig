@@ -12,6 +12,7 @@
 //! and of the PEM block's key, both kept, match the same keys.
 
 const std = @import("std");
+const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const Sha256 = std.crypto.hash.sha2.Sha256;
@@ -28,7 +29,7 @@ const prefix = "sha256//";
 /// curl fails every handshake on.
 pub fn read(arena: Allocator, io: Io, value: []const u8) Error![]const [32]u8 {
     if (std.mem.startsWith(u8, value, prefix)) return hashes(arena, value);
-    const bytes = Io.Dir.cwd().readFileAlloc(io, value, arena, .limited(max_file)) catch |err| switch (err) {
+    const bytes = aegis.own.readFile(io, Io.Dir.cwd(), value, arena, aegis.units.Bytes(u64).fromRaw(max_file)) catch |err| switch (err) {
         error.Canceled => return error.Canceled,
         error.OutOfMemory => return error.OutOfMemory,
         else => return &.{},

@@ -28,12 +28,14 @@
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const warp = @import("warp");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const Io = std.Io;
 
 const hash = @import("../hash/hash.zig");
+const date = @import("../text.zig").date;
 const object = @import("../object/object.zig");
 const odb_mod = @import("../odb/odb.zig");
 const repo_mod = @import("../repo/repo.zig");
@@ -315,7 +317,7 @@ fn octal(field: []u8, value: u64) void {
     }
     // Every value written fits its field: sizes and times past the ustar
     // limit go to a pax header instead.
-    assert(v == 0);
+    aegis.assert.invariant(v == 0, "v == 0");
     field[digits] = 0;
 }
 
@@ -687,7 +689,7 @@ const ZipSink = struct {
     writer: Io.Writer,
 
     fn drain(w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
-        const sink: *ZipSink = @alignCast(@fieldParentPtr("writer", w)); // safe: the vtable is installed only on a ZipSink's writer
+        const sink: *ZipSink = @alignCast(@fieldParentPtr("writer", w)); // aegis: no-danger: the vtable is installed only on a ZipSink's writer
         try sink.z.write(w.buffered());
         w.end = 0;
         var n: usize = 0;
@@ -848,7 +850,7 @@ const Walk = struct {
         if (wk.decorations == null and (hasPlaceholder(format, "", "dD") or std.mem.find(u8, format, "%(decorate") != null))
             wk.decorations = try pretty.Decorations.load(wk.gpa, wk.io, wk.repo, .{});
         if (wk.signer == null and hasPlaceholder(format, "", "G")) if (wk.options.programs) |programs| {
-            wk.signer = try signing.Signer.init(wk.gpa, wk.io, wk.repo.configuration(), wk.repo.topDirectory(), programs);
+            wk.signer = try signing.Signer.init(wk.gpa, wk.io, wk.repo.configuration(), wk.repo.topDirectory().get(), programs);
         };
         return .{
             .abbrev_len = wk.abbrev_len,
@@ -861,7 +863,7 @@ const Walk = struct {
 
     fn lookup(wk: *Walk, path: []const u8, is_dir: bool) Error!attributes.Attributes {
         if (wk.options.worktree_attributes) {
-            if (wk.repo.workDirectory()) |wt| try wk.attrs.enter(wk.io, wt, path);
+            if (wk.repo.workDirectory()) |wt| try wk.attrs.enter(wk.io, wt.get(), path);
         }
         return wk.attrs.lookup(wk.a, path, if (is_dir) .dir else .file);
     }
@@ -873,7 +875,7 @@ const Walk = struct {
         const config = wk.repo.configuration();
         const head = stream.reader().peek(@intCast(@min(stream.size, zip_stream_piece))) catch |err| switch (err) {
             error.ReadFailed => return stream.err().?,
-            // unreachable: a stream gives its length's bytes or fails
+            // aegis: no-danger: a stream gives its length's bytes or fails
             error.EndOfStream => unreachable,
         };
         return driver_mod.Driver.of(config, applied.get("diff")).isBinary(config, head);
@@ -1070,10 +1072,10 @@ pub fn archive(gpa: Allocator, io: Io, w: *Io.Writer, inputs: Inputs, options: O
     const a = arena_instance.allocator();
     const db = repo.objectDatabase();
 
-    const peeled = try peel(gpa, io, db, treeish, options.now.toSeconds());
+    const peeled = try peel(gpa, io, db, treeish, date.seconds(options.now));
     const commit = peeled.commit;
     const tree = peeled.tree;
-    const time = if (options.mtime) |m| m.toSeconds() else peeled.time;
+    const time = if (options.mtime) |m| date.seconds(m) else peeled.time;
 
     // each pathspec must name something, as git checks
     for (options.pathspecs) |p| {
@@ -1097,7 +1099,7 @@ pub fn archive(gpa: Allocator, io: Io, w: *Io.Writer, inputs: Inputs, options: O
     }
     const rules = try repo.worktreeRules();
     var conv: convert.Session = .open(gpa, io, .{
-        .wt = repo.workDirectory() orelse repo.gitDirectory(),
+        .wt = repo.topDirectory().get(),
         .kind = db.objectFormat(),
         .core = rules.core,
         .required_filters = try repo.requiredFilters(a),

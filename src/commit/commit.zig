@@ -32,6 +32,7 @@ const filter = @import("../checkout/filter.zig");
 const program = @import("../process.zig").program;
 
 const std = @import("std");
+const aegis = @import("aegis");
 const ctype = @import("../text.zig").ctype;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -178,7 +179,7 @@ pub fn commit(io: Io, repo: *Repository, request: Request, options: Options) Sel
     const prepared = try prepareMessage(arena, io, repo, request.message, cleanup, options);
     const comment = prepared.comment;
     const first_message = prepared.message;
-    try repo.gitDirectory().writeFile(io, .{ .sub_path = "COMMIT_EDITMSG", .data = first_message });
+    try repo.gitDirectory().get().writeFile(io, .{ .sub_path = "COMMIT_EDITMSG", .data = first_message });
 
     // `pre-commit` may have staged something, so the index is read now and
     // not before.
@@ -222,7 +223,7 @@ pub fn commit(io: Io, repo: *Repository, request: Request, options: Options) Sel
         if (options.verify) _ = try runner.commitMsg(io, env, message_path);
     }
 
-    const edited = try repo.gitDirectory().readFileAlloc(io, "COMMIT_EDITMSG", arena, .limited(1 << 30));
+    const edited = try aegis.own.readFile(io, repo.gitDirectory().get(), "COMMIT_EDITMSG", arena, aegis.units.Bytes(u64).fromRaw(1 << 30));
     const cleaned = try clean(arena, edited, cleanup, comment);
     try validateMessage(arena, cleaned, cleanup, comment, options);
 
@@ -308,9 +309,9 @@ fn prepareMessage(arena: Allocator, io: Io, repo: *Repository, input: []const u8
 /// found from where git runs `commit`, the top of the working tree, and
 /// `~/` is the home the repository was opened with. The text is `gpa`'s.
 pub fn template(gpa: Allocator, io: Io, repo: *Repository) config_mod.PathSettingError!?[]u8 {
-    const path = (try repo.configuration().getPath(gpa, io, repo.topDirectory(), "commit.template")) orelse return null;
+    const path = (try repo.configuration().getPath(gpa, io, repo.topDirectory().get(), "commit.template")) orelse return null;
     defer gpa.free(path);
-    const text = repo.topDirectory().readFileAlloc(io, path, gpa, .limited(1 << 30)) catch return null;
+    const text = aegis.own.readFile(io, repo.topDirectory().get(), path, gpa, aegis.units.Bytes(u64).fromRaw(1 << 30)) catch return null;
     if (text.len == 0) {
         gpa.free(text);
         return null;

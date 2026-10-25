@@ -440,12 +440,13 @@ pub fn addAll(
 
 // Every filesystem walk uses the same distinction: a vanished directory
 // can be absent, but a directory that could not be read cannot be empty.
-fn openWalkDirectory(io: Io, wt: Io.Dir, path: []const u8) Error!?Io.Dir {
-    if (path.len == 0) return wt;
-    return wt.openDir(io, path, .{ .iterate = true }) catch |err| switch (err) {
-        error.FileNotFound, error.NotDir => null,
+// The top is opened again, once a walk, so every level is a handle of its
+// own.
+fn openWalkDirectory(io: Io, wt: Io.Dir, path: []const u8) Error!?fs.OwnedDir {
+    return fs.OwnedDir.init(wt.openDir(io, if (path.len == 0) "." else path, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir => return null,
         else => return err,
-    };
+    });
 }
 
 const Walker = struct {
@@ -494,8 +495,9 @@ const Walker = struct {
 
     fn walk(w: *Walker, dir_path: []const u8, depth: u32) Error!void {
         if (depth > 64) return error.TreeTooDeep;
-        const dir = (try openWalkDirectory(w.io, w.wt, dir_path)) orelse return;
-        defer if (dir_path.len != 0) dir.close(w.io);
+        var opened = (try openWalkDirectory(w.io, w.wt, dir_path)) orelse return;
+        defer opened.deinit(w.io);
+        const dir = opened.lend().get();
 
         if (w.options.rules.ignore) |rules| try rules.addDirectory(w.io, w.wt, dir_path, depth);
         defer if (w.options.rules.ignore) |rules| rules.popTo(depth + 2);
@@ -873,7 +875,7 @@ pub const Tracked = struct {
             const applied = try attrs.lookup(a, path, .file);
             return (try t.conv.toGitFile(a, .{ .path = path, .size = found.size, .applied = applied }, .{ .storing = .hash_only })).bytes;
         }
-        return t.wt.readFileAlloc(t.io, path, a, .limited(1 << 31));
+        return aegis.own.readFile(t.io, t.wt, path, a, aegis.units.Bytes(u64).fromRaw(1 << 31));
     }
 };
 
@@ -947,7 +949,7 @@ pub const StatusEntry = struct {
     /// HEAD against the index.
     staged: Change,
     /// The index against the working tree.
-    unstaged: Change,
+    unstaged: Change, // aegis: no-danger: a comparison's answer, computed once and read; no lifecycle
     /// Set when the path has entries at stages 1 to 3.
     conflicted: bool = false,
     /// Where a `renamed` or `copied` path came from, and how alike the two
@@ -1537,8 +1539,9 @@ const StatusScan = struct {
 
     fn walk(s: *StatusScan, dir_path: []const u8, depth: u32) Error!void {
         if (depth > 64) return error.TreeTooDeep;
-        const dir = (try openWalkDirectory(s.io, s.wt, dir_path)) orelse return;
-        defer if (dir_path.len != 0) dir.close(s.io);
+        var opened = (try openWalkDirectory(s.io, s.wt, dir_path)) orelse return;
+        defer opened.deinit(s.io);
+        const dir = opened.lend().get();
 
         if (s.options.rules.ignore) |rules| try rules.addDirectory(s.io, s.wt, dir_path, depth);
         defer if (s.options.rules.ignore) |rules| rules.popTo(depth + 2);
@@ -1782,8 +1785,9 @@ const StatusScan = struct {
     fn readNames(s: *StatusScan, path: []const u8) Error!std.ArrayList(Name) {
         var out: std.ArrayList(Name) = .empty;
         errdefer out.deinit(s.gpa);
-        const dir = (try openWalkDirectory(s.io, s.wt, path)) orelse return out;
-        defer if (path.len != 0) dir.close(s.io);
+        var opened = (try openWalkDirectory(s.io, s.wt, path)) orelse return out;
+        defer opened.deinit(s.io);
+        const dir = opened.lend().get();
         var scan = try dir_scan.Scan.init(s.gpa, s.io, dir, .{ .precompose = s.options.rules.precompose_unicode });
 
         defer scan.deinit();
@@ -2750,7 +2754,7 @@ const WriteBatch = struct {
             _ = arena.reset(.retain_capacity);
             b.arena = arena.state;
         }
-        var next: std.atomic.Value(usize) = .init(0);
+        var next = Claimed.init(Claims.fromRaw(0));
         // A batch of a few files is written here, as git writes fewer than
         // its `checkout.thresholdForParallelism` of them.
         const tasks = if (b.jobs.items.len < parallel_threshold) 1 else @min(b.workers, b.jobs.items.len);
@@ -2763,7 +2767,7 @@ const WriteBatch = struct {
         run(io, wt, b.jobs.items, &next);
         // It stops only once every job is claimed, so none is read below
         // with the result it started with.
-        assert(next.load(.monotonic) >= b.jobs.items.len);
+        assert(next.load(.monotonic).compare(Claims.fromRaw(b.jobs.items.len)) != .lt);
         group.await(io) catch group.cancel(io);
         var first: ?Error = null;
         for (b.jobs.items) |*job| {
@@ -2778,9 +2782,14 @@ const WriteBatch = struct {
         if (first) |err| return err;
     }
 
-    fn run(io: Io, wt: Io.Dir, jobs: []Job, next: *std.atomic.Value(usize)) void {
+    /// How many jobs the tasks have claimed: each takes the next one by
+    /// its index until none is left.
+    const Claims = aegis.units.Count(Job, usize);
+    const Claimed = aegis.Atomic(Claims);
+
+    fn run(io: Io, wt: Io.Dir, jobs: []Job, next: *Claimed) void {
         while (true) {
-            const at = next.fetchAdd(1, .monotonic);
+            const at = next.fetchAddWrapping(Claims.fromRaw(1), .monotonic).raw();
             if (at >= jobs.len) return;
             const job = &jobs[at];
             job.result = write(io, wt, job);
@@ -2948,11 +2957,12 @@ pub fn addTreeAttributes(
 }
 
 fn writeSmudged(io: Io, wt: Io.Dir, path: []const u8, smudged: native.Content, executable: bool) Error!void {
-    switch (smudged) {
+    var content = smudged;
+    switch (content) {
         .bytes => |bytes| try writeFile(io, wt, path, .{ .bytes = bytes }, executable),
-        .file => |file| {
-            defer file.close(io);
-            try writeFile(io, wt, path, .{ .file = file }, executable);
+        .file => |*file| {
+            defer file.deinit(io);
+            try writeFile(io, wt, path, .{ .file = file.lend().get() }, executable);
         },
         .delayed => unreachable,
     }
@@ -3106,7 +3116,7 @@ fn writePathFile(
     want: PathWrite.Blob,
     rules: Rules,
 ) Error!bool {
-    assert(want.mode == .file or want.mode == .exec);
+    aegis.assert.invariant(want.mode == .file or want.mode == .exec, "want.mode == .file or want.mode == .exec");
     var scratch: std.heap.ArenaAllocator = .init(gpa);
     defer scratch.deinit();
     const a = scratch.allocator();
@@ -3569,7 +3579,7 @@ pub const RacyCheck = struct {
     }
 
     fn changed(context: *anyopaque, index: *const Index, entry: index_mod.Entry) bool {
-        const c: *RacyCheck = @ptrCast(@alignCast(context)); // safe: the context handed out with this function is a RacyCheck
+        const c: *RacyCheck = @ptrCast(@alignCast(context)); // aegis: no-danger: the context handed out with this function is a RacyCheck
         return differsFromIndex(c.gpa, c.io, c.wt, .{ .index = index, .entry = entry }, c.rules) catch true;
     }
 };
@@ -3603,7 +3613,7 @@ pub fn differsFromIndex(
     }
     const attrs = rules.attrs orelse {
         if (try streamsIn(rules.big_file_bytes, found, null)) return !try namedAs(io, wt, entry);
-        const bytes = wt.readFileAlloc(io, entry.path, a, .limited(1 << 31)) catch |err| switch (err) {
+        const bytes = aegis.own.readFile(io, wt, entry.path, a, aegis.units.Bytes(u64).fromRaw(1 << 31)) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return true,
         };
@@ -3632,7 +3642,7 @@ pub fn differsFromIndex(
     defer if (!entered) attrs.leave();
     const applied = try attrs.lookup(a, entry.path, .file);
     if (try streamsIn(rules.big_file_bytes, found, .{ .session = &conv, .path = entry.path, .applied = applied })) return !try namedAs(io, wt, entry);
-    const bytes = wt.readFileAlloc(io, entry.path, a, .limited(1 << 31)) catch |err| switch (err) {
+    const bytes = aegis.own.readFile(io, wt, entry.path, a, aegis.units.Bytes(u64).fromRaw(1 << 31)) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return true,
     };
@@ -4089,8 +4099,9 @@ const ListScan = struct {
 
     fn walk(s: *ListScan, dir_path: []const u8, depth: u32) Error!void {
         if (depth > 64) return error.TreeTooDeep;
-        const dir = (try openWalkDirectory(s.io, s.wt, dir_path)) orelse return;
-        defer if (dir_path.len != 0) dir.close(s.io);
+        var opened = (try openWalkDirectory(s.io, s.wt, dir_path)) orelse return;
+        defer opened.deinit(s.io);
+        const dir = opened.lend().get();
 
         if (s.rules.ignore) |rules| try rules.addDirectory(s.io, s.wt, dir_path, depth);
         defer if (s.rules.ignore) |rules| rules.popTo(depth + 2);

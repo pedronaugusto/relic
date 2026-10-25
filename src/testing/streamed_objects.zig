@@ -528,9 +528,9 @@ test "a blob past 4 GiB, made from a reader and never held, goes through add, co
     {
         var index = try repo.openIndex(io);
         defer index.deinit();
-        const added = try worktree.addAll(gpa, io, repo.workDirectory().?, .{ .index = &index, .db = repo.objectDatabase() }, .{ .rules = try repo.worktreeRules() });
+        const added = try worktree.addAll(gpa, io, repo.workDirectory().?.get(), .{ .index = &index, .db = repo.objectDatabase() }, .{ .rules = try repo.worktreeRules() });
         try std.testing.expect(added.streamed_pack != null);
-        try index.write(io, repo.gitDirectory(), "index", .{});
+        try index.write(io, repo.gitDirectory().get(), "index", .{});
     }
     const made = try commit_mod.commit(io, &repo, .{ .author = who, .committer = who, .message = "big\n" }, .{});
     const stored = try ours.line(io, &.{ "rev-parse", "HEAD:big.txt" });

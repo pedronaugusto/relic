@@ -5,6 +5,7 @@
 //! This is package plumbing, reached by no public name.
 
 const std = @import("std");
+const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -18,7 +19,7 @@ pub const Error = error{
     LfsStoreFailed,
     UnwritableTime,
 } || Allocator.Error || Io.Cancelable || fs.LockFile.OpenError || fs.CommitError ||
-    Io.Dir.CreateDirPathError || Io.Dir.ReadFileAllocError || Io.File.Writer.Error;
+    Io.Dir.CreateDirPathError || aegis.own.ReadFileError || Io.File.Writer.Error;
 
 const dir_name = "lfs";
 const name = "lfs/locks.json";

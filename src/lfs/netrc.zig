@@ -93,7 +93,7 @@ pub const Netrc = struct {
             }
         }
         if (current) |m| try machines.append(a, m);
-        n.machines = machines.items;
+        n.machines = try machines.toOwnedSlice(a);
         return n;
     }
 

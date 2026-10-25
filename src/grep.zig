@@ -22,6 +22,7 @@
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
@@ -1128,7 +1129,7 @@ fn applyAttributes(a: Allocator, gpa: Allocator, io: Io, repos: *Repos, items: [
         var state: ?attributes.State = null;
         const repo = repos.list.items[item.owner];
         if (repos.attrs.items[item.owner]) |*at| {
-            if (repo.workDirectory()) |w| try at.enter(io, w, item.path);
+            if (repo.workDirectory()) |w| try at.enter(io, w.get(), item.path);
             state = (try at.lookup(a, item.path, .file)).get("diff");
         }
         const driver = driver_mod.Driver.of(config, state);
@@ -1162,7 +1163,12 @@ const Work = struct {
     buffers: [][]u8,
     used: []usize,
     scratch: []Scratch,
-    next: std.atomic.Value(usize) = .init(0),
+    /// How many items the workers have claimed: each takes the next by
+    /// its index until none is left.
+    next: Claimed = Claimed.init(Claims.fromRaw(0)),
+
+    const Claims = aegis.units.Count(Item, usize);
+    const Claimed = aegis.Atomic(Claims);
 };
 
 /// Search files until none is left; a step is one file, held in memory
@@ -1170,7 +1176,7 @@ const Work = struct {
 fn runWorker(work: *Work, io: Io, worker: usize) Io.Cancelable!void {
     while (true) {
         try io.checkCancel();
-        const i = work.next.fetchAdd(1, .monotonic);
+        const i = work.next.fetchAddWrapping(Work.Claims.fromRaw(1), .monotonic).raw();
         if (i >= work.items.len) return;
         const content = work.contents[i] orelse continue;
         const buf = work.buffers[worker];
@@ -1249,7 +1255,7 @@ const Batch = struct {
                     const found = try repo.objectDatabase().read(io, oid);
                     break :blk found.bytes;
                 },
-                .file => (fs.readFileAlloc(repo.objectDatabase().allocator(), io, repo.workDirectory().?, item.path, 1 << 31) catch null) orelse null,
+                .file => (fs.readFileAlloc(repo.objectDatabase().allocator(), io, repo.workDirectory().?.get(), item.path, 1 << 31) catch null) orelse null,
             };
             if (content) |c| {
                 try batch.owned.append(gpa, .{ .bytes = c, .owner = item.owner });

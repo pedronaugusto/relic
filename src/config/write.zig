@@ -10,6 +10,7 @@
 
 const ErrorNamespace = @This();
 const std = @import("std");
+const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -33,7 +34,7 @@ pub const Edit = union(enum) {
 /// Errors from writing a configuration file.
 pub const Error = errors: {
     break :errors config.Config.SetError || config.ParseError || fs.LockError || fs.CommitError ||
-        Io.Dir.ReadFileAllocError;
+        aegis.own.ReadFileError;
 };
 
 /// What a write did beside setting values.

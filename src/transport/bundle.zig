@@ -175,8 +175,8 @@ pub const Header = struct {
                 try references.append(a, .{ .oid = oid, .name = try a.dupe(u8, rest[1..]) });
             }
         }
-        h.prerequisites = prerequisites.items;
-        h.references = references.items;
+        h.prerequisites = try prerequisites.toOwnedSlice(a);
+        h.references = try references.toOwnedSlice(a);
         // Only v3 says anything but SHA-1 and no filter, as `write` writes.
         if (h.version == .v2) {
             assert(h.object_format == .sha1);
@@ -255,7 +255,7 @@ pub const File = struct {
     pub const Error = ErrorNamespace.Error;
 
     gpa: Allocator,
-    file: Io.File,
+    file: fs.OwnedFile,
     buffer: [64 * 1024]u8 = undefined,
     reader: Io.File.Reader = undefined,
     header: Header,
@@ -265,9 +265,9 @@ pub const File = struct {
         const f = try gpa.create(File);
         errdefer gpa.destroy(f);
         f.gpa = gpa;
-        f.file = try dir.openFile(io, path, .{});
-        errdefer f.file.close(io);
-        f.reader = f.file.reader(io, &f.buffer);
+        f.file = .init(try dir.openFile(io, path, .{}));
+        errdefer f.file.deinit(io);
+        f.reader = f.file.lend().get().reader(io, &f.buffer);
         f.header = try Header.read(gpa, &f.reader.interface);
         return f;
     }
@@ -275,7 +275,7 @@ pub const File = struct {
     /// Close it.
     pub fn deinit(f: *File, io: Io) void {
         f.header.deinit();
-        f.file.close(io);
+        f.file.deinit(io);
         f.gpa.destroy(f);
     }
 
@@ -394,8 +394,9 @@ pub const UnbundleOptions = struct {
 /// repository, completing a thin pack from it; a filtered bundle's pack is
 /// kept as a promisor pack, as git keeps it. Returns what was received.
 pub fn unbundle(gpa: Allocator, io: Io, repo: *Repository, bundle: *File, options: UnbundleOptions) Self.Error!index_pack.Result {
+    // Made where it is missing, as the pack is written there.
     var pack_dir = try repo.objectDatabase().openPackDirectory(io);
-    defer pack_dir.close(io);
+    defer pack_dir.deinit(io);
     const tips = try repositoryTips(gpa, io, repo);
     defer gpa.free(tips);
     const strict: fsck.Rules = .{ .strict = true };

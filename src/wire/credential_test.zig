@@ -350,10 +350,11 @@ test "credential-store run in process keeps the file git's keeps and answers as 
         var ours_answer: std.ArrayList(u8) = .empty;
         defer ours_answer.deinit(gpa);
         if (std.mem.eql(u8, step.op, "get")) {
-            if (try store_mod.get(gpa, io, files, step.c)) |found| {
+            if (try store_mod.get(gpa, io, files, step.c)) |got| {
+                var found = got;
                 defer gpa.free(found.username);
-                defer gpa.free(found.password);
-                try ours_answer.print(gpa, "username={s}\npassword={s}\n", .{ found.username, found.password });
+                defer found.password.deinit();
+                try ours_answer.print(gpa, "username={s}\npassword={s}\n", .{ found.username, found.password.expose() });
             }
         } else if (std.mem.eql(u8, step.op, "store")) {
             try store_mod.store(gpa, io, files, step.c);
@@ -572,6 +573,54 @@ test "credential-cache's daemon run in process answers git's client as git's dae
     try testing.expectError(error.SocketPathNotAbsolute, cache_daemon.Daemon.listen(gpa, io, "relative/socket"));
 }
 
+test "credential-cache's daemon takes a request of the most a request may be, passes over one a byte longer, and goes on serving" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try testremote.absolutePath(gpa, io, tmp.dir);
+    defer gpa.free(root);
+    const socket = try gpa.print("{s}/relic/socket", .{root});
+    defer gpa.free(socket);
+    var daemons: cache_daemon.InProcess = .init(gpa, io);
+    defer daemons.deinit();
+    const starter = daemons.starter();
+    try starter.start(starter.context, io, socket);
+
+    var stored = (try cache.request(gpa, io, socket, .{
+        .action = .store,
+        .input = "protocol=https\nhost=example.com\nusername=ada\npassword=one\n\n",
+    })) orelse return error.TestDaemonNotListening;
+    stored.deinit();
+
+    // A request is the client's two lines, then the credential's; a line
+    // the daemon does not know pads it to the length wanted.
+    const header = std.fmt.count("action={t}\ntimeout={d}\n", .{ cache.Action.get, cache.default_timeout });
+    const query = "protocol=https\nhost=example.com\npad=";
+    const input = try gpa.alloc(u8, cache.max_request + 1 - header);
+    defer gpa.free(input);
+    for ([_]bool{ false, true }) |longer| {
+        const extra: usize = @intFromBool(longer);
+        const padded = input[0 .. cache.max_request + extra - header];
+        @memcpy(padded[0..query.len], query);
+        @memset(padded[query.len .. padded.len - 2], 'x');
+        @memcpy(padded[padded.len - 2 ..], "\n\n");
+        var said = (try cache.request(gpa, io, socket, .{ .action = .get, .input = padded })) orelse return error.TestDaemonNotListening;
+        defer said.deinit();
+        if (longer) {
+            try testing.expectEqualStrings("", said.expose());
+        } else {
+            try testing.expect(std.mem.find(u8, said.expose(), "password=one\n") != null);
+        }
+    }
+
+    var again = (try cache.request(gpa, io, socket, .{ .action = .get, .input = "protocol=https\nhost=example.com\n\n" })) orelse return error.TestDaemonNotListening;
+    defer again.deinit();
+    try testing.expect(std.mem.find(u8, again.expose(), "password=one\n") != null);
+    var exited = (try cache.request(gpa, io, socket, .{ .action = .exit, .input = "" })) orelse return error.TestDaemonNotListening;
+    exited.deinit();
+}
+
 test "credential-cache's daemon lets a credential go when its time is up, and ends thirty seconds after it holds nothing, by the clock it runs on" {
     const gpa = testing.allocator;
     const io = testing.io;
@@ -593,7 +642,9 @@ test "credential-cache's daemon lets a credential go when its time is up, and en
 
     const ask = struct {
         fn ask(a: Allocator, s: []const u8, action: cache.Action, timeout: i32, input: []const u8) !?[]u8 {
-            return cache.request(a, testing.io, s, .{ .action = action, .timeout = timeout, .input = input });
+            var answer = (try cache.request(a, testing.io, s, .{ .action = action, .timeout = timeout, .input = input })) orelse return null;
+            defer answer.deinit();
+            return try a.dupe(u8, answer.expose());
         }
     }.ask;
     const held = "protocol=https\nhost=h.example\n\n";

@@ -372,8 +372,8 @@ pub fn dev(b: *std.Build, tools: type) void {
         // tests, `bay test -Dci-tsan=true`, each test's bound scaled for it.
         .hardened = .{},
         // The comparisons with git run on the riscv64 machine too, with
-        // Alpine's git.
-        .vm_packages = &.{"git"},
+        // Alpine edge's git 2.56, the release the tests are held to.
+        .vm_packages = &.{"git@edge=2.56.0-r0"},
         .test_timeout = if (large_objects) .{ .bound = .{
             .limit = .fromSeconds(40 * 60),
             .reason = "the blob past 4 GiB goes through relic and git several times over: tens of minutes, within the nightly job's 45",

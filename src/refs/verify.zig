@@ -165,7 +165,7 @@ const Checker = struct {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => |e| return e,
             };
-            const git_dir = fs.realPathAlloc(c.a, c.io, c.store.gitDir(), ".") catch |err| switch (err) {
+            const git_dir = fs.realPathAlloc(c.a, c.io, c.store.gitDir().get(), ".") catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => |e| return e,
             };
@@ -191,7 +191,7 @@ const Checker = struct {
     /// `files_fsck_refs_dir`: every file under `<git dir>/refs`, in name
     /// order, but a lock file.
     fn looseRefs(c: *Checker) Error!void {
-        var refs_dir = c.store.gitDir().openDir(c.io, "refs", .{ .iterate = true }) catch |err| switch (err) {
+        var refs_dir = c.store.gitDir().get().openDir(c.io, "refs", .{ .iterate = true }) catch |err| switch (err) {
             error.FileNotFound => return,
             else => |e| return e,
         };
@@ -228,7 +228,7 @@ const Checker = struct {
         }.lessThan);
         for (items.items) |item| {
             const name = try c.a.print("refs/{s}", .{item.sub});
-            try c.loose(c.store.gitDir(), name, name, item.kind);
+            try c.loose(c.store.gitDir().get(), name, name, item.kind);
         }
     }
 
@@ -236,25 +236,25 @@ const Checker = struct {
     /// the git directory, in the order the directory gives them, until one
     /// is found in error, after which git looks at no more of them.
     fn rootRefs(c: *Checker) Error!void {
-        var it = c.store.gitDir().iterate();
+        var it = c.store.gitDir().get().iterate();
         while (try it.next(c.io)) |entry| {
             if (entry.name.len == 0 or entry.name[0] == '.' or std.mem.endsWith(u8, entry.name, ".lock")) continue;
             if (!names.isRootRef(entry.name)) continue;
-            const st = c.store.gitDir().statFile(c.io, entry.name, .{ .follow_symlinks = true }) catch |err| switch (err) {
+            const st = c.store.gitDir().get().statFile(c.io, entry.name, .{ .follow_symlinks = true }) catch |err| switch (err) {
                 error.FileNotFound => continue,
                 else => |e| return e,
             };
             if (st.kind != .file) continue;
             const name = try c.a.dupe(u8, entry.name);
             const errors_before = c.errorCount();
-            try c.loose(c.store.gitDir(), name, name, st.kind);
+            try c.loose(c.store.gitDir().get(), name, name, st.kind);
             if (c.errorCount() != errors_before) return;
         }
     }
 
     /// `packed_fsck`.
     fn packedRefs(c: *Checker) Error!void {
-        const dir = c.store.commonDir();
+        const dir = c.store.commonDir().get();
         const st = dir.statFile(c.io, "packed-refs", .{ .follow_symlinks = false }) catch |err| switch (err) {
             error.FileNotFound => return,
             else => |e| return e,
@@ -370,7 +370,7 @@ const Checker = struct {
 
     /// `reftable_be_fsck`: the stack's table names, then every ref it holds.
     fn reftableStack(c: *Checker) Error!void {
-        const dir = if (c.options.worktree == null) c.store.commonDir() else c.store.gitDir();
+        const dir = if (c.options.worktree == null) c.store.commonDir().get() else c.store.gitDir().get();
         if (try fs.readFileAlloc(c.a, c.io, dir, "reftable/tables.list", 1 << 24)) |list| {
             var tables = std.mem.splitScalar(u8, list, '\n');
             while (tables.next()) |table| {

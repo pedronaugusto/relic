@@ -149,7 +149,7 @@ pub fn locate(gpa: Allocator, io: Io, environ: *const Environ.Map, programs: ?pr
             if (exists(io, path)) try global.append(arena, path);
         }
     }
-    l.global = global.items;
+    l.global = try global.toOwnedSlice(arena);
 
     // Values above every file.
     var pairs: std.ArrayList(config_mod.Sources.Pair) = .empty;
@@ -174,7 +174,7 @@ pub fn locate(gpa: Allocator, io: Io, environ: *const Environ.Map, programs: ?pr
     if (environ.get("GIT_CONFIG_PARAMETERS")) |text| {
         try pairs.appendSlice(arena, try parseParameters(arena, text));
     }
-    l.pairs = pairs.items;
+    l.pairs = try pairs.toOwnedSlice(arena);
     return l;
 }
 

@@ -19,6 +19,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const shakedown_mod = @import("shakedown");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -30,7 +31,7 @@ const glob_mod = @import("../text.zig").glob;
 const fs = @import("../fs/fs.zig");
 
 /// Errors from loading sparse patterns.
-pub const Error = Allocator.Error || Io.Dir.ReadFileAllocError;
+pub const Error = Allocator.Error || aegis.own.ReadFileError;
 
 /// The patterns that decide what is in the working tree. They hold the cache
 /// their queries run on, so one thread at a time asks them.
@@ -388,7 +389,7 @@ fn onlyEscapedGlobs(pattern: []const u8) bool {
 }
 
 fn matcher(ptr: *anyopaque) *sets.Matcher {
-    return @ptrCast(@alignCast(ptr)); // safe: the pointer stored in a pattern set is always a sets.Matcher
+    return @ptrCast(@alignCast(ptr)); // aegis: no-danger: the pointer stored in a pattern set is always a sets.Matcher
 }
 
 test "the last matching pattern decides, and nothing is in by default" {

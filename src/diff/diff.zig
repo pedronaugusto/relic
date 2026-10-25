@@ -13,6 +13,7 @@ const rename = @import("rename.zig");
 const similarity = @import("similarity.zig");
 
 const std = @import("std");
+const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -277,7 +278,7 @@ pub const Order = struct {
     /// Everything is `arena`'s.
     pub fn configured(arena: Allocator, io: Io, base: Io.Dir, config: *const config_mod.Config) ConfiguredError!Order {
         const path = (try config.getPath(arena, io, base, "diff.orderfile")) orelse return .{};
-        const text = base.readFileAlloc(io, path, arena, .unlimited) catch |err| switch (err) {
+        const text = aegis.own.readFile(io, base, path, arena, aegis.units.Bytes(u64).fromRaw(std.math.maxInt(u64))) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.OrderFileUnreadable,
         };
@@ -1683,7 +1684,7 @@ pub const FilePair = struct {
     }
 
     fn findFunction(context: ?*const anyopaque, line: []const u8) ?[]const u8 {
-        const pair: *FilePair = @ptrCast(@alignCast(@constCast(context.?))); // safe: functionLine hands out its own FilePair, which is not const, as the context
+        const pair: *FilePair = @ptrCast(@alignCast(@constCast(context.?))); // aegis: no-danger: functionLine hands out its own FilePair, which is not const, as the context
         return pair.rule.?.heading(line) catch {
             pair.failed = true;
             return null;
@@ -1974,7 +1975,7 @@ fn writeWords(gpa: Allocator, io: Io, w: *Io.Writer, diff: parallax.Diff, unifie
 /// A caller's `FunctionLine` asked of a line, as git's `ff_regexp` asks a
 /// driver's pattern: without the line's ending, carriage return included.
 fn findByRule(context: ?*const anyopaque, line: []const u8) ?[]const u8 {
-    const rule: *const FunctionLine = @ptrCast(@alignCast(context.?)); // safe: unifiedBody hands its own *const FunctionLine as the context
+    const rule: *const FunctionLine = @ptrCast(@alignCast(context.?)); // aegis: no-danger: unifiedBody hands its own *const FunctionLine as the context
     const bare = if (std.mem.endsWith(u8, line, "\r")) line[0 .. line.len - 1] else line;
     return rule.find(rule.context, bare);
 }

@@ -199,9 +199,9 @@ pub fn beforePush(
             if (theirs.get(e.hint)) |l| try others.append(a, l);
             if (ours.get(e.hint)) |l| try own.append(a, l);
         }
-        report.locked_by_others = others.items;
-        report.own_locks_touched = own.items;
-        if (others.items.len != 0 and state == .enabled) return error.LfsLockedByOthers;
+        report.locked_by_others = try others.toOwnedSlice(a);
+        report.own_locks_touched = try own.toOwnedSlice(a);
+        if (report.locked_by_others.len != 0 and state == .enabled) return error.LfsLockedByOthers;
     }
 
     if (pointers.len == 0) return;
@@ -252,7 +252,7 @@ fn usesLfs(io: Io, repo: *Repository) bool {
     for (repo.configuration().entries.items) |entry| {
         if (std.ascii.eqlIgnoreCase(entry.section, "filter") and std.mem.eql(u8, entry.subsection, "lfs")) return true;
     }
-    repo.commonDirectory().access(io, "lfs", .{}) catch return false;
+    repo.commonDirectory().get().access(io, "lfs", .{}) catch return false;
     return true;
 }
 
@@ -293,7 +293,7 @@ const PushContext = struct {
     previous: ?push_mod.BeforeSend,
     failure: ?Error = null,
     fn run(gpa: Allocator, io: Io, context: *anyopaque, repository: *Repository, input: push_mod.BeforeSendInput) push_mod.BeforeSendError!void {
-        const c: *PushContext = @ptrCast(@alignCast(context)); // safe: the callback context is the PushContext this function was registered with
+        const c: *PushContext = @ptrCast(@alignCast(context)); // aegis: no-danger: the callback context is the PushContext this function was registered with
         if (c.previous) |previous| try previous.run(gpa, io, previous.context, repository, input);
         beforePush(gpa, io, repository, .{ .remote = input.remote, .remote_refs = input.refs, .pushed = input.objects, .reach = c.reach }, c.options) catch |err| {
             c.failure = err;

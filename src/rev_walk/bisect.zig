@@ -30,10 +30,12 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const ctype = @import("../text.zig").ctype;
 const quote = @import("../text.zig").quote;
 const decimal = @import("../text.zig").decimal;
 const state_file = @import("../repo/state.zig");
+const fs = @import("../fs/fs.zig");
 const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -108,7 +110,7 @@ pub const Error = error{
     /// together.
     ResetWhenFoundWithoutCheckout,
 } || Allocator.Error || pathspec.Error || refs_mod.TransactionError || refs_mod.ReadError || repo_mod.Error || rev_parse.Error ||
-    rev_walk.Error || head_mod.Error || three_way.Error || hooks.Error || program.Error || Io.Dir.ReadFileAllocError ||
+    rev_walk.Error || head_mod.Error || three_way.Error || hooks.Error || program.Error || aegis.own.ReadFileError ||
     Io.Dir.DeleteFileError || Io.File.OpenError;
 
 /// What a bisection command needs from the caller.
@@ -184,12 +186,12 @@ const Ctx = struct {
         try c.out.print(c.a, fmt, args);
     }
 
-    fn dir(c: *Ctx) Io.Dir {
+    fn dir(c: *Ctx) fs.LentDir {
         return c.repo.gitDirectory();
     }
 
     fn readState(c: *Ctx, name: []const u8) Error!?[]u8 {
-        return c.dir().readFileAlloc(c.io, name, c.a, .unlimited) catch |err| switch (err) {
+        return aegis.own.readFile(c.io, c.dir().get(), name, c.a, aegis.units.Bytes(u64).fromRaw(std.math.maxInt(u64))) catch |err| switch (err) {
             error.FileNotFound => null,
             else => |e| return e,
         };
@@ -201,12 +203,12 @@ const Ctx = struct {
     }
 
     fn exists(c: *Ctx, name: []const u8) bool {
-        _ = c.dir().statFile(c.io, name, .{}) catch return false;
+        _ = c.dir().get().statFile(c.io, name, .{}) catch return false;
         return true;
     }
 
     fn writeState(c: *Ctx, name: []const u8, bytes: []const u8) Error!void {
-        try state_file.write(c.io, c.dir(), name, bytes);
+        try state_file.write(c.io, c.dir().get(), name, bytes);
     }
 
     fn appendState(c: *Ctx, name: []const u8, bytes: []const u8) Error!void {
@@ -215,7 +217,7 @@ const Ctx = struct {
     }
 
     fn removeState(c: *Ctx, name: []const u8) Error!void {
-        c.dir().deleteFile(c.io, name) catch |err| switch (err) {
+        c.dir().get().deleteFile(c.io, name) catch |err| switch (err) {
             error.FileNotFound => {},
             else => |e| return e,
         };
@@ -595,7 +597,7 @@ fn listCommits(c: *Ctx, revs: *const Revs, first_parent: bool) Error!Listed {
     for (commits.items) |oid| for (listed.parents.get(oid).?) |p| {
         if (walk.isHidden(p)) try listed.hidden.put(c.a, p, {});
     };
-    listed.commits = commits.items;
+    listed.commits = try commits.toOwnedSlice(c.a);
     return listed;
 }
 
@@ -1199,7 +1201,7 @@ fn resetTo(c: *Ctx, commit: ?[]const u8) Error!void {
 
 /// `git bisect log`: what `BISECT_LOG` holds. The result is the caller's.
 pub fn log(gpa: Allocator, io: Io, repo: *Repository) Self.Error![]u8 {
-    const text = repo.gitDirectory().readFileAlloc(io, "BISECT_LOG", gpa, .unlimited) catch |err| switch (err) {
+    const text = aegis.own.readFile(io, repo.gitDirectory().get(), "BISECT_LOG", gpa, aegis.units.Bytes(u64).fromRaw(std.math.maxInt(u64))) catch |err| switch (err) {
         error.FileNotFound => return error.NoLog,
         else => |e| return e,
     };
@@ -1350,7 +1352,7 @@ fn runCommand(c: *Ctx, line: []const u8, run_options: RunOptions) Error!i32 {
     var outcome = try program.run(c.gpa, c.io, run_options.programs, .{
         .argv = &.{line},
         .shell = true,
-        .cwd = if (c.repo.workDirectory()) |wt| .{ .dir = wt } else .inherit,
+        .cwd = if (c.repo.workDirectory()) |wt| .{ .dir = wt.get() } else .inherit,
     }, .{});
     defer outcome.deinit(c.gpa);
     return switch (outcome.term) {

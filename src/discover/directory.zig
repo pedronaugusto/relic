@@ -7,6 +7,7 @@ const Self = @This();
 
 const std = @import("std");
 const Io = std.Io;
+const fs = @import("../fs/fs.zig");
 
 /// All errors reported by this namespace.
 pub const Error = error{
@@ -41,7 +42,7 @@ fn startsWithHex(text: []const u8, n: usize) bool {
 /// The directory `git_dir`'s `commondir` names, opened, or `null` when it
 /// has none: a linked worktree's shared directory. A relative name is taken
 /// from `git_dir`, as git's `get_common_dir_noenv` takes it.
-pub fn openCommon(io: Io, git_dir: Io.Dir) Self.Error!?Io.Dir {
+pub fn openCommon(io: Io, git_dir: Io.Dir) Self.Error!?fs.OwnedDir {
     var buf: [Io.Dir.max_path_bytes + 2]u8 = undefined;
     // One that is there but cannot be read is an error, as git dies on it
     // ("failed to read"), never a repository without one.
@@ -56,10 +57,10 @@ pub fn openCommon(io: Io, git_dir: Io.Dir) Self.Error!?Io.Dir {
         Io.Dir.openDirAbsolute(io, target, .{ .iterate = true })
     else
         git_dir.openDir(io, target, .{ .iterate = true });
-    return opened catch |err| switch (err) {
-        error.FileNotFound, error.NotDir => error.BrokenCommonDir,
-        else => |e| e,
-    };
+    return fs.OwnedDir.init(opened catch |err| switch (err) {
+        error.FileNotFound, error.NotDir => return error.BrokenCommonDir,
+        else => |e| return e,
+    });
 }
 
 /// git's `is_git_directory`: a valid `HEAD`, and `objects` and `refs` in
@@ -67,9 +68,9 @@ pub fn openCommon(io: Io, git_dir: Io.Dir) Self.Error!?Io.Dir {
 /// another). A `commondir` that names nothing is not a git directory.
 pub fn isGitDirectory(io: Io, dir: Io.Dir) bool {
     if (!validHead(io, dir)) return false;
-    const common = openCommon(io, dir) catch return false;
-    defer if (common) |c| c.close(io);
-    const where = common orelse dir;
+    var common = openCommon(io, dir) catch return false;
+    defer if (common) |*c| c.deinit(io);
+    const where = if (common) |*c| c.lend().get() else dir;
     where.access(io, "objects", .{}) catch return false;
     where.access(io, "refs", .{}) catch return false;
     return true;

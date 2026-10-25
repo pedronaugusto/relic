@@ -3,9 +3,11 @@
 
 const Self = @This();
 const std = @import("std");
+const aegis = @import("aegis");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const hash = @import("../hash/hash.zig");
+const date = @import("../text.zig").date;
 const fs = @import("../fs/fs.zig");
 const object = @import("../object/object.zig");
 const odb = @import("../odb/odb.zig");
@@ -139,7 +141,7 @@ pub fn writeCommitGraph(gpa: Allocator, io: Io, db: *odb.Odb, tips: []const Oid,
     const followed = db.pauseReplacements();
     defer db.resumeReplacements(followed);
     if (db.shallow.count() != 0) return error.ShallowCommitGraph;
-    const dir = db.objectsDirectory();
+    const dir = db.objectsDirectory().get();
     var old = try graph_mod.Graph.openUsable(gpa, io, dir, db.objectFormat());
     defer if (old) |*g| g.deinit();
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
@@ -206,7 +208,7 @@ pub fn writeCommitGraph(gpa: Allocator, io: Io, db: *odb.Odb, tips: []const Oid,
     std.mem.reverse(Oid, bases.items);
     const bytes = try graph_mod.encode(gpa, db.objectFormat(), inputs.items, .{ .generations = options.generations and (if (retained) |base| base.hasGenerations() else true), .changed_paths = options.changed_paths, .bases = bases.items });
     defer gpa.free(bytes);
-    const checksum = Oid.fromRaw(db.objectFormat(), bytes[bytes.len - db.objectFormat().rawLen() ..]) catch unreachable; // unreachable: the slice is the last raw length of bytes the encoder wrote
+    const checksum = Oid.fromRaw(db.objectFormat(), bytes[bytes.len - db.objectFormat().rawLen() ..]) catch unreachable; // aegis: no-danger: the slice is the last raw length of bytes the encoder wrote
     try fs.makeDirs(io, dir, "info", db.sharedPermissions());
     if (options.split == .none) {
         try publish(gpa, io, db, dir, "info/commit-graph", bytes, options.sync orelse db.settings().fsync.sync(.commit_graph), .read_only);
@@ -270,7 +272,7 @@ fn computeGenerations(arena: Allocator, nodes: []GraphNode, by_name: *const Oid.
             }
             if (wait) continue;
             std.debug.assert(level >= 1);
-            std.debug.assert(generation >= 1);
+            aegis.assert.invariant(generation >= 1, "generation >= 1");
             node.level = level;
             node.generation = generation;
             node.visiting = false;
@@ -285,8 +287,8 @@ fn computeGenerations(arena: Allocator, nodes: []GraphNode, by_name: *const Oid.
 fn expireLayers(arena: Allocator, io: Io, dir: Io.Dir, old: ?*const graph_mod.Graph, bases: []const Oid, checksum: Oid, options: CommitGraphOptions) Self.Error!void {
     // Git marks merged-out layers at this write's time, then expires
     // inactive layers no newer than expire_time. Keep future-dated files.
-    const now = Io.Clock.real.now(io).toSeconds();
-    const expiry = if (options.expire_time) |t| t.toSeconds() else now;
+    const now = date.seconds(Io.Clock.real.now(io));
+    const expiry = if (options.expire_time) |t| date.seconds(t) else now;
     const graph_dir = dir.openDir(io, "info/commit-graphs", .{ .iterate = true }) catch |err| switch (err) {
         error.FileNotFound => return,
         else => return err,
@@ -309,7 +311,7 @@ fn expireLayers(arena: Allocator, io: Io, dir: Io.Dir, old: ?*const graph_mod.Gr
                 error.FileNotFound => continue,
                 else => |e| return e,
             };
-            fs.setTimestamps(io, graph_dir, filename, .{ .modify_timestamp = .{ .new = .{ .nanoseconds = @as(i96, now) * std.time.ns_per_s } } }) catch |err| switch (err) {
+            fs.setTimestamps(io, graph_dir, filename, .{ .modify_timestamp = .{ .new = date.timestamp(now) } }) catch |err| switch (err) {
                 error.FileNotFound => {},
                 else => return err,
             };
@@ -326,7 +328,7 @@ fn expireLayers(arena: Allocator, io: Io, dir: Io.Dir, old: ?*const graph_mod.Gr
         };
         if (active) continue;
         const stat = try graph_dir.statFile(io, entry.name, .{});
-        const mtime = @divFloor(stat.mtime.nanoseconds, std.time.ns_per_s);
+        const mtime = date.seconds(stat.mtime);
         if (mtime <= expiry) try removeIfPresent(io, graph_dir, entry.name);
     }
 }
@@ -385,9 +387,9 @@ fn readPackInputs(gpa: Allocator, io: Io, dir: Io.Dir, kind: hash.Kind, only: ?[
         const stat = (try dir.statFile(io, pack_path, .{}));
         const objects = try arena.alloc(midx_mod.WriteEntry, index.count);
         for (objects, 0..) |*obj, i| obj.* = .{ .oid = index.nameAt(@intCast(i)), .offset = try index.offsetAt(@intCast(i)) };
-        try packs.append(arena, .{ .name = try arena.dupe(u8, entry.name), .mtime = @intCast(@divFloor(stat.mtime.nanoseconds, std.time.ns_per_s)), .entries = objects });
+        try packs.append(arena, .{ .name = try arena.dupe(u8, entry.name), .mtime = @intCast(date.seconds(stat.mtime)), .entries = objects });
     }
-    result.packs = packs.items;
+    result.packs = try packs.toOwnedSlice(arena);
     return result;
 }
 
@@ -401,7 +403,7 @@ pub fn writeMidx(gpa: Allocator, io: Io, db: *odb.Odb, options: MidxOptions) Sel
     // git's multi-pack-index runs with replace refs off.
     const followed = db.pauseReplacements();
     defer db.resumeReplacements(followed);
-    const dir = try db.objectsDirectory().openDir(io, "pack", .{ .iterate = true });
+    const dir = try db.objectsDirectory().get().openDir(io, "pack", .{ .iterate = true });
     defer dir.close(io);
     var inputs = try readPackInputs(gpa, io, dir, db.objectFormat(), options.packs);
     defer inputs.deinit();
@@ -452,12 +454,12 @@ pub fn writeMidx(gpa: Allocator, io: Io, db: *odb.Odb, options: MidxOptions) Sel
                 const located = try old.locate(@intCast(i));
                 if (located.pack == pack_position) try assigned.append(arena, .{ .oid = old.nameAt(@intCast(i)), .offset = located.offset });
             }
-            p.entries = assigned.items;
+            p.entries = try assigned.toOwnedSlice(arena);
         };
     }
     const bytes = try midx_mod.encode(gpa, db.objectFormat(), inputs.packs, .{ .preferred_pack = options.preferred_pack, .reverse_index = options.reverse_index });
     defer gpa.free(bytes);
-    // unreachable: the slice is the last raw length of bytes the encoder wrote
+    // aegis: no-danger: the slice is the last raw length of bytes the encoder wrote
     const checksum = Oid.fromRaw(db.objectFormat(), bytes[bytes.len - db.objectFormat().rawLen() ..]) catch unreachable;
     try publish(gpa, io, db, dir, "multi-pack-index", bytes, options.sync orelse db.settings().fsync.sync(.pack_metadata), .umask);
     if (!options.keep_bitmaps) try clearMidxBitmaps(gpa, io, dir, null);
@@ -471,7 +473,7 @@ pub fn expireMidx(gpa: Allocator, io: Io, db: *odb.Odb, sync: ?fs.Sync) Self.Mid
     // git's multi-pack-index runs with replace refs off.
     const followed = db.pauseReplacements();
     defer db.resumeReplacements(followed);
-    const dir = try db.objectsDirectory().openDir(io, "pack", .{ .iterate = true });
+    const dir = try db.objectsDirectory().get().openDir(io, "pack", .{ .iterate = true });
     defer dir.close(io);
     // An index that does not read as one assigns nothing, so it is no
     // reason to remove a pack.
@@ -541,7 +543,7 @@ pub const BitmapOptions = struct {
 pub const BitmapError = Error || MidxError || revwalk_mod.Error || object_walk.Error || bitmap_mod.Error || bitmap_store.Error || error{ InvalidBitmapInput, BitmapNotClosed };
 
 fn storedBitmap(gpa: Allocator, io: Io, db: *odb.Odb) BitmapError!?bitmap_store.Store {
-    return bitmap_store.Store.open(gpa, io, db.objectsDirectory(), db.objectFormat()) catch |err| {
+    return bitmap_store.Store.open(gpa, io, db.objectsDirectory().get(), db.objectFormat()) catch |err| {
         if (odb_open.readRefusal(err)) return err;
         return null;
     };
@@ -764,7 +766,7 @@ pub fn writePackBitmap(gpa: Allocator, io: Io, db: *odb.Odb, inputs: BitmapInput
     const tips = inputs.tips;
     if (std.mem.findAny(u8, pack_name, "/\\") != null or !std.mem.startsWith(u8, pack_name, "pack-")) return error.InvalidBitmapInput;
     const base = if (std.mem.endsWith(u8, pack_name, ".pack")) pack_name[0 .. pack_name.len - 5] else if (std.mem.endsWith(u8, pack_name, ".idx")) pack_name[0 .. pack_name.len - 4] else pack_name;
-    const dir = try db.objectsDirectory().openDir(io, "pack", .{ .iterate = true });
+    const dir = try db.objectsDirectory().get().openDir(io, "pack", .{ .iterate = true });
     defer dir.close(io);
     const path = try gpa.print("{s}.idx", .{base});
     defer gpa.free(path);
@@ -814,7 +816,7 @@ pub fn writeMidxBitmap(gpa: Allocator, io: Io, db: *odb.Odb, inputs: MidxBitmapI
     var previous = try storedBitmap(gpa, io, db);
     defer if (previous) |*value| value.deinit();
     if (previous) |value| if (value.bitmap.checksum.eql(checksum)) return checksum;
-    const dir = try db.objectsDirectory().openDir(io, "pack", .{ .iterate = true });
+    const dir = try db.objectsDirectory().get().openDir(io, "pack", .{ .iterate = true });
     defer dir.close(io);
     var index = (try midx_mod.Index.open(gpa, io, dir, db.objectFormat())).?;
     defer index.deinit();
@@ -854,7 +856,7 @@ pub fn repackMidx(gpa: Allocator, io: Io, db: *odb.Odb, options: MidxRepackOptio
     // git's multi-pack-index runs with replace refs off.
     const followed = db.pauseReplacements();
     defer db.resumeReplacements(followed);
-    const dir = try db.objectsDirectory().openDir(io, "pack", .{ .iterate = true });
+    const dir = try db.objectsDirectory().get().openDir(io, "pack", .{ .iterate = true });
     defer dir.close(io);
     var index = (try midx_mod.Index.openUsable(gpa, io, dir, db.objectFormat())) orelse return null;
     defer index.deinit();
@@ -980,7 +982,7 @@ pub fn writeConfiguredCommitGraph(gpa: Allocator, io: Io, repo: *repo_mod.Reposi
     var settings: ?graph_mod.bloom.Settings = null;
     // Version 0 reads no filters, so none is carried into the new graph.
     if (version != 0) {
-        var old = try graph_mod.Graph.openUsable(gpa, io, repo.objectDatabase().objectsDirectory(), repo.objectFormat());
+        var old = try graph_mod.Graph.openUsable(gpa, io, repo.objectDatabase().objectsDirectory().get(), repo.objectFormat());
         defer if (old) |*g| g.deinit();
         if (old) |*g| if (g.count > 0) if (try g.changedPaths(g.count - 1)) |filter| {
             settings = filter.settings;

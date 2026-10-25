@@ -201,7 +201,7 @@ pub const Lazy = struct {
     }
 
     fn fetchFn(io: Io, context: *anyopaque, oids: []const Oid) (Allocator.Error || Io.Cancelable || error{PromisorFetchFailed})!void {
-        const l: *Lazy = @ptrCast(@alignCast(context)); // safe: the context handed out with this function is a Lazy
+        const l: *Lazy = @ptrCast(@alignCast(context)); // aegis: no-danger: the context handed out with this function is a Lazy
         l.fetch(io, oids) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Canceled => return error.Canceled,
@@ -296,9 +296,10 @@ pub const Lazy = struct {
             .repository = repo,
         });
         defer session.deinit(io);
-        var pack_dir = try repo.objectDatabase().openPackDirectory(io);
-        defer pack_dir.close(io);
-        var rules = try fsck.forTransfer(l.gpa, io, repo.configuration(), .{ .kind = repo.objectFormat(), .scope = .fetch, .base = repo.topDirectory() }, .{ .explicit = l.options.check_objects, .sink = null });
+        var opened_pack_dir = try repo.objectDatabase().openPackDirectory(io);
+        defer opened_pack_dir.deinit(io);
+        const pack_dir = opened_pack_dir.lend().get();
+        var rules = try fsck.forTransfer(l.gpa, io, repo.configuration(), .{ .kind = repo.objectFormat(), .scope = .fetch, .base = repo.topDirectory().get() }, .{ .explicit = l.options.check_objects, .sink = null });
         defer if (rules) |*r| r.deinit(l.gpa);
         var fetched = try session.fetch(l.gpa, io, .{ .db = repo.objectDatabase(), .pack_dir = pack_dir, .request = .{
             .wants = oids,

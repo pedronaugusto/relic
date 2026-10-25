@@ -105,7 +105,7 @@ pub fn registration(gpa: Allocator, scheduler: Scheduler, inputs: Inputs) Self.E
             try entries.append(arena, .{ .path = try arena.print("Git Maintenance ({t})", .{f}), .contents = try task(arena, f, inputs) });
         },
     }
-    reg.entries = entries.items;
+    reg.entries = try entries.toOwnedSlice(arena);
     return reg;
 }
 

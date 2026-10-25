@@ -127,7 +127,7 @@ pub fn connect(
     if (host.len != 0 and host[0] == '-') return error.SuspiciousHostname;
     if (url.path.len != 0 and url.path[0] == '-') return error.SuspiciousPathname;
     var port_buf: [8]u8 = undefined;
-    // unreachable: a u16 is at most five digits
+    // aegis: no-danger: a u16 is at most five digits
     const port: ?[]const u8 = if (url.port) |p| std.mem.print(&port_buf, "{d}", .{p}) catch unreachable else null;
 
     // The program, and whether it is a command line.

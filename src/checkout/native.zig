@@ -2,6 +2,7 @@
 //! conversion protocol; a provider owns its format, store and fetch policy.
 const Self = @This();
 const std = @import("std");
+const aegis = @import("aegis");
 const config = @import("../config/config.zig");
 const fs = @import("../fs/fs.zig");
 const Allocator = std.mem.Allocator;
@@ -10,7 +11,7 @@ const Io = std.Io;
 pub const Error = config.ValueError || config.ParseError || Allocator.Error || Io.Cancelable || fs.ReadSizedError ||
     Io.Reader.ShortError || Io.File.Reader.Error || Io.File.Writer.Error ||
     Io.File.OpenError || Io.File.StatError || Io.File.ReadPositionalError ||
-    Io.Dir.CreateDirPathError || Io.Dir.RenameError || Io.Dir.ReadFileAllocError || error{
+    Io.Dir.CreateDirPathError || Io.Dir.RenameError || aegis.own.ReadFileError || error{
     NameTooLong,
     NativeFilterExtensionUnsupported,
     NativeFilterFetchFailed,
@@ -23,7 +24,7 @@ pub const Storing = enum { store, hash_only };
 /// Bytes borrow the input, the call allocator, or the session until its
 /// deinit. An open
 /// file belongs to the caller. Delayed content is delivered by `nextReady`.
-pub const Content = union(enum) { bytes: []const u8, file: Io.File, delayed };
+pub const Content = union(enum) { bytes: []const u8, file: fs.OwnedFile, delayed };
 pub const Ready = struct { path: []const u8, content: Content };
 
 /// Identity of content a native filter could not make available. The identity

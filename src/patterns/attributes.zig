@@ -17,6 +17,7 @@ const c_quote = @import("../text.zig").c_quote;
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const shakedown_mod = @import("shakedown");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
@@ -29,7 +30,7 @@ const encoding = @import("../text.zig").encoding;
 const fs = @import("../fs/fs.zig");
 
 /// Errors from loading attributes.
-pub const Error = Allocator.Error || Io.Dir.ReadFileAllocError;
+pub const Error = Allocator.Error || aegis.own.ReadFileError;
 
 /// What one attribute is set to.
 pub const State = union(enum) {
@@ -544,7 +545,7 @@ pub const Attrs = struct {
 };
 
 fn levelMatcher(level: Level) *sets.Matcher {
-    return @ptrCast(@alignCast(level.compiled)); // safe: a Level's matcher is allocated as a sets.Matcher and never changes type
+    return @ptrCast(@alignCast(level.compiled)); // aegis: no-danger: a Level's matcher is allocated as a sets.Matcher and never changes type
 }
 
 fn relativeTo(base: []const u8, path: []const u8) ?[]const u8 {

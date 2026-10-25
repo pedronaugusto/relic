@@ -496,9 +496,9 @@ pub const Helper = struct {
                 break;
             };
         }
-        out.refs = refs.items;
-        const kept = try h.arena_state.allocator().alloc(protocol.RemoteRef, refs.items.len);
-        for (refs.items, kept) |ref, *k| {
+        out.refs = try refs.toOwnedSlice(a);
+        const kept = try h.arena_state.allocator().alloc(protocol.RemoteRef, out.refs.len);
+        for (out.refs, kept) |ref, *k| {
             k.* = ref;
             k.name = try h.arena_state.allocator().dupe(u8, ref.name);
             if (ref.symref_target) |t| k.symref_target = try h.arena_state.allocator().dupe(u8, t);
@@ -791,8 +791,8 @@ pub const Helper = struct {
             try refs.append(a, .{ .name = try a.dupe(u8, c.dst), .status = .no_match });
             try updates.append(a, .empty);
         };
-        for (refs.items, updates.items) |*ref, made| ref.updates = made.items;
-        report.refs = refs.items;
+        for (refs.items, updates.items) |*ref, *made| ref.updates = try made.toOwnedSlice(a);
+        report.refs = try refs.toOwnedSlice(a);
         return report;
     }
 

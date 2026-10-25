@@ -280,9 +280,9 @@ test "git add streams a file past core.bigFileThreshold that nothing converts in
     defer attrs.deinit();
     var rules = try repo.worktreeRules();
     rules.attrs = &attrs;
-    const outcome = try worktree.addAll(gpa, io, repo.workDirectory().?, .{ .index = &index, .db = repo.objectDatabase() }, .{ .rules = rules });
+    const outcome = try worktree.addAll(gpa, io, repo.workDirectory().?.get(), .{ .index = &index, .db = repo.objectDatabase() }, .{ .rules = rules });
     try std.testing.expect(outcome.streamed_pack != null);
-    try index.write(io, repo.gitDirectory(), "index", .{});
+    try index.write(io, repo.gitDirectory().get(), "index", .{});
 
     const their_layout = try objectLayout(gpa, io, &theirs);
     defer gpa.free(their_layout);
@@ -293,9 +293,9 @@ test "git add streams a file past core.bigFileThreshold that nothing converts in
     // A big file whose blob is stored already makes no pack.
     for ([_]*testgit.Repo{ &theirs, &ours }) |r| try r.writeFile(io, "copy.bin", repeat("\x00\x01\x02 binary ", 20));
     try theirs.exec(io, &.{ "add", "-A" });
-    const again = try worktree.addAll(gpa, io, repo.workDirectory().?, .{ .index = &index, .db = repo.objectDatabase() }, .{ .rules = rules });
+    const again = try worktree.addAll(gpa, io, repo.workDirectory().?.get(), .{ .index = &index, .db = repo.objectDatabase() }, .{ .rules = rules });
     try std.testing.expectEqual(null, again.streamed_pack);
-    try index.write(io, repo.gitDirectory(), "index", .{});
+    try index.write(io, repo.gitDirectory().get(), "index", .{});
     const their_again = try objectLayout(gpa, io, &theirs);
     defer gpa.free(their_again);
     const our_again = try objectLayout(gpa, io, &ours);
@@ -332,13 +332,13 @@ test "git add holds no more of a file past core.bigFileThreshold than the pieces
     const rules = try repo.worktreeRules();
     counting.resetPeak();
     const before = counting.live_bytes;
-    const outcome = try worktree.addAll(counted, io, repo.workDirectory().?, .{ .index = &index, .db = repo.objectDatabase() }, .{ .rules = rules });
+    const outcome = try worktree.addAll(counted, io, repo.workDirectory().?.get(), .{ .index = &index, .db = repo.objectDatabase() }, .{ .rules = rules });
     try std.testing.expect(outcome.streamed_pack != null);
     std.testing.expect(counting.peak_bytes - before < big.len / 4) catch |err| {
         std.debug.print("{d} bytes held\n", .{counting.peak_bytes - before});
         return err;
     };
-    try index.write(io, repo.gitDirectory(), "index", .{});
+    try index.write(io, repo.gitDirectory().get(), "index", .{});
     const listed = try git.line(io, &.{ "ls-files", "-s" });
     defer gpa.free(listed);
     const named = try git.line(io, &.{ "hash-object", "big.bin" });

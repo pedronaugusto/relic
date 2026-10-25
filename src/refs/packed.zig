@@ -183,11 +183,11 @@ const Validity = struct {
     present: bool,
     inode: Io.File.INode = 0,
     size: u64 = 0,
-    mtime: i96 = 0,
-    ctime: i96 = 0,
+    mtime: Io.Timestamp = Io.Timestamp.fromNanoseconds(0),
+    ctime: Io.Timestamp = Io.Timestamp.fromNanoseconds(0),
 
     fn from(st: Io.File.Stat) Validity {
-        return .{ .present = true, .inode = st.inode, .size = st.size, .mtime = st.mtime.nanoseconds, .ctime = st.ctime.nanoseconds };
+        return .{ .present = true, .inode = st.inode, .size = st.size, .mtime = st.mtime, .ctime = st.ctime };
     }
 
     fn of(io: Io, dir: Io.Dir) ReadError!Validity {
@@ -202,7 +202,7 @@ const Validity = struct {
     fn eql(a: Validity, b: Validity) bool {
         if (a.present != b.present) return false;
         if (!a.present) return true;
-        return a.inode == b.inode and a.size == b.size and a.mtime == b.mtime and a.ctime == b.ctime;
+        return a.inode == b.inode and a.size == b.size and a.mtime.nanoseconds == b.mtime.nanoseconds and a.ctime.nanoseconds == b.ctime.nanoseconds;
     }
 };
 

@@ -156,7 +156,7 @@ fn converse(gpa: Allocator, io: Io, repo: *repo_mod.Repository, in: *Io.Reader, 
     const oid = rev_parse.resolve(gpa, io, repo.revisionSource(), treeish) catch return refuse(out, "not a valid object name: {s}", .{treeish});
     if (parsed.mtime) |text| {
         const secs = date.approximate(text, .{ .now = options.now }) orelse return refuse(out, "invalid date format: {s}", .{text});
-        parsed.options.mtime = .fromNanoseconds(@as(i96, secs) * std.time.ns_per_s);
+        parsed.options.mtime = date.timestamp(secs);
     }
     parsed.options.now = options.now;
     parsed.options.programs = options.programs;
@@ -293,7 +293,7 @@ fn parse(arena: Allocator, args: []const []const u8, offered: []const archive.Na
         }
         p.options.level = @intCast(l);
     }
-    p.options.pathspecs = paths.items;
+    p.options.pathspecs = try paths.toOwnedSlice(arena);
     return p;
 }
 

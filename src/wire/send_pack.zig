@@ -88,7 +88,7 @@ pub const PushCert = enum {
 /// What the server said about one ref.
 pub const RefReport = struct {
     name: []const u8,
-    status: Status,
+    status: Status, // aegis: no-danger: the server's report for one ref
     /// The reason an `ng` or a remote helper's `error` gave, or what its
     /// `ok` added, when it is none of the words git reads as a status.
     message: ?[]const u8 = null,
@@ -380,8 +380,8 @@ fn readReport(gpa: Allocator, report: *Report, r: *Io.Reader, against: Against) 
         new_update = ok;
     }
     if (first) return error.ProtocolError;
-    for (refs.items, updates.items) |*ref, made| ref.updates = made.items;
-    report.refs = refs.items;
+    for (refs.items, updates.items) |*ref, *made| ref.updates = try made.toOwnedSlice(arena);
+    report.refs = try refs.toOwnedSlice(arena);
 }
 
 fn mapBand(conn: *Connection, demux: *side_band.Demux, err: ReportError) Error {

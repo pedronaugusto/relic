@@ -24,6 +24,7 @@ const ErrorNamespace = @This();
 const unicode_width = @import("../text.zig").unicode_width;
 const builtin = @import("builtin");
 const std = @import("std");
+const aegis = @import("aegis");
 const ctype = @import("../text.zig").ctype;
 const fs = @import("../fs/fs.zig");
 const decimal = @import("../text.zig").decimal;
@@ -1123,8 +1124,8 @@ pub const Listing = struct {
                 rest = m.rest;
             } else return error.BadFieldArgument;
         }
-        atom.describe.match = matches.items;
-        atom.describe.exclude = excludes.items;
+        atom.describe.match = try matches.toOwnedSlice(l.a());
+        atom.describe.exclude = try excludes.toOwnedSlice(l.a());
     }
 
     fn parseAlignArgument(atom: *Atom, arg: ?[]const u8) ErrorNamespace.Error!void {
@@ -1935,7 +1936,7 @@ pub const Listing = struct {
     }
 
     fn mainWorktreePath(l: *Listing) ErrorNamespace.Error![]const u8 {
-        var path: []const u8 = fs.realPathAlloc(l.a(), l.io, l.repo.commonDirectory(), ".") catch return "";
+        var path: []const u8 = fs.realPathAlloc(l.a(), l.io, l.repo.commonDirectory().get(), ".") catch return "";
         if (std.mem.endsWith(u8, path, "/.git")) path = path[0 .. path.len - "/.git".len];
         return path;
     }
@@ -2100,7 +2101,7 @@ pub const Listing = struct {
         if (l.head_description) |d| return d;
         const ar = l.a();
         const io = l.io;
-        const dir = l.repo.gitDirectory();
+        const dir = l.repo.gitDirectory().get();
         var text: []const u8 = "(no branch)";
         var rebasing = false;
         var branch: ?[]const u8 = null;
@@ -2132,7 +2133,7 @@ pub const Listing = struct {
 
     /// git's `get_branch` for a state file.
     fn stateBranch(l: *Listing, path: []const u8) ErrorNamespace.Error!?[]const u8 {
-        const bytes = l.repo.gitDirectory().readFileAlloc(l.io, path, l.a(), .limited(1 << 20)) catch return null;
+        const bytes = aegis.own.readFile(l.io, l.repo.gitDirectory().get(), path, l.a(), aegis.units.Bytes(u64).fromRaw(1 << 20)) catch return null;
         const trimmed = std.mem.trimEnd(u8, bytes, "\n");
         if (trimmed.len == 0) return null;
         if (std.mem.startsWith(u8, trimmed, "refs/heads/")) return trimmed["refs/heads/".len..];

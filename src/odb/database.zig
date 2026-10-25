@@ -25,20 +25,20 @@ pub const Database = struct {
         const T = @TypeOf(db);
         const Adapter = struct {
             fn read(io: Io, raw: *anyopaque, oid: hash.Oid) policy.Error!Read {
-                const owner: T = @ptrCast(@alignCast(raw)); // safe: from stores the adapted owner, whose type is T
+                const owner: T = @ptrCast(@alignCast(raw)); // aegis: no-danger: from stores the adapted owner, whose type is T
                 const result = try owner.read(io, oid);
                 return .{ .type = result.type, .bytes = result.bytes };
             }
             fn header(io: Io, raw: *anyopaque, oid: hash.Oid) policy.Error!object.Header {
-                const owner: T = @ptrCast(@alignCast(raw)); // safe: from stores the adapted owner, whose type is T
+                const owner: T = @ptrCast(@alignCast(raw)); // aegis: no-danger: from stores the adapted owner, whose type is T
                 return owner.readHeader(io, oid);
             }
             fn exists(io: Io, raw: *anyopaque, oid: hash.Oid) policy.Error!bool {
-                const owner: T = @ptrCast(@alignCast(raw)); // safe: from stores the adapted owner, whose type is T
+                const owner: T = @ptrCast(@alignCast(raw)); // aegis: no-danger: from stores the adapted owner, whose type is T
                 return owner.exists(io, oid);
             }
             fn same(io: Io, raw: *anyopaque, oid: hash.Oid, ours: *Io.Reader, size: u64) policy.Error!bool {
-                const owner: T = @ptrCast(@alignCast(raw)); // safe: from stores the adapted owner, whose type is T
+                const owner: T = @ptrCast(@alignCast(raw)); // aegis: no-danger: from stores the adapted owner, whose type is T
                 const theirs = try owner.stream(io, oid);
                 defer theirs.close(io);
                 if (theirs.size != size) return false;

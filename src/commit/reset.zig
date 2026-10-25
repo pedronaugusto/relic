@@ -74,7 +74,7 @@ pub fn toTree(
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
     const arena = arena_instance.allocator();
-    const wt = repo.workDirectory() orelse return error.BareRepository;
+    const wt = (repo.workDirectory() orelse return error.BareRepository).get();
     const db = repo.objectDatabase();
 
     var rules = try repo.worktreeRules();

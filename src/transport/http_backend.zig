@@ -202,11 +202,11 @@ pub const Backend = struct {
     /// and time, or not found.
     fn sendFile(io: Io, arena: Allocator, remote: *local.Remote, file: []const u8, content_type: []const u8, response: *Response) anyerror!void {
         const sub_path = std.mem.trimStart(u8, file, "/");
-        const opened = remote.repo.gitDirectory().openFile(io, sub_path, .{}) catch return notFound(io, response);
+        const opened = remote.repo.gitDirectory().get().openFile(io, sub_path, .{}) catch return notFound(io, response);
         defer opened.close(io);
         const stat = try opened.stat(io);
         try response.header("Content-Type", content_type);
-        try response.header("Last-Modified", try rfc2822(arena, @intCast(@divFloor(stat.mtime.nanoseconds, std.time.ns_per_s))));
+        try response.header("Last-Modified", try rfc2822(arena, @intCast(date.seconds(stat.mtime))));
         try response.setLength(stat.size);
         const w = try response.writer(io);
         var buffer: [16 * 1024]u8 = undefined;
@@ -391,7 +391,7 @@ pub fn openServed(gpa: Allocator, io: Io, root: []const u8, relative: []const u8
         else => return null,
     };
     if (!export_all) {
-        remote.repo.gitDirectory().access(io, "git-daemon-export-ok", .{}) catch {
+        remote.repo.gitDirectory().get().access(io, "git-daemon-export-ok", .{}) catch {
             remote.deinit(io);
             return null;
         };

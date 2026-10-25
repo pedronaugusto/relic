@@ -392,15 +392,15 @@ test "credentials in the URL, from askpass and from the caller's prompt are what
     const Asked = struct {
         const Self = @This();
         prompts: std.ArrayList(u8) = .empty,
-        fn ask(allocator: Allocator, context: ?*anyopaque, field: credential.Field, prompt: []const u8) Allocator.Error!?[]u8 {
+        fn ask(context: ?*anyopaque, field: credential.Field, prompt: []const u8, answer: *std.Io.Writer) (Allocator.Error || std.Io.Writer.Error)!bool {
             const self_: *Self = @ptrCast(@alignCast(context.?));
             try self_.prompts.appendSlice(testing.allocator, prompt);
             try self_.prompts.append(testing.allocator, '\n');
-            const answer = try allocator.dupe(u8, switch (field) {
+            try answer.writeAll(switch (field) {
                 .username => "ada",
                 .password => "secret",
             });
-            return answer;
+            return true;
         }
     };
     var asked: Asked = .{};

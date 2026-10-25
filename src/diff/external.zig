@@ -200,13 +200,13 @@ fn blobBytes(ext: *const External, a: Allocator, io: Io, spec: Run, s: Side) Sel
     const attrs = spec.attrs orelse return blob;
     try attrs.enter(io, wt.dir, s.path);
     const applied = try attrs.lookup(a, s.path, .file);
-    const content = try wt.conv.toWorktree(a, .{ .path = s.path, .blob = blob, .applied = applied }, .{ .blob = s.oid });
+    var content = try wt.conv.toWorktree(a, .{ .path = s.path, .blob = blob, .applied = applied }, .{ .blob = s.oid });
     return switch (content) {
         .bytes => |b| b,
-        .file => |file| blk: {
-            defer file.close(io);
+        .file => |*file| blk: {
+            defer file.deinit(io);
             var buf: [4096]u8 = undefined;
-            var reader = file.readerStreaming(io, &buf);
+            var reader = file.lend().get().readerStreaming(io, &buf);
             break :blk try reader.interface.allocRemaining(a, .unlimited);
         },
         .delayed => error.DelayedContent,

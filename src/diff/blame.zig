@@ -20,6 +20,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const Io = std.Io;
@@ -48,7 +49,7 @@ pub const Error = diff.Error || diff.TextError || object.ParseError || textconv_
 };
 
 /// Errors from reading the commits to ignore.
-pub const IgnoreError = Error || config_mod.PathSettingError || Io.Dir.ReadFileAllocError || error{
+pub const IgnoreError = Error || config_mod.PathSettingError || aegis.own.ReadFileError || error{
     /// An ignore-revs file that is not there: "could not open object name
     /// list".
     IgnoreRevsFileMissing,
@@ -181,7 +182,7 @@ pub fn file(gpa: Allocator, io: Io, db: *odb_mod.Odb, inputs: Inputs, options: O
     assert(s.guilty.items.len == line_count);
     var next_line: usize = 1;
     for (hunks.items) |h| {
-        assert(h.final_start == next_line);
+        aegis.assert.invariant(h.final_start == next_line, "h.final_start == next_line");
         next_line += h.count;
     }
     assert(next_line == line_count + 1);

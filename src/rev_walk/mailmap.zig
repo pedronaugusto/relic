@@ -31,6 +31,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const ctype = @import("../text.zig").ctype;
 const shakedown = @import("shakedown");
 const builtin = @import("builtin");
@@ -52,7 +53,7 @@ pub const Identity = struct {
 };
 
 /// Errors from loading a repository's mailmap.
-pub const LoadError = Allocator.Error || Io.File.Reader.Error || Io.Dir.ReadFileAllocError ||
+pub const LoadError = Allocator.Error || Io.File.Reader.Error || aegis.own.ReadFileError ||
     error{MalformedValue} || config_mod.PathSettingError || odb_mod.Error;
 
 /// Keys compared as `strcasecmp` compares them: ASCII case folded.
@@ -214,7 +215,8 @@ pub const Mailmap = struct {
         errdefer m.deinit();
         const config = repo.configuration();
 
-        if (!repo.isBare()) if (repo.workDirectory()) |wt| {
+        if (!repo.isBare()) if (repo.workDirectory()) |lent_wt| {
+            const wt = lent_wt.get();
             try m.addFileAt(io, wt, ".mailmap", .{ .follow_symlinks = false });
         };
 
@@ -241,12 +243,12 @@ pub const Mailmap = struct {
 
         // Read as git's configset reads it: the last value alone.
         const file = if (config.find("mailmap.file")) |entry|
-            try config_mod.pathSetting(gpa, io, repo.topDirectory(), config.context.home, entry.value)
+            try config_mod.pathSetting(gpa, io, repo.topDirectory().get(), config.context.home, entry.value)
         else
             null;
         if (file) |path| {
             defer gpa.free(path);
-            try m.addFileAt(io, repo.topDirectory(), path, .{ .follow_symlinks = true });
+            try m.addFileAt(io, repo.topDirectory().get(), path, .{ .follow_symlinks = true });
         }
         return m;
     }
@@ -266,7 +268,7 @@ pub const Mailmap = struct {
             const st = dir.statFile(io, path, .{ .follow_symlinks = false }) catch return;
             if (st.kind == .sym_link) return;
         }
-        const bytes = dir.readFileAlloc(io, path, m.gpa, .unlimited) catch |err| switch (err) {
+        const bytes = aegis.own.readFile(io, dir, path, m.gpa, aegis.units.Bytes(u64).fromRaw(std.math.maxInt(u64))) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return,
         };

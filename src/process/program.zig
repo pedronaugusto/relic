@@ -92,7 +92,7 @@ pub const Invocation = struct {
     /// git's do; a helper's are the caller's to show. `to_stdout` is the
     /// shell's `2>&1`: wherever standard output goes, one stream with it in
     /// the order the program wrote them.
-    stderr: enum { capture, inherit, ignore, to_stdout } = .capture,
+    stderr: enum { capture, inherit, ignore, to_stdout } = .capture, // aegis: no-danger: an option
     /// Where the program's standard output goes. `to_stderr` is this
     /// process's own standard error, which is where git sends most hooks'
     /// output so that it never mixes with what git itself prints; `inherit`
@@ -103,7 +103,7 @@ pub const Invocation = struct {
 pub const Error = error{
     /// The program's output passed `RunOptions`.
     OutputTooLong,
-} || std.process.SpawnError || Child.SpawnError || Child.OutputError || Child.ExchangeError || conduit.InputWriter.StartError ||
+} || std.process.SpawnError || Child.SpawnError || Child.OutputError || Child.ExchangeError || Child.ExchangeIntoError || conduit.InputWriter.StartError ||
     conduit.InputWriter.QueueError || Io.Timeout.Error || Io.Dir.RealPathError || Io.File.Reader.Error;
 
 pub const Outcome = struct {
@@ -156,14 +156,49 @@ pub fn run(
     defer started.deinit(io);
     // A program that ends without reading all of its input is no error, as
     // git has it: conduit does not report the closed pipe.
-    var output = try started.child.exchange(gpa, io, options.input, .{
+    var output = try started.child.exchange(gpa, io, options.input, exchangeOptions(options));
+    defer output.deinit();
+    try finished(output.timedOut(), output.stdoutTruncated() or output.stderrTruncated());
+    return .{ .term = output.term(), .stdout = output.takeStdout(), .stderr = output.takeStderr() };
+}
+
+/// `run`, with what the program writes on each captured stream written into
+/// `sinks` as it is read, straight into each writer's buffer: conduit's
+/// `Child.exchangeInto`. A writer over storage wiped when it is let go keeps
+/// what a credential helper prints out of any other memory. A stream that is
+/// not captured leaves its writer untouched.
+pub fn runInto(
+    gpa: Allocator,
+    io: Io,
+    programs: Programs,
+    invocation: Invocation,
+    options: IntoOptions,
+) Self.Error!Term {
+    var started = try start(gpa, io, programs, invocation);
+    defer started.deinit(io);
+    const ended = try started.child.exchangeInto(io, options.run.input, options.sinks, exchangeOptions(options.run));
+    try finished(ended.timed_out, ended.stdout_truncated or ended.stderr_truncated);
+    return ended.term;
+}
+
+/// What `runInto` takes: where the output goes, and `run`'s options.
+pub const IntoOptions = struct {
+    sinks: Child.Sinks,
+    run: RunOptions = .{},
+};
+
+fn exchangeOptions(options: RunOptions) Child.ExchangeOptions {
+    return .{
         .max_bytes = .fromRaw(options.output.toInt() orelse std.math.maxInt(usize)),
         .timeout = options.timeout,
-    });
-    defer output.deinit();
-    if (output.timedOut()) return error.Timeout;
-    if (output.stdoutTruncated() or output.stderrTruncated()) return error.OutputTooLong;
-    return .{ .term = output.term(), .stdout = output.takeStdout(), .stderr = output.takeStderr() };
+    };
+}
+
+/// A run's end as `RunOptions` has it: one that ran out of time, or wrote more
+/// than it allows, is an error.
+fn finished(timed_out: bool, truncated: bool) Self.Error!void {
+    if (timed_out) return error.Timeout;
+    if (truncated) return error.OutputTooLong;
 }
 
 /// A program running with its standard input and output as pipes, for a
@@ -443,7 +478,7 @@ const SpawnHooks = struct {
     ended: bool = false,
 
     fn start(gpa: Allocator, io: Io, raw: *anyopaque, options: Child.SpawnOptions) Child.SpawnError!Child {
-        const self: *SpawnHooks = @ptrCast(@alignCast(raw)); // safe: the test hands the hook a *SpawnHooks as its context
+        const self: *SpawnHooks = @ptrCast(@alignCast(raw)); // aegis: no-danger: the test hands the hook a *SpawnHooks as its context
         self.started = true;
         const hooked = options.environ.?.get("RELIC_HOOKED") orelse "";
         self.prepared = std.mem.eql(u8, suite.path(.process_fixture), options.argv[0]) and
@@ -453,7 +488,7 @@ const SpawnHooks = struct {
     }
 
     fn terminate(io: Io, raw: *anyopaque, child: *Child) void {
-        const self: *SpawnHooks = @ptrCast(@alignCast(raw)); // safe: the test hands the hook a *SpawnHooks as its context
+        const self: *SpawnHooks = @ptrCast(@alignCast(raw)); // aegis: no-danger: the test hands the hook a *SpawnHooks as its context
         self.ended = true;
         // glint-ignore: Z026 -- termination cannot fail its caller; a child already gone has nothing left to reap
         _ = child.killWait(io, .fromRaw(0)) catch {};

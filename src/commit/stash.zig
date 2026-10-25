@@ -29,6 +29,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const Io = std.Io;
@@ -95,7 +96,7 @@ pub const Error = error{
     NestedRepository,
 } || pretty.Error || pathspec_mod.Error || repo_mod.WriteError || refs_mod.TransactionError || worktree.Error || merge.Error || diff.TextError ||
     diff.Error || hooks.Error || refs_mod.LogReadError || fs.LockError || fs.CommitError ||
-    ignore.Error || attributes.Error || convert.Error || state_file.Error || Io.Dir.ReadFileAllocError ||
+    ignore.Error || attributes.Error || convert.Error || state_file.Error || aegis.own.ReadFileError ||
     reset.Error || refs_mod.ReadError || error{NameTooLong};
 
 /// Where a refusal writes the path it is about.
@@ -314,7 +315,7 @@ const Ctx = struct {
         filters: ?*const filter.Drivers,
         programs: ?program.Programs,
     ) Error!void {
-        const wt = repo.workDirectory() orelse return error.BareRepository;
+        const wt = (repo.workDirectory() orelse return error.BareRepository).get();
         ctx.* = .{
             .repo = repo,
             .io = io,
@@ -1231,7 +1232,7 @@ pub fn createAutostash(io: Io, repo: *Repository, place: Autostash, options: Aut
             var buf: [hash.max_hex_len + 1]u8 = undefined;
             const hex = made.hex(buf[0..hash.max_hex_len]);
             buf[hex.len] = '\n';
-            try state_file.write(io, repo.gitDirectory(), sub_path, buf[0 .. hex.len + 1]);
+            try state_file.write(io, repo.gitDirectory().get(), sub_path, buf[0 .. hex.len + 1]);
         },
         .ref => |root| {
             var tx = repo.beginRefs();
@@ -1286,7 +1287,7 @@ pub fn restoreAutostash(io: Io, repo: *Repository, place: Autostash, options: Re
     const gpa = repo.allocator();
     const commit: Oid = switch (place) {
         .file => |sub_path| blk: {
-            const text = (try state_file.read(gpa, io, repo.gitDirectory(), sub_path)) orelse return null;
+            const text = (try state_file.read(gpa, io, repo.gitDirectory().get(), sub_path)) orelse return null;
             defer gpa.free(text);
             // git's `read_oneliner`, which skips an empty file, then
             // `strbuf_trim`.
@@ -1298,7 +1299,7 @@ pub fn restoreAutostash(io: Io, repo: *Repository, place: Autostash, options: Re
     };
     const restored = try restoreStash(io, repo, commit, options);
     switch (place) {
-        .file => |sub_path| try state_file.remove(io, repo.gitDirectory(), sub_path),
+        .file => |sub_path| try state_file.remove(io, repo.gitDirectory().get(), sub_path),
         .ref => |root| try repo.refStore().root().delete(gpa, io, root),
     }
     return restored;

@@ -13,6 +13,7 @@ const Self = @This();
 const retention = @import("keep.zig");
 
 const std = @import("std");
+const aegis = @import("aegis");
 const shakedown = @import("shakedown");
 const io_mod = @import("../testing/io.zig");
 const entry_mod = @import("pack/entry.zig");
@@ -94,7 +95,7 @@ pub const IndexError = error{
     BadLargeOffset,
     /// The trailing digest did not match the index bytes before it.
     ChecksumMismatch,
-} || Allocator.Error || Io.Dir.ReadFileAllocError;
+} || Allocator.Error || aegis.own.ReadFileError;
 
 /// A packfile's `.idx`, version 2 or the version 1 git still reads.
 ///
@@ -154,7 +155,7 @@ pub const Index = struct {
         options: OpenOptions,
     ) Self.IndexError!Index {
         const kind = options.kind;
-        const bytes = try dir.readFileAlloc(io, sub_path, gpa, .limited(options.max_bytes));
+        const bytes = try aegis.own.readFile(io, dir, sub_path, gpa, aegis.units.Bytes(u64).fromRaw(options.max_bytes));
         // parse takes ownership on success and failure.
         return parse(gpa, kind, bytes);
     }
@@ -174,7 +175,7 @@ pub const Index = struct {
         var checksum_hasher: hash.Hasher = .init(kind);
         checksum_hasher.update(bytes[0 .. bytes.len - raw_len]);
         const computed_checksum = checksum_hasher.final();
-        // unreachable: the slice is cut to the format's raw length
+        // aegis: no-danger: the slice is cut to the format's raw length
         const stored_checksum = Oid.fromRaw(kind, bytes[bytes.len - raw_len ..][0..raw_len]) catch unreachable;
         if (!computed_checksum.eql(stored_checksum)) return error.ChecksumMismatch;
 
@@ -196,7 +197,7 @@ pub const Index = struct {
         if (remaining % 8 != 0) return error.TruncatedIndex;
         const large_count: u32 = @intCast(remaining / 8);
 
-        // unreachable: the slice is cut to the format's raw length
+        // aegis: no-danger: the slice is cut to the format's raw length
         const pack_checksum = Oid.fromRaw(kind, bytes[bytes.len - 2 * raw_len ..][0..raw_len]) catch unreachable;
 
         const index: Index = .{
@@ -236,7 +237,7 @@ pub const Index = struct {
 
         var checksum_hasher: hash.Hasher = .init(kind);
         checksum_hasher.update(bytes[0 .. bytes.len - raw_len]);
-        // unreachable: the slice is cut to the format's raw length
+        // aegis: no-danger: the slice is cut to the format's raw length
         const stored_checksum = Oid.fromRaw(kind, bytes[bytes.len - raw_len ..][0..raw_len]) catch unreachable;
         if (!checksum_hasher.final().eql(stored_checksum)) return error.ChecksumMismatch;
 
@@ -253,7 +254,7 @@ pub const Index = struct {
             .offsets_at = 1024,
             .large_at = 0,
             .large_count = 0,
-            // unreachable: the slice is cut to the format's raw length
+            // aegis: no-danger: the slice is cut to the format's raw length
             .pack_checksum = Oid.fromRaw(kind, bytes[bytes.len - 2 * raw_len ..][0..raw_len]) catch unreachable,
         };
         try index.checkOrder();
@@ -296,7 +297,7 @@ pub const Index = struct {
 
     /// The name of the object at position `i`.
     pub fn nameAt(index: Index, i: u32) Oid {
-        // unreachable: rawNameAt cuts the name to the format's raw length
+        // aegis: no-danger: rawNameAt cuts the name to the format's raw length
         return Oid.fromRaw(index.kind, index.rawNameAt(i)) catch unreachable;
     }
 
@@ -494,7 +495,7 @@ pub const Pack = struct {
 
     gpa: Allocator,
     kind: Kind,
-    file: Io.File,
+    file: fs.OwnedFile,
     mapping: ?Io.File.MemoryMap,
     /// The whole pack, when it is mapped.
     memory: ?[]const u8,
@@ -609,7 +610,7 @@ pub const Pack = struct {
         return .{
             .gpa = gpa,
             .kind = kind,
-            .file = file,
+            .file = fs.OwnedFile.init(file),
             .mapping = mapping,
             .memory = memory,
             .size = stat.size,
@@ -618,7 +619,7 @@ pub const Pack = struct {
             .max_depth = options.max_depth,
             .max_chain_bytes = options.max_chain_bytes,
             .decoder = decoder,
-            // unreachable: read_block_bytes is a nonzero constant
+            // aegis: no-danger: read_block_bytes is a nonzero constant
             .slots = @intCast(@max(1, @min(options.read_cache_bytes / read_block_bytes, std.math.divCeil(u64, stat.size, read_block_bytes) catch unreachable))),
         };
     }
@@ -653,7 +654,7 @@ pub const Pack = struct {
         const dest = p.slotBytes(slot)[block_prefix..][0..len];
         var done: usize = 0;
         while (done < len) {
-            const n = try p.file.readPositional(io, &.{dest[done..]}, start + done);
+            const n = try p.file.lend().get().readPositional(io, &.{dest[done..]}, start + done);
             if (n == 0) return error.TruncatedPack;
             done += n;
         }
@@ -701,7 +702,7 @@ pub const Pack = struct {
     /// front of the next block, in that slot's prefix, so the two read as
     /// one run; neither block's own bytes move.
     fn nextBlock(r: *Io.Reader) Io.Reader.Error!void {
-        const p: *Pack = @alignCast(@fieldParentPtr("block_reader", r)); // safe: installed only on a Pack's block_reader
+        const p: *Pack = @alignCast(@fieldParentPtr("block_reader", r)); // aegis: no-danger: installed only on a Pack's block_reader
         const next = p.reader_block + 1;
         if (next * read_block_bytes >= p.size) return error.EndOfStream;
         const kept = r.end - r.seek;
@@ -746,7 +747,7 @@ pub const Pack = struct {
     /// blocks as they were.
     fn streamReaderAt(p: *Pack, io: Io, at: u64) ErrorNamespace.Error!*Io.Reader {
         if (p.stream_buffer.len == 0) p.stream_buffer = try p.gpa.alloc(u8, stream_buffer_bytes);
-        p.stream_reader = p.file.reader(io, p.stream_buffer);
+        p.stream_reader = p.file.lend().get().reader(io, p.stream_buffer);
         p.stream_reader.seekTo(at) catch |err| return switch (err) {
             error.EndOfStream => error.TruncatedPack,
             error.ReadFailed => p.stream_reader.err orelse error.ReadFailed,
@@ -766,7 +767,7 @@ pub const Pack = struct {
         }
         if (p.stream_buffer.len != 0) p.gpa.free(p.stream_buffer);
         if (p.mapping) |*m| m.destroy(io);
-        p.file.close(io);
+        p.file.deinit(io);
         p.index.deinit();
         p.* = undefined;
     }
@@ -784,7 +785,7 @@ pub const Pack = struct {
         }
         var done: usize = 0;
         while (done < out.len) {
-            const n = try p.file.readPositional(io, &.{out[done..]}, offset + done);
+            const n = try p.file.lend().get().readPositional(io, &.{out[done..]}, offset + done);
             if (n == 0) return error.TruncatedPack;
             done += n;
         }
@@ -793,7 +794,7 @@ pub const Pack = struct {
     /// The `out.len` packed bytes from `offset`, as they are in the file,
     /// read positionally or from the mapping. Nothing of the pack that
     /// changes is touched, so tasks call it at once on one pack.
-    pub fn readStored(p: *const Pack, io: Io, offset: u64, out: []u8) Self.Error!void {
+    pub fn readStored(p: *Pack, io: Io, offset: u64, out: []u8) Self.Error!void {
         if (offset > p.size or out.len > p.size - offset) return error.TruncatedPack;
         if (p.memory) |mem| {
             @memcpy(out, mem[@intCast(offset)..][0..out.len]);
@@ -801,7 +802,7 @@ pub const Pack = struct {
         }
         var done: usize = 0;
         while (done < out.len) {
-            const n = try p.file.readPositional(io, &.{out[done..]}, offset + done);
+            const n = try p.file.lend().get().readPositional(io, &.{out[done..]}, offset + done);
             if (n == 0) return error.TruncatedPack;
             done += n;
         }
@@ -809,10 +810,10 @@ pub const Pack = struct {
 
     /// The pack's bytes from `offset` on, read through `buffer` (unused for
     /// a pack in memory), for copying a stored entry in blocks.
-    pub fn readerAt(p: *const Pack, io: Io, offset: u64, buffer: []u8) Self.Error!Positioned {
+    pub fn readerAt(p: *Pack, io: Io, offset: u64, buffer: []u8) Self.Error!Positioned {
         if (offset > p.size) return error.TruncatedPack;
         if (p.memory) |mem| return .{ .memory = .fixed(mem[@intCast(offset)..@intCast(p.size)]) };
-        var file_reader = p.file.reader(io, buffer);
+        var file_reader = p.file.lend().get().reader(io, buffer);
         try file_reader.seekTo(offset);
         return .{ .file = file_reader };
     }
@@ -904,7 +905,7 @@ pub const Pack = struct {
             7 => blk: {
                 const raw_len = p.kind.rawLen();
                 if (i + raw_len > bytes.len) return null;
-                // unreachable: the slice is cut to the format's raw length
+                // aegis: no-danger: the slice is cut to the format's raw length
                 const oid = Oid.fromRaw(p.kind, bytes[i..][0..raw_len]) catch unreachable;
                 i += raw_len;
                 break :blk .{ .ref_delta = oid };
@@ -993,7 +994,7 @@ pub const Pack = struct {
     /// `readAt`'s, with the delta-base cache.
     pub const InflateInputs = struct { reader: *EntryReader, at: u64, size: u64 };
 
-    pub fn inflateWith(p: *const Pack, io: Io, inputs: InflateInputs, out: []u8) Self.Error!void {
+    pub fn inflateWith(p: *Pack, io: Io, inputs: InflateInputs, out: []u8) Self.Error!void {
         const reader = inputs.reader;
         const at = inputs.at;
         const size = inputs.size;
@@ -1009,7 +1010,7 @@ pub const Pack = struct {
             // No more read ahead than the stream can take: a deflated entry
             // is at most an eighth longer than what it holds.
             const want = @min(reader.buffer.len, result_len +| result_len / 8 +| 64);
-            file_reader = p.file.reader(io, reader.buffer[0..want]);
+            file_reader = p.file.lend().get().reader(io, reader.buffer[0..want]);
             file_reader.seekTo(at) catch |err| return switch (err) {
                 error.EndOfStream => error.TruncatedPack,
                 error.ReadFailed => file_reader.err orelse error.ReadFailed,
@@ -1362,7 +1363,7 @@ pub const Pack = struct {
             fixed = .fixed(mem[@intCast(entry.data_at)..]);
             break :blk &fixed;
         } else blk: {
-            file_reader = p.file.reader(io, &input);
+            file_reader = p.file.lend().get().reader(io, &input);
             try file_reader.seekTo(entry.data_at);
             break :blk &file_reader.interface;
         };
@@ -2095,7 +2096,8 @@ pub const Writer = struct {
 
     temp: [64]u8,
     temp_len: usize,
-    file: Io.File,
+    /// The temporary pack, open; `null` when the writer streams.
+    file: ?fs.OwnedFile,
     file_writer: Io.File.Writer,
     file_buffer: []u8,
 
@@ -2143,7 +2145,7 @@ pub const Writer = struct {
         }
 
         fn drain(w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
-            const s: *Sink = @alignCast(@fieldParentPtr("writer", w)); // safe: this function is installed only on a Sink's writer
+            const s: *Sink = @alignCast(@fieldParentPtr("writer", w)); // aegis: no-danger: this function is installed only on a Sink's writer
             if (w.end != 0) {
                 try s.emit(w.buffer[0..w.end]);
                 w.end = 0;
@@ -2187,7 +2189,7 @@ pub const Writer = struct {
             .expected = object_count,
             .temp = undefined,
             .temp_len = 0,
-            .file = undefined,
+            .file = null,
             .file_writer = undefined,
             .file_buffer = &.{},
             .sink = undefined,
@@ -2249,7 +2251,7 @@ pub const Writer = struct {
             .expected = object_count,
             .temp = undefined,
             .temp_len = temp.len,
-            .file = file,
+            .file = fs.OwnedFile.init(file),
             .file_writer = undefined,
             .file_buffer = file_buffer,
             .sink = undefined,
@@ -2298,7 +2300,7 @@ pub const Writer = struct {
             w.finished = true;
             return;
         }
-        w.file.close(io);
+        w.file.?.deinit(io);
         // glint-ignore: Z026 -- abandoning cannot fail; a temporary pack left behind is what `git gc` prunes
         w.dir.deleteFile(io, w.temp[0..w.temp_len]) catch {};
         w.finished = true;
@@ -2488,7 +2490,7 @@ pub const Writer = struct {
             try w.dropLast(io);
             const held = for (w.entries.items) |entry| {
                 if (entry.oid.eql(oid)) break entry.offset;
-            } else unreachable; // unreachable: `seen` holds what `entries` does
+            } else unreachable; // aegis: no-danger: `seen` holds what `entries` does
             return .{ .oid = oid, .offset = held, .new = false };
         }
         _ = try w.endEntry(oid, at);
@@ -2505,7 +2507,7 @@ pub const Writer = struct {
         const mark = w.mark.?;
         w.mark = null;
         try w.file_writer.interface.flush();
-        try w.file.setLength(io, mark.at);
+        try w.file.?.lend().get().setLength(io, mark.at);
         try w.file_writer.seekTo(mark.at);
         w.sink.hasher = mark.hasher;
         w.sink.count = mark.at;
@@ -2592,17 +2594,17 @@ pub const Writer = struct {
         errdefer if (token) |*t| t.deinit(io);
         const pack_bytes = w.sink.count + w.kind.rawLen();
         try w.file_writer.interface.flush();
-        try fs.syncFile(io, w.file, .{ .policy = w.options.fsync.sync(.pack) });
-        w.file.close(io);
+        try fs.syncFile(io, w.file.?.lend().get(), .{ .policy = w.options.fsync.sync(.pack) });
+        w.file.?.deinit(io);
         w.finished = true;
 
         var hex: [hash.max_hex_len]u8 = undefined;
         const text = checksum.hex(&hex);
         var pack_name_buf: [hash.max_hex_len + 32]u8 = undefined;
-        // unreachable: a hex name is at most max_hex_len digits, a prefix of sixteen bytes and the rest eight
+        // aegis: no-danger: a hex name is at most max_hex_len digits, a prefix of sixteen bytes and the rest eight
         const pack_name = std.mem.print(&pack_name_buf, "{s}-{s}.pack", .{ w.options.prefix, text }) catch unreachable;
         var idx_name_buf: [hash.max_hex_len + 32]u8 = undefined;
-        // unreachable: a hex name is at most max_hex_len digits, a prefix of sixteen bytes and the rest eight
+        // aegis: no-danger: a hex name is at most max_hex_len digits, a prefix of sixteen bytes and the rest eight
         const idx_name = std.mem.print(&idx_name_buf, "{s}-{s}.idx", .{ w.options.prefix, text }) catch unreachable;
 
         // The index goes to a temporary of its own, because the order the two
@@ -2641,13 +2643,13 @@ pub const Writer = struct {
         // The reverse index before the index, as git renames them.
         if (rev_temp) |t| {
             var rev_name_buf: [hash.max_hex_len + 32]u8 = undefined;
-            // unreachable: a hex name is at most max_hex_len digits, a prefix of sixteen bytes and the rest eight
+            // aegis: no-danger: a hex name is at most max_hex_len digits, a prefix of sixteen bytes and the rest eight
             const rev_name = std.mem.print(&rev_name_buf, "{s}-{s}.rev", .{ w.options.prefix, text }) catch unreachable;
             try fs.rename(io, w.dir, t, rev_name);
         }
         if (mtimes_temp) |t| {
             var mtimes_name_buf: [hash.max_hex_len + 32]u8 = undefined;
-            // unreachable: a hex name is at most max_hex_len digits, a prefix of sixteen bytes and the rest eight
+            // aegis: no-danger: a hex name is at most max_hex_len digits, a prefix of sixteen bytes and the rest eight
             const mtimes_name = std.mem.print(&mtimes_name_buf, "{s}-{s}.mtimes", .{ w.options.prefix, text }) catch unreachable;
             try fs.rename(io, w.dir, t, mtimes_name);
         }
@@ -2678,14 +2680,14 @@ pub const Writer = struct {
         try w.file_writer.interface.flush();
         var header: [4]u8 = undefined;
         std.mem.writeInt(u32, &header, @intCast(w.entries.items.len), .big);
-        _ = try w.file.writePositionalAll(io, &header, 8);
+        _ = try w.file.?.lend().get().writePositionalAll(io, &header, 8);
 
         var hasher: hash.Hasher = .init(w.kind);
         var at: u64 = 0;
         const buffer = w.file_buffer;
         while (at < w.sink.count) {
             const want: usize = @intCast(@min(buffer.len, w.sink.count - at));
-            const n = try w.file.readPositionalAll(io, buffer[0..want], at);
+            const n = try w.file.?.lend().get().readPositionalAll(io, buffer[0..want], at);
             if (n == 0) break;
             hasher.update(buffer[0..n]);
             at += n;
@@ -2741,7 +2743,7 @@ pub fn writeIndexFile(
     std.mem.sort(WrittenEntry, entries, {}, lessThanWritten);
     // The names rise, each once: what `Index.parse` checks before anything
     // is looked up.
-    if (entries.len > 1) for (1..entries.len) |i| std.debug.assert(entries[i - 1].oid.order(entries[i].oid) == .lt);
+    if (entries.len > 1) for (1..entries.len) |i| aegis.assert.invariant(entries[i - 1].oid.order(entries[i].oid) == .lt, "entries[i - 1].oid.order(entries[i].oid) == .lt");
 
     const raw_len = kind.rawLen();
 
@@ -3388,25 +3390,25 @@ const LiveAllocator = struct {
         return .{ .ptr = l, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
     }
     fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
-        const l: *LiveAllocator = @ptrCast(@alignCast(ctx)); // safe: ctx is the pointer `allocator` handed out
+        const l: *LiveAllocator = @ptrCast(@alignCast(ctx)); // aegis: no-danger: ctx is the pointer `allocator` handed out
         const p = l.child.rawAlloc(len, alignment, ret) orelse return null;
         l.live += len;
         return p;
     }
     fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret: usize) bool {
-        const l: *LiveAllocator = @ptrCast(@alignCast(ctx)); // safe: ctx is the pointer `allocator` handed out
+        const l: *LiveAllocator = @ptrCast(@alignCast(ctx)); // aegis: no-danger: ctx is the pointer `allocator` handed out
         if (!l.child.rawResize(memory, alignment, new_len, ret)) return false;
         l.live = l.live - memory.len + new_len;
         return true;
     }
     fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret: usize) ?[*]u8 {
-        const l: *LiveAllocator = @ptrCast(@alignCast(ctx)); // safe: ctx is the pointer `allocator` handed out
+        const l: *LiveAllocator = @ptrCast(@alignCast(ctx)); // aegis: no-danger: ctx is the pointer `allocator` handed out
         const p = l.child.rawRemap(memory, alignment, new_len, ret) orelse return null;
         l.live = l.live - memory.len + new_len;
         return p;
     }
     fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret: usize) void {
-        const l: *LiveAllocator = @ptrCast(@alignCast(ctx)); // safe: ctx is the pointer `allocator` handed out
+        const l: *LiveAllocator = @ptrCast(@alignCast(ctx)); // aegis: no-danger: ctx is the pointer `allocator` handed out
         l.child.rawFree(memory, alignment, ret);
         l.live -= memory.len;
     }

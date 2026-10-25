@@ -16,6 +16,7 @@
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -29,7 +30,7 @@ const Repository = repo_mod.Repository;
 
 /// Errors from running the hooks.
 pub const Error = hooks.Error || Allocator.Error || Io.Dir.RealPathError ||
-    Io.Dir.ReadFileAllocError || fs.AtomicWriteError || error{NameTooLong};
+    aegis.own.ReadFileError || fs.AtomicWriteError || error{NameTooLong};
 
 /// A command's hooks: the runner, or `null` to run none, and whether the
 /// ones `--no-verify` skips run.
@@ -48,8 +49,9 @@ pub const Hooks = struct {
         var h: Hooks = .{ .runner = runner, .verify = options.verify, .git_dir = ".git" };
         if (runner == null) return h;
         var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const git_path = try arena.dupe(u8, try fs.realPath(io, repo.gitDirectory(), &buf));
-        if (repo.workDirectory()) |wt| {
+        const git_path = try arena.dupe(u8, try fs.realPath(io, repo.gitDirectory().get(), &buf));
+        if (repo.workDirectory()) |lent_wt| {
+            const wt = lent_wt.get();
             const top = try fs.realPath(io, wt, &buf);
             const expected = try std.mem.concat(arena, u8, &.{ top, "/.git" });
             if (std.mem.eql(u8, expected, git_path)) return h;
@@ -91,11 +93,11 @@ pub const Hooks = struct {
         const runner = h.runner orelse return text;
         const e = try h.env(arena, author);
         if (h.verify) _ = try runner.preCommit(io, e);
-        try fs.atomicWrite(io, repo.gitDirectory(), "COMMIT_EDITMSG", text, .{ .prefix = ".relic-msg-", .sync = .none });
+        try fs.atomicWrite(io, repo.gitDirectory().get(), "COMMIT_EDITMSG", text, .{ .prefix = ".relic-msg-", .sync = .none });
         const message_path = try h.path(arena, "COMMIT_EDITMSG");
         _ = try runner.prepareCommitMsg(io, e, message_path, .{ .source = source, .commit = null });
         if (h.verify) _ = try runner.commitMsg(io, e, message_path);
-        return repo.gitDirectory().readFileAlloc(io, "COMMIT_EDITMSG", arena, .limited(1 << 30));
+        return aegis.own.readFile(io, repo.gitDirectory().get(), "COMMIT_EDITMSG", arena, aegis.units.Bytes(u64).fromRaw(1 << 30));
     }
 
     /// `post-commit`, once the branch has moved. It cannot undo anything.

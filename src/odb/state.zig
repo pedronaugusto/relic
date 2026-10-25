@@ -12,6 +12,7 @@ const midx = @import("midx.zig");
 const warp = @import("warp");
 const odb = @import("policy.zig");
 const reachability = @import("bitmap/reachability.zig");
+const fs = @import("../fs/fs.zig");
 pub const Error = odb.Error;
 const Stats = odb.Stats;
 
@@ -20,7 +21,9 @@ pub const Data = struct {
     gpa: Allocator,
     kind: Kind,
     options: odb.Options,
-    sources: std.ArrayList(Source) = .empty,
+    /// Each allocated on its own: a source keeps its place while the list
+    /// grows, and its directories their owners.
+    sources: std.ArrayList(*Source) = .empty,
     cache: pack.Cache,
     /// The id the next pack opened is given: the delta-base cache's key
     /// for it, which no other pack ever has, however the packs move.
@@ -37,7 +40,7 @@ pub const Data = struct {
 };
 
 pub fn get(state: *State) *Data {
-    return @ptrCast(@alignCast(state)); // safe: create allocates each State as aligned Data.
+    return @ptrCast(@alignCast(state)); // aegis: no-danger: create allocates each State as aligned Data.
 }
 
 pub fn create(gpa: Allocator, kind: Kind, options: odb.Options) Allocator.Error!*State {
@@ -46,7 +49,7 @@ pub fn create(gpa: Allocator, kind: Kind, options: odb.Options) Allocator.Error!
     var cache = try pack.Cache.init(gpa, options.delta_cache_bytes.raw());
     errdefer cache.deinit();
     data.* = .{ .gpa = gpa, .kind = kind, .options = options, .cache = cache };
-    return @ptrCast(data); // safe: the opaque owner retains the allocated Data pointer.
+    return @ptrCast(data); // aegis: no-danger: the opaque owner retains the allocated Data pointer.
 }
 
 /// The pack and the name it was opened under have one owner. Registration
@@ -69,12 +72,14 @@ pub const NamedPack = struct {
 
 /// One `objects` directory: the repository's own, or an alternate.
 pub const Source = struct {
-    dir: Io.Dir,
+    dir: fs.OwnedDir,
     /// Where `dir` is, every link resolved, owned: how an alternate the
     /// chain names twice, or one naming this database, is known.
     real_path: []u8,
-    pack_dir: ?Io.Dir,
-    packs: std.ArrayList(NamedPack),
+    pack_dir: ?fs.OwnedDir,
+    /// Each allocated on its own, as the sources are: a pack keeps its
+    /// place, and its file its owner, while a scan adds others.
+    packs: std.ArrayList(*NamedPack),
     /// Whether objects may be written here. Only the first source is.
     writable: bool,
     /// `pack/multi-pack-index`, when there is one.
@@ -84,6 +89,17 @@ pub const Source = struct {
     /// name and this database holds them in directory order, so the two have
     /// to be matched up once rather than on every lookup.
     midx_packs: std.ArrayList(?u32),
+
+    /// The `objects` directory, lent until the source is closed.
+    pub fn directory(source: *Source) fs.LentDir {
+        return source.dir.lend();
+    }
+
+    /// Its `pack` directory, lent until the source is closed, or `null`
+    /// when there is none yet.
+    pub fn packDirectory(source: *Source) ?fs.LentDir {
+        return if (source.pack_dir) |*dir| dir.lend() else null;
+    }
 
     /// Which pack holds `oid`, asking the multi-pack index first.
     ///
@@ -109,7 +125,7 @@ pub const Source = struct {
             }
         }
         stats.pack_scans += 1;
-        for (source.packs.items, 0..) |*named, position| {
+        for (source.packs.items, 0..) |named, position| {
             const p = &named.pack;
             if (try p.index.find(oid)) |found| return .{ .at = position, .offset = found.offset };
         }

@@ -36,7 +36,7 @@ fn ours(gpa: std.mem.Allocator, io: std.Io, git: *testgit.Repo) ![]u8 {
     var rules = try repo.worktreeRules();
     rules.ignore = &ignore_rules;
     rules.attrs = &attrs;
-    var result = try checkout.status(gpa, io, repo.workDirectory().?, .{ .index = &locked.index, .db = repo.objectDatabase() }, .{
+    var result = try checkout.status(gpa, io, repo.workDirectory().?.get(), .{ .index = &locked.index, .db = repo.objectDatabase() }, .{
         .rules = rules,
         .head_tree = head_tree,
         .added_content = true,

@@ -97,7 +97,7 @@ pub fn backfill(gpa: Allocator, io: Io, repo: *Repository, inputs: Inputs, optio
     defer if (patterns) |*p| p.deinit();
     const settings = try sparse_checkout.settings(io, repo);
     if (options.sparse orelse settings.enabled) {
-        patterns = try sparse.Patterns.load(gpa, io, repo.gitDirectory(), .{
+        patterns = try sparse.Patterns.load(gpa, io, repo.gitDirectory().get(), .{
             .case_fold = try repo.configuration().getBool("core.ignorecase", false),
             .cone = settings.cone,
         }) orelse return error.NoSparseCheckout;

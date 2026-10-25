@@ -521,7 +521,7 @@ pub fn head(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Er
 /// Whether the index or the working tree differs from `HEAD`'s tree,
 /// untracked files aside: `git diff-index --quiet HEAD`.
 fn isDirty(gpa: Allocator, io: Io, repo: *Repository, head_oid: Oid) Error!bool {
-    const wt = repo.workDirectory() orelse return error.BareRepository;
+    const wt = (repo.workDirectory() orelse return error.BareRepository).get();
     var index = try repo.openIndex(io);
     defer index.deinit();
     var rules = try repo.worktreeRules();

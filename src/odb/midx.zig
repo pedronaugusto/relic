@@ -9,6 +9,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -33,7 +34,7 @@ pub const Error = error{
     CorruptMultiPackIndex,
     /// A chain of multi-pack indexes. This release reads one.
     ChainUnsupported,
-} || Allocator.Error || Io.Dir.ReadFileAllocError;
+} || Allocator.Error || aegis.own.ReadFileError;
 
 /// Where an object lives.
 pub const Located = struct {
@@ -169,7 +170,7 @@ pub const Index = struct {
 
     /// The checksum that names a bitmap written beside this index.
     pub fn checksum(index: *const Index) Oid {
-        // unreachable: the slice is the last raw length of bytes, which parse checked are there
+        // aegis: no-danger: the slice is the last raw length of bytes, which parse checked are there
         return Oid.fromRaw(index.kind, index.bytes[index.bytes.len - index.kind.rawLen() ..]) catch unreachable;
     }
 
@@ -249,7 +250,7 @@ pub const Index = struct {
     /// The name of the object at `position`.
     pub fn nameAt(index: *const Index, position: u32) Oid {
         const raw_len = index.kind.rawLen();
-        // unreachable: the slice is cut to the format's raw length
+        // aegis: no-danger: the slice is cut to the format's raw length
         return Oid.fromRaw(index.kind, index.bytes[index.oids_at + @as(usize, position) * raw_len ..][0..raw_len]) catch unreachable;
     }
 
@@ -431,7 +432,7 @@ pub fn encode(gpa: Allocator, kind: hash.Kind, packs: []const WritePack, options
     // fixed-width name and one pack-and-offset pair per object, and the
     // pack names padded to four bytes.
     std.debug.assert(total == entries.items.len);
-    if (entries.items.len > 1) for (1..entries.items.len) |i| std.debug.assert(entries.items[i - 1].oid.order(entries.items[i].oid) == .lt);
+    if (entries.items.len > 1) for (1..entries.items.len) |i| aegis.assert.invariant(entries.items[i - 1].oid.order(entries.items[i].oid) == .lt, "entries.items[i - 1].oid.order(entries.items[i].oid) == .lt");
     std.debug.assert(buffers[0].bytes.items.len % 4 == 0);
     std.debug.assert(buffers[2].bytes.items.len == entries.items.len * kind.rawLen());
     std.debug.assert(buffers[3].bytes.items.len == entries.items.len * 8);

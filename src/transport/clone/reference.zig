@@ -155,7 +155,7 @@ pub fn borrow(arena: Allocator, io: Io, repo: *Repository, references: []const R
 pub fn dissociate(gpa: Allocator, io: Io, repo: *Repository) Self.Error!void {
     if (!repo.objectDatabase().hasAlternates()) return;
     _ = try repack_mod.repack(gpa, io, repo, .{ .mode = .all, .delete = true });
-    repo.gitDirectory().deleteFile(io, "objects/info/alternates") catch |e| switch (e) {
+    repo.gitDirectory().get().deleteFile(io, "objects/info/alternates") catch |e| switch (e) {
         error.FileNotFound => {},
         else => |other| return other,
     };
@@ -182,7 +182,7 @@ pub fn forSubmodule(arena: Allocator, io: Io, superproject: *Repository, name: [
 
     var listed = try superproject.objectDatabase().listAlternates(arena, io);
     defer listed.deinit();
-    const objects = try fs.realPathAlloc(arena, io, superproject.gitDirectory(), "objects");
+    const objects = try fs.realPathAlloc(arena, io, superproject.gitDirectory().get(), "objects");
     var out: std.ArrayList(Reference) = .empty;
     for (listed.paths) |raw| {
         const path = if (Io.Dir.path.isAbsolute(raw)) raw else try Io.Dir.path.join(arena, &.{ objects, raw });

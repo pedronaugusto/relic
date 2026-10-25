@@ -237,7 +237,7 @@ pub fn collect(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self
         return error.GcRunning;
     }
     // glint-ignore: Z026 -- git's pid file is a tempfile its exit removes; one already gone is no failure of the gc
-    defer repo.commonDirectory().deleteFile(io, "gc.pid") catch {};
+    defer repo.commonDirectory().get().deleteFile(io, "gc.pid") catch {};
 
     var report: Report = .{ .outcome = .ran };
     if (!options.skip_foreground_tasks) try foreground(gpa, io, repo, options.clock, options.auto);
@@ -248,7 +248,7 @@ pub fn collect(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self
     if (detach and report.too_many_loose) {
         try writeLog(gpa, io, repo, "warning: There are too many unreachable loose objects; run 'git prune' to remove them.\n", .{});
     } else {
-        try deleteIfThere(io, repo.gitDirectory(), "gc.log");
+        try deleteIfThere(io, repo.gitDirectory().get(), "gc.log");
     }
     return report;
 }
@@ -388,7 +388,7 @@ fn tooManyPacks(arena: Allocator, io: Io, repo: *Repository, limit: i64) Self.Er
 pub fn tooManyLoose(io: Io, repo: *Repository, limit: i64) Self.Error!bool {
     const threshold = @divFloor(limit + 255, 256) * 256;
     const hex_len = repo.objectFormat().hexLen() - 2;
-    var dir = repo.objectDatabase().objectsDirectory().openDir(io, "17", .{ .iterate = true }) catch |err| switch (err) {
+    var dir = repo.objectDatabase().objectsDirectory().get().openDir(io, "17", .{ .iterate = true }) catch |err| switch (err) {
         error.FileNotFound => return false,
         else => |e| return e,
     };
@@ -442,12 +442,12 @@ fn allPacked(plan: *repack_mod.Options, s: *const Settings, keep: []const []cons
 
 /// `report_last_gc_error`: `gc.log` newer than the expiry, and not empty.
 fn lastFailed(io: Io, repo: *Repository, expire: date.Expiry) Self.Error!bool {
-    const dir = repo.gitDirectory();
+    const dir = repo.gitDirectory().get();
     const stat = dir.statFile(io, "gc.log", .{}) catch |err| switch (err) {
         error.FileNotFound => return false,
         else => |e| return e,
     };
-    if (date.Expiry.fromRaw(stat.mtime.toSeconds()).compare(expire) == .lt) return false;
+    if (date.instant(stat.mtime).compare(expire) == .lt) return false;
     return stat.size != 0;
 }
 
@@ -455,12 +455,12 @@ fn lastFailed(io: Io, repo: *Repository, expire: date.Expiry) Self.Error!bool {
 /// written within twelve hours, `<pid> <host>`, and on another host or
 /// a process still there.
 fn holderOf(io: Io, repo: *Repository, clock: date.Context) Self.Error!?Holder {
-    const dir = repo.commonDirectory();
+    const dir = repo.commonDirectory().get();
     const stat = dir.statFile(io, "gc.pid", .{}) catch |err| switch (err) {
         error.FileNotFound => return null,
         else => |e| return e,
     };
-    if (clock.now.toSeconds() - stat.mtime.toSeconds() > 12 * std.time.s_per_hour) return null;
+    if (date.instant(stat.mtime).saturatingDurationTo(date.instant(clock.now)).compare(date.spanHours(12)) == .gt) return null;
     var buf: [fs.max_host_name + 32]u8 = undefined;
     const text = dir.readFile(io, "gc.pid", &buf) catch |err| switch (err) {
         error.FileNotFound => return null,
@@ -484,7 +484,7 @@ fn holderOf(io: Io, repo: *Repository, clock: date.Context) Self.Error!?Holder {
 /// unless `force`; else `gc.pid` written as `<pid> <host>`.
 fn lockGc(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Error!?Holder {
     var buffer: [256]u8 = undefined;
-    var lock = try fs.LockFile.open(gpa, io, repo.commonDirectory(), .{ .sub_path = "gc.pid", .buffer = &buffer }, .{ .sync = .none, .write_pid = repo.lockfilePid() });
+    var lock = try fs.LockFile.open(gpa, io, repo.commonDirectory().get(), .{ .sub_path = "gc.pid", .buffer = &buffer }, .{ .sync = .none, .write_pid = repo.lockfilePid() });
     defer lock.deinit(io);
     if (!options.force) if (try holderOf(io, repo, options.clock)) |holder| return holder;
     var host_buf: [fs.max_host_name]u8 = undefined;
@@ -496,7 +496,7 @@ fn lockGc(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Erro
 /// `gc.log` replaced, through its lock, by what a detached gc printed.
 fn writeLog(gpa: Allocator, io: Io, repo: *Repository, comptime format: []const u8, args: anytype) Self.Error!void {
     var buffer: [256]u8 = undefined;
-    var lock = try fs.LockFile.open(gpa, io, repo.gitDirectory(), .{ .sub_path = "gc.log", .buffer = &buffer }, .{ .sync = .none, .write_pid = repo.lockfilePid() });
+    var lock = try fs.LockFile.open(gpa, io, repo.gitDirectory().get(), .{ .sub_path = "gc.log", .buffer = &buffer }, .{ .sync = .none, .write_pid = repo.lockfilePid() });
     defer lock.deinit(io);
     try lock.writer().print(format, args);
     try lock.commit(io);

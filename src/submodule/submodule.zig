@@ -176,7 +176,8 @@ fn refuse(refusal: ?*Refusal, path: []const u8, setting: []const u8, err: Error)
 /// unmerged git reads none of it, and neither does this.
 pub fn loadGitmodules(gpa: Allocator, io: Io, repo: *Repository, index: *const Index) Self.Error!Gitmodules {
     if (isUnmerged(index, ".gitmodules")) return .empty(gpa);
-    if (repo.workDirectory()) |wt| {
+    if (repo.workDirectory()) |lent_wt| {
+        const wt = lent_wt.get();
         const text = fs.readFileAlloc(gpa, io, wt, ".gitmodules", 1 << 24) catch |err| switch (err) {
             error.IsDir => null,
             else => |e| return e,
@@ -367,7 +368,7 @@ fn superprojectUrl(arena: Allocator, io: Io, repo: *Repository) Error![]const u8
     if (try configString(arena, repo.configuration(), key)) |url| {
         if (url.len > 0) return url;
     }
-    return try fs.realPathAlloc(arena, io, repo.workDirectory() orelse return error.BareRepository, ".");
+    return try fs.realPathAlloc(arena, io, (repo.workDirectory() orelse return error.BareRepository).get(), ".");
 }
 
 /// `../` for every component of `path`, which is what a url relative to a
@@ -525,7 +526,7 @@ fn validateGitDir(arena: Allocator, io: Io, git_dir: Io.Dir, name: []const u8, d
 
 /// Open the repository whose working tree is `path` in `repo`'s.
 fn openSubmodule(gpa: Allocator, io: Io, repo: *Repository, path: []const u8, options: Repository.OpenOptions) Error!Repository {
-    const wt = repo.workDirectory() orelse return error.BareRepository;
+    const wt = (repo.workDirectory() orelse return error.BareRepository).get();
     var dir = try wt.openDir(io, path, .{});
     defer dir.close(io);
     var o = options;
@@ -538,7 +539,7 @@ fn openSubmodule(gpa: Allocator, io: Io, repo: *Repository, path: []const u8, op
 /// opens, else its repository in `modules`, which has no working tree;
 /// `null` when neither is there.
 pub fn openRepository(gpa: Allocator, io: Io, repo: *Repository, module: PathName, options: Repository.OpenOptions) Self.Error!?Repository {
-    const wt = repo.workDirectory() orelse return error.BareRepository;
+    const wt = (repo.workDirectory() orelse return error.BareRepository).get();
     if (try gitlink.isRepository(gpa, io, wt, module.path)) return try openSubmodule(gpa, io, repo, module.path, options);
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
@@ -667,7 +668,7 @@ fn statusInto(
     out: *std.ArrayList(StatusEntry),
 ) Error!void {
     if (depth > max_depth) return refuse(options.refusal, prefix, "", error.NestingTooDeep);
-    const wt = repo.workDirectory() orelse return error.BareRepository;
+    const wt = (repo.workDirectory() orelse return error.BareRepository).get();
     var index = try repo.openIndex(io);
     defer index.deinit();
     var listing = try list(gpa, io, repo, &index, paths);
@@ -791,7 +792,7 @@ pub const StatusProbe = struct {
     }
 
     fn inspect(io: Io, context: *anyopaque, path: []const u8, recorded: Oid) worktree.Error!worktree.SubmoduleState {
-        const p: *StatusProbe = @ptrCast(@alignCast(context)); // safe: the context handed out with this function is a StatusProbe
+        const p: *StatusProbe = @ptrCast(@alignCast(context)); // aegis: no-danger: the context handed out with this function is a StatusProbe
         return p.inspectPath(io, path, recorded) catch |err| return p.fail(path, err);
     }
 
@@ -813,7 +814,7 @@ pub const StatusProbe = struct {
 
         const ignore = try p.ignoreFor(arena, path);
         if (ignore == .all) return .{};
-        const wt = p.repo.workDirectory() orelse return error.BareRepository;
+        const wt = (p.repo.workDirectory() orelse return error.BareRepository).get();
         var found = (try gitlink.open(p.gpa, io, wt, path)) orelse return .{};
         found.deinit(io);
         if (p.depth >= max_depth) return error.NestingTooDeep;
@@ -882,7 +883,7 @@ fn inspectRepository(
 
     var child = try StatusProbe.initAt(gpa, io, sub, &index, .{ .open = options.open }, depth);
     defer child.deinit();
-    var result = worktree.status(gpa, io, sub.workDirectory() orelse return error.BareRepository, .{ .index = &index, .db = sub.objectDatabase() }, .{
+    var result = worktree.status(gpa, io, (sub.workDirectory() orelse return error.BareRepository).get(), .{ .index = &index, .db = sub.objectDatabase() }, .{
         .rules = rules,
         .head_tree = try sub.headTree(io),
         .untracked = if (ignore == .untracked) .no else .normal,
@@ -1023,7 +1024,7 @@ fn syncIn(
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
     const arena = arena_instance.allocator();
-    const wt = repo.workDirectory() orelse return error.BareRepository;
+    const wt = (repo.workDirectory() orelse return error.BareRepository).get();
 
     var index = try repo.openIndex(io);
     defer index.deinit();
@@ -1099,7 +1100,7 @@ pub fn deinit(gpa: Allocator, io: Io, repo: *Repository, options: DeinitOptions)
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
     const arena = arena_instance.allocator();
-    const wt = repo.workDirectory() orelse return error.BareRepository;
+    const wt = (repo.workDirectory() orelse return error.BareRepository).get();
 
     var index = try repo.openIndex(io);
     defer index.deinit();
@@ -1154,7 +1155,7 @@ pub fn migrateGitDirConfigs(gpa: Allocator, io: Io, repo: *Repository) Self.Erro
     const arena = arena_instance.allocator();
     var edits: LocalEdits = .{ .arena = arena };
     var migrated: usize = 0;
-    if (repo.gitDirectory().openDir(io, "modules", .{ .iterate = true })) |modules_const| {
+    if (repo.gitDirectory().get().openDir(io, "modules", .{ .iterate = true })) |modules_const| {
         var modules = modules_const;
         defer modules.close(io);
         var it = modules.iterate();
@@ -1192,15 +1193,15 @@ const ModuleDir = struct {
 
 fn moduleDir(arena: Allocator, io: Io, repo: *Repository, name: []const u8, display: []const u8, refusal: ?*Refusal) Error!ModuleDir {
     if (!repo.submodulePathConfig()) {
-        try validateGitDir(arena, io, repo.gitDirectory(), name, display, refusal);
-        return .{ .base = repo.gitDirectory(), .path = try arena.print("modules/{s}", .{name}) };
+        try validateGitDir(arena, io, repo.gitDirectory().get(), name, display, refusal);
+        return .{ .base = repo.gitDirectory().get(), .path = try arena.print("modules/{s}", .{name}) };
     }
     const value = repo.configuration().get(try configKey(arena, name, "gitdir")) orelse
         return refuse(refusal, display, try configKey(arena, name, "gitdir"), error.NoSubmoduleGitDir);
     const found: ModuleDir = if (std.Io.Dir.path.isAbsolute(value))
         .{ .base = Io.Dir.cwd(), .path = value }
     else
-        .{ .base = repo.topDirectory(), .path = value };
+        .{ .base = repo.topDirectory().get(), .path = value };
     if (!try encodedGitDirOk(arena, io, repo, found, name)) return refuse(refusal, display, value, error.GitDirInsideGitDir);
     return found;
 }
@@ -1226,7 +1227,7 @@ fn encodedGitDirOk(arena: Allocator, io: Io, repo: *Repository, dir: ModuleDir, 
             if (!std.ascii.eqlIgnoreCase(entry.section, "submodule") or !std.ascii.eqlIgnoreCase(entry.name, "gitdir")) continue;
             if (std.mem.eql(u8, entry.subsection, name)) continue;
             const value = entry.value orelse continue;
-            const theirs: ModuleDir = if (std.Io.Dir.path.isAbsolute(value)) .{ .base = Io.Dir.cwd(), .path = value } else .{ .base = repo.topDirectory(), .path = value };
+            const theirs: ModuleDir = if (std.Io.Dir.path.isAbsolute(value)) .{ .base = Io.Dir.cwd(), .path = value } else .{ .base = repo.topDirectory().get(), .path = value };
             if (std.mem.eql(u8, mine, try theirs.absolute(arena, io))) return false;
         }
     }
@@ -1269,13 +1270,13 @@ fn setDefaultGitDir(arena: Allocator, io: Io, repo: *Repository, name: []const u
     try candidates.append(arena, try arena.dupe(u8, hasher.final().hex(&hex)));
     for (candidates.items) |candidate| {
         const path = try arena.print("{s}/modules/{s}", .{ git_dir, candidate });
-        const dir: ModuleDir = if (std.Io.Dir.path.isAbsolute(path)) .{ .base = Io.Dir.cwd(), .path = path } else .{ .base = repo.topDirectory(), .path = path };
+        const dir: ModuleDir = if (std.Io.Dir.path.isAbsolute(path)) .{ .base = Io.Dir.cwd(), .path = path } else .{ .base = repo.topDirectory().get(), .path = path };
         // git checks each as `validate_submodule_git_dir` does: before the
         // extension is on, as a migration runs, the plain name alone.
         if (repo.submodulePathConfig()) {
             if (!try encodedGitDirOk(arena, io, repo, dir, name)) continue;
         } else {
-            validateGitDir(arena, io, repo.gitDirectory(), name, name, null) catch |err| switch (err) {
+            validateGitDir(arena, io, repo.gitDirectory().get(), name, name, null) catch |err| switch (err) {
                 error.GitDirInsideGitDir => return error.NoSubmoduleGitDir,
                 else => |e| return e,
             };
@@ -1288,8 +1289,8 @@ fn setDefaultGitDir(arena: Allocator, io: Io, repo: *Repository, name: []const u
 /// The superproject's git directory as git names it from the top of its
 /// working tree: `.git` where it is there, its absolute path otherwise.
 fn gitDirText(arena: Allocator, io: Io, repo: *Repository) Error![]const u8 {
-    const git_dir = try fs.realPathAlloc(arena, io, repo.gitDirectory(), ".");
-    const top = try fs.realPathAlloc(arena, io, repo.topDirectory(), ".");
+    const git_dir = try fs.realPathAlloc(arena, io, repo.gitDirectory().get(), ".");
+    const top = try fs.realPathAlloc(arena, io, repo.topDirectory().get(), ".");
     const local = try arena.print("{s}/.git", .{top});
     return if (std.mem.eql(u8, git_dir, local)) ".git" else git_dir;
 }
@@ -1320,7 +1321,7 @@ fn hasLocalChanges(
     const recorded = entry.recorded orelse return true;
     const in_head = if (head_tree) |tree| try lookupPath(io, repo, tree, entry.path) else null;
     if (in_head == null or !in_head.?.eql(recorded)) return true;
-    const wt = repo.workDirectory() orelse return error.BareRepository;
+    const wt = (repo.workDirectory() orelse return error.BareRepository).get();
     var found = (try gitlink.open(gpa, io, wt, entry.path)) orelse return false;
     found.deinit(io);
     var sub = try openSubmodule(gpa, io, repo, entry.path, open);
@@ -1393,7 +1394,7 @@ fn absorbIn(
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
     const arena = arena_instance.allocator();
-    const wt = repo.workDirectory() orelse return error.BareRepository;
+    const wt = (repo.workDirectory() orelse return error.BareRepository).get();
 
     var index = try repo.openIndex(io);
     defer index.deinit();
@@ -1443,7 +1444,7 @@ fn relocate(
     display: []const u8,
     refusal: ?*Refusal,
 ) Error!void {
-    const wt = repo.workDirectory() orelse return error.BareRepository;
+    const wt = (repo.workDirectory() orelse return error.BareRepository).get();
     const dot_git = try arena.print("{s}/.git", .{path});
     if (wt.openDir(io, try arena.print("{s}/worktrees", .{dot_git}), .{ .iterate = true })) |dir_const| {
         var dir = dir_const;
@@ -1472,7 +1473,7 @@ fn relocate(
 /// an edit to it can be staged without taking other changes along: git's
 /// `is_staging_gitmodules_ok`. No file, or no entry for one, is fine.
 pub fn gitmodulesStaged(gpa: Allocator, io: Io, repo: *Repository, index: *const Index) Self.Error!bool {
-    const wt = repo.workDirectory() orelse return true;
+    const wt = (repo.workDirectory() orelse return true).get();
     const entry = index.find(".gitmodules") orelse return true;
     return !try worktree.differsFromIndex(gpa, io, wt, .{ .index = index, .entry = entry.* }, try repo.worktreeRules());
 }
@@ -1484,7 +1485,7 @@ pub fn removeFromGitmodules(gpa: Allocator, io: Io, repo: *Repository, index: *c
     var modules = (try gitmodulesToEdit(gpa, io, repo, index)) orelse return false;
     defer modules.deinit();
     const module = modules.byPath(path) orelse return false;
-    const wt = repo.workDirectory() orelse return error.BareRepository;
+    const wt = (repo.workDirectory() orelse return error.BareRepository).get();
     const written = try repo.writeConfigFile(io, wt, ".gitmodules", &.{.{ .remove_section = .{ .section = "submodule", .subsection = module.name } }});
     return written.sections_removed != 0;
 }
@@ -1499,7 +1500,7 @@ pub fn moveInGitmodules(gpa: Allocator, io: Io, repo: *Repository, index: *const
     var modules = (try gitmodulesToEdit(gpa, io, repo, index)) orelse return false;
     defer modules.deinit();
     const module = modules.byPath(move.old) orelse return false;
-    const wt = repo.workDirectory() orelse return error.BareRepository;
+    const wt = (repo.workDirectory() orelse return error.BareRepository).get();
     const key = try std.mem.concat(gpa, u8, &.{ "submodule.", module.name, ".path" });
     defer gpa.free(key);
     _ = try repo.writeConfigFile(io, wt, ".gitmodules", &.{.{ .set = .{ .name = key, .value = move.new } }});
@@ -1509,7 +1510,7 @@ pub fn moveInGitmodules(gpa: Allocator, io: Io, repo: *Repository, index: *const
 /// `.gitmodules` as an edit to it reads it, or `null` when the working tree
 /// has none.
 fn gitmodulesToEdit(gpa: Allocator, io: Io, repo: *Repository, index: *const Index) Error!?Gitmodules {
-    const wt = repo.workDirectory() orelse return null;
+    const wt = (repo.workDirectory() orelse return null).get();
     if (try fs.statAt(io, wt, ".gitmodules") == null) return null;
     if (isUnmerged(index, ".gitmodules")) return error.GitmodulesUnmerged;
     return try loadGitmodules(gpa, io, repo, index);
@@ -1520,20 +1521,20 @@ fn gitmodulesToEdit(gpa: Allocator, io: Io, repo: *Repository, index: *const Ind
 /// file, a directory among them. git's `read_gitfile`, which `mv` asks
 /// before the working tree moves and the file's relative path with it.
 pub fn gitDirOf(arena: Allocator, io: Io, repo: *Repository, path: []const u8) Self.Error!?[]const u8 {
-    const wt = repo.workDirectory() orelse return error.BareRepository;
+    const wt = (repo.workDirectory() orelse return error.BareRepository).get();
     var work = try wt.openDir(io, path, .{});
     defer work.close(io);
     const named = (try gitfile.read(arena, io, work, ".git")) orelse return null;
     var git_dir = try gitfile.open(io, work, named, .{});
-    defer git_dir.close(io);
-    return try fs.realPathAlloc(arena, io, git_dir, ".");
+    defer git_dir.deinit(io);
+    return try fs.realPathAlloc(arena, io, git_dir.lend().get(), ".");
 }
 
 /// Connect the working tree at `path` and the git directory `git_dir`, an
 /// absolute path, to each other, then each active submodule inside it to
 /// its own: git's `connect_work_tree_and_git_dir` after a move.
 pub fn connectGitDir(gpa: Allocator, io: Io, repo: *Repository, path: []const u8, git_dir: []const u8) Self.Error!void {
-    const wt = repo.workDirectory() orelse return error.BareRepository;
+    const wt = (repo.workDirectory() orelse return error.BareRepository).get();
     try connectAt(gpa, io, repo, wt, path, git_dir, 0);
 }
 
@@ -1555,7 +1556,7 @@ fn connectAt(gpa: Allocator, io: Io, repo: *Repository, wt: Io.Dir, path: []cons
     // has nothing nested to connect.
     var sub = openSubmodule(gpa, io, repo, path, .{}) catch return;
     defer sub.deinit(io);
-    const sub_wt = sub.workDirectory() orelse return;
+    const sub_wt = (sub.workDirectory() orelse return).get();
     var index = try sub.openIndex(io);
     defer index.deinit();
     var modules = try loadGitmodules(gpa, io, &sub, &index);
@@ -1619,7 +1620,7 @@ const Promised = struct {
     }
 
     fn fetch(io: Io, context: *anyopaque, oids: []const Oid) (Allocator.Error || Io.Cancelable || error{PromisorFetchFailed})!void {
-        const p: *Promised = @ptrCast(@alignCast(context)); // safe: the context handed out with this function is a Promised
+        const p: *Promised = @ptrCast(@alignCast(context)); // aegis: no-danger: the context handed out with this function is a Promised
         p.transport.fetchPromisedFn.?(p.gpa, io, p.transport.context, p.repo, oids) catch |err| return switch (err) {
             error.TransportFailed => error.PromisorFetchFailed,
             error.OutOfMemory => error.OutOfMemory,
@@ -1723,7 +1724,7 @@ fn updateIn(
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
     const arena = arena_instance.allocator();
-    const wt = repo.workDirectory() orelse return error.BareRepository;
+    const wt = (repo.workDirectory() orelse return error.BareRepository).get();
 
     var index = try repo.openIndex(io);
     defer index.deinit();
@@ -1752,7 +1753,7 @@ fn updateIn(
         }
         const url = try resolvedUrl(arena, io, repo, module, display, options.refusal);
         try validatePath(io, wt, entry.path, display, options.refusal, repo.settings().protect);
-        try validateGitDir(arena, io, repo.gitDirectory(), module.name, display, options.refusal);
+        try validateGitDir(arena, io, repo.gitDirectory().get(), module.name, display, options.refusal);
 
         const dot_git = try arena.print("{s}/.git", .{entry.path});
         const just_cloned = try fs.statAt(io, wt, dot_git) == null;
@@ -1815,7 +1816,7 @@ fn populate(
     options: UpdateOptions,
     outcome: *UpdateOutcome,
 ) Error!void {
-    const wt = repo.workDirectory() orelse return error.BareRepository;
+    const wt = (repo.workDirectory() orelse return error.BareRepository).get();
     const where = try moduleDir(arena, io, repo, module.name, display, options.refusal);
     const target = where.path;
     var module_dir: Io.Dir = blk: {
@@ -1877,15 +1878,15 @@ fn emptyOrAbsent(io: Io, wt: Io.Dir, path: []const u8) Error!bool {
 fn correctCoreWorktree(arena: Allocator, gpa: Allocator, io: Io, repo: *const Repository, wt: Io.Dir, path: []const u8) Error!void {
     var found = (try gitlink.open(gpa, io, wt, path)) orelse return;
     defer found.deinit(io);
-    var config = try config_mod.Config.openFile(gpa, io, .{ .dir = found.common_dir, .sub_path = "config" }, .local, .{});
+    var config = try config_mod.Config.openFile(gpa, io, .{ .dir = found.commonDirectory().get(), .sub_path = "config" }, .local, .{});
     defer config.deinit();
     if (config.get("core.worktree") == null) return;
     var work = try wt.openDir(io, path, .{});
     defer work.close(io);
-    const wanted = try relativePath(arena, try fs.realPathAlloc(arena, io, work, "."), try fs.realPathAlloc(arena, io, found.git_dir, "."));
+    const wanted = try relativePath(arena, try fs.realPathAlloc(arena, io, work, "."), try fs.realPathAlloc(arena, io, found.gitDirectory().get(), "."));
     const now = try configString(arena, &config, "core.worktree");
     if (now != null and std.mem.eql(u8, now.?, wanted)) return;
-    try setCoreWorktree(io, repo, found.common_dir, wanted);
+    try setCoreWorktree(io, repo, found.commonDirectory().get(), wanted);
 }
 
 /// Make sure the submodule's repository has `commit`, fetching it through
@@ -1915,7 +1916,7 @@ fn checkoutCommit(
     display: []const u8,
     options: UpdateOptions,
 ) Error!void {
-    const work = sub.workDirectory() orelse return error.BareRepository;
+    const work = (sub.workDirectory() orelse return error.BareRepository).get();
     const tree = try sub.commitTree(io, commit);
     var locked_index = try sub.lockIndex(io);
     defer locked_index.deinit(io);
@@ -2010,7 +2011,7 @@ fn runUpdateCommand(
     var outcome = try program.run(gpa, io, programs, .{
         .argv = argv.items,
         .shell = true,
-        .cwd = .{ .dir = sub.workDirectory() orelse return error.BareRepository },
+        .cwd = .{ .dir = (sub.workDirectory() orelse return error.BareRepository).get() },
         .unset = &local_repo_env,
         .stderr = .inherit,
     }, .{});
@@ -2079,7 +2080,7 @@ pub const Mover = struct {
     }
 
     fn moveFn(io: Io, context: *anyopaque, request: worktree.SubmoduleMove) worktree.Error!void {
-        const m: *Mover = @ptrCast(@alignCast(context)); // safe: the context handed out with this function is a Mover
+        const m: *Mover = @ptrCast(@alignCast(context)); // aegis: no-danger: the context handed out with this function is a Mover
         m.move(io, request) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Canceled => return error.Canceled,
@@ -2098,7 +2099,7 @@ pub const Mover = struct {
         defer arena_instance.deinit();
         const arena = arena_instance.allocator();
         const repo = m.repo;
-        const wt = repo.workDirectory() orelse return error.BareRepository;
+        const wt = (repo.workDirectory() orelse return error.BareRepository).get();
         const display = try join(arena, m.prefix, request.path);
         errdefer if (m.options.refusal) |r| {
             if (r.path().len == 0) r.set(display, "");
@@ -2121,7 +2122,7 @@ pub const Mover = struct {
     /// A populated submodule, moved from its `HEAD` or a recorded commit.
     fn moveFrom(m: *Mover, arena: Allocator, io: Io, target: Target) MoveError!void {
         const request = target.request;
-        const wt = m.repo.workDirectory().?;
+        const wt = m.repo.workDirectory().?.get();
         if (!request.force) {
             var sub = try openSubmodule(m.gpa, io, m.repo, request.path, m.options.open);
             defer sub.deinit(io);
@@ -2155,7 +2156,7 @@ pub const Mover = struct {
     /// out, as git's `submodule_move_head` with no old head makes one.
     fn populate(m: *Mover, arena: Allocator, io: Io, target: Target) MoveError!void {
         const request = target.request;
-        const wt = m.repo.workDirectory().?;
+        const wt = m.repo.workDirectory().?.get();
         var module_dir = target.where.base.openDir(io, target.where.path, .{}) catch |err| switch (err) {
             error.FileNotFound, error.NotDir => return refuse(m.options.refusal, target.display, target.where.path, error.NotCloned),
             else => |e| return e,
@@ -2221,7 +2222,7 @@ pub const Mover = struct {
             rules.attrs = &attrs;
             rules.required_filters = try sub.requiredFilters(arena);
             rules.submodules = nested.submodules();
-            _ = worktree.checkout(m.gpa, io, sub.workDirectory().?, .{ .index = index, .db = sub.objectDatabase(), .tree = new_tree }, .{
+            _ = worktree.checkout(m.gpa, io, sub.workDirectory().?.get(), .{ .index = index, .db = sub.objectDatabase(), .tree = new_tree }, .{
                 .rules = rules,
                 .force = true,
                 .programs = m.options.programs,
@@ -2262,7 +2263,7 @@ pub const Mover = struct {
     /// The submodule's `.git` file, its directory once empty, and its
     /// repository's `core.worktree`, gone.
     fn takeAway(m: *Mover, io: Io, target: Target) MoveError!void {
-        const wt = m.repo.workDirectory().?;
+        const wt = m.repo.workDirectory().?.get();
         var work = try wt.openDir(io, target.request.path, .{});
         defer work.close(io);
         work.deleteFile(io, ".git") catch |err| switch (err) {
@@ -2542,7 +2543,7 @@ pub const Walk = struct {
             }
             const entry = frame.listing.entries[frame.next];
             frame.next += 1;
-            const wt = frame.repo.workDirectory() orelse return error.BareRepository;
+            const wt = (frame.repo.workDirectory() orelse return error.BareRepository).get();
             var found = (try gitlink.open(w.gpa, w.io, wt, entry.path)) orelse continue;
             found.deinit(w.io);
             const display = try join(frame.arena.allocator(), frame.prefix, entry.path);

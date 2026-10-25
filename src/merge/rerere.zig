@@ -27,7 +27,9 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const decimal = @import("../text.zig").decimal;
+const date = @import("../text.zig").date;
 const state_file = @import("../repo/state.zig");
 const shakedown = @import("shakedown");
 const path_mod = @import("../names.zig").path;
@@ -109,7 +111,7 @@ pub const Outcome = struct {
 /// `.git/rr-cache` is there.
 pub fn enabled(io: Io, repo: *Repository) bool {
     const setting = repo.configuration().getBool("rerere.enabled", false) catch null;
-    if (repo.configuration().get("rerere.enabled") == null) return state_file.exists(io, repo.commonDirectory(), "rr-cache");
+    if (repo.configuration().get("rerere.enabled") == null) return state_file.exists(io, repo.commonDirectory().get(), "rr-cache");
     return setting orelse false;
 }
 
@@ -138,7 +140,7 @@ const Run = struct {
 
     /// Take `MERGE_RR.lock`. `r` stays where it is until `release`.
     fn hold(r: *Run) Error!void {
-        r.lock = try fs.LockFile.open(r.gpa, r.io, r.repo.gitDirectory(), .{ .sub_path = "MERGE_RR", .buffer = &r.lock_buffer }, .{ .sync = .none, .shared = r.repo.sharedPermissions(), .write_pid = r.repo.lockfilePid() });
+        r.lock = try fs.LockFile.open(r.gpa, r.io, r.repo.gitDirectory().get(), .{ .sub_path = "MERGE_RR", .buffer = &r.lock_buffer }, .{ .sync = .none, .shared = r.repo.sharedPermissions(), .write_pid = r.repo.lockfilePid() });
     }
 
     /// Give `MERGE_RR.lock` up, `MERGE_RR` unchanged unless it was written.
@@ -159,7 +161,7 @@ const Run = struct {
         slot.key_ptr.* = try r.arena.dupe(u8, hex);
         slot.value_ptr.* = .empty;
         const sub = try r.arena.print("rr-cache/{s}", .{hex});
-        var dir = r.repo.commonDirectory().openDir(r.io, sub, .{ .iterate = true }) catch return slot.value_ptr;
+        var dir = r.repo.commonDirectory().get().openDir(r.io, sub, .{ .iterate = true }) catch return slot.value_ptr;
         defer dir.close(r.io);
         var it = dir.iterate();
         while (try it.next(r.io)) |entry| {
@@ -175,15 +177,15 @@ const Run = struct {
     }
 
     fn readFile(r: *Run, sub: []const u8) ?[]u8 {
-        return state_file.read(r.arena, r.io, r.repo.commonDirectory(), sub) catch null;
+        return state_file.read(r.arena, r.io, r.repo.commonDirectory().get(), sub) catch null;
     }
 
     fn writeFile(r: *Run, sub: []const u8, bytes: []const u8) Error!void {
-        try state_file.write(r.io, r.repo.commonDirectory(), sub, bytes);
+        try state_file.write(r.io, r.repo.commonDirectory().get(), sub, bytes);
     }
 
     fn removeFile(r: *Run, sub: []const u8) Error!void {
-        try state_file.remove(r.io, r.repo.commonDirectory(), sub);
+        try state_file.remove(r.io, r.repo.commonDirectory().get(), sub);
     }
 
     fn markerSize(r: *Run, path: []const u8) Error!u32 {
@@ -221,8 +223,8 @@ fn parseVariant(text: []const u8) ?i32 {
 }
 
 fn fit(arena: Allocator, list: *std.ArrayList(u8), variant: i32) Allocator.Error!void {
-    assert(variant >= 0);
-    assert(variant <= max_variant);
+    aegis.assert.invariant(variant >= 0, "variant >= 0");
+    aegis.assert.invariant(variant <= max_variant, "variant <= max_variant");
     // The assertion keeps the variant small and not negative.
     const want: usize = @intCast(variant + 1);
     while (list.items.len < want) try list.append(arena, 0);
@@ -346,9 +348,9 @@ pub fn run(gpa: Allocator, io: Io, repo: *Repository, index: *Index, options: Op
         outcome.arena = arena_instance.state;
         return outcome;
     }
-    const wt = repo.workDirectory() orelse return error.BareRepository;
+    const wt = (repo.workDirectory() orelse return error.BareRepository).get();
     // `rerere.enabled` true makes the directory.
-    try repo.commonDirectory().createDirPath(io, "rr-cache");
+    try repo.commonDirectory().get().createDirPath(io, "rr-cache");
 
     var attrs = try repo.loadAttrs(io);
     defer attrs.deinit();
@@ -396,7 +398,7 @@ pub fn run(gpa: Allocator, io: Io, repo: *Repository, index: *Index, options: Op
         try rr.put(arena, path, .{ .hex = n.id.? });
         _ = try r.status(n.id.?);
         const sub = try arena.print("rr-cache/{s}", .{n.id.?});
-        try repo.commonDirectory().createDirPath(io, sub);
+        try repo.commonDirectory().get().createDirPath(io, sub);
     }
     sortRr(&rr);
 
@@ -420,10 +422,10 @@ pub fn run(gpa: Allocator, io: Io, repo: *Repository, index: *Index, options: Op
 
     try writeMergeRr(&r, &rr);
 
-    outcome.recorded_preimage = recorded_preimage.items;
-    outcome.recorded_resolution = recorded_resolution.items;
-    outcome.resolved = resolved.items;
-    outcome.staged = update.items;
+    outcome.recorded_preimage = try recorded_preimage.toOwnedSlice(arena);
+    outcome.recorded_resolution = try recorded_resolution.toOwnedSlice(arena);
+    outcome.resolved = try resolved.toOwnedSlice(arena);
+    outcome.staged = try update.toOwnedSlice(arena);
     outcome.arena = arena_instance.state;
     return outcome;
 }
@@ -431,7 +433,7 @@ pub fn run(gpa: Allocator, io: Io, repo: *Repository, index: *Index, options: Op
 /// `read_rr`: `MERGE_RR`'s records, by path, each conflict's directory
 /// scanned on the way.
 fn readMergeRr(r: *Run) Error!std.array_hash_map.String(?Id) {
-    const text = (try state_file.read(r.arena, r.io, r.repo.gitDirectory(), "MERGE_RR")) orelse return .empty;
+    const text = (try state_file.read(r.arena, r.io, r.repo.gitDirectory().get(), "MERGE_RR")) orelse return .empty;
     var rr = try parseMergeRr(r.arena, text, r.repo.objectFormat());
     for (rr.values()) |slot| {
         const id = slot.?;
@@ -490,7 +492,7 @@ fn writeMergeRr(r: *Run, rr: *const std.array_hash_map.String(?Id)) Error!void {
         // What `parseMergeRr` takes back: a name of the format's length, a
         // variant that is not negative, and a path no NUL ends early.
         assert(id.hex.len == hex_len);
-        assert(id.variant >= 0);
+        aegis.assert.invariant(id.variant >= 0, "id.variant >= 0");
         assert(path.len != 0);
         assert(std.mem.findScalar(u8, path, 0) == null);
         if (id.variant > 0) {
@@ -508,7 +510,7 @@ fn isReg(mode: object.Mode) bool {
 }
 
 fn readWorktree(r: *Run, path: []const u8) ?[]u8 {
-    return r.wt.readFileAlloc(r.io, path, r.arena, .limited(1 << 30)) catch null;
+    return aegis.own.readFile(r.io, r.wt, path, r.arena, aegis.units.Bytes(u64).fromRaw(1 << 30)) catch null;
 }
 
 fn removeVariant(r: *Run, id: Id) Error!void {
@@ -578,7 +580,7 @@ fn replay(r: *Run, vid: Id, path: []const u8, size: u32) Error!bool {
     const merged = (try tryMerge(r, vid, path, n.text, size)) orelse return false;
     // A replay marks the postimage used, which is what keeps gc from
     // pruning a resolution still in use; git only warns when it cannot.
-    fs.setTimestamps(r.io, r.repo.commonDirectory(), try r.pathOf(vid, "postimage"), .{ .access_timestamp = .now, .modify_timestamp = .now }) catch |err| switch (err) {
+    fs.setTimestamps(r.io, r.repo.commonDirectory().get(), try r.pathOf(vid, "postimage"), .{ .access_timestamp = .now, .modify_timestamp = .now }) catch |err| switch (err) {
         error.FileNotFound, error.AccessDenied, error.PermissionDenied, error.ReadOnlyFileSystem => {},
         else => |e| return e,
     };
@@ -662,7 +664,7 @@ pub fn clear(gpa: Allocator, io: Io, repo: *Repository) Self.Error!void {
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
     const arena = arena_instance.allocator();
-    var r: Run = .{ .gpa = gpa, .arena = arena, .io = io, .repo = repo, .wt = repo.workDirectory() orelse return error.BareRepository, .rules = .{} };
+    var r: Run = .{ .gpa = gpa, .arena = arena, .io = io, .repo = repo, .wt = (repo.workDirectory() orelse return error.BareRepository).get(), .rules = .{} };
     try r.hold();
     defer r.release();
     // `read_rr`, which refuses a corrupt `MERGE_RR` as git's dies on one:
@@ -679,12 +681,12 @@ pub fn clear(gpa: Allocator, io: Io, repo: *Repository) Self.Error!void {
         try r.removeFile(try r.pathOf(id, "preimage"));
         try r.removeFile(try r.pathOf(id, "postimage"));
         const sub = try arena.print("rr-cache/{s}", .{id.hex});
-        repo.commonDirectory().deleteDir(io, sub) catch |err| switch (err) {
+        repo.commonDirectory().get().deleteDir(io, sub) catch |err| switch (err) {
             error.DirNotEmpty, error.FileNotFound => {},
             else => return err,
         };
     }
-    try state_file.remove(io, repo.gitDirectory(), "MERGE_RR");
+    try state_file.remove(io, repo.gitDirectory().get(), "MERGE_RR");
 }
 
 /// What `git commit` does to a stop's files once the commit that ends it
@@ -694,7 +696,7 @@ pub fn clear(gpa: Allocator, io: Io, repo: *Repository) Self.Error!void {
 pub fn afterCommit(gpa: Allocator, io: Io, repo: *Repository) Self.Error!void {
     try repo.refStore().special().delete(io, .merge_head);
     for ([_][]const u8{ "MERGE_MSG", "MERGE_MODE", "SQUASH_MSG" }) |name| {
-        try state_file.remove(io, repo.gitDirectory(), name);
+        try state_file.remove(io, repo.gitDirectory().get(), name);
     }
     try repo.refStore().root().delete(repo.allocator(), io, .auto_merge);
     var locked_index = try repo.lockIndex(io);
@@ -744,7 +746,7 @@ pub const Paths = struct {
 };
 
 fn startRun(gpa: Allocator, arena: Allocator, io: Io, repo: *Repository, attrs: ?*attributes.Attrs) Error!Run {
-    const wt = repo.workDirectory() orelse return error.BareRepository;
+    const wt = (repo.workDirectory() orelse return error.BareRepository).get();
     var rules = try repo.worktreeRules();
     rules.attrs = attrs;
     return .{ .gpa = gpa, .arena = arena, .io = io, .repo = repo, .wt = wt, .rules = rules };
@@ -759,7 +761,7 @@ pub fn status(gpa: Allocator, io: Io, repo: *Repository) Self.Error!Paths {
     if (enabled(io, repo)) {
         var r = try startRun(gpa, arena_instance.allocator(), io, repo, null);
         const rr = try readMergeRr(&r);
-        out.paths = rr.keys();
+        out.paths = try arena_instance.allocator().dupe([]const u8, rr.keys());
     }
     out.arena = arena_instance.state;
     return out;
@@ -803,7 +805,7 @@ pub fn remaining(gpa: Allocator, io: Io, repo: *Repository) Self.Error!Paths {
         for (rr.keys()) |path| {
             if (!resolved.contains(path)) try paths.append(arena, path);
         }
-        out.paths = paths.items;
+        out.paths = try paths.toOwnedSlice(arena);
     }
     out.arena = arena_instance.state;
     return out;
@@ -931,9 +933,9 @@ pub fn forget(gpa: Allocator, io: Io, repo: *Repository, pathspec: []const []con
         }
     }
     try writeMergeRr(&r, &rr);
-    out.forgotten = forgotten.items;
-    out.unparsable = unparsable.items;
-    out.unremembered = unremembered.items;
+    out.forgotten = try forgotten.toOwnedSlice(arena);
+    out.unparsable = try unparsable.toOwnedSlice(arena);
+    out.unremembered = try unremembered.toOwnedSlice(arena);
     out.arena = arena_instance.state;
     return out;
 }
@@ -960,7 +962,7 @@ fn forgetOne(r: *Run, rr: *std.array_hash_map.String(?Id), path: []const u8, sta
     if (variant >= st.items.len) return .unremembered;
     const id: Id = .{ .hex = hex, .variant = variant };
     const postimage = try r.pathOf(id, "postimage");
-    r.repo.commonDirectory().deleteFile(r.io, postimage) catch |err| switch (err) {
+    r.repo.commonDirectory().get().deleteFile(r.io, postimage) catch |err| switch (err) {
         error.FileNotFound => return .unremembered,
         else => |e| return e,
     };
@@ -992,7 +994,7 @@ fn handleCache(r: *Run, path: []const u8, stages: Stages, size: u32) Error!Norma
 /// one, `now` none. A conflict's directory goes once it is empty. Nothing
 /// happens when rerere is not enabled.
 pub fn gc(gpa: Allocator, io: Io, repo: *Repository, now_at: Io.Timestamp) Self.Error!void {
-    const now = now_at.toSeconds();
+    const now = date.seconds(now_at);
     if (!enabled(io, repo)) return;
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
@@ -1000,7 +1002,7 @@ pub fn gc(gpa: Allocator, io: Io, repo: *Repository, now_at: Io.Timestamp) Self.
     var r = try startRun(gpa, arena, io, repo, null);
     const cutoffs = try gcCutoffs(repo, now);
 
-    var dir = repo.commonDirectory().openDir(io, "rr-cache", .{ .iterate = true }) catch |err| switch (err) {
+    var dir = repo.commonDirectory().get().openDir(io, "rr-cache", .{ .iterate = true }) catch |err| switch (err) {
         error.FileNotFound => return,
         else => |e| return e,
     };
@@ -1024,7 +1026,7 @@ pub fn gc(gpa: Allocator, io: Io, repo: *Repository, now_at: Io.Timestamp) Self.
     }
     for (to_remove.items) |hex| {
         const sub = try arena.print("rr-cache/{s}", .{hex});
-        repo.commonDirectory().deleteDir(io, sub) catch |err| switch (err) {
+        repo.commonDirectory().get().deleteDir(io, sub) catch |err| switch (err) {
             error.DirNotEmpty, error.FileNotFound => {},
             else => return err,
         };
@@ -1040,13 +1042,13 @@ pub fn gcNeeded(gpa: Allocator, io: Io, repo: *Repository, now_at: Io.Timestamp,
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
     const arena = arena_instance.allocator();
-    var dir = repo.commonDirectory().openDir(io, "rr-cache", .{ .iterate = true }) catch |err| switch (err) {
+    var dir = repo.commonDirectory().get().openDir(io, "rr-cache", .{ .iterate = true }) catch |err| switch (err) {
         error.FileNotFound => return false,
         else => |e| return e,
     };
     defer dir.close(io);
     var r = try startRun(gpa, arena, io, repo, null);
-    const cutoffs = try gcCutoffs(repo, now_at.toSeconds());
+    const cutoffs = try gcCutoffs(repo, date.seconds(now_at));
     var count: u64 = 0;
     var it = dir.iterate();
     while (try it.next(io)) |entry| {
@@ -1097,7 +1099,7 @@ fn pruneOne(r: *Run, id: Id, flags: *u8, cutoffs: Cutoffs) Error!void {
 }
 
 fn mtimeOf(r: *Run, sub: []const u8) Error!i64 {
-    const found = (try fs.statAt(r.io, r.repo.commonDirectory(), sub)) orelse return 0;
+    const found = (try fs.statAt(r.io, r.repo.commonDirectory().get(), sub)) orelse return 0;
     return found.stat.mtime_sec;
 }
 

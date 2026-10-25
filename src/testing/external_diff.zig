@@ -87,7 +87,7 @@ fn ours(gpa: Allocator, io: Io, pair: *history.Pair, cached: bool, out: *Io.Writ
     var rules = try repo.worktreeRules();
     rules.attrs = &attrs;
     const db = repo.objectDatabase();
-    const wt = repo.workDirectory().?;
+    const wt = repo.workDirectory().?.get();
     var conv: convert.Session = .open(gpa, io, .{ .wt = wt, .kind = db.objectFormat(), .core = rules.core, .index = &index, .db = db });
     defer conv.deinit(io);
     const ext: external.External = .{

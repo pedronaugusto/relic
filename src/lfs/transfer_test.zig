@@ -2015,8 +2015,9 @@ test "LFS uploads and downloads through each SOCKS scheme, and downloads with TL
                 var fetched = try lfstransfer.fetch(io, server, &repo, .{});
                 defer fetched.deinit();
                 try expectNoFailures(&fetched);
-                const file = (try server.store().open(io, &.{ .oid = object.oid, .size = object.size })).?;
-                defer file.close(io);
+                var owned = (try server.store().open(io, &.{ .oid = object.oid, .size = object.size })).?;
+                defer owned.deinit(io);
+                const file = owned.lend().get();
                 const bytes = try gpa.alloc(u8, content.len);
                 defer gpa.free(bytes);
                 try testing.expectEqual(content.len, try file.readPositionalAll(io, bytes, 0));

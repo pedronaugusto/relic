@@ -17,6 +17,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -52,7 +53,7 @@ pub const Error = error{
     /// `move` stop at rather than touch a directory that is not this
     /// worktree's.
     CorruptWorktree,
-} || Allocator.Error || Io.Dir.OpenError || Io.Dir.ReadFileAllocError ||
+} || Allocator.Error || Io.Dir.OpenError || aegis.own.ReadFileError ||
     Io.Dir.CreateDirError || Io.Dir.CreateDirPathError || Io.Dir.DeleteFileError ||
     Io.Dir.DeleteTreeError || Io.Dir.RenameError || Io.Dir.WriteFileError ||
     Io.File.OpenError || Io.Writer.Error || Io.File.SyncError ||
@@ -121,7 +122,7 @@ pub const Listing = struct {
 /// The main working tree is not one of these: it has no administrative
 /// directory, and a caller that wants it in a list adds it.
 pub fn list(gpa: Allocator, io: Io, refs: *const refs_mod.Store) Self.Error!Listing {
-    const common_dir = refs.commonDir();
+    const common_dir = refs.commonDir().get();
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_instance.deinit();
     const arena = arena_instance.allocator();
@@ -231,10 +232,10 @@ fn pointsBack(arena: Allocator, io: Io, admin: Io.Dir, named: Named) Self.Error!
     defer work.close(io);
     const target = (try gitfile.read(arena, io, work, ".git")) orelse return false;
     var target_dir = gitfile.open(io, work, target, .{}) catch return false;
-    defer target_dir.close(io);
+    defer target_dir.deinit(io);
     var target_buf: [4096]u8 = undefined;
     var admin_buf: [4096]u8 = undefined;
-    return std.mem.eql(u8, try fs.realPath(io, target_dir, &target_buf), try fs.realPath(io, admin, &admin_buf));
+    return std.mem.eql(u8, try fs.realPath(io, target_dir.lend().get(), &target_buf), try fs.realPath(io, admin, &admin_buf));
 }
 
 /// What `add` is asked to create.
@@ -252,10 +253,10 @@ pub const AddOptions = struct {
 pub const Added = struct {
     /// The name under `worktrees/`. Owned by the caller.
     name: []const u8,
-    /// The administrative directory, opened. The caller closes it.
-    admin_dir: Io.Dir,
-    /// The destination directory, opened. The caller closes it.
-    work_dir: Io.Dir,
+    /// The administrative directory, opened, the caller's.
+    admin_dir: fs.OwnedDir,
+    /// The destination directory, opened, the caller's.
+    work_dir: fs.OwnedDir,
 };
 
 /// Register a worktree in `dest_dir`, which the caller has made and which
@@ -282,7 +283,7 @@ pub fn add(
 ) Self.Error!Added {
     const name = inputs.name;
     const dest_dir = inputs.dest_dir;
-    const common_dir = refs.commonDir();
+    const common_dir = refs.commonDir().get();
     try checkId(name);
     if (options.detach_at == null) {
         if (options.branch) |branch| {
@@ -294,10 +295,10 @@ pub fn add(
 
     const owned_name = try gpa.dupe(u8, name);
     errdefer gpa.free(owned_name);
-    const opened_work_dir = try dest_dir.openDir(io, ".", .{ .iterate = true });
-    errdefer opened_work_dir.close(io);
+    var opened_work_dir = fs.OwnedDir.init(try dest_dir.openDir(io, ".", .{ .iterate = true }));
+    errdefer opened_work_dir.deinit(io);
     {
-        var it = opened_work_dir.iterate();
+        var it = opened_work_dir.lend().get().iterate();
         if (try it.next(io) != null) return error.DestinationNotEmpty;
     }
 
@@ -312,22 +313,23 @@ pub fn add(
         error.PathAlreadyExists => return error.WorktreeExists,
         else => |e| return e,
     };
-    var admin = try worktrees_dir.openDir(io, name, .{ .iterate = true });
-    errdefer admin.close(io);
+    var admin = fs.OwnedDir.init(try worktrees_dir.openDir(io, name, .{ .iterate = true }));
+    errdefer admin.deinit(io);
+    const admin_dir = admin.lend().get();
 
     // `commondir` is relative to the administrative directory, which is what
     // makes a repository movable as a whole.
-    try writeLine(io, admin, "commondir", "../..");
+    try writeLine(io, admin_dir, "commondir", "../..");
 
     var abs_buf: [4096]u8 = undefined;
     const dest_abs = try fs.realPath(io, dest_dir, &abs_buf);
     var gitdir_buf: [4200]u8 = undefined;
     const gitfile_path = std.mem.print(&gitdir_buf, "{s}/.git", .{dest_abs}) catch
         return error.InvalidWorktreeName;
-    try writeLine(io, admin, "gitdir", gitfile_path);
+    try writeLine(io, admin_dir, "gitdir", gitfile_path);
 
-    try refs_mod.create(io, admin, refs.refFormat(), .{ .worktree = true, .shared = refs.sharedPermissions() });
-    var own = try refs_mod.Store.init(gpa, refs.objectFormat(), admin, common_dir, .{
+    try refs_mod.create(io, admin_dir, refs.refFormat(), .{ .worktree = true, .shared = refs.sharedPermissions() });
+    var own = try refs_mod.Store.init(gpa, refs.objectFormat(), admin.lend(), refs.commonDir(), .{
         .format = refs.refFormat(),
         .reftable = refs.reftableOptions(),
         .shared = refs.sharedPermissions(),
@@ -356,10 +358,10 @@ pub fn add(
     // And the `.git` file in the destination, which is what makes the
     // directory a worktree at all.
     var admin_abs_buf: [4096]u8 = undefined;
-    const admin_abs = try fs.realPath(io, admin, &admin_abs_buf);
+    const admin_abs = try fs.realPath(io, admin_dir, &admin_abs_buf);
     try gitfile.write(io, dest_dir, admin_abs, options.hide_dot_files);
 
-    return .{ .name = owned_name, .admin_dir = admin, .work_dir = opened_work_dir };
+    return .{ .name = owned_name, .admin_dir = admin.move(), .work_dir = opened_work_dir.move() };
 }
 
 fn writeLine(io: Io, dir: Io.Dir, name: []const u8, text: []const u8) Error!void {
@@ -497,7 +499,7 @@ pub fn prune(gpa: Allocator, io: Io, refs: *const refs_mod.Store, options: Prune
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_instance.deinit();
     const arena = arena_instance.allocator();
-    const common_dir = refs.commonDir();
+    const common_dir = refs.commonDir().get();
     var pruned: std.ArrayList(Pruned) = .empty;
     var skipped_locked: u32 = 0;
     const worktrees_dir = common_dir.openDir(io, "worktrees", .{ .iterate = true }) catch |err| switch (err) {
@@ -591,7 +593,7 @@ fn judge(arena: Allocator, io: Io, worktrees_dir: Io.Dir, name: []const u8, expi
     };
     if (std.Io.Dir.accessAbsolute(io, dot_git, .{})) |_| {} else |_| {
         const stat = admin.statFile(io, "index", .{}) catch return .{ .prune = .gone };
-        if (expire == null or date.Expiry.fromRaw(stat.mtime.toSeconds()).compare(expire.?) != .gt) return .{ .prune = .gone };
+        if (expire == null or date.instant(stat.mtime).compare(expire.?) != .gt) return .{ .prune = .gone };
     }
     return .{ .keep = dot_git };
 }

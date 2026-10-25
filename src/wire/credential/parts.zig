@@ -100,6 +100,15 @@ pub const UrlParts = struct {
     }
 };
 
+/// `parts` after `text`'s live bytes, in order: a credential's text built a
+/// piece at a time, held nowhere but in wiped storage.
+pub fn appendParts(text: *SecretBytes, parts: []const []const u8) Allocator.Error!void {
+    for (parts) |piece| text.appendSlice(piece) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.Overlap => unreachable,
+    };
+}
+
 /// git's `credential_match`: every part `want` has -- protocol, host,
 /// path, username and, with `match_password`, password and credential --
 /// `have` has the same. Either is anything with those parts it has as

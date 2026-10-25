@@ -9,6 +9,7 @@
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -49,7 +50,7 @@ pub const Error = error{
 } || config_mod.ValueError || Allocator.Error;
 
 /// Errors from reading the format of a repository on the disk.
-pub const ReadError = Error || config_mod.ParseError || Io.Dir.ReadFileAllocError;
+pub const ReadError = Error || config_mod.ParseError || aegis.own.ReadFileError;
 
 /// The largest repository configuration read for its format.
 const max_config_bytes = 1 << 24;

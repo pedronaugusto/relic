@@ -553,14 +553,14 @@ test "LFS SSH pagination ends or explicitly refuses a repeated cursor" {
             var arena = std.heap.ArenaAllocator.init(testing.allocator);
             defer arena.deinit();
             _ = try lfslocks.lock(arena.allocator(), std.testing.io, server, &repo, .{ .path = "a.bin", .request = .{ .ref = "refs/heads/main" } });
-            try repo.commonDirectory().deleteTree(testing.io, "lfs/cache/locks");
+            try repo.commonDirectory().get().deleteTree(testing.io, "lfs/cache/locks");
             const cache_path = "lfs/cache/locks/refs/heads/main";
             const remote_bytes = "[{\"id\":\"old\",\"path\":\"old.bin\"}]\n";
             const verify_bytes = "{\"ours\":[{\"id\":\"old\",\"path\":\"old.bin\"}],\"theirs\":[]}\n";
             if (i >= 4) {
-                try repo.commonDirectory().createDirPath(testing.io, cache_path);
-                try repo.commonDirectory().writeFile(testing.io, .{ .sub_path = cache_path ++ "/remote", .data = remote_bytes });
-                try repo.commonDirectory().writeFile(testing.io, .{ .sub_path = cache_path ++ "/verifiable", .data = verify_bytes });
+                try repo.commonDirectory().get().createDirPath(testing.io, cache_path);
+                try repo.commonDirectory().get().writeFile(testing.io, .{ .sub_path = cache_path ++ "/remote", .data = remote_bytes });
+                try repo.commonDirectory().get().writeFile(testing.io, .{ .sub_path = cache_path ++ "/verifiable", .data = verify_bytes });
             }
             if (verify) {
                 if (i >= 4) {
@@ -577,7 +577,7 @@ test "LFS SSH pagination ends or explicitly refuses a repeated cursor" {
                     result.deinit();
                 }
             }
-            const store: lfs_mod.Store = .{ .base = repo.commonDirectory(), .root = "lfs" };
+            const store: lfs_mod.Store = .{ .base = repo.commonDirectory().get(), .root = "lfs" };
             var cached = try lfslocks.Table.cached(testing.allocator, testing.io, &store, "refs/heads/main");
             defer cached.deinit();
             try testing.expectEqual(i < 4, cached.find("a.bin") != null);
@@ -586,7 +586,7 @@ test "LFS SSH pagination ends or explicitly refuses a repeated cursor" {
                 for ([_][2][]const u8{ .{ "remote", remote_bytes }, .{ "verifiable", verify_bytes } }) |file| {
                     const path = try testing.allocator.print("{s}/{s}", .{ cache_path, file[0] });
                     defer testing.allocator.free(path);
-                    const actual = try repo.commonDirectory().readFileAlloc(testing.io, path, testing.allocator, .limited(1024));
+                    const actual = try repo.commonDirectory().get().readFileAlloc(testing.io, path, testing.allocator, .limited(1024));
                     defer testing.allocator.free(actual);
                     try testing.expectEqualStrings(file[1], actual);
                 }
@@ -640,13 +640,13 @@ test "cached SSH lock connection refuses pipe failure and cancellation without r
         warm.deinit();
         const path = "lfs/cache/locks/refs/heads/main/remote";
         const previous = "[{\"id\":\"old\",\"path\":\"old.bin\"}]\n";
-        try repo.commonDirectory().writeFile(io, .{ .sub_path = path, .data = previous });
+        try repo.commonDirectory().get().writeFile(io, .{ .sub_path = path, .data = previous });
         const plan = [_]shakedown.FaultIo.IoPlan.Entry{.{ .at = .{ .nth = .{ .call = case.call, .n = 1 } }, .fault = .{ .fail = case.fault } }};
         const faults = try shakedown.FaultIo.init(gpa, io, .{ .plan = &plan });
         defer faults.deinit();
         try testing.expectError(case.expected, lfslocks.list(faults.io(), server, &repo, .{}, .{ .ref = "refs/heads/main" }));
         try testing.expect(faults.count(case.call) > 0);
-        const after = try repo.commonDirectory().readFileAlloc(io, path, gpa, .unlimited);
+        const after = try repo.commonDirectory().get().readFileAlloc(io, path, gpa, .unlimited);
         defer gpa.free(after);
         try testing.expectEqualStrings(previous, after);
     }

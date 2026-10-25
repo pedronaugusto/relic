@@ -304,7 +304,7 @@ pub const Settings = struct {
     };
 
     /// Errors from reading `.lfsconfig`.
-    pub const LoadError = Allocator.Error || Io.Dir.ReadFileAllocError || config_mod.ParseError;
+    pub const LoadError = Allocator.Error || aegis.own.ReadFileError || config_mod.ParseError;
 
     /// Read `.lfsconfig` from `work_dir`, if there is one. `config` is
     /// borrowed for as long as the settings live.
@@ -921,9 +921,12 @@ pub const SshAuth = struct {
 /// one that is not zero wins over `at`, and neither (`at` Go's zero time) is
 /// no expiry.
 pub fn expiresWithin(now_at: Io.Timestamp, in_s: i64, at: time_text.GoTime, margin_s: i64) bool {
+    // Go's time.Duration: int64 nanoseconds, wrapping as Go wraps them.
     const in_ns = in_s *% std.time.ns_per_s;
+    // aegis: no-danger: Go's nanoseconds, compared as git-lfs compares them
     if (in_ns != 0) return in_ns < margin_s * std.time.ns_per_s;
     if (at.isZero()) return false;
+    // aegis: no-danger: Go's nanoseconds since the epoch, compared as git-lfs compares them
     return at.nanoseconds() < @as(i128, now_at.nanoseconds) + margin_s * std.time.ns_per_s;
 }
 
@@ -1349,7 +1352,7 @@ pub const Client = struct {
     /// Close the HTTP clients `transportFor` made.
     fn freeTransports(c: *Client, io: Io) void {
         const handle = c.transports.teardown().* orelse return;
-        const pool: *TransportPool = @ptrCast(@alignCast(handle)); // safe: transportFor installs a TransportPool
+        const pool: *TransportPool = @ptrCast(@alignCast(handle)); // aegis: no-danger: transportFor installs a TransportPool
         for (pool.items.items) |t| {
             t.client.deinit(io);
             t.free(c.gpa);
@@ -1980,7 +1983,7 @@ pub const Client = struct {
     fn exchangeOnce(c: *Client, io: Io, request: Request, url: []const u8, auth_header: ?[]const u8) ErrorNamespace.Error!*Exchange {
         const state = try c.gpa.create(ExchangeState);
         errdefer c.gpa.destroy(state);
-        state.* = .{ .exchange = .{ .client = c, .arena = .init(c.gpa), .wire = @ptrCast(state) } }; // safe: the opaque handle points back to its owning ExchangeState
+        state.* = .{ .exchange = .{ .client = c, .arena = .init(c.gpa), .wire = @ptrCast(state) } }; // aegis: no-danger: the opaque handle points back to its owning ExchangeState
         const ex = &state.exchange;
         errdefer ex.arena.deinit();
         const a = ex.arena.allocator();
@@ -2036,9 +2039,10 @@ pub const Client = struct {
             .none => try c.sendWhole(io, ex, transport, method, headers.items, if (request.method.requestHasBody()) .{ .bytes = "" } else .none),
             .bytes => |bytes| try c.sendWhole(io, ex, transport, method, headers.items, .{ .bytes = bytes }),
             .object => |o| {
-                const file = (o.store.open(io, &o.pointer) catch |err| return c.fail("{s}", io, .{@errorName(err)}, error.ConnectionFailed)) orelse
+                var owned = (o.store.open(io, &o.pointer) catch |err| return c.fail("{s}", io, .{@errorName(err)}, error.ConnectionFailed)) orelse
                     return c.fail("object {s} is not in the store", io, .{&o.pointer.oid}, error.HttpStatus);
-                defer file.close(io);
+                defer owned.deinit(io);
+                const file = owned.lend().get();
                 var outgoing = transport.begin(io, .{
                     .method = method,
                     .url = request_url,
@@ -2120,9 +2124,10 @@ pub const Client = struct {
     fn objectContentType(c: *Client, a: Allocator, io: Io, url: []const u8, store: *const lfs.Store, pointer: *const lfs.Pointer) ErrorNamespace.Error![]const u8 {
         const setting = try c.settings.urlGet(a, "lfs", url, "contenttype");
         if (!gitLfsBool(setting, true)) return "application/octet-stream";
-        const file = (store.open(io, pointer) catch |err| return c.fail("{s}", io, .{@errorName(err)}, error.ConnectionFailed)) orelse
+        var owned = (store.open(io, pointer) catch |err| return c.fail("{s}", io, .{@errorName(err)}, error.ConnectionFailed)) orelse
             return c.fail("object {s} is not in the store", io, .{&pointer.oid}, error.HttpStatus);
-        defer file.close(io);
+        defer owned.deinit(io);
+        const file = owned.lend().get();
         var head: [mime_sniff.sniff_len]u8 = undefined;
         const n = file.readPositionalAll(io, &head, 0) catch return c.fail("upload: reading the object", io, .{}, error.ConnectionFailed);
         return mime_sniff.contentType(head[0..n]);
@@ -2185,9 +2190,9 @@ pub const Client = struct {
         if (handle.* == null) {
             const pool = try c.gpa.create(TransportPool);
             pool.* = .{};
-            handle.* = @ptrCast(pool); // safe: the opaque handle owns this TransportPool until deinit
+            handle.* = @ptrCast(pool); // aegis: no-danger: the opaque handle owns this TransportPool until deinit
         }
-        const pool: *TransportPool = @ptrCast(@alignCast(handle.*.?)); // safe: the handle above owns a TransportPool
+        const pool: *TransportPool = @ptrCast(@alignCast(handle.*.?)); // aegis: no-danger: the handle above owns a TransportPool
         for (pool.items.items) |t| {
             if (std.mem.eql(u8, t.key, key)) return &t.client;
         }
@@ -2505,7 +2510,7 @@ pub const Exchange = struct {
     body: ?*Io.Reader = null,
 
     fn state(ex: *const Exchange) *ExchangeState {
-        return @ptrCast(@alignCast(ex.wire)); // safe: exchangeOnce pairs every handle with its ExchangeState
+        return @ptrCast(@alignCast(ex.wire)); // aegis: no-danger: exchangeOnce pairs every handle with its ExchangeState
     }
 
     /// The answer's status.
@@ -2698,7 +2703,7 @@ pub const Server = struct {
             .base_path = undefined,
             .remote = undefined,
         };
-        s.base_path = try (repo.workDirectory() orelse repo.commonDirectory()).realPathFileAlloc(io, ".", gpa);
+        s.base_path = try (repo.workDirectory() orelse repo.commonDirectory()).get().realPathFileAlloc(io, ".", gpa);
         errdefer gpa.free(s.base_path);
         const lfsconfig = try repo.lfsconfigText(io);
         defer if (lfsconfig) |t| repo.allocator().free(t);
@@ -2723,7 +2728,7 @@ pub const Server = struct {
         errdefer if (s.fetch_head) |f| gpa.free(f);
         s.download_ref = try downloadRef(gpa, io, repo, &s.settings);
         errdefer gpa.free(s.download_ref);
-        s.lfs = try lfs.Lfs.load(gpa, io, repo.configuration(), .{ .common_dir = repo.commonDirectory(), .shared = repo.sharedPermissions(), .work_dir = null, .lfsconfig = lfsconfig });
+        s.lfs = try lfs.Lfs.load(gpa, io, repo.configuration(), .{ .common_dir = repo.commonDirectory().get(), .shared = repo.sharedPermissions(), .work_dir = null, .lfsconfig = lfsconfig });
         errdefer s.lfs.deinit();
         s.alternates = try repo.objectDatabase().listAlternates(gpa, io);
         errdefer s.alternates.deinit();
@@ -2804,7 +2809,7 @@ fn timeoutsFor(settings: *const Settings, scratch: Allocator, url: url_mod.Url) 
 /// `n` seconds, above zero, as uplink's span; one past what it holds is the
 /// longest there is.
 fn seconds(n: i64) uplink.Duration {
-    return .fromRaw(std.math.mul(u64, @intCast(n), std.time.ns_per_s) catch std.math.maxInt(u64)); // safe: n is above zero at every call
+    return .fromRaw(std.math.mul(u64, @intCast(n), std.time.ns_per_s) catch std.math.maxInt(u64)); // aegis: no-danger: n is above zero at every call
 }
 
 /// How long a `Retry-After` value asks to wait, as git-lfs reads it: whole
@@ -2814,9 +2819,9 @@ fn seconds(n: i64) uplink.Duration {
 pub fn parseRetryAfter(value: []const u8, now: ?Io.Timestamp) ?Io.Duration {
     const text = std.mem.trim(u8, value, " \t");
     // A u64 of seconds is under 2^94 nanoseconds, well inside a Duration's i96.
-    if (decimal.goInt(u64, text)) |n| return .fromNanoseconds(@as(i96, n) * std.time.ns_per_s);
+    if (decimal.goInt(u64, text)) |n| return aegis.units.Duration(.second, u64).fromRaw(n).toIoDuration();
     const at = time_text.parseHttpDate(text) orelse return null;
-    const from = (now orelse return null).toSeconds();
+    const from = gitdate.seconds(now orelse return null);
     return .fromSeconds(@max(0, at - from));
 }
 
@@ -3221,12 +3226,12 @@ test "learned LFS policy writes the shared source without replacing worktree con
     defer client.deinit(io);
     try client.learnLocksVerify(io, "https://example.com/project", false);
     try client.remember(io, &repo);
-    var shared = try Config.openFile(gpa, io, .{ .dir = repo.commonDirectory(), .sub_path = "config" }, .local, .{});
+    var shared = try Config.openFile(gpa, io, .{ .dir = repo.commonDirectory().get(), .sub_path = "config" }, .local, .{});
     defer shared.deinit();
     try testing.expect(shared.get("fixture.shared") != null);
     try testing.expectEqualStrings("kept", shared.get("fixture.shared").?);
     try testing.expectEqualStrings("false", shared.get("lfs.https://example.com/project.locksverify").?);
-    const after = try repo.commonDirectory().readFileAlloc(io, "config.worktree", gpa, .limited(4096));
+    const after = try repo.commonDirectory().get().readFileAlloc(io, "config.worktree", gpa, .limited(4096));
     defer gpa.free(after);
     try testing.expectEqualStrings(worktree, after);
     _ = try repo.refreshConfig(io, .{});

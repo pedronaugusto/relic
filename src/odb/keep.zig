@@ -2,19 +2,20 @@
 //! share it under the marker's lock. A foreign marker is never removed.
 const ErrorNamespace = @This();
 const std = @import("std");
+const aegis = @import("aegis");
 const shakedown_mod = @import("shakedown");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const hash = @import("../hash/hash.zig");
 const fs = @import("../fs/fs.zig");
 
-pub const Error = fs.LockError || fs.CommitError || Io.Dir.OpenError || Io.Dir.ReadFileAllocError || Io.Dir.DeleteFileError || Allocator.Error;
+pub const Error = fs.LockError || fs.CommitError || Io.Dir.OpenError || aegis.own.ReadFileError || Io.Dir.DeleteFileError || Allocator.Error;
 
 pub const Token = struct {
     pub const Error = ErrorNamespace.Error;
 
     gpa: Allocator,
-    dir: Io.Dir,
+    dir: fs.OwnedDir,
     name: [hash.max_hex_len + 10]u8,
     name_len: usize,
     id: [24]u8,
@@ -29,7 +30,7 @@ pub const Token = struct {
         defer _ = io.swapCancelProtection(protection);
         const dir = try pack_dir.openDir(io, ".", .{});
         errdefer dir.close(io);
-        var t: Token = .{ .gpa = gpa, .dir = dir, .name = undefined, .name_len = 0, .id = undefined, .managed = true };
+        var t: Token = .{ .gpa = gpa, .dir = undefined, .name = undefined, .name_len = 0, .id = undefined, .managed = true };
         var hex: [hash.max_hex_len]u8 = undefined;
         // unreachable: the buffer holds the maximum hex name and the fixed pack/keep affixes.
         const name = std.mem.print(&t.name, "pack-{s}.keep", .{oid.hex(&hex)}) catch unreachable;
@@ -40,18 +41,20 @@ pub const Token = struct {
         var buffer: [4096]u8 = undefined;
         var lock = try fs.LockFile.open(gpa, io, dir, .{ .sub_path = name, .buffer = &buffer }, .{ .sync = .none, .on_contention = .{ .wait = .fromMilliseconds(1000) } });
         defer lock.deinit(io);
-        const previous = dir.readFileAlloc(io, name, gpa, .limited(1 << 20)) catch |err| switch (err) {
+        const previous = aegis.own.readFile(io, dir, name, gpa, aegis.units.Bytes(u64).fromRaw(1 << 20)) catch |err| switch (err) {
             error.FileNotFound => try gpa.dupe(u8, header),
             else => return err,
         };
         defer gpa.free(previous);
         if (!std.mem.startsWith(u8, previous, header)) {
             t.managed = false;
+            t.dir = fs.OwnedDir.init(dir);
             return t;
         }
         try lock.writer().writeAll(previous);
         try lock.writer().print("{s}\n", .{t.id});
         try lock.commit(io);
+        t.dir = fs.OwnedDir.init(dir);
         return t;
     }
 
@@ -61,7 +64,7 @@ pub const Token = struct {
         defer t.* = undefined;
         const protection = io.swapCancelProtection(.blocked);
         defer _ = io.swapCancelProtection(protection);
-        defer t.dir.close(io);
+        defer t.dir.deinit(io);
         // glint-ignore: Z026 -- failed cleanup retains the marker, keeping unreferenced objects protected
         if (t.managed) t.release(io) catch {};
     }
@@ -69,9 +72,9 @@ pub const Token = struct {
     fn release(t: *Token, io: Io) ErrorNamespace.Error!void {
         const name = t.name[0..t.name_len];
         var buffer: [4096]u8 = undefined;
-        var lock = try fs.LockFile.open(t.gpa, io, t.dir, .{ .sub_path = name, .buffer = &buffer }, .{ .sync = .none, .on_contention = .{ .wait = .fromMilliseconds(1000) } });
+        var lock = try fs.LockFile.open(t.gpa, io, t.dir.lend().get(), .{ .sub_path = name, .buffer = &buffer }, .{ .sync = .none, .on_contention = .{ .wait = .fromMilliseconds(1000) } });
         defer lock.deinit(io);
-        const previous = try t.dir.readFileAlloc(io, name, t.gpa, .limited(1 << 20));
+        const previous = try aegis.own.readFile(io, t.dir.lend().get(), name, t.gpa, aegis.units.Bytes(u64).fromRaw(1 << 20));
         defer t.gpa.free(previous);
         if (!std.mem.startsWith(u8, previous, header)) return;
         var lines = std.mem.splitScalar(u8, previous[header.len..], '\n');
@@ -84,7 +87,7 @@ pub const Token = struct {
         }
         if (remaining == 0) {
             // The lock excludes new token acquisition through this deletion.
-            try t.dir.deleteFile(io, name);
+            try t.dir.lend().get().deleteFile(io, name);
         } else try lock.commit(io);
     }
 };

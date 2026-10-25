@@ -30,6 +30,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const decimal = @import("../text.zig").decimal;
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
@@ -1846,13 +1847,13 @@ const Merge = struct {
 
         // As git asserts: three sides matching were resolved while
         // collecting, and two matching are any two.
-        assert(ci.match_mask == 0 or ci.match_mask == 3 or ci.match_mask == 5 or ci.match_mask == 6);
+        aegis.assert.invariant(ci.match_mask == 0 or ci.match_mask == 3 or ci.match_mask == 5 or ci.match_mask == 6, "ci.match_mask == 0 or ci.match_mask == 3 or ci.match_mask == 5 or ci.match_mask == 6");
         if (ci.dirmask != 0) {
             try m.recordEntryForTree(meta, path, ci);
             if (ci.filemask == 0) return;
             // A file and a directory at one path is a directory/file
             // conflict.
-            assert(ci.df_conflict);
+            aegis.assert.invariant(ci.df_conflict, "ci.df_conflict");
         }
 
         if (ci.df_conflict and ci.result.mode == 0) {
@@ -1894,7 +1895,7 @@ const Merge = struct {
                 ci.result = ci.stages[1];
             } else {
                 const othermask: u3 = 7 & ~ci.match_mask;
-                assert(othermask == 2 or othermask == 4);
+                aegis.assert.invariant(othermask == 2 or othermask == 4, "othermask == 2 or othermask == 4");
                 const side: usize = if (othermask == 4) 2 else 1;
                 ci.result = ci.stages[side];
                 ci.is_null = ci.result.mode == 0;
