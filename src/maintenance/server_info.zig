@@ -178,7 +178,7 @@ fn update(arena: Allocator, io: Io, dir: Io.Dir, sub_dir: []const u8, name: []co
             return err;
         };
     }
-    fs.adjustShared(io, dir, temp, shared);
+    try fs.adjustShared(io, dir, temp, shared);
     fs.rename(io, dir, temp, path) catch |err| {
         // The rename's error is the one to report; a temporary left behind holds nothing anyone reads.
         fs.removeLeftover(io, dir, temp);

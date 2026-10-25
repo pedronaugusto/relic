@@ -530,9 +530,9 @@ fn publish(gpa: Allocator, io: Io, db: anytype, p: Publication, options: Options
 
     // read-only, as git leaves a pack and its indexes
     const shared = db.sharedPermissions();
-    fs.readOnlyObject(io, pack_dir, p.temp, shared);
-    fs.readOnlyObject(io, pack_dir, idx_temp, shared);
-    if (rev_temp) |t| fs.readOnlyObject(io, pack_dir, t, shared);
+    try fs.readOnlyObject(io, pack_dir, p.temp, shared);
+    try fs.readOnlyObject(io, pack_dir, idx_temp, shared);
+    if (rev_temp) |t| try fs.readOnlyObject(io, pack_dir, t, shared);
     try fs.rename(io, pack_dir, p.temp, pack_name);
     p.kept.* = true;
     if (rev_temp) |t| {

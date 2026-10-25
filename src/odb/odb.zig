@@ -1849,7 +1849,7 @@ pub const Odb = struct {
         };
         defer file.close(io);
         try file.writePositionalAll(io, contents, 0);
-        fs.adjustShared(io, dir, file_name, db.sharedPermissions());
+        try fs.adjustShared(io, dir, file_name, db.sharedPermissions());
     }
 
     pub fn sharedPermissions(odb: *const Odb) fs.Shared {
@@ -4224,7 +4224,7 @@ pub const ObjectStream = struct {
         var fan_out_made = false;
         if (s.dir.createDir(io, text[0..2], .default_dir)) |_| {
             fan_out_made = true;
-            fs.adjustShared(io, s.dir, text[0..2], s.odb.backendData().options.shared);
+            try fs.adjustShared(io, s.dir, text[0..2], s.odb.backendData().options.shared);
         } else |err| switch (err) {
             error.PathAlreadyExists => {},
             else => |e| return e,
