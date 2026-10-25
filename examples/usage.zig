@@ -145,7 +145,11 @@ fn run(gpa: std.mem.Allocator, io: std.Io, cwd: std.Io.Dir) !void {
 
 test "overlapping usage examples own different scratch directories" {
     const Io = std.Io;
-    const Controlled = struct {
+    const shakedown = @import("shakedown");
+    // The first two scratch directories opened under `parent` are recorded,
+    // and each opener waits there until both have: every example opens
+    // one before anything else, so the two are one from each.
+    const Opens = struct {
         parent: Io.Dir,
         lock: Io.Mutex = .init,
         opened: usize = 0,
@@ -153,49 +157,44 @@ test "overlapping usage examples own different scratch directories" {
         lengths: [2]usize = undefined,
         ready: Io.Event = .unset,
         proceed: Io.Event = .unset,
-        const Self = @This();
-        threadlocal var state: ?*Self = null;
-        threadlocal var intercepted: bool = false;
+    };
+    const Controlled = struct {
+        const Layer = shakedown.Layer(Opens, .{ .dirOpenDir = open });
 
-        fn open(context: ?*anyopaque, parent: Io.Dir, path: []const u8, options: Io.Dir.OpenOptions) Io.Dir.OpenError!Io.Dir {
-            const dir = try std.testing.io.vtable.dirOpenDir(context, parent, path, options);
-            errdefer dir.close(std.testing.io);
-            if (state) |control| {
-                if (!intercepted and parent.handle == control.parent.handle and std.mem.startsWith(u8, path, "relic-example")) {
-                    intercepted = true;
-                    {
-                        control.lock.lockUncancelable(std.testing.io);
-                        defer control.lock.unlock(std.testing.io);
-                        const i = control.opened;
-                        @memcpy(control.paths[i][0..path.len], path);
-                        control.lengths[i] = path.len;
-                        control.opened += 1;
-                        if (control.opened == 2) control.ready.set(std.testing.io);
-                    }
-                    control.proceed.wait(std.testing.io) catch return error.Canceled;
-                }
-            }
+        fn open(userdata: ?*anyopaque, parent: Io.Dir, path: []const u8, options: Io.Dir.OpenOptions) Io.Dir.OpenError!Io.Dir {
+            const l = Layer.of(userdata);
+            const dir = try l.base.vtable.dirOpenDir(l.base.userdata, parent, path, options);
+            errdefer dir.close(l.base);
+            if (parent.handle != l.state.parent.handle or !std.mem.startsWith(u8, path, "relic-example")) return dir;
+            const held = held: {
+                l.state.lock.lockUncancelable(l.base);
+                defer l.state.lock.unlock(l.base);
+                const i = l.state.opened;
+                if (i == 2) break :held false;
+                @memcpy(l.state.paths[i][0..path.len], path);
+                l.state.lengths[i] = path.len;
+                l.state.opened += 1;
+                if (l.state.opened == 2) l.state.ready.set(l.base);
+                break :held true;
+            };
+            if (held) l.state.proceed.wait(l.base) catch return error.Canceled;
             return dir;
         }
 
-        fn example(control: *Self, io: Io) !void {
-            state = control;
-            intercepted = false;
-            defer state = null;
-            try run(std.testing.allocator, io, control.parent);
+        fn example(io: Io, parent: Io.Dir) !void {
+            try run(std.testing.allocator, io, parent);
         }
     };
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    var control: Controlled = .{ .parent = tmp.dir };
-    var vtable = io.vtable.*;
-    vtable.dirOpenDir = Controlled.open;
-    const guarded: Io = .{ .userdata = io.userdata, .vtable = &vtable };
-    var first = try io.concurrent(Controlled.example, .{ &control, guarded });
+    var controlled: Controlled.Layer = .init(io, .{ .parent = tmp.dir });
+    const control = &controlled.state;
+    const guarded = controlled.io();
+    var first = try io.concurrent(Controlled.example, .{ guarded, tmp.dir });
     // glint-ignore: Z026 -- the task is canceled to stop it; how it ended is not this example's subject
     defer first.cancel(io) catch {};
-    var second = try io.concurrent(Controlled.example, .{ &control, guarded });
+    var second = try io.concurrent(Controlled.example, .{ guarded, tmp.dir });
     // glint-ignore: Z026 -- the task is canceled to stop it; how it ended is not this example's subject
     defer second.cancel(io) catch {};
     defer control.proceed.set(io);
