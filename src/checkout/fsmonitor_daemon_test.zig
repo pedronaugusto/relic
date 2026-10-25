@@ -30,11 +30,12 @@ const settings = blk: {
 
 /// A daemon that answers every question with `reply`, raw bytes, and
 /// keeps each question it was asked. It listens on the repository's
-/// `.git/fsmonitor--daemon.ipc`, where git looks for its own.
+/// `.git/fsmonitor--daemon.ipc`, where git looks for its own: a Unix
+/// socket, or on Windows the named pipe git for Windows' daemon serves.
 const FakeDaemon = struct {
     gpa: Allocator,
     io: Io,
-    listener: Io.net.Server,
+    listener: Listener,
     path: []u8,
     task: Io.Future(void),
     stopping: std.atomic.Value(bool) = .init(false),
@@ -44,21 +45,36 @@ const FakeDaemon = struct {
     /// Each question, one per line.
     asked: std.ArrayList(u8) = .empty,
 
+    const Listener = if (builtin.os.tag == .windows) Pipe else Io.net.Server;
+
     fn start(gpa: Allocator, io: Io, r: *testgit.Repo) !*FakeDaemon {
-        if (builtin.os.tag == .windows or !Io.net.has_unix_sockets) return error.SkipZigTest;
         const top = try r.dir.realPathFileAlloc(io, ".", gpa);
         defer gpa.free(top);
         const absolute = try std.fs.path.join(gpa, &.{ top, ".git", "fsmonitor--daemon.ipc" });
         defer gpa.free(absolute);
-        // As git names it, from the working directory, where the absolute
-        // name is past what a socket address holds.
-        const cwd = try std.process.currentPathAlloc(io, gpa);
-        defer gpa.free(cwd);
-        const path = try std.fs.path.relativeAllocPosix(gpa, cwd, cwd, absolute);
+        var path: []u8 = undefined;
+        var listener: Listener = undefined;
+        if (builtin.os.tag == .windows) {
+            // git for Windows' name: `\\.\pipe\` and the path, the drive's
+            // `:` as `_`.
+            path = try std.mem.concat(gpa, u8, &.{ "\\\\.\\pipe\\", absolute });
+            errdefer gpa.free(path);
+            const drive = path["\\\\.\\pipe\\".len..];
+            if (drive.len >= 2 and drive[1] == ':') drive[1] = '_';
+            listener = try Pipe.listen(gpa, path);
+        } else {
+            if (!Io.net.has_unix_sockets) return error.SkipZigTest;
+            // As git names it, from the working directory, where the absolute
+            // name is past what a socket address holds.
+            const cwd = try std.process.currentPathAlloc(io, gpa);
+            defer gpa.free(cwd);
+            path = try std.fs.path.relativeAllocPosix(gpa, cwd, cwd, absolute);
+            errdefer gpa.free(path);
+            if (path.len >= @typeInfo(@FieldType(std.posix.sockaddr.un, "path")).array.len) return error.SkipZigTest;
+            const address: Io.net.UnixAddress = .{ .path = path };
+            listener = try address.listen(io, .{});
+        }
         errdefer gpa.free(path);
-        if (path.len >= @typeInfo(@FieldType(std.posix.sockaddr.un, "path")).array.len) return error.SkipZigTest;
-        const address: Io.net.UnixAddress = .{ .path = path };
-        var listener = try address.listen(io, .{});
         errdefer listener.deinit(io);
         const d = try gpa.create(FakeDaemon);
         errdefer gpa.destroy(d);
@@ -70,8 +86,13 @@ const FakeDaemon = struct {
     fn stop(d: *FakeDaemon) void {
         const io = d.io;
         d.stopping.store(true, .release);
-        const address: Io.net.UnixAddress = .{ .path = d.path };
-        if (address.connect(io)) |stream| stream.close(io) else |_| {}
+        // A client of its own wakes the daemon from its wait.
+        if (builtin.os.tag == .windows) {
+            if (Io.Dir.openFileAbsolute(io, d.path, .{ .mode = .read_write })) |pipe| pipe.close(io) else |_| {}
+        } else {
+            const address: Io.net.UnixAddress = .{ .path = d.path };
+            if (address.connect(io)) |stream| stream.close(io) else |_| {}
+        }
         d.task.await(io);
         d.listener.deinit(io);
         d.asked.deinit(d.gpa);
@@ -93,23 +114,36 @@ const FakeDaemon = struct {
     }
 
     fn serve(d: *FakeDaemon) void {
+        const io = d.io;
         while (!d.stopping.load(.acquire)) {
-            const stream = d.listener.accept(d.io) catch return;
-            defer stream.close(d.io);
-            if (d.stopping.load(.acquire)) return;
-            // glint-ignore: Z026 -- a question that breaks off is its client's to report; the daemon takes the next
-            d.handle(stream) catch {};
+            const read_buffer = d.gpa.alloc(u8, pkt_line.max_line) catch return;
+            defer d.gpa.free(read_buffer);
+            var write_buffer: [256]u8 = undefined;
+            if (builtin.os.tag == .windows) {
+                const pipe = d.listener.accept() catch return;
+                defer Pipe.hangUp(io, pipe);
+                if (d.stopping.load(.acquire)) return;
+                var reader = pipe.readerStreaming(io, read_buffer);
+                var writer = pipe.writerStreaming(io, &write_buffer);
+                // glint-ignore: Z026 -- a question that breaks off is its client's to report; the daemon takes the next
+                d.handle(&reader.interface, &writer.interface) catch {};
+            } else {
+                const stream = d.listener.accept(io) catch return;
+                defer stream.close(io);
+                if (d.stopping.load(.acquire)) return;
+                var reader = stream.reader(io, read_buffer);
+                var writer = stream.writer(io, &write_buffer);
+                // glint-ignore: Z026 -- a question that breaks off is its client's to report; the daemon takes the next
+                d.handle(&reader.interface, &writer.interface) catch {};
+            }
         }
     }
 
-    fn handle(d: *FakeDaemon, stream: Io.net.Stream) !void {
+    fn handle(d: *FakeDaemon, reader: *Io.Reader, writer: *Io.Writer) !void {
         const io = d.io;
-        const read_buffer = try d.gpa.alloc(u8, pkt_line.max_line);
-        defer d.gpa.free(read_buffer);
-        var reader = stream.reader(io, read_buffer);
         var question: std.ArrayList(u8) = .empty;
         defer question.deinit(d.gpa);
-        while (true) switch (try pkt_line.read(&reader.interface)) {
+        while (true) switch (try pkt_line.read(reader)) {
             .data => |data| try question.appendSlice(d.gpa, data.readForParse()),
             else => break,
         };
@@ -120,10 +154,62 @@ const FakeDaemon = struct {
             if (!std.ascii.isDigit(c)) break false;
         } else true;
         try d.asked.print(d.gpa, "{s}\n", .{if (timed) "<time>" else question.items});
-        var write_buffer: [256]u8 = undefined;
-        var writer = stream.writer(io, &write_buffer);
-        try writer.interface.writeAll(d.reply);
-        try writer.interface.flush();
+        try writer.writeAll(d.reply);
+        try writer.flush();
+    }
+};
+
+/// A named pipe served as git for Windows' simple-ipc serves its daemon's:
+/// a byte pipe of unlimited instances, and the next instance made as soon
+/// as a client takes the waiting one, so a client never finds no pipe.
+const Pipe = struct {
+    gpa: Allocator,
+    name: [:0]u16,
+    /// The instance the next client connects to.
+    waiting: windows.HANDLE,
+
+    const windows = std.os.windows;
+    const access_duplex = 3;
+    const unlimited_instances = 255;
+    extern "kernel32" fn CreateNamedPipeW(name: [*:0]const u16, open_mode: u32, pipe_mode: u32, instances: u32, out_size: u32, in_size: u32, timeout: u32, security: ?*windows.SECURITY_ATTRIBUTES) callconv(.winapi) windows.HANDLE;
+    extern "kernel32" fn ConnectNamedPipe(pipe: windows.HANDLE, overlapped: ?*anyopaque) callconv(.winapi) windows.BOOL;
+    extern "kernel32" fn FlushFileBuffers(file: windows.HANDLE) callconv(.winapi) windows.BOOL;
+
+    fn listen(gpa: Allocator, name: []const u8) !Pipe {
+        const wide = try std.unicode.wtf8ToWtf16LeAllocZ(gpa, name);
+        errdefer gpa.free(wide);
+        return .{ .gpa = gpa, .name = wide, .waiting = try instance(wide) };
+    }
+
+    fn instance(name: [:0]const u16) error{Unexpected}!windows.HANDLE {
+        const pipe = CreateNamedPipeW(name, access_duplex, 0, unlimited_instances, 4096, 4096, 0, null);
+        if (pipe == windows.INVALID_HANDLE_VALUE) return error.Unexpected;
+        return pipe;
+    }
+
+    /// The next client's connection, the caller's to hang up.
+    fn accept(p: *Pipe) error{Unexpected}!Io.File {
+        // A client that came before the wait is connected already.
+        if (ConnectNamedPipe(p.waiting, null) == 0 and windows.GetLastError() != .PIPE_CONNECTED) return error.Unexpected;
+        const connected = p.waiting;
+        p.waiting = instance(p.name) catch |err| {
+            windows.CloseHandle(connected);
+            return err;
+        };
+        return .{ .handle = connected, .flags = .{ .nonblocking = false } };
+    }
+
+    /// Waits for the client to read what was written, as git's server
+    /// does, then closes the connection.
+    fn hangUp(io: Io, pipe: Io.File) void {
+        _ = FlushFileBuffers(pipe.handle);
+        pipe.close(io);
+    }
+
+    fn deinit(p: *Pipe, io: Io) void {
+        _ = io;
+        windows.CloseHandle(p.waiting);
+        p.gpa.free(p.name);
     }
 };
 
