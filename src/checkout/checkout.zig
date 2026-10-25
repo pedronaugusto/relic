@@ -1880,18 +1880,27 @@ fn describeTree(index: *Index, tree_oid: Oid) Allocator.Error!void {
 /// Every path out of the tree is checked before it becomes a filesystem
 /// path. A tree is a file format and anyone may write one.
 fn refuseUnsafeTree(arena: Allocator, wanted: *std.StringHashMapUnmanaged(TreeEntry), options: CheckoutOptions) Error!void {
-    var check_it = wanted.iterator();
-    while (check_it.next()) |entry| {
-        const path = entry.key_ptr.*;
-        if (safe_path.checkEntry(path, .worktree, entry.value_ptr.mode == .symlink, options.rules.protect)) |refused| {
-            if (options.refusal) |out| out.set(refused.reason, path);
-            return error.UnsafePath;
-        }
-    }
+    try refuseUnsafePaths(wanted, options.rules.protect, options.refusal);
     if (options.rules.ignore_case) {
         try refuseCaseCollisions(arena, wanted);
     }
     try refuseCollidingPaths(arena, wanted, options.rules.ignore_case, options.refusal);
+}
+
+/// Refuse a tree whose paths git's `verify_path` refuses before any of them
+/// reaches the working tree, as unpack-trees refuses one: a tree is a file
+/// format, and `..`, an absolute name, `.git` in any spelling or a
+/// `.gitmodules` link would otherwise be deleted or written through first.
+/// `refusal` says which path and why.
+pub fn refuseUnsafePaths(wanted: *const std.StringHashMapUnmanaged(TreeEntry), protect: safe_path.Protect, refusal: ?*Refusal) Error!void {
+    var check_it = wanted.iterator();
+    while (check_it.next()) |entry| {
+        const path = entry.key_ptr.*;
+        if (safe_path.checkEntry(path, .worktree, entry.value_ptr.mode == .symlink, protect)) |refused| {
+            if (refusal) |out| out.set(refused.reason, path);
+            return error.UnsafePath;
+        }
+    }
 }
 
 /// An entry standing where another entry of the tree has its directory --

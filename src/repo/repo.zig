@@ -1603,7 +1603,7 @@ pub const Repository = struct {
     }
 
     pub fn openIndex(repo: *Repository, io: Io) index_mod.ReadError!index_mod.Index {
-        return index_mod.Index.read(repo.data().gpa, io, repo.data().git_dir, "index", .{ .git_dir = repo.data().git_dir, .kind = repo.objectFormat(), .timestamp_resolution = repo.data().odb.timestamp_resolution });
+        return index_mod.Index.read(repo.data().gpa, io, repo.data().git_dir, "index", .{ .git_dir = repo.data().git_dir, .kind = repo.objectFormat(), .timestamp_resolution = repo.data().odb.timestamp_resolution, .protect = repo.settings().protect });
     }
 
     /// Open an index anywhere.
@@ -1616,7 +1616,7 @@ pub const Repository = struct {
         dir: Io.Dir,
         sub_path: []const u8,
     ) index_mod.ReadError!index_mod.Index {
-        return index_mod.Index.read(repo.data().gpa, io, dir, sub_path, .{ .git_dir = repo.data().git_dir, .kind = repo.objectFormat() });
+        return index_mod.Index.read(repo.data().gpa, io, dir, sub_path, .{ .git_dir = repo.data().git_dir, .kind = repo.objectFormat(), .protect = repo.settings().protect });
     }
 
     /// What `HEAD` resolves to, or `null` on an unborn branch.

@@ -402,6 +402,8 @@ fn carry(
     }
     std.mem.sort([]const u8, changes.items, {}, lessThanPath);
 
+    try refuseUnsafeChanges(&desired, rules.protect, options.blocked);
+
     // Nothing is written until every change has been checked, by the same
     // rules a checkout keeps.
     var ignore_rules = try repo.loadIgnore(io);
@@ -481,6 +483,19 @@ fn carry(
 /// Each path the merge changes, with what the merged tree has there:
 /// `null` where it has nothing.
 const Desired = std.array_hash_map.String(?TreeEntry);
+
+/// A path git's `verify_path` refuses is refused before the working tree is
+/// looked at for it, as unpack-trees refuses one: the merged tree is the
+/// trees' paths, and a tree is a file format.
+fn refuseUnsafeChanges(desired: *const Desired, protect: names_path.Protect, blocked: ?*Blocked) Error!void {
+    for (desired.keys(), desired.values()) |path, want| {
+        const entry = want orelse continue;
+        if (names_path.checkEntry(path, .worktree, entry.mode == .symlink, protect) != null) {
+            if (blocked) |b| b.set(path);
+            return error.UnsafePath;
+        }
+    }
+}
 
 /// Remove what the merge takes away, last path first, so that a directory
 /// the merge turns into a file is gone before the file is written. How

@@ -34,7 +34,7 @@ pub const Error = error{
     NotATree,
     /// The trees nest deeper than the walk will go.
     TreeTooDeep,
-} || ort.Error || attributes.Error || Allocator.Error || odb_mod.Error || object.TreeParseError ||
+} || ort.Error || attributes.Error || Allocator.Error || odb_mod.Error || object.TreeParseError || index_mod.Index.AddError ||
     object.Tree.Builder.AddError || index_mod.ReadError;
 
 /// A content merge refuses data git classifies as binary.
@@ -416,7 +416,7 @@ fn directoriesOf(arena: Allocator, entries: *const Entries) Allocator.Error!std.
     return dirs;
 }
 
-fn stage(index: *index_mod.Index, path: []const u8, side: Side, at: u2) Allocator.Error!void {
+fn stage(index: *index_mod.Index, path: []const u8, side: Side, at: u2) index_mod.Index.AddError!void {
     try index.add(.{
         .path = path,
         .oid = side.oid,
@@ -425,7 +425,7 @@ fn stage(index: *index_mod.Index, path: []const u8, side: Side, at: u2) Allocato
     });
 }
 
-fn stageAll(index: *index_mod.Index, path: []const u8, b: ?Side, o: ?Side, t: ?Side) Allocator.Error!void {
+fn stageAll(index: *index_mod.Index, path: []const u8, b: ?Side, o: ?Side, t: ?Side) index_mod.Index.AddError!void {
     if (b) |side| try stage(index, path, side, 1);
     if (o) |side| try stage(index, path, side, 2);
     if (t) |side| try stage(index, path, side, 3);

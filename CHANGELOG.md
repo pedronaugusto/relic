@@ -6,6 +6,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+
+- A tree whose entry names git's `verify_path` refuses no longer reaches the working tree or the index. A tree may name `..`, an absolute path, `.git` in any spelling a protected file system opens as it, or a path through a symbolic link: git reads such a tree, and a fetch takes one unless `transfer.fsckObjects` is on. In relic 0.29.1 and before, `commit.reset.toTree` (`reset --hard`, `--merge`) deleted the directory such a path named before refusing it, so a fetched history could have `reset --hard` delete the repository's `.git`, a directory outside the working tree, or one reached through a link. A merge could reach the same through its working-tree write, and an index took such a path, where `rm` and the LFS pull would act on it later. Now, as git refuses them:
+  - every path of the tree is checked before any reaches the working tree, in `reset.toTree` and in the working-tree merge (`worktree.refuseUnsafePaths`, the check a checkout already made);
+  - nothing is deleted through a symbolic link;
+  - `index.Index.add` and `addMany`, and a sparse directory's expansion, refuse a path git's `add_index_entry` refuses, `error.UnsafePath`, by `Index.protect` (`core.protectNTFS` and `core.protectHFS`, which `Repository.openIndex` reads; `ReadOptions.protect`).
+
+  `Index.add`'s error set is `Index.AddError` now, `Allocator.Error` with `UnsafePath`; a caller that named `Allocator.Error` names `AddError`. `testing/security/tree_paths.zig`: `reset --hard`, a merge and an index reset to a tree holding `../x`, `a/../../x`, an absolute name, `.git`, `.GIT`, `.g\u{200c}it`, `git~1` and `.git/hooks/…` each refuse with nothing deleted, and nothing is deleted through a linked directory.
+
 ## [0.29.1] - 2026-10-21
 
 ### Added
