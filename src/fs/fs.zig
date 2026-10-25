@@ -1745,21 +1745,47 @@ pub fn readAll(gpa: Allocator, io: Io, file: Io.File, max_bytes: usize) (Io.Dir.
     };
     var bytes: std.ArrayList(u8) = try .initCapacity(gpa, @min(std.math.cast(usize, length) orelse max_bytes, max_bytes) + 1);
     errdefer bytes.deinit(gpa);
+    var at: Reading = .offset;
     while (true) {
         if (bytes.items.len == bytes.capacity) {
             if (bytes.items.len > max_bytes) return error.StreamTooLong;
             try bytes.ensureTotalCapacityPrecise(gpa, @min(bytes.capacity *| 2, max_bytes + 1));
         }
-        // A read may give no bytes short of the end (reactor's io_uring
-        // answers so for an interrupted one): only EndOfStream ends it.
-        bytes.items.len += file.readStreaming(io, &.{bytes.unusedCapacitySlice()}) catch |err| switch (err) {
-            error.EndOfStream => break,
-            else => |e| return e,
-        };
+        bytes.items.len += try at.read(io, file, bytes.unusedCapacitySlice(), bytes.items.len) orelse break;
     }
     if (bytes.items.len > max_bytes) return error.StreamTooLong;
     return bytes.toOwnedSlice(gpa);
 }
+
+/// How a whole-file read reads: at an offset, as std's `readFileAlloc` and
+/// aegis's `own.readFile` read, so the file's shared position is no part
+/// of it; a file with no offsets (a pipe) as a stream.
+const Reading = enum {
+    offset,
+    stream,
+
+    /// Bytes read into `dest` at `pos`, or null at the end. At an offset a
+    /// read of no bytes is the end; a streamed read may give none short of
+    /// it, and only `EndOfStream` ends it.
+    fn read(at: *Reading, io: Io, file: Io.File, dest: []u8, pos: usize) Io.Dir.ReadFileAllocError!?usize {
+        while (true) switch (at.*) {
+            .offset => {
+                const n = file.readPositional(io, &.{dest}, pos) catch |err| switch (err) {
+                    error.Unseekable => {
+                        at.* = .stream;
+                        continue;
+                    },
+                    else => |e| return e,
+                };
+                return if (n == 0) null else n;
+            },
+            .stream => return file.readStreaming(io, &.{dest}) catch |err| switch (err) {
+                error.EndOfStream => null,
+                else => |e| e,
+            },
+        };
+    }
+};
 
 /// `readFileAlloc` for a file that holds a secret (`.netrc`, a private
 /// key): read into an owner that wipes its bytes when let go, growing
@@ -1785,6 +1811,7 @@ pub fn readSecretFile(
     const guess = std.math.cast(usize, length) orelse max_bytes;
     var secret = try aegis.SecretBytes.init(gpa, @min(guess, max_bytes) + 1);
     errdefer secret.deinit();
+    var at: Reading = .offset;
     while (true) {
         const have = secret.len();
         if (have == secret.capacity()) {
@@ -1793,13 +1820,7 @@ pub fn readSecretFile(
         }
         // unreachable: the capacity was just made room for.
         secret.resizeWithinCapacity(secret.capacity()) catch unreachable;
-        // As in `readAll`, a read of no bytes is not the end.
-        const n = file.readStreaming(io, &.{secret.exposeMut()[have..]}) catch |err| switch (err) {
-            error.EndOfStream => {
-                // unreachable: no larger than it was.
-                secret.resizeWithinCapacity(have) catch unreachable;
-                break;
-            },
+        const read = at.read(io, file, secret.exposeMut()[have..], have) catch |err| switch (err) {
             error.IsDir => {
                 secret.deinit();
                 return null;
@@ -1807,7 +1828,8 @@ pub fn readSecretFile(
             else => |e| return e,
         };
         // unreachable: the read filled no more than the capacity.
-        secret.resizeWithinCapacity(have + n) catch unreachable;
+        secret.resizeWithinCapacity(have + (read orelse 0)) catch unreachable;
+        if (read == null) break;
     }
     if (secret.len() > max_bytes) return error.StreamTooLong;
     return secret;
@@ -2042,11 +2064,17 @@ test "a secret file is read whole into its owner, and refused past its limit as 
     try std.testing.expect(try readSecretFile(gpa, io, dir, "d", 1 << 20) == null);
 }
 
-/// An `Io` whose first streaming read gives five bytes and whose second
-/// gives none, short of the end: what reactor's io_uring backend answers
-/// for an interrupted read, and what `readStreaming` allows ("including 0").
-const ZeroMidStream = @import("shakedown").Layer(struct { reads: u32 = 0 }, .{ .operate = ZeroMidStreamOps.operate });
+/// An `Io` with no offsets to read at, as a pipe has, whose first streaming
+/// read gives five bytes and whose second gives none, short of the end: what
+/// reactor's io_uring backend answers for an interrupted read, and what
+/// `readStreaming` allows ("including 0").
+const ZeroMidStream = @import("shakedown").Layer(struct { reads: u32 = 0 }, .{ .operate = ZeroMidStreamOps.operate, .fileReadPositional = ZeroMidStreamOps.unseekable });
 const ZeroMidStreamOps = struct {
+    fn unseekable(userdata: ?*anyopaque, file: Io.File, data: []const []u8, offset: u64) Io.File.ReadPositionalError!usize {
+        _ = .{ userdata, file, data, offset };
+        return error.Unseekable;
+    }
+
     fn operate(userdata: ?*anyopaque, operation: Io.Operation) Io.Cancelable!Io.Operation.Result {
         const l = ZeroMidStream.of(userdata);
         if (operation == .file_read_streaming) {
@@ -2084,6 +2112,25 @@ test "a whole-file read goes on past a read that gives no bytes short of the end
     defer kept.deinit();
     try std.testing.expectEqualStrings("twelve bytes", kept.expose());
     try std.testing.expect(secret.state.reads > 2);
+}
+
+test "a whole-file read reads at offsets, whatever the file's position" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "f", .data = "twelve bytes" });
+    var file = try tmp.dir.openFile(io, "f", .{});
+    defer file.close(io);
+    // The position at the end, where a streamed read would find nothing.
+    var drained: [32]u8 = undefined;
+    while (true) _ = file.readStreaming(io, &.{&drained}) catch |err| switch (err) {
+        error.EndOfStream => break,
+        else => |e| return e,
+    };
+    const whole = try readAll(gpa, io, file, 1 << 20);
+    defer gpa.free(whole);
+    try std.testing.expectEqualStrings("twelve bytes", whole);
 }
 
 test "a lock is refused, not broken, and says who holds it" {
