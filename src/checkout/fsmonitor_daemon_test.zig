@@ -245,6 +245,60 @@ fn ourStatus(gpa: Allocator, io: Io, r: *testgit.Repo) ![]u8 {
     return out.toOwnedSlice(gpa);
 }
 
+/// How long the control in `missed` waits for git's daemon to record its
+/// sentinel.
+const control_ms = 10_000;
+
+/// A change git's daemon left out of its answer. git's daemon on macOS
+/// hears of changes through FSEvents, which a loaded machine's fseventsd
+/// can hold back for seconds; the daemon then answers from what it has
+/// heard. So the control writes a sentinel and asks the daemon after it,
+/// as this package asks, the answer not kept: when the daemon has not
+/// recorded it either within `control_ms`, the failure names the system,
+/// not the daemon's answer or this package's reading of it. Never a pass.
+fn missed(gpa: Allocator, io: Io, r: *testgit.Repo) error{FsEventsBackedUp}!void {
+    switch (control(gpa, io, r) catch |err| {
+        std.debug.print("git's daemon could not be asked after a control sentinel ({t}); the change was not reported\n", .{err});
+        return;
+    }) {
+        .recorded => |recorded_ms| std.debug.print("git's daemon recorded a control sentinel in {d} ms; the change was not reported\n", .{recorded_ms}),
+        .silent => {
+            std.debug.print("the system's FSEvents delivered nothing for {d} s (fseventsd backed up): git's daemon did not record a control sentinel written after the change\n", .{control_ms / 1000});
+            return error.FsEventsBackedUp;
+        },
+    }
+}
+
+/// What the control measured: its sentinel recorded after so many
+/// milliseconds, or nothing within `control_ms`.
+const Control = union(enum) { recorded: i64, silent };
+
+/// The sentinel written, then git's daemon asked from the index's token
+/// until it names the sentinel and vouches for `a`, which no one changed:
+/// an answer from what it heard, not the trivial one it gives when it has
+/// not heard its own cookie file.
+fn control(gpa: Allocator, io: Io, r: *testgit.Repo) !Control {
+    var env = try testgit.programEnviron(gpa);
+    defer env.deinit();
+    const start = Io.Clock.awake.now(io);
+    try r.writeFile(io, "control", "written\n");
+    while (start.durationTo(Io.Clock.awake.now(io)).toMilliseconds() < control_ms) {
+        var repo = try repo_mod.Repository.open(gpa, io, r.dir, .{});
+        defer repo.deinit(io);
+        var locked_index = try repo.lockIndex(io);
+        defer locked_index.deinit(io);
+        var arena: std.heap.ArenaAllocator = .init(gpa);
+        defer arena.deinit();
+        const source = (try fsmonitor.configured(arena.allocator(), io, repo.configuration(), .{ .git_dir = repo.gitDirectory().get(), .work_tree = repo.workDirectory().?.get() }, .{ .environ = &env })).?;
+        const index = &locked_index.index;
+        try fsmonitor.refresh(gpa, io, repo.workDirectory().?.get(), index, source);
+        if (!index.find("control").?.fsmonitor_valid and index.find("a").?.fsmonitor_valid)
+            return .{ .recorded = start.durationTo(Io.Clock.awake.now(io)).toMilliseconds() };
+        try io.sleep(.fromMilliseconds(100), .awake);
+    }
+    return .silent;
+}
+
 fn code(change: worktree.Change) u8 {
     return switch (change) {
         .unmodified => ' ',
@@ -384,6 +438,8 @@ test "git's own daemon, where git has one, answers this package as it answers gi
     r.defaults = settings;
     try r.writeFile(io, "a", "a\n");
     try r.writeFile(io, "d/b", "b\n");
+    // The sentinel `missed` writes when a change went unreported.
+    try r.writeFile(io, "control", "\n");
     try r.exec(io, &.{ "add", "-A" });
     try r.exec(io, &.{ "commit", "-q", "-m", "base" });
     try r.exec(io, &.{ "config", "core.fsmonitor", "true" });
@@ -414,6 +470,7 @@ test "git's own daemon, where git has one, answers this package as it answers gi
     // made for that query: every change before it is seen by then.
     const report = try ourStatus(gpa, io, &r);
     defer gpa.free(report);
+    if (!std.mem.eql(u8, report, " M d/b\n")) try missed(gpa, io, &r);
     try std.testing.expectEqualStrings(" M d/b\n", report);
     const git_report = try r.run(io, &.{ "status", "--porcelain", "--untracked-files=no" });
     defer gpa.free(git_report);
