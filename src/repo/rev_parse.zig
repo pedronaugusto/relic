@@ -24,6 +24,7 @@
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const decimal = @import("../text.zig").decimal;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -64,7 +65,7 @@ pub const Source = struct {
 
 // Failures to obtain the bytes are distinct from an expression naming
 // nothing. These are the resource errors the readers below can return.
-const ResourceError = Allocator.Error || Io.Dir.OpenError || Io.Dir.ReadFileAllocError ||
+const ResourceError = Allocator.Error || Io.Dir.OpenError || aegis.own.ReadFileError ||
     Io.Dir.Iterator.Error || Io.File.Reader.Error || Io.File.Reader.SeekError;
 
 /// Errors from reading an expression.

@@ -15,6 +15,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -38,7 +39,7 @@ pub const AppendError = errors: {
 pub const ReadError = error{
     /// A line that is not `old new ident` with the right shapes.
     MalformedReflogEntry,
-} || Allocator.Error || Io.Dir.ReadFileAllocError || object.Signature.ParseError;
+} || Allocator.Error || aegis.own.ReadFileError || object.Signature.ParseError;
 
 /// One line of a log.
 pub const Entry = struct {

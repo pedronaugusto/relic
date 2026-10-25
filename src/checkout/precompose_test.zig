@@ -71,7 +71,7 @@ test "untracked names, the names added and clean's names are git's under core.pr
         defer gpa.free(theirs);
         var locked = try repo.lockIndex(io);
         defer locked.deinit(io);
-        var result = try checkout.status(gpa, io, repo.workDirectory().?, .{ .index = &locked.index, .db = repo.objectDatabase() }, .{
+        var result = try checkout.status(gpa, io, repo.workDirectory().?.get(), .{ .index = &locked.index, .db = repo.objectDatabase() }, .{
             .rules = try repo.worktreeRules(),
             .untracked = .all,
         });
@@ -115,7 +115,7 @@ test "untracked names, the names added and clean's names are git's under core.pr
 
         var index = try repo.openIndex(io);
         defer index.deinit();
-        _ = try checkout.addAll(gpa, io, repo.workDirectory().?, .{ .index = &index, .db = repo.objectDatabase() }, .{ .rules = try repo.worktreeRules() });
+        _ = try checkout.addAll(gpa, io, repo.workDirectory().?.get(), .{ .index = &index, .db = repo.objectDatabase() }, .{ .rules = try repo.worktreeRules() });
         var mine: std.ArrayList(u8) = .empty;
         defer mine.deinit(gpa);
         for (index.items()) |e| {

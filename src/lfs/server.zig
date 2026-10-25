@@ -39,6 +39,7 @@
 //! branch, as most servers keep them.
 
 const std = @import("std");
+const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -63,7 +64,7 @@ const Response = uplink.server.Response;
 /// Errors from answering a request.
 pub const Error = Allocator.Error || Io.Cancelable || Response.Error || Store.Error || locks.WriteAnswerError || lock_store.Error ||
     transfer.WriteBatchError || Request.CollectError || fs.LockFile.OpenError || fs.CommitError ||
-    Io.Dir.CreateDirPathError || Io.Dir.ReadFileAllocError || Io.File.Writer.Error;
+    Io.Dir.CreateDirPathError || aegis.own.ReadFileError || Io.File.Writer.Error;
 
 /// git-lfs's pure-ssh protocol over the same store and locks:
 /// `git-lfs-transfer`.
@@ -401,7 +402,7 @@ const Call = struct {
             error.MalformedResponse => return message(c.io, c.response, .unprocessable_entity, "Unprocessable Entity"),
         };
         if (asked.path.len == 0) return message(c.io, c.response, .unprocessable_entity, "A lock needs a path");
-        var table = try lock_store.Table.take(c.b.gpa, c.arena, c.io, c.remote.repo.gitDirectory());
+        var table = try lock_store.Table.take(c.b.gpa, c.arena, c.io, c.remote.repo.gitDirectory().get());
         defer table.deinit();
         for (table.list) |l| if (std.mem.eql(u8, l.path, asked.path)) {
             return c.lockAnswer(.conflict, l, "lock already created");
@@ -423,7 +424,7 @@ const Call = struct {
         const query = c.request.query orelse "";
         const path = try queryValue(c.arena, query, "path");
         const id = try queryValue(c.arena, query, "id");
-        const all = try lock_store.read(c.arena, c.io, c.remote.repo.gitDirectory());
+        const all = try lock_store.read(c.arena, c.io, c.remote.repo.gitDirectory().get());
         var matching: std.ArrayList(locks.Lock) = .empty;
         for (all) |l| {
             if (path) |p| if (!std.mem.eql(u8, l.path, p)) continue;
@@ -443,7 +444,7 @@ const Call = struct {
             error.OutOfMemory => return error.OutOfMemory,
             error.MalformedResponse => return message(c.io, c.response, .unprocessable_entity, "Unprocessable Entity"),
         };
-        const all = try lock_store.read(c.arena, c.io, c.remote.repo.gitDirectory());
+        const all = try lock_store.read(c.arena, c.io, c.remote.repo.gitDirectory().get());
         const limit: usize = if (asked.limit > 0) @intCast(asked.limit) else c.b.options.lock_page;
         const page = lock_store.paged(all, if (asked.cursor.len != 0) asked.cursor else null, limit);
         var ours: std.ArrayList(locks.Lock) = .empty;
@@ -463,7 +464,7 @@ const Call = struct {
             error.OutOfMemory => return error.OutOfMemory,
             error.MalformedResponse => return message(c.io, c.response, .unprocessable_entity, "Unprocessable Entity"),
         };
-        var table = try lock_store.Table.take(c.b.gpa, c.arena, c.io, c.remote.repo.gitDirectory());
+        var table = try lock_store.Table.take(c.b.gpa, c.arena, c.io, c.remote.repo.gitDirectory().get());
         defer table.deinit();
         const at = for (table.list, 0..) |l, i| {
             if (std.mem.eql(u8, l.id, id)) break i;

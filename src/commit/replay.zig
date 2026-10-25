@@ -321,7 +321,7 @@ const Run = struct {
         for (inputs.exclude) |name| try walk.hide(try r.commitOf(name));
         var bottoms: std.ArrayList(Oid) = .empty;
         for (inputs.ancestry_path) |name| try bottoms.append(r.a, try r.commitOf(name));
-        walk.ancestry_path = bottoms.items;
+        walk.ancestry_path = try bottoms.toOwnedSlice(r.a);
         var decorations: ?pretty.Decorations = null;
         defer if (decorations) |*d| d.deinit();
         r.last = setup.onto;

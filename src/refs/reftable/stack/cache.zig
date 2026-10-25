@@ -151,7 +151,7 @@ pub const Stack = struct {
             mine.* = true;
             table.* = try reftable.Table.open(io, file.*, kind);
         }
-        stack.names = names.items;
+        stack.names = try names.toOwnedSlice(arena);
         stack.tables = tables;
         stack.files = files;
         if (old) |o| o.closeUnclaimed(stack.names);
@@ -350,7 +350,7 @@ fn tableName(io: Io, buf: *[64]u8, min: u64, max: u64) []const u8 {
         min,
         max,
         std.mem.readInt(u32, &random, .little),
-    }) catch unreachable; // unreachable: two u64 of at most sixteen hex digits, a u32 of eight and fourteen bytes fit 64
+    }) catch unreachable; // aegis: no-danger: two u64 of at most sixteen hex digits, a u32 of eight and fourteen bytes fit 64
 }
 
 //=========================================================================
@@ -406,8 +406,8 @@ pub const Cache = struct {
     /// from this cache.
     fn refresh(c: *Cache, guard: *const Guard, io: Io, store: anytype) ErrorNamespace.Error!*const Stacks {
         const h = guard.value();
-        const main_now = try Validity.of(io, store.commonDir());
-        const worktree_now: ?Validity = if (isLinked(store)) try Validity.of(io, store.gitDir()) else null;
+        const main_now = try Validity.of(io, store.commonDir().get());
+        const worktree_now: ?Validity = if (isLinked(store)) try Validity.of(io, store.gitDir().get()) else null;
         if (h.stacks) |*st| {
             if (Validity.same(h.main_seen, main_now) and
                 (!isLinked(store) or Validity.same(h.worktree_seen, worktree_now)))
@@ -417,12 +417,12 @@ pub const Cache = struct {
             // The stat moved; the list may not have. Reload only what did.
             h.reloads += 1;
             if (!Validity.same(h.main_seen, main_now)) {
-                const fresh = try reloadIn(c.gpa, io, store.commonDir(), store.objectFormat(), &st.main);
+                const fresh = try reloadIn(c.gpa, io, store.commonDir().get(), store.objectFormat(), &st.main);
                 st.main.arena.deinit();
                 st.main = fresh;
             }
             if (isLinked(store) and !Validity.same(h.worktree_seen, worktree_now)) {
-                const fresh = try reloadIn(c.gpa, io, store.gitDir(), store.objectFormat(), &st.worktree.?);
+                const fresh = try reloadIn(c.gpa, io, store.gitDir().get(), store.objectFormat(), &st.worktree.?);
                 st.worktree.?.arena.deinit();
                 st.worktree = fresh;
             }
@@ -442,20 +442,20 @@ const Validity = struct {
     present: bool,
     inode: Io.File.INode = 0,
     size: u64 = 0,
-    mtime: i96 = 0,
+    mtime: Io.Timestamp = Io.Timestamp.fromNanoseconds(0),
 
     fn of(io: Io, parent: Io.Dir) Error!Validity {
         const st = parent.statFile(io, "reftable/tables.list", .{}) catch |err| switch (err) {
             error.FileNotFound, error.NotDir => return .{ .present = false },
             else => return error.ReftableMissing,
         };
-        return .{ .present = true, .inode = st.inode, .size = st.size, .mtime = st.mtime.nanoseconds };
+        return .{ .present = true, .inode = st.inode, .size = st.size, .mtime = st.mtime };
     }
 
     fn same(seen: ?Validity, now: ?Validity) bool {
         const a = seen orelse return false;
         const b = now orelse return false;
-        return a.present == b.present and a.inode == b.inode and a.size == b.size and a.mtime == b.mtime;
+        return a.present == b.present and a.inode == b.inode and a.size == b.size and a.mtime.nanoseconds == b.mtime.nanoseconds;
     }
 };
 
@@ -468,9 +468,9 @@ const Stacks = struct {
     worktree: ?Stack,
 
     fn open(gpa: Allocator, io: Io, store: anytype) Error!Stacks {
-        var main = try loadIn(gpa, io, store.commonDir(), store.objectFormat());
+        var main = try loadIn(gpa, io, store.commonDir().get(), store.objectFormat());
         errdefer main.deinit();
-        const worktree: ?Stack = if (isLinked(store)) try loadIn(gpa, io, store.gitDir(), store.objectFormat()) else null;
+        const worktree: ?Stack = if (isLinked(store)) try loadIn(gpa, io, store.gitDir().get(), store.objectFormat()) else null;
         return .{ .main = main, .worktree = worktree };
     }
 
@@ -505,7 +505,7 @@ fn reloadIn(gpa: Allocator, io: Io, parent: Io.Dir, kind: Kind, old: ?*Stack) Er
 }
 
 fn isLinked(store: anytype) bool {
-    return store.gitDir().handle != store.commonDir().handle;
+    return store.gitDir().get().handle != store.commonDir().get().handle;
 }
 
 pub const internal = struct {

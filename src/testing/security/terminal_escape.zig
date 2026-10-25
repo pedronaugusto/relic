@@ -19,12 +19,12 @@ const progress = @import("../../report.zig").progress;
 const Prompts = struct {
     text: std.ArrayList(u8) = .empty,
 
-    fn ask(gpa: std.mem.Allocator, context: ?*anyopaque, field: credential.Field, prompt: []const u8) std.mem.Allocator.Error!?[]u8 {
+    fn ask(context: ?*anyopaque, field: credential.Field, prompt: []const u8, answer: *std.Io.Writer) (std.mem.Allocator.Error || std.Io.Writer.Error)!bool {
         const p: *Prompts = @ptrCast(@alignCast(context.?)); // safe: the context handed out with this function is a Prompts
         try p.text.appendSlice(std.testing.allocator, prompt);
         try p.text.append(std.testing.allocator, '\n');
-        const answer = try gpa.dupe(u8, if (field == .password) "askpass-password" else "user");
-        return answer;
+        try answer.writeAll(if (field == .password) "askpass-password" else "user");
+        return true;
     }
 };
 

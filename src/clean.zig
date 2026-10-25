@@ -133,7 +133,7 @@ pub const Outcome = struct {
 /// Remove the untracked files of `repo`'s working tree that `options`
 /// name.
 pub fn clean(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Error!Outcome {
-    const wt = repo.workDirectory() orelse return error.BareRepository;
+    const wt = (repo.workDirectory() orelse return error.BareRepository).get();
     const config = repo.configuration();
     if (try config.getBool("clean.requireforce", true) and options.force == .no and !options.dry_run)
         return error.ForceRequired;

@@ -234,7 +234,7 @@ const State = struct {
     have_quoted_cr: bool = false,
     any_quoted_cr: bool = false,
     message_id: ?[]const u8 = null,
-    transfer_encoding: TransferEncoding = .dontcare,
+    transfer_encoding: TransferEncoding = .dontcare, // aegis: no-danger: the header's value as read
     patch_lines: usize = 0,
     filter_stage: u1 = 0,
     header_stage: bool = true,
@@ -968,8 +968,8 @@ pub fn info(gpa: Allocator, mail: []const u8, options: InfoOptions) Self.Error!I
     if (rest) |line| try handleBody(&s, line);
     if (s.input_error) |err| return err;
 
-    result.message = s.log_message.items;
-    result.patch = s.patch.items;
+    result.message = try s.log_message.toOwnedSlice(a);
+    result.patch = try s.patch.toOwnedSlice(a);
     result.quoted_cr = s.any_quoted_cr;
     result.format_flowed = s.format_flowed;
     var out: std.ArrayList(u8) = .empty;
@@ -985,8 +985,8 @@ pub fn info(gpa: Allocator, mail: []const u8, options: InfoOptions) Self.Error!I
         } else if (std.mem.eql(u8, name, "From")) {
             try handleFrom(&s, try cleanupSpace(a, hdr));
             try out.print(a, "Author: {s}\nEmail: {s}\n", .{ s.name.items, s.email.items });
-            result.author = s.name.items;
-            result.email = s.email.items;
+            result.author = try s.name.toOwnedSlice(a);
+            result.email = try s.email.toOwnedSlice(a);
         } else {
             const v = try cleanupSpace(a, hdr);
             try out.print(a, "{s}: {s}\n", .{ name, v });
@@ -994,7 +994,7 @@ pub fn info(gpa: Allocator, mail: []const u8, options: InfoOptions) Self.Error!I
         }
     }
     try out.append(a, '\n');
-    result.info = out.items;
+    result.info = try out.toOwnedSlice(a);
     return result;
 }
 

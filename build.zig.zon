@@ -3,8 +3,8 @@
     .version = "0.29.1",
     .dependencies = .{
         .aegis = .{
-            .url = "git+https://github.com/pedronaugusto/aegis?ref=v0.1.14#5852ab956e97a47926af73abbb7dced5361f9267",
-            .hash = "aegis-0.1.14-rsxouiwFCACpt6FVOECFUhpjUaetlNneWpaDTj95q514",
+            .url = "git+https://github.com/pedronaugusto/aegis?ref=v0.1.17#58751d5713c134b890d0fe0e65be95c289b84983",
+            .hash = "aegis-0.1.17-rsxouvg5CABaJmNEkRXQIkVJ6JqVOG7NN60ctSBvSzO_",
         },
 
         .conduit = .{
@@ -70,8 +70,8 @@
     },
     .dev_dependencies = .{
         .preflight = .{
-            .url = "git+https://github.com/pedronaugusto/preflight?ref=v0.15.2#a4b47b2143ce3c057044532ba5af7205a5d078b1",
-            .hash = "preflight-0.15.2-LX1ZwghlFAAdBXf7TAH-CEgjYs61REZkh2Q4wokFP-tx",
+            .url = "git+https://github.com/pedronaugusto/preflight?ref=v0.17.0#d4b591746fea0a2354322967f0513b2a43cd0b04",
+            .hash = "preflight-0.17.0-LX1ZwiU1EgCWQT4q8WKiwM-7LGFaQ1iuFgCgTh-fR6HF",
         },
 
         .shakedown = .{

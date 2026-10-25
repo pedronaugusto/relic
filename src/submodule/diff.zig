@@ -62,7 +62,7 @@ pub const DiffWriter = struct {
     }
 
     fn writeFn(io: Io, context: *anyopaque, w: *Io.Writer, change: diff.SubmoduleChange) diff.SubmoduleWriter.Error!void {
-        const d: *DiffWriter = @ptrCast(@alignCast(context)); // safe: `writer` makes the context from a DiffWriter
+        const d: *DiffWriter = @ptrCast(@alignCast(context)); // aegis: no-danger: `writer` makes the context from a DiffWriter
         var arena_instance: std.heap.ArenaAllocator = .init(d.gpa);
         defer arena_instance.deinit();
         return d.write(arena_instance.allocator(), io, w, change);
@@ -125,7 +125,7 @@ pub const DiffWriter = struct {
         });
         var attrs: ?attributes.Attrs = if (sub.workDirectory() != null) try sub.loadAttrs(io) else null;
         defer if (attrs) |*x| x.deinit();
-        const drivers: driver_mod.Drivers = .{ .attrs = if (attrs) |*x| x else null, .work_dir = sub.workDirectory(), .config = config };
+        const drivers: driver_mod.Drivers = .{ .attrs = if (attrs) |*x| x else null, .work_dir = if (sub.workDirectory()) |work| work.get() else null, .config = config };
         var nested = try DiffWriter.init(d.gpa, sub, d.programs);
         const textconv: ?textconv_mod.Textconv = if (d.programs) |p| .{ .programs = p } else null;
         const external: ?external_mod.External = if (d.programs) |p| .{ .programs = p, .command = try external_mod.configured(config) } else null;
@@ -144,7 +144,7 @@ pub const DiffWriter = struct {
 /// finds it: its working tree's `.git`, else the one `.gitmodules` names
 /// it by in `modules`; `null` when there is none, or it does not open.
 fn open(gpa: Allocator, io: Io, repo: *Repository, path: []const u8) ?Repository {
-    const wt = repo.workDirectory() orelse return null;
+    const wt = (repo.workDirectory() orelse return null).get();
     if (gitlink.isRepository(gpa, io, wt, path) catch false) {
         return submodule.openRepository(gpa, io, repo, .{ .path = path, .name = path }, .{}) catch null;
     }

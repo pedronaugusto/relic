@@ -35,7 +35,7 @@ test "received pack survives prune before references are published" {
             defer target.deinit();
             var repo = try repo_mod.Repository.open(gpa, io, target.dir, .{});
             defer repo.deinit(io);
-            var dir = try repo.objectDatabase().objectsDirectory().openDir(io, "pack", .{ .iterate = true });
+            var dir = try repo.objectDatabase().objectsDirectory().get().openDir(io, "pack", .{ .iterate = true });
             defer dir.close(io);
             var reader: Io.Reader = .fixed(bytes);
             var received = try repo.objectDatabase().receivePack(io, &reader, .{});
@@ -219,7 +219,7 @@ test "local receive owns a keep token with default receive options" {
             defer gpa.free(path);
             var session = try transport_mod.Session.open(gpa, io, path, .{ .service = .upload_pack, .kind = repository.objectFormat() }, .{ .local_copy = true });
             defer session.deinit(io);
-            var pack_dir = try repository.objectDatabase().objectsDirectory().openDir(io, "pack", .{ .iterate = true });
+            var pack_dir = try repository.objectDatabase().objectsDirectory().get().openDir(io, "pack", .{ .iterate = true });
             defer pack_dir.close(io);
             const oid = try Oid.parse(repository.objectFormat(), head);
             var fetched = try session.fetch(gpa, io, .{ .db = repository.objectDatabase(), .pack_dir = pack_dir, .request = .{ .wants = &.{oid}, .tips = &.{} } }, .{});

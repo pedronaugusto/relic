@@ -114,8 +114,8 @@ const Pair = struct {
         const index = &locked_index.index;
         var arena: std.heap.ArenaAllocator = .init(gpa);
         defer arena.deinit();
-        const source = (try fsmonitor.configured(arena.allocator(), io, repo.configuration(), .{ .git_dir = repo.gitDirectory(), .work_tree = repo.workDirectory().? }, .{ .environ = &pair.env })).?;
-        var result = try worktree.status(gpa, io, repo.workDirectory().?, .{ .index = index, .db = repo.objectDatabase() }, .{
+        const source = (try fsmonitor.configured(arena.allocator(), io, repo.configuration(), .{ .git_dir = repo.gitDirectory().get(), .work_tree = repo.workDirectory().?.get() }, .{ .environ = &pair.env })).?;
+        var result = try worktree.status(gpa, io, repo.workDirectory().?.get(), .{ .index = index, .db = repo.objectDatabase() }, .{
             .rules = try repo.worktreeRules(),
             .head_tree = try repo.headTree(io),
             .untracked = untracked,
@@ -333,7 +333,7 @@ test "a program's own change source decides what status looks at" {
             var locked_index = try repo.lockIndex(io_);
             defer locked_index.deinit(io_);
             const index = &locked_index.index;
-            var result = try worktree.status(g, io_, repo.workDirectory().?, .{ .index = index, .db = repo.objectDatabase() }, .{
+            var result = try worktree.status(g, io_, repo.workDirectory().?.get(), .{ .index = index, .db = repo.objectDatabase() }, .{
                 .rules = try repo.worktreeRules(),
                 .head_tree = try repo.headTree(io_),
                 .untracked = untracked,

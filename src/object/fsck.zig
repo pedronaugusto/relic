@@ -25,6 +25,7 @@
 
 const ErrorNamespace = @This();
 const std = @import("std");
+const aegis = @import("aegis");
 const decimal = @import("../text.zig").decimal;
 const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
@@ -355,7 +356,7 @@ pub const Rules = struct {
     /// git reads `fsck.skipList`.
     pub fn readSkipList(r: *Rules, gpa: Allocator, io: Io, list: SkipListAt, path: []const u8) LoadError!void {
         const kind = list.kind;
-        const text_ = list.dir.readFileAlloc(io, path, gpa, .limited(1 << 30)) catch |err| switch (err) {
+        const text_ = aegis.own.readFile(io, list.dir, path, gpa, aegis.units.Bytes(u64).fromRaw(1 << 30)) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Canceled => return error.Canceled,
             else => return error.SkipListUnreadable,
@@ -537,12 +538,12 @@ pub const ToWarnings = struct {
     }
 
     fn noteFinding(context: *anyopaque, finding: Finding) Allocator.Error!void {
-        const t: *ToWarnings = @ptrCast(@alignCast(context)); // safe: the context is the ToWarnings the sink was made from
+        const t: *ToWarnings = @ptrCast(@alignCast(context)); // aegis: no-danger: the context is the ToWarnings the sink was made from
         try note(t.warnings, finding);
     }
 
     fn noteUnknown(context: *anyopaque, name: []const u8) Allocator.Error!void {
-        const t: *ToWarnings = @ptrCast(@alignCast(context)); // safe: the context is the ToWarnings the sink was made from
+        const t: *ToWarnings = @ptrCast(@alignCast(context)); // aegis: no-danger: the context is the ToWarnings the sink was made from
         try warning.note(t.warnings, .{ .fsck_unknown_message = name });
     }
 };
@@ -792,7 +793,7 @@ const TreeEntry = struct {
     len: usize,
 
     fn oidValue(e: TreeEntry, kind: Kind) Oid {
-        return Oid.fromRaw(kind, e.oid) catch unreachable; // unreachable: decodeEntry took exactly rawLen bytes
+        return Oid.fromRaw(kind, e.oid) catch unreachable; // aegis: no-danger: decodeEntry took exactly rawLen bytes
     }
 };
 
@@ -1247,12 +1248,12 @@ const Collected = struct {
     }
 
     fn noteProblem(context: *anyopaque, finding: Finding) Allocator.Error!void {
-        const c: *Collected = @ptrCast(@alignCast(context)); // safe: the context is the Collected the sink was made from
+        const c: *Collected = @ptrCast(@alignCast(context)); // aegis: no-danger: the context is the Collected the sink was made from
         try c.items.append(c.gpa, finding.problem.?);
     }
 
     fn unknownName(context: *anyopaque, name: []const u8) Allocator.Error!void {
-        const c: *Collected = @ptrCast(@alignCast(context)); // safe: the context is the Collected the sink was made from
+        const c: *Collected = @ptrCast(@alignCast(context)); // aegis: no-danger: the context is the Collected the sink was made from
         try c.unknown.append(c.gpa, try c.gpa.dupe(u8, name));
     }
 };

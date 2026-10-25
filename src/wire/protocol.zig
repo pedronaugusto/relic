@@ -38,7 +38,7 @@ pub const session_id_len = 48;
 /// as git writes its, then random bits where git names the host and the
 /// process, which say as surely that two are not the same.
 pub fn sessionId(io: Io, buf: *[session_id_len]u8) []const u8 {
-    const ns = Io.Clock.real.now(io).nanoseconds;
+    const ns = Io.Clock.real.now(io).nanoseconds; // aegis: no-danger: trace2's session id writes the time to the microsecond, split from nanoseconds here
     const secs: u64 = @intCast(@max(0, @divFloor(ns, std.time.ns_per_s)));
     const micros: u64 = @intCast(@divFloor(@mod(ns, std.time.ns_per_s), std.time.ns_per_us));
     const epoch: std.time.epoch.EpochSeconds = .{ .secs = secs };
@@ -240,7 +240,7 @@ pub fn readAdvertisement(gpa: Allocator, conn: *Connection, kind: ?hash.Kind) Se
         }
         try refs.append(arena, .{ .name = try arena.dupe(u8, name), .oid = oid });
     }
-    adv.capabilities = capabilities.items;
+    adv.capabilities = try capabilities.toOwnedSlice(arena);
     if (adv.version == .v2) {
         if (adv.value("object-format")) |format| {
             adv.kind = hash.Kind.parse(format) catch return error.UnknownObjectFormat;
@@ -256,8 +256,8 @@ pub fn readAdvertisement(gpa: Allocator, conn: *Connection, kind: ?hash.Kind) Se
     for (refs.items) |*ref| {
         if (adv.symrefTarget(ref.name)) |target| ref.symref_target = target;
     }
-    adv.refs = refs.items;
-    adv.shallow = shallow.items;
+    adv.refs = try refs.toOwnedSlice(arena);
+    adv.shallow = try shallow.toOwnedSlice(arena);
     return adv;
 }
 
@@ -329,7 +329,7 @@ pub fn listRefs(gpa: Allocator, conn: *Connection, adv: *const Advertisement, op
                 try refs.append(arena, .{ .name = "HEAD", .oid = .zero(adv.kind), .symref_target = try arena.dupe(u8, target), .unborn = true });
             }
         }
-        list.refs = refs.items;
+        list.refs = try refs.toOwnedSlice(arena);
         return list;
     }
 
@@ -360,7 +360,7 @@ pub fn listRefs(gpa: Allocator, conn: *Connection, adv: *const Advertisement, op
         }
         try refs.append(arena, try parseLsRefsLine(arena, adv.kind, data));
     }
-    list.refs = refs.items;
+    list.refs = try refs.toOwnedSlice(arena);
     return list;
 }
 
@@ -682,7 +682,7 @@ pub const Fake = struct {
 
     fn self(context: *anyopaque, c: *Connection) *Fake {
         _ = context;
-        return @alignCast(@fieldParentPtr("connection", c)); // safe: this vtable is installed only on a Fake's own connection
+        return @alignCast(@fieldParentPtr("connection", c)); // aegis: no-danger: this vtable is installed only on a Fake's own connection
     }
 
     fn advertisement(context: *anyopaque, c: *Connection) connection.Error!*Io.Reader {

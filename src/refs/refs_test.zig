@@ -9,6 +9,7 @@ const Io = std.Io;
 const refs = @import("refs.zig");
 const names = @import("../names.zig").ref;
 const hash = @import("../hash/hash.zig");
+const fs = @import("../fs/fs.zig");
 const repo_mod = @import("../repo/repo.zig");
 const rev_parse = @import("../repo/rev_parse.zig");
 const commit_mod = @import("../commit/commit.zig");
@@ -420,7 +421,9 @@ test "an edit to a symbolic value releases its target when the transaction canno
         fn run(gpa: Allocator) !void {
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
-            var store: refs.Store = try .init(gpa, .sha1, tmp.dir, tmp.dir, .{});
+            var held_store = fs.OwnedDir.init(try tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true }));
+            defer held_store.deinit(std.testing.io);
+            var store: refs.Store = try .init(gpa, .sha1, held_store.lend(), held_store.lend(), .{});
             defer store.deinit();
             var tx = store.begin(gpa);
             defer tx.deinit(std.testing.io);

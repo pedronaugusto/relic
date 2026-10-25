@@ -3413,8 +3413,8 @@ test "adding a resolved file replaces its conflict and remembers the stages, as 
                     var rules = try repo.worktreeRules();
                     rules.ignore = &ignore;
                     rules.attrs = &attrs;
-                    _ = try worktree.addAll(gpa, io, repo.workDirectory().?, .{ .index = &index, .db = repo.objectDatabase() }, .{ .rules = rules });
-                    try index.write(io, repo.gitDirectory(), "index", .{});
+                    _ = try worktree.addAll(gpa, io, repo.workDirectory().?.get(), .{ .index = &index, .db = repo.objectDatabase() }, .{ .rules = rules });
+                    try index.write(io, repo.gitDirectory().get(), "index", .{});
                 }
                 try expectSameState(&pair, io, &merge_state, &main_logs);
             }

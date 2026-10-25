@@ -64,15 +64,15 @@ test "commit graph writing agrees byte for byte with git, including overflow and
             try repo.exec(io, if (version == 0) &.{ "commit-graph", "write", "--reachable" } else &.{ "-c", config, "commit-graph", "write", "--reachable", "--changed-paths" });
             const expected = try repo.readFile(io, ".git/objects/info/commit-graph");
             defer gpa.free(expected);
-            try db.objectsDirectory().deleteFile(io, "info/commit-graph");
+            try db.objectsDirectory().get().deleteFile(io, "info/commit-graph");
             _ = try ops.writeCommitGraph(gpa, io, &db, &.{head}, .{ .changed_paths = if (version == 0) null else .{ .version = version } });
             try sameFile(&repo, ".git/objects/info/commit-graph", expected);
             try repo.exec(io, &.{ "commit-graph", "verify" });
-            var parsed = (try graph.Graph.open(gpa, io, db.objectsDirectory(), kind)).?;
+            var parsed = (try graph.Graph.open(gpa, io, db.objectsDirectory().get(), kind)).?;
             defer parsed.deinit();
             try parsed.verify();
             try std.testing.expectEqual(@as(u32, 9), parsed.count);
-            try db.objectsDirectory().deleteFile(io, "info/commit-graph");
+            try db.objectsDirectory().get().deleteFile(io, "info/commit-graph");
         }
     }
 }
@@ -122,7 +122,7 @@ test "split commit graph chains and merge thresholds agree byte for byte with gi
             defer gpa.free(path);
             try expected_files.append(gpa, try repo.readFile(io, path));
         }
-        try db.objectsDirectory().deleteFile(io, "info/commit-graphs/commit-graph-chain");
+        try db.objectsDirectory().get().deleteFile(io, "info/commit-graphs/commit-graph-chain");
         try repo.writeFile(io, ".git/objects/info/commit-graphs/commit-graph-chain", before);
         before_hashes.reset();
         var before_i: usize = 0;
@@ -147,7 +147,7 @@ test "split commit graph chains and merge thresholds agree byte for byte with gi
             try sameFile(&repo, path, expected_files.items[i]);
         }
         try repo.exec(io, &.{ "commit-graph", "verify" });
-        var parsed = (try graph.Graph.open(gpa, io, db.objectsDirectory(), .sha1)).?;
+        var parsed = (try graph.Graph.open(gpa, io, db.objectsDirectory().get(), .sha1)).?;
         defer parsed.deinit();
         parsed.verify() catch |err| {
             std.debug.print("verify {s}: {s}\n", .{ @tagName(mode), @errorName(err) });
@@ -199,11 +199,11 @@ test "MIDX object selection, RIDX, BTMP and its bitmap agree byte for byte with 
     try repo.exec(io, &.{ "multi-pack-index", "write" });
     const plain = try repo.readFile(io, ".git/objects/pack/multi-pack-index");
     defer gpa.free(plain);
-    try db.objectsDirectory().deleteFile(io, "pack/multi-pack-index");
+    try db.objectsDirectory().get().deleteFile(io, "pack/multi-pack-index");
     _ = try ops.writeMidx(gpa, io, &db, .{});
     try sameFile(&repo, ".git/objects/pack/multi-pack-index", plain);
     try repo.exec(io, &.{ "multi-pack-index", "verify" });
-    try db.objectsDirectory().deleteFile(io, "pack/multi-pack-index");
+    try db.objectsDirectory().get().deleteFile(io, "pack/multi-pack-index");
     for ([_]bool{ false, true }) |lookup| {
         const config: []const u8 = if (lookup) "pack.writeBitmapLookupTable=true" else "pack.writeBitmapLookupTable=false";
         try repo.exec(io, &.{ "-c", config, "multi-pack-index", "write", "--bitmap" });
@@ -213,7 +213,7 @@ test "MIDX object selection, RIDX, BTMP and its bitmap agree byte for byte with 
         defer gpa.free(path);
         const expected_bitmap = try repo.readFile(io, path);
         defer gpa.free(expected_bitmap);
-        try db.objectsDirectory().deleteFile(io, "pack/multi-pack-index");
+        try db.objectsDirectory().get().deleteFile(io, "pack/multi-pack-index");
         _ = try ops.writeMidxBitmap(gpa, io, &db, .{ .tips = &.{head}, .midx_options = .{} }, .{ .lookup_table = lookup });
         try sameFile(&repo, ".git/objects/pack/multi-pack-index", expected);
         try sameFile(&repo, path, expected_bitmap);
@@ -223,7 +223,7 @@ test "MIDX object selection, RIDX, BTMP and its bitmap agree byte for byte with 
         try std.testing.expectEqual(@as(u64, 18), count.commits);
         try std.testing.expectEqual(@as(u64, 54), count.total());
         try std.testing.expect(db.stats.bitmap_hits > 0);
-        try db.objectsDirectory().deleteFile(io, "pack/multi-pack-index");
+        try db.objectsDirectory().get().deleteFile(io, "pack/multi-pack-index");
         try repo.dir.deleteFile(io, path);
     }
 }
@@ -250,7 +250,7 @@ test "pack bitmap bytes, XORs, hashes, lookup table and accelerated counts agree
         // git writes these bytes from 2.55 on; every git reads them.
         if (try testgit.gitAtLeast(gpa, io, 2, 55)) try sameFile(&repo, path, expected);
         try repo.exec(io, &.{ "rev-list", "--test-bitmap", "HEAD" });
-        var store = (try bitmap_store.Store.open(gpa, io, db.objectsDirectory(), .sha1)).?;
+        var store = (try bitmap_store.Store.open(gpa, io, db.objectsDirectory().get(), .sha1)).?;
         defer store.deinit();
         const head_words = (try store.reach(gpa, head)).?;
         defer gpa.free(head_words);
@@ -294,7 +294,7 @@ test "MIDX repack and expire retain kept packs and match git's two-step semantic
         defer git_dir.close(io);
         var db = try odb.Odb.open(gpa, io, git_dir, .sha1, .{});
         defer db.deinit(io);
-        const dir = try db.objectsDirectory().openDir(io, "pack", .{ .iterate = true });
+        const dir = try db.objectsDirectory().get().openDir(io, "pack", .{ .iterate = true });
         defer dir.close(io);
         var before = (try midx.Index.open(gpa, io, dir, .sha1)).?;
         defer before.deinit();
@@ -386,7 +386,7 @@ test "preferred pack duplicate selection agrees byte for byte with git" {
     defer git_dir.close(io);
     var db = try odb.Odb.open(gpa, io, git_dir, .sha1, .{});
     defer db.deinit(io);
-    const packs = try db.objectsDirectory().openDir(io, "pack", .{ .iterate = true });
+    const packs = try db.objectsDirectory().get().openDir(io, "pack", .{ .iterate = true });
     defer packs.close(io);
     var iterator = packs.iterate();
     var preferred: ?[]u8 = null;

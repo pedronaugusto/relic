@@ -154,7 +154,7 @@ pub fn move(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Er
     if (options.sources.len == 0) return error.NoSource;
     var outcome: Outcome = .{ .arena = .init(gpa) };
     errdefer outcome.deinit();
-    const wt = repo.workDirectory() orelse return error.BareRepository;
+    const wt = (repo.workDirectory() orelse return error.BareRepository).get();
     const ignore_case = repo.settings().ignore_case;
 
     var locked = try repo.lockIndex(io);
@@ -163,7 +163,7 @@ pub fn move(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Er
 
     const settings = try sparse_checkout.settings(io, repo);
     var cone_patterns: ?sparse.Patterns = if (settings.enabled)
-        try sparse.Patterns.load(gpa, io, repo.gitDirectory(), .{ .case_fold = ignore_case, .cone = settings.cone })
+        try sparse.Patterns.load(gpa, io, repo.gitDirectory().get(), .{ .case_fold = ignore_case, .cone = settings.cone })
     else
         null;
     defer if (cone_patterns) |*p| p.deinit();
@@ -200,7 +200,7 @@ pub fn move(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Er
     if (options.dry_run) {
         var renamed: std.ArrayList(Rename) = .empty;
         for (mover.items.items) |item| try renamed.append(mover.arena, .{ .source = item.source, .destination = item.destination });
-        outcome.renamed = renamed.items;
+        outcome.renamed = try renamed.toOwnedSlice(mover.arena);
         return outcome;
     }
     try mover.apply();
@@ -293,8 +293,8 @@ const Mover = struct {
             }
             _ = m.items.orderedRemove(i);
         }
-        m.outcome.skipped = m.skipped.items;
-        m.outcome.sparse_only = m.sparse_only.items;
+        m.outcome.skipped = try m.skipped.toOwnedSlice(m.arena);
+        m.outcome.sparse_only = try m.sparse_only.toOwnedSlice(m.arena);
         return null;
     }
 
@@ -436,7 +436,7 @@ const Mover = struct {
             if (mode.working_directory or mode.skip_worktree_dir) continue;
             try m.moveEntry(item, rules);
         }
-        m.outcome.renamed = renamed.items;
+        m.outcome.renamed = try renamed.toOwnedSlice(m.arena);
 
         // `remove_empty_src_dirs`: a directory everything moved out of goes,
         // whatever is left in it.
@@ -483,7 +483,7 @@ const Mover = struct {
                 fs.deleteFile(io, wt, src) catch |err| std.log.warn("unable to unlink '{s}': {t}", .{ src, err });
             } else {
                 try m.dirty.append(m.arena, dst);
-                m.outcome.dirty = m.dirty.items;
+                m.outcome.dirty = try m.dirty.toOwnedSlice(m.arena);
                 if (std.Io.Dir.path.dirnamePosix(dst)) |parent| try fs.makeDirs(io, wt, parent, m.repo.sharedPermissions());
                 try fs.rename(io, wt, src, dst);
             }

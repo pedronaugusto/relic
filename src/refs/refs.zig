@@ -20,6 +20,7 @@ const builtin = @import("builtin");
 const stack_engine = @import("reftable/stack/transaction.zig");
 
 const std = @import("std");
+const aegis = @import("aegis");
 const ctype = @import("../text.zig").ctype;
 const glob = @import("../text.zig").glob;
 const shakedown = @import("shakedown");
@@ -140,7 +141,7 @@ pub const Store = struct {
     state: *state_mod.State,
     /// Open over an already-opened pair of directories, which the store borrows.
     /// The returned owner must be released with `deinit`.
-    pub fn init(gpa: Allocator, kind: Kind, git_dir: Io.Dir, common_dir: Io.Dir, options: Options) Allocator.Error!Store {
+    pub fn init(gpa: Allocator, kind: Kind, git_dir: fs.LentDir, common_dir: fs.LentDir, options: Options) Allocator.Error!Store {
         const state = try state_mod.create(gpa, kind, options.format, options.reftable, git_dir, common_dir);
         state_mod.get(state).shared = options.shared;
         state_mod.get(state).fsync = options.fsync;
@@ -180,11 +181,12 @@ pub const Store = struct {
         return state_mod.get(store.state).shared;
     }
 
-    /// Borrowed directories; their handles stay owned by the caller of init.
-    pub fn gitDir(store: *const Store) Io.Dir {
+    /// The directories `init` was lent, lent on: their owner is the caller
+    /// of `init`.
+    pub fn gitDir(store: *const Store) fs.LentDir {
         return state_mod.get(store.state).git_dir;
     }
-    pub fn commonDir(store: *const Store) Io.Dir {
+    pub fn commonDir(store: *const Store) fs.LentDir {
         return state_mod.get(store.state).common_dir;
     }
 
@@ -261,7 +263,7 @@ pub const Store = struct {
     /// `worktrees/<id>`, or the common directory for the main worktree.
     /// It writes that worktree's own refs and logs, which this store
     /// refuses. The directory is borrowed; release with `deinit`.
-    pub fn sibling(store: *const Store, git_dir: Io.Dir) Allocator.Error!Store {
+    pub fn sibling(store: *const Store, git_dir: fs.LentDir) Allocator.Error!Store {
         const d = state_mod.get(store.state);
         return Store.init(d.gpa, d.kind, git_dir, d.common_dir, .{
             .format = d.format,
@@ -287,7 +289,7 @@ pub const Store = struct {
     /// shares. Pseudo-refs other than `HEAD`, such as `FETCH_HEAD`, are not
     /// covered. A folder in the list need not exist yet.
     pub fn watchScopes(store: *const Store) WatchScopes {
-        const linked = store.gitDir().handle != store.commonDir().handle;
+        const linked = store.gitDir().get().handle != store.commonDir().get().handle;
         var scopes: WatchScopes = .{};
         if (store.refFormat() == .reftable) {
             // every ref is in a stack, `HEAD` too: the shared stack, and a
@@ -312,7 +314,7 @@ pub const Store = struct {
     /// root refs, `refs/bisect/`, `refs/worktree/`, `refs/rewritten/`), the
     /// shared one otherwise. Private to the store: a caller reads and
     /// writes refs and their logs through it, never the files.
-    fn dirFor(store: *const Store, name: []const u8) Io.Dir {
+    fn dirFor(store: *const Store, name: []const u8) fs.LentDir {
         if (names.isCurrentWorktree(name)) return store.gitDir();
         return store.commonDir();
     }
@@ -347,7 +349,7 @@ pub const Store = struct {
     }
 
     fn readLoose(store: *const Store, gpa: Allocator, io: Io, name: []const u8) ReadError!?Ref {
-        return store.readLooseAt(gpa, io, store.dirFor(name), name);
+        return store.readLooseAt(gpa, io, store.dirFor(name).get(), name);
     }
 
     /// The loose ref at `path` under `dir`, or `null`.
@@ -558,11 +560,11 @@ pub const Store = struct {
         broken: *std.ArrayList(Broken),
         prefix: []const u8,
     ) ReadError!void {
-        const linked = store.gitDir().handle != store.commonDir().handle;
-        try store.walkLooseIn(arena, io, store.commonDir(), "refs", out, broken, prefix, linked);
+        const linked = store.gitDir().get().handle != store.commonDir().get().handle;
+        try store.walkLooseIn(arena, io, store.commonDir().get(), "refs", out, broken, prefix, linked);
         if (!linked) return;
         for (per_worktree_folders) |folder| {
-            try store.walkLooseIn(arena, io, store.gitDir(), folder, out, broken, prefix, false);
+            try store.walkLooseIn(arena, io, store.gitDir().get(), folder, out, broken, prefix, false);
         }
     }
 
@@ -668,7 +670,7 @@ pub const Store = struct {
     /// file is an empty listing. `read` and `list` go through the store's
     /// snapshot of the file instead, which they check with a stat.
     pub fn readPacked(store: *const Store, gpa: Allocator, io: Io) ReadError!PackedListing {
-        return packed_cache.read(gpa, io, store.commonDir(), store.objectFormat());
+        return packed_cache.read(gpa, io, store.commonDir().get(), store.objectFormat());
     }
 
     /// Parse `packed-refs` bytes this takes ownership of, including on error.
@@ -679,7 +681,7 @@ pub const Store = struct {
     /// The store's snapshot of `packed-refs`, brought up to date, with its
     /// lock held: give it back with `release`.
     fn acquirePacked(store: *const Store, io: Io) ReadError!packed_cache.Cache.Snapshot {
-        return state_mod.get(store.state).packed_refs.?.snapshot(io, store.commonDir(), store.objectFormat());
+        return state_mod.get(store.state).packed_refs.?.snapshot(io, store.commonDir().get(), store.objectFormat());
     }
 
     /// The object `packed-refs` names for `name`, or `null`.
@@ -708,7 +710,7 @@ pub const Store = struct {
     /// removal and lose the name that holds them now.
     fn lockPacked(store: *const Store, io: Io, buffer: []u8) TransactionError!fs.LockFile {
         const data = state_mod.get(store.state);
-        return fs.LockFile.open(data.gpa, io, store.commonDir(), .{ .sub_path = "packed-refs", .buffer = buffer }, .{
+        return fs.LockFile.open(data.gpa, io, store.commonDir().get(), .{ .sub_path = "packed-refs", .buffer = buffer }, .{
             .shared = store.sharedPermissions(),
             .sync = store.referenceSync(),
             .sync_directory = store.referenceSync() != .none,
@@ -824,7 +826,7 @@ pub const Store = struct {
     /// git's `should_pack_refs` for `--auto`: whether the loose refs to
     /// pack reach `log2(size of packed-refs / 100) * 5`, at least 16.
     fn packingDue(store: *const Store, arena: Allocator, io: Io, options: PackOptions) TransactionError!bool {
-        const size: u64 = if (store.commonDir().statFile(io, "packed-refs", .{})) |stat| stat.size else |err| switch (err) {
+        const size: u64 = if (store.commonDir().get().statFile(io, "packed-refs", .{})) |stat| stat.size else |err| switch (err) {
             error.FileNotFound => 0,
             else => |e| return e,
         };
@@ -836,14 +838,14 @@ pub const Store = struct {
     /// file's lock, the file goes if it still holds `oid`, and so do the
     /// directories that leaves empty; the packed entry and the log stay.
     fn pruneLoose(store: *const Store, io: Io, name: []const u8, oid: Oid) TransactionError!void {
-        if (try store.removeLooseHolding(io, name, oid)) removeEmptyParents(io, store.dirFor(name), name);
+        if (try store.removeLooseHolding(io, name, oid)) removeEmptyParents(io, store.dirFor(name).get(), name);
     }
 
     /// Remove `name`'s loose file under its lock when it holds `oid`;
     /// whether it went.
     fn removeLooseHolding(store: *const Store, io: Io, name: []const u8, oid: Oid) TransactionError!bool {
         const data = state_mod.get(store.state);
-        const dir = store.dirFor(name);
+        const dir = store.dirFor(name).get();
         var buffer: [max_loose_ref]u8 = undefined;
         var lock = fs.LockFile.open(data.gpa, io, dir, .{ .sub_path = name, .buffer = &buffer }, .{ .shared = store.sharedPermissions(), .sync = store.referenceSync(), .on_contention = data.locks.loose, .write_pid = data.locks.pid_file }) catch |err| switch (err) {
             // Another writer has it: the ref is its to change, as git's
@@ -878,25 +880,25 @@ pub const Store = struct {
         const where = names.parseWorktreeRef(name);
         if (where.owner == .other) {
             var admin = (try store.openWorktree(io, name, where)) orelse return false;
-            defer admin.close(io);
-            return reflog.exists(gpa, io, admin, where.bare);
+            defer admin.deinit(io);
+            return reflog.exists(gpa, io, admin.lend().get(), where.bare);
         }
-        return reflog.exists(gpa, io, store.logDir(name, where), where.bare);
+        return reflog.exists(gpa, io, store.logDir(name, where).get(), where.bare);
     }
 
     /// The directory whose `logs/` holds the log of `name`, a ref of this
     /// worktree's, a shared one or the main worktree's.
-    fn logDir(store: *const Store, name: []const u8, where: names.WorktreeRef) Io.Dir {
+    fn logDir(store: *const Store, name: []const u8, where: names.WorktreeRef) fs.LentDir {
         return if (where.owner == .main) store.commonDir() else store.dirFor(name);
     }
 
     /// The administrative directory of the linked worktree `name` reaches,
     /// `worktrees/<id>`, opened, or `null` when there is no such worktree.
-    fn openWorktree(store: *const Store, io: Io, name: []const u8, where: names.WorktreeRef) Io.Dir.OpenError!?Io.Dir {
-        return store.commonDir().openDir(io, name[0 .. name.len - where.bare.len], .{}) catch |err| switch (err) {
-            error.FileNotFound, error.NotDir => null,
-            else => |e| e,
-        };
+    fn openWorktree(store: *const Store, io: Io, name: []const u8, where: names.WorktreeRef) Io.Dir.OpenError!?fs.OwnedDir {
+        return fs.OwnedDir.init(store.commonDir().get().openDir(io, name[0 .. name.len - where.bare.len], .{}) catch |err| switch (err) {
+            error.FileNotFound, error.NotDir => return null,
+            else => |e| return e,
+        });
     }
 
     pub const AppendInputs = value_mod.AppendInputs;
@@ -916,7 +918,7 @@ pub const Store = struct {
         // The message a transaction would write: collapsed as git collapses it.
         const text = try reflog.normalizeMessage(gpa, log.message);
         defer gpa.free(text);
-        return reflog.append(gpa, io, store.dirFor(name), .{ .ref = name, .old = old, .new = new, .who = log.who, .message = text, .shared = store.sharedPermissions(), .sync = store.referenceSync() });
+        return reflog.append(gpa, io, store.dirFor(name).get(), .{ .ref = name, .old = old, .new = new, .who = log.who, .message = text, .shared = store.sharedPermissions(), .sync = store.referenceSync() });
     }
 
     /// Errors from `readLog`.
@@ -931,10 +933,10 @@ pub const Store = struct {
             // A worktree that is not there has no log, which is an empty one.
             var admin = (try store.openWorktree(io, name, where)) orelse
                 return .{ .gpa = gpa, .bytes = try gpa.alloc(u8, 0), .entries = try gpa.alloc(reflog.Entry, 0) };
-            defer admin.close(io);
-            return reflog.read(gpa, io, admin, where.bare, store.objectFormat());
+            defer admin.deinit(io);
+            return reflog.read(gpa, io, admin.lend().get(), where.bare, store.objectFormat());
         }
-        return reflog.read(gpa, io, store.logDir(name, where), where.bare, store.objectFormat());
+        return reflog.read(gpa, io, store.logDir(name, where).get(), where.bare, store.objectFormat());
     }
 
     /// Which logs `logNames` lists.
@@ -956,13 +958,13 @@ pub const Store = struct {
         if (store.refFormat() == .reftable) return stack_engine.logNames(gpa, arena, io, store, options.every_worktree);
         var out: std.ArrayList([]const u8) = .empty;
         const linked = store.isLinked();
-        try walkLogs(arena, io, store.commonDir(), &out, if (linked) .shared else null, "");
-        if (linked) try walkLogs(arena, io, store.gitDir(), &out, .current, "");
+        try walkLogs(arena, io, store.commonDir().get(), &out, if (linked) .shared else null, "");
+        if (linked) try walkLogs(arena, io, store.gitDir().get(), &out, .current, "");
         if (options.every_worktree) {
-            if (linked) try walkLogs(arena, io, store.commonDir(), &out, .current, "main-worktree/");
+            if (linked) try walkLogs(arena, io, store.commonDir().get(), &out, .current, "main-worktree/");
             for (try store.otherWorktrees(arena, io)) |id| {
                 const prefix = try arena.print("worktrees/{s}/", .{id});
-                var admin = store.commonDir().openDir(io, prefix[0 .. prefix.len - 1], .{}) catch |err| switch (err) {
+                var admin = store.commonDir().get().openDir(io, prefix[0 .. prefix.len - 1], .{}) catch |err| switch (err) {
                     error.FileNotFound, error.NotDir => continue,
                     else => |e| return e,
                 };
@@ -976,7 +978,7 @@ pub const Store = struct {
 
     /// Whether this store is a linked worktree's.
     fn isLinked(store: *const Store) bool {
-        return store.gitDir().handle != store.commonDir().handle;
+        return store.gitDir().get().handle != store.commonDir().get().handle;
     }
 
     /// The ids of the linked worktrees other than this one, in `arena`:
@@ -984,12 +986,12 @@ pub const Store = struct {
     /// them, less the one this store was opened in.
     pub fn otherWorktrees(store: *const Store, arena: Allocator, io: Io) ReadLogError![]const []const u8 {
         var out: std.ArrayList([]const u8) = .empty;
-        var dir = store.commonDir().openDir(io, "worktrees", .{ .iterate = true }) catch |err| switch (err) {
+        var dir = store.commonDir().get().openDir(io, "worktrees", .{ .iterate = true }) catch |err| switch (err) {
             error.FileNotFound, error.NotDir => return out.items,
             else => |e| return e,
         };
         defer dir.close(io);
-        const own = if (store.isLinked()) try store.gitDir().stat(io) else null;
+        const own = if (store.isLinked()) try store.gitDir().get().stat(io) else null;
         var it: fs.Names = .init(dir, store.precomposeUnicode());
         while (try it.next(io)) |entry| {
             if (entry.kind != .directory) continue;
@@ -1030,7 +1032,7 @@ pub const Store = struct {
         if (!isRefName(name)) return error.InvalidRefName;
         try ownWorktree(name);
         if (store.refFormat() == .reftable) return stack_engine.createLog(gpa, io, store, name);
-        return reflog.create(gpa, io, store.dirFor(name), name, store.sharedPermissions());
+        return reflog.create(gpa, io, store.dirFor(name).get(), name, store.sharedPermissions());
     }
 
     /// How `expireLog` treats the entries it keeps.
@@ -1060,7 +1062,7 @@ pub const Store = struct {
         if (!isRefName(name)) return error.InvalidRefName;
         try ownWorktree(name);
         if (store.refFormat() == .reftable) return stack_engine.expireLog(gpa, io, store, keeper, options);
-        const dir = store.dirFor(name);
+        const dir = store.dirFor(name).get();
         if (std.Io.Dir.path.dirnamePosix(name)) |parent| {
             fs.makeDirs(io, dir, parent, store.sharedPermissions()) catch |err| switch (err) {
                 error.PathAlreadyExists => {},
@@ -1101,7 +1103,7 @@ pub const Store = struct {
         if (!isRefName(name)) return error.InvalidRefName;
         try ownWorktree(name);
         if (store.refFormat() == .reftable) return stack_engine.deleteLog(gpa, io, store, name);
-        const dir = store.dirFor(name);
+        const dir = store.dirFor(name).get();
         try reflog.delete(gpa, io, dir, name);
         const path = try reflog.pathFor(gpa, name);
         defer gpa.free(path);
@@ -1218,7 +1220,7 @@ pub const Store = struct {
             else
                 // `worktrees/<id>/<name>` is that worktree's file under the
                 // shared directory, path for path.
-                try store.readLooseAt(gpa, io, store.commonDir(), if (where.owner == .main) where.bare else name),
+                try store.readLooseAt(gpa, io, store.commonDir().get(), if (where.owner == .main) where.bare else name),
         };
         if (own) |value| return .{ .value = value, .from_packed = false };
         if (store.refFormat() == .files and (where.owner == .current or where.owner == .shared)) {
@@ -1292,7 +1294,7 @@ pub const RootRefs = struct {
         const arena = arena_instance.allocator();
         var entries: std.ArrayList(Named) = .empty;
         var broken: std.ArrayList(Broken) = .empty;
-        var it = store.gitDir().iterate();
+        var it = store.gitDir().get().iterate();
         while (try it.next(io)) |entry| {
             if (entry.kind != .file or !names.isRootRef(entry.name)) continue;
             const name = try arena.dupe(u8, entry.name);
@@ -1329,13 +1331,13 @@ pub const SpecialRefs = struct {
 
     /// Everything `ref` holds, every line, or `null` when it is not
     /// there. The bytes are the caller's.
-    pub fn readAll(s: SpecialRefs, gpa: Allocator, io: Io, ref: names.Special) Io.Dir.ReadFileAllocError!?[]u8 {
-        return fs.readFileAlloc(gpa, io, s.store.gitDir(), ref.name(), max_bytes);
+    pub fn readAll(s: SpecialRefs, gpa: Allocator, io: Io, ref: names.Special) aegis.own.ReadFileError!?[]u8 {
+        return fs.readFileAlloc(gpa, io, s.store.gitDir().get(), ref.name(), max_bytes);
     }
 
     /// Whether `ref` is there, as git's `file_exists` asks.
     pub fn exists(s: SpecialRefs, io: Io, ref: names.Special) bool {
-        s.store.gitDir().access(io, ref.name(), .{}) catch return false;
+        s.store.gitDir().get().access(io, ref.name(), .{}) catch return false;
         return true;
     }
 
@@ -1368,7 +1370,7 @@ pub const SpecialRefs = struct {
     /// `<ref>.lock`, waiting as long as git waits on a ref's lock.
     fn takeLock(s: SpecialRefs, gpa: Allocator, io: Io, ref: names.Special, buffer: []u8) TransactionError!fs.LockFile {
         const locks_now = s.store.locks();
-        return fs.LockFile.open(gpa, io, s.store.gitDir(), .{ .sub_path = ref.name(), .buffer = buffer }, .{
+        return fs.LockFile.open(gpa, io, s.store.gitDir().get(), .{ .sub_path = ref.name(), .buffer = buffer }, .{
             .on_contention = locks_now.loose,
             .sync = .none,
             .shared = s.store.sharedPermissions(),
@@ -1378,7 +1380,7 @@ pub const SpecialRefs = struct {
 
     /// Remove `ref`, which need not be there.
     pub fn delete(s: SpecialRefs, io: Io, ref: names.Special) Io.Dir.DeleteFileError!void {
-        s.store.gitDir().deleteFile(io, ref.name()) catch |err| switch (err) {
+        s.store.gitDir().get().deleteFile(io, ref.name()) catch |err| switch (err) {
             error.FileNotFound, error.NotDir => {},
             else => |e| return e,
         };
@@ -1442,7 +1444,7 @@ pub const RemoveError = ReadError || Io.Dir.DeleteTreeError || Io.Dir.DeleteFile
 /// `refs/heads` stubs beside it. `FETCH_HEAD` and the other special refs,
 /// files in either format, stay.
 pub fn removeOnDisk(gpa: Allocator, io: Io, store: *Store) RemoveError!void {
-    const dir = store.gitDir();
+    const dir = store.gitDir().get();
     switch (store.refFormat()) {
         .files => {
             var roots = try store.root().list(gpa, io);
@@ -1708,7 +1710,7 @@ pub const Transaction = struct {
         var to_check: std.ArrayList(usize) = .empty;
         defer to_check.deinit(tx.gpa);
         for (tx.edits.items, 0..) |*edit, i| {
-            const dir = tx.store.dirFor(edit.name);
+            const dir = tx.store.dirFor(edit.name).get();
             const own = edit.via == null;
             if (own and edit.new != null) {
                 // A loose ref where a directory of this one would be, or
@@ -1864,7 +1866,7 @@ pub const Transaction = struct {
     /// first conflict found, owned, or `null` when there is none.
     fn conflict(tx: *Transaction, io: Io, index: usize, existing: Existing) TransactionError!?[]u8 {
         const name = tx.edits.items[index].name;
-        const dir = tx.store.dirFor(name);
+        const dir = tx.store.dirFor(name).get();
         var end: usize = 0;
         while (std.mem.findScalarPos(u8, name, end + 1, '/')) |slash| : (end = slash) {
             const parent = name[0..slash];
@@ -2066,7 +2068,7 @@ pub const Transaction = struct {
                     // git's `create_ref_symlink`: the ref a link to its
                     // target's name, its lock given up with the rest; where
                     // no link can be made, the text after all.
-                    if (tx.store.preferSymlinkRefs() and symlinkRef(io, tx.store.dirFor(edit.name), edit.name, target)) continue;
+                    if (tx.store.preferSymlinkRefs() and symlinkRef(io, tx.store.dirFor(edit.name).get(), edit.name, target)) continue;
                     lock.writer().print("ref: {s}\n", .{target}) catch return error.WriteFailed;
                 },
             }
@@ -2074,7 +2076,7 @@ pub const Transaction = struct {
         }
         for (tx.edits.items) |edit| {
             if (edit.via != null or edit.new != null or edit.rejected) continue;
-            try reflog.delete(tx.gpa, io, tx.store.dirFor(edit.name), edit.name);
+            try reflog.delete(tx.gpa, io, tx.store.dirFor(edit.name).get(), edit.name);
         }
         if (tx.packed_rewrite) try tx.removeFromPacked(io);
         if (tx.packed_announced) {
@@ -2084,7 +2086,7 @@ pub const Transaction = struct {
         }
         for (tx.edits.items) |edit| {
             if (edit.via != null or edit.new != null or edit.rejected) continue;
-            tx.store.dirFor(edit.name).deleteFile(io, edit.name) catch |err| switch (err) {
+            tx.store.dirFor(edit.name).get().deleteFile(io, edit.name) catch |err| switch (err) {
                 error.FileNotFound => {},
                 else => |e| return e,
             };
@@ -2114,12 +2116,12 @@ pub const Transaction = struct {
                         break :blk Oid.zero(tx.store.objectFormat());
                     },
                 };
-                const exists = try reflog.exists(tx.gpa, io, tx.store.dirFor(edit.name), edit.name);
+                const exists = try reflog.exists(tx.gpa, io, tx.store.dirFor(edit.name).get(), edit.name);
                 if (!reflog.shouldLog(message.policy, edit.name, exists)) continue;
                 // An edit's own words, or the transaction's.
                 const own = if (source.message) |m| try reflog.normalizeMessage(tx.gpa, m) else null;
                 defer if (own) |t| tx.gpa.free(t);
-                try reflog.append(tx.gpa, io, tx.store.dirFor(edit.name), .{ .ref = edit.name, .old = old, .new = new, .who = message.who, .message = own orelse shared, .shared = tx.store.sharedPermissions(), .sync = tx.store.referenceSync() });
+                try reflog.append(tx.gpa, io, tx.store.dirFor(edit.name).get(), .{ .ref = edit.name, .old = old, .new = new, .who = message.who, .message = own orelse shared, .shared = tx.store.sharedPermissions(), .sync = tx.store.referenceSync() });
             }
         }
 
@@ -2129,7 +2131,7 @@ pub const Transaction = struct {
         // as git's cleanup removes them.
         for (tx.edits.items) |edit| {
             if (edit.via != null or edit.new != null or edit.rejected) continue;
-            const dir = tx.store.dirFor(edit.name);
+            const dir = tx.store.dirFor(edit.name).get();
             removeEmptyParents(io, dir, edit.name);
             const log_path = try reflog.pathFor(tx.gpa, edit.name);
             defer tx.gpa.free(log_path);
@@ -2258,7 +2260,9 @@ test "a loose ref is written, read and resolved" {
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
-    var store: Store = try .init(gpa, .sha1, tmp.dir, tmp.dir, .{});
+    var held_store = fs.OwnedDir.init(try tmp.dir.openDir(io, ".", .{ .iterate = true }));
+    defer held_store.deinit(io);
+    var store: Store = try .init(gpa, .sha1, held_store.lend(), held_store.lend(), .{});
     defer store.deinit();
     const oid = try Oid.parse(.sha1, &@as([40]u8, @splat('1')));
 
@@ -2303,7 +2307,9 @@ test "preparing an existing symbolic ref releases every parsed target" {
     var safe_allocator: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     const gpa = safe_allocator.allocator();
     {
-        var store: Store = try .init(gpa, .sha1, tmp.dir, tmp.dir, .{});
+        var held_store = fs.OwnedDir.init(try tmp.dir.openDir(io, ".", .{ .iterate = true }));
+        defer held_store.deinit(io);
+        var store: Store = try .init(gpa, .sha1, held_store.lend(), held_store.lend(), .{});
         defer store.deinit();
         var tx = store.begin(gpa);
         defer tx.deinit(io);
@@ -2319,7 +2325,9 @@ test "an expected value that does not hold changes nothing" {
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
-    var store: Store = try .init(gpa, .sha1, tmp.dir, tmp.dir, .{});
+    var held_store = fs.OwnedDir.init(try tmp.dir.openDir(io, ".", .{ .iterate = true }));
+    defer held_store.deinit(io);
+    var store: Store = try .init(gpa, .sha1, held_store.lend(), held_store.lend(), .{});
     defer store.deinit();
     const one = try Oid.parse(.sha1, &@as([40]u8, @splat('1')));
     const two = try Oid.parse(.sha1, &@as([40]u8, @splat('2')));
@@ -2355,7 +2363,9 @@ test "a whole transaction rolls back when one lock is held" {
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
-    var store: Store = try .init(gpa, .sha1, tmp.dir, tmp.dir, .{});
+    var held_store = fs.OwnedDir.init(try tmp.dir.openDir(io, ".", .{ .iterate = true }));
+    defer held_store.deinit(io);
+    var store: Store = try .init(gpa, .sha1, held_store.lend(), held_store.lend(), .{});
     defer store.deinit();
     const one = try Oid.parse(.sha1, &@as([40]u8, @splat('1')));
 
@@ -2382,7 +2392,9 @@ test "packed refs read, shadow and write" {
     const gpa = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    var store: Store = try .init(gpa, .sha1, tmp.dir, tmp.dir, .{});
+    var held_store = fs.OwnedDir.init(try tmp.dir.openDir(io, ".", .{ .iterate = true }));
+    defer held_store.deinit(io);
+    var store: Store = try .init(gpa, .sha1, held_store.lend(), held_store.lend(), .{});
     defer store.deinit();
 
     const one = try Oid.parse(.sha1, &@as([40]u8, @splat('1')));
@@ -2425,10 +2437,14 @@ test "a store parses packed-refs once, and again when the file is replaced" {
     const gpa = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    var store: Store = try .init(gpa, .sha1, tmp.dir, tmp.dir, .{});
+    var held_store = fs.OwnedDir.init(try tmp.dir.openDir(io, ".", .{ .iterate = true }));
+    defer held_store.deinit(io);
+    var store: Store = try .init(gpa, .sha1, held_store.lend(), held_store.lend(), .{});
     defer store.deinit();
     // Another writer: a store of its own over the same directory.
-    var other: Store = try .init(gpa, .sha1, tmp.dir, tmp.dir, .{});
+    var held_other = fs.OwnedDir.init(try tmp.dir.openDir(io, ".", .{ .iterate = true }));
+    defer held_other.deinit(io);
+    var other: Store = try .init(gpa, .sha1, held_other.lend(), held_other.lend(), .{});
     defer other.deinit();
     const cache = state_mod.get(store.state).packed_refs.?;
 
@@ -2468,7 +2484,9 @@ test "a listing takes the packed refs under its prefix and no others" {
     const gpa = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    var store: Store = try .init(gpa, .sha1, tmp.dir, tmp.dir, .{});
+    var held_store = fs.OwnedDir.init(try tmp.dir.openDir(io, ".", .{ .iterate = true }));
+    defer held_store.deinit(io);
+    var store: Store = try .init(gpa, .sha1, held_store.lend(), held_store.lend(), .{});
     defer store.deinit();
     // Out of order, as a hand-written file may be: the snapshot sorts it.
     try tmp.dir.writeFile(io, .{ .sub_path = "packed-refs", .data = "2222222222222222222222222222222222222222 refs/tags/b\n" ++
@@ -2491,7 +2509,9 @@ test "deleting a packed ref removes it from the packed file" {
     const gpa = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    var store: Store = try .init(gpa, .sha1, tmp.dir, tmp.dir, .{});
+    var held_store = fs.OwnedDir.init(try tmp.dir.openDir(io, ".", .{ .iterate = true }));
+    defer held_store.deinit(io);
+    var store: Store = try .init(gpa, .sha1, held_store.lend(), held_store.lend(), .{});
     defer store.deinit();
 
     const one = try Oid.parse(.sha1, &@as([40]u8, @splat('1')));
@@ -2521,9 +2541,9 @@ test "deleting a ref that is loose and packed at once removes both, as git does"
     try repo.exec(io, &.{ "commit", "-q", "--allow-empty", "-m", "two" });
     try repo.exec(io, &.{ "branch", "-f", "x", "HEAD" });
 
-    var git_dir = try repo.gitDir(io);
-    defer git_dir.close(io);
-    var store: Store = try .init(gpa, .sha1, git_dir, git_dir, .{});
+    var git_dir = fs.OwnedDir.init(try repo.gitDir(io));
+    defer git_dir.deinit(io);
+    var store: Store = try .init(gpa, .sha1, git_dir.lend(), git_dir.lend(), .{});
     defer store.deinit();
     var tx = store.begin(gpa);
     defer tx.deinit(io);
@@ -2545,9 +2565,9 @@ test "a deletion holds packed-refs.lock from prepare, so git cannot pack a ref i
     try repo.exec(io, &.{ "pack-refs", "--all" });
     try repo.exec(io, &.{ "branch", "b" });
 
-    var git_dir = try repo.gitDir(io);
-    defer git_dir.close(io);
-    var store: Store = try .init(gpa, .sha1, git_dir, git_dir, .{ .locks = .{ .packed_refs = .fail } });
+    var git_dir = fs.OwnedDir.init(try repo.gitDir(io));
+    defer git_dir.deinit(io);
+    var store: Store = try .init(gpa, .sha1, git_dir.lend(), git_dir.lend(), .{ .locks = .{ .packed_refs = .fail } });
     defer store.deinit();
     var tx = store.begin(gpa);
     defer tx.deinit(io);
@@ -2566,7 +2586,7 @@ test "a deletion holds packed-refs.lock from prepare, so git cannot pack a ref i
 
     // A lock another writer holds is waited for as long as the store says,
     // then refused with nothing changed.
-    try git_dir.writeFile(io, .{ .sub_path = "packed-refs.lock", .data = "" });
+    try git_dir.lend().get().writeFile(io, .{ .sub_path = "packed-refs.lock", .data = "" });
     var held = store.begin(gpa);
     defer held.deinit(io);
     try held.delete("refs/heads/b", .must_exist);
@@ -2588,9 +2608,9 @@ test "a name that shares a path with an existing ref is refused, loose or packed
     defer gpa.free(head_text);
     const head = try Oid.parse(.sha1, std.mem.trim(u8, head_text, "\r\n"));
 
-    var git_dir = try repo.gitDir(io);
-    defer git_dir.close(io);
-    var store: Store = try .init(gpa, .sha1, git_dir, git_dir, .{});
+    var git_dir = fs.OwnedDir.init(try repo.gitDir(io));
+    defer git_dir.deinit(io);
+    var store: Store = try .init(gpa, .sha1, git_dir.lend(), git_dir.lend(), .{});
     defer store.deinit();
     repo.report_failures = false;
     for ([_][]const u8{ "refs/heads/a/b", "refs/heads/c", "refs/heads/e" }) |name| {
@@ -2625,9 +2645,9 @@ test "FETCH_HEAD and a merge's MERGE_HEAD read as their first object name, as gi
     try repo.exec(io, &.{ "fetch", "-q", source_path, "main", "other" });
     try repo.writeFile(io, ".git/MERGE_HEAD", @as([40]u8, @splat('1')) ++ "\n" ++ @as([40]u8, @splat('2')) ++ "\n");
 
-    var git_dir = try repo.gitDir(io);
-    defer git_dir.close(io);
-    var store: Store = try .init(gpa, .sha1, git_dir, git_dir, .{});
+    var git_dir = fs.OwnedDir.init(try repo.gitDir(io));
+    defer git_dir.deinit(io);
+    var store: Store = try .init(gpa, .sha1, git_dir.lend(), git_dir.lend(), .{});
     defer store.deinit();
     inline for (comptime std.enums.values(names.Special)) |special| {
         const theirs = try repo.run(io, &.{ "rev-parse", special.name() });
@@ -2649,7 +2669,9 @@ test "a symbolic ref's target is checked as git checks it" {
     const gpa = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    var store: Store = try .init(gpa, .sha1, tmp.dir, tmp.dir, .{});
+    var held_store = fs.OwnedDir.init(try tmp.dir.openDir(io, ".", .{ .iterate = true }));
+    defer held_store.deinit(io);
+    var store: Store = try .init(gpa, .sha1, held_store.lend(), held_store.lend(), .{});
     defer store.deinit();
     var tx = store.begin(gpa);
     defer tx.deinit(io);
@@ -2669,7 +2691,9 @@ test "an update through HEAD is refused when HEAD moves between the split and th
     try tmp.dir.writeFile(io, .{ .sub_path = "HEAD", .data = "ref: refs/heads/main\n" });
     try tmp.dir.writeFile(io, .{ .sub_path = "refs/heads/main", .data = @as([40]u8, @splat('1')) ++ "\n" });
     try tmp.dir.writeFile(io, .{ .sub_path = "refs/heads/other", .data = @as([40]u8, @splat('1')) ++ "\n" });
-    var store: Store = try .init(gpa, .sha1, tmp.dir, tmp.dir, .{});
+    var held_store = fs.OwnedDir.init(try tmp.dir.openDir(io, ".", .{ .iterate = true }));
+    defer held_store.deinit(io);
+    var store: Store = try .init(gpa, .sha1, held_store.lend(), held_store.lend(), .{});
     defer store.deinit();
     var tx = store.begin(gpa);
     defer tx.deinit(io);
@@ -2687,7 +2711,9 @@ test "a ref name ending in .lock is refused" {
     const gpa = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    var store: Store = try .init(gpa, .sha1, tmp.dir, tmp.dir, .{});
+    var held_store = fs.OwnedDir.init(try tmp.dir.openDir(io, ".", .{ .iterate = true }));
+    defer held_store.deinit(io);
+    var store: Store = try .init(gpa, .sha1, held_store.lend(), held_store.lend(), .{});
     defer store.deinit();
     var tx = store.begin(gpa);
     defer tx.deinit(io);
@@ -2702,7 +2728,9 @@ test "nesting names in one transaction is refused" {
     const gpa = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    var store: Store = try .init(gpa, .sha1, tmp.dir, tmp.dir, .{});
+    var held_store = fs.OwnedDir.init(try tmp.dir.openDir(io, ".", .{ .iterate = true }));
+    defer held_store.deinit(io);
+    var store: Store = try .init(gpa, .sha1, held_store.lend(), held_store.lend(), .{});
     defer store.deinit();
     var tx = store.begin(gpa);
     defer tx.deinit(io);
@@ -2794,18 +2822,20 @@ test "reference-transaction hears from a transaction what git's hears" {
     try twin.gitWithHooks(io, &.{ "update-ref", "refs/heads/topic", second_text, first_text });
     try twin.gitWithHooks(io, &.{ "symbolic-ref", "HEAD", "refs/heads/topic" });
 
-    var git_dir = try twin.relic.gitDir(io);
-    defer git_dir.close(io);
+    var git_dir = fs.OwnedDir.init(try twin.relic.gitDir(io));
+    defer git_dir.deinit(io);
     var config = try config_mod.Config.parseText(gpa, "", .local);
     defer config.deinit();
+    var work = fs.OwnedDir.init(try twin.relic.dir.openDir(io, ".", .{ .iterate = true }));
+    defer work.deinit(io);
     var runner = try hooks.Runner.init(gpa, io, .{
         .config = &config,
-        .git_dir = git_dir,
-        .common_dir = git_dir,
-        .work_dir = twin.relic.dir,
+        .git_dir = git_dir.lend(),
+        .common_dir = git_dir.lend(),
+        .work_dir = work.lend(),
     }, .{ .environ = &twin.environ }, .{ .output = .ignore });
     defer runner.deinit();
-    var store: Store = try .init(gpa, .sha1, git_dir, git_dir, .{});
+    var store: Store = try .init(gpa, .sha1, git_dir.lend(), git_dir.lend(), .{});
     defer store.deinit();
     {
         var tx = store.begin(gpa);
@@ -2853,18 +2883,20 @@ test "an update goes through HEAD to its branch, and both logs record it, as git
     try twin.gitWithHooks(io, &.{ "symbolic-ref", "HEAD", "refs/heads/main" });
     try twin.gitWithHooks(io, &.{ "update-ref", "-d", "-m", "deleted through HEAD", "HEAD" });
 
-    var git_dir = try twin.relic.gitDir(io);
-    defer git_dir.close(io);
+    var git_dir = fs.OwnedDir.init(try twin.relic.gitDir(io));
+    defer git_dir.deinit(io);
     var config = try config_mod.Config.parseText(gpa, "", .local);
     defer config.deinit();
+    var work = fs.OwnedDir.init(try twin.relic.dir.openDir(io, ".", .{ .iterate = true }));
+    defer work.deinit(io);
     var runner = try hooks.Runner.init(gpa, io, .{
         .config = &config,
-        .git_dir = git_dir,
-        .common_dir = git_dir,
-        .work_dir = twin.relic.dir,
+        .git_dir = git_dir.lend(),
+        .common_dir = git_dir.lend(),
+        .work_dir = work.lend(),
     }, .{ .environ = &twin.environ }, .{ .output = .ignore });
     defer runner.deinit();
-    var store: Store = try .init(gpa, .sha1, git_dir, git_dir, .{});
+    var store: Store = try .init(gpa, .sha1, git_dir.lend(), git_dir.lend(), .{});
     defer store.deinit();
     const who: object.Signature = .{ .name = "Fixture", .email = "fixture@example.com", .when_secs = 1_700_000_000, .offset_minutes = 0 };
     const Step = struct { name: []const u8, new: ?Ref, expected: Expected, no_deref: bool = false, message: ?[]const u8 };
@@ -2909,9 +2941,9 @@ test "a log message is collapsed in the transaction as git collapses it" {
     const message = "  commit:\tsubject  line\n\n  body \r\n";
     try twin.gitWithHooks(io, &.{ "update-ref", "-m", message, "refs/heads/topic", head_text });
 
-    var git_dir = try twin.relic.gitDir(io);
-    defer git_dir.close(io);
-    var store: Store = try .init(gpa, .sha1, git_dir, git_dir, .{});
+    var git_dir = fs.OwnedDir.init(try twin.relic.gitDir(io));
+    defer git_dir.deinit(io);
+    var store: Store = try .init(gpa, .sha1, git_dir.lend(), git_dir.lend(), .{});
     defer store.deinit();
     var tx = store.begin(gpa);
     defer tx.deinit(io);
@@ -2936,7 +2968,9 @@ test "an edit named twice, once through HEAD, is refused before anything moves" 
     try tmp.dir.createDirPath(io, "refs/heads");
     try tmp.dir.writeFile(io, .{ .sub_path = "HEAD", .data = "ref: refs/heads/main\n" });
     try tmp.dir.writeFile(io, .{ .sub_path = "refs/heads/main", .data = @as([40]u8, @splat('1')) ++ "\n" });
-    var store: Store = try .init(gpa, .sha1, tmp.dir, tmp.dir, .{});
+    var held_store = fs.OwnedDir.init(try tmp.dir.openDir(io, ".", .{ .iterate = true }));
+    defer held_store.deinit(io);
+    var store: Store = try .init(gpa, .sha1, held_store.lend(), held_store.lend(), .{});
     defer store.deinit();
     var tx = store.begin(gpa);
     defer tx.deinit(io);
@@ -2966,18 +3000,20 @@ test "a reference-transaction hook refusing a transaction leaves every ref as it
         twin.git.report_failures = false;
         try std.testing.expectError(error.GitFailed, twin.gitWithHooks(io, &.{ "update-ref", "refs/heads/topic", head_text }));
 
-        var git_dir = try twin.relic.gitDir(io);
-        defer git_dir.close(io);
+        var git_dir = fs.OwnedDir.init(try twin.relic.gitDir(io));
+        defer git_dir.deinit(io);
         var config = try config_mod.Config.parseText(gpa, "", .local);
         defer config.deinit();
+        var work = fs.OwnedDir.init(try twin.relic.dir.openDir(io, ".", .{ .iterate = true }));
+        defer work.deinit(io);
         var runner = try hooks.Runner.init(gpa, io, .{
             .config = &config,
-            .git_dir = git_dir,
-            .common_dir = git_dir,
-            .work_dir = twin.relic.dir,
+            .git_dir = git_dir.lend(),
+            .common_dir = git_dir.lend(),
+            .work_dir = work.lend(),
         }, .{ .environ = &twin.environ }, .{ .output = .ignore });
         defer runner.deinit();
-        var store: Store = try .init(gpa, .sha1, git_dir, git_dir, .{});
+        var store: Store = try .init(gpa, .sha1, git_dir.lend(), git_dir.lend(), .{});
         defer store.deinit();
         {
             var tx = store.begin(gpa);
@@ -2988,7 +3024,7 @@ test "a reference-transaction hook refusing a transaction leaves every ref as it
         }
         try std.testing.expectEqualStrings("reference-transaction", runner.failure.event());
         try std.testing.expect((try store.read(gpa, io, "refs/heads/topic")) == null);
-        try std.testing.expect(!fs.lockHeld(io, git_dir, "refs/heads/topic"));
+        try std.testing.expect(!fs.lockHeld(io, git_dir.lend().get(), "refs/heads/topic"));
         try twin.expectSameLog(io);
     }
 }
@@ -3014,18 +3050,20 @@ test "a deletion is announced as git announces it, packed or loose" {
     try twin.gitWithHooks(io, &.{ "branch", "loose" });
     try twin.gitWithHooks(io, &.{ "branch", "-D", "-q", "packed", "loose" });
 
-    var git_dir = try twin.relic.gitDir(io);
-    defer git_dir.close(io);
+    var git_dir = fs.OwnedDir.init(try twin.relic.gitDir(io));
+    defer git_dir.deinit(io);
     var config = try config_mod.Config.parseText(gpa, "", .local);
     defer config.deinit();
+    var work = fs.OwnedDir.init(try twin.relic.dir.openDir(io, ".", .{ .iterate = true }));
+    defer work.deinit(io);
     var runner = try hooks.Runner.init(gpa, io, .{
         .config = &config,
-        .git_dir = git_dir,
-        .common_dir = git_dir,
-        .work_dir = twin.relic.dir,
+        .git_dir = git_dir.lend(),
+        .common_dir = git_dir.lend(),
+        .work_dir = work.lend(),
     }, .{ .environ = &twin.environ }, .{ .output = .ignore });
     defer runner.deinit();
-    var store: Store = try .init(gpa, .sha1, git_dir, git_dir, .{});
+    var store: Store = try .init(gpa, .sha1, git_dir.lend(), git_dir.lend(), .{});
     defer store.deinit();
     {
         var tx = store.begin(gpa);
@@ -3078,9 +3116,9 @@ test "deleting a ref takes its log and its empty directories with it, as git doe
     }
     try git.exec(io, &.{ "branch", "-q", "-D", "a/b/c", "d", "e" });
 
-    var git_dir = try here.gitDir(io);
-    defer git_dir.close(io);
-    var store: Store = try .init(gpa, .sha1, git_dir, git_dir, .{});
+    var git_dir = fs.OwnedDir.init(try here.gitDir(io));
+    defer git_dir.deinit(io);
+    var store: Store = try .init(gpa, .sha1, git_dir.lend(), git_dir.lend(), .{});
     defer store.deinit();
     var tx = store.begin(gpa);
     defer tx.deinit(io);
@@ -3157,7 +3195,9 @@ test "reading packed refs has one owner when parsing stops" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var store: Store = try .init(gpa, .sha1, tmp.dir, tmp.dir, .{});
+    var held_store = fs.OwnedDir.init(try tmp.dir.openDir(io, ".", .{ .iterate = true }));
+    defer held_store.deinit(io);
+    var store: Store = try .init(gpa, .sha1, held_store.lend(), held_store.lend(), .{});
     defer store.deinit();
     try tmp.dir.writeFile(io, .{ .sub_path = "packed-refs", .data = packed_header ++ @as([40]u8, @splat('1')) ++ " refs/heads/main\n" });
     {
@@ -3169,7 +3209,9 @@ test "reading packed refs has one owner when parsing stops" {
 }
 
 fn readPackedForAllocation(gpa: Allocator, io: Io, dir: Io.Dir) !void {
-    var store: Store = try .init(gpa, .sha1, dir, dir, .{});
+    var held_store = fs.OwnedDir.init(try dir.openDir(io, ".", .{ .iterate = true }));
+    defer held_store.deinit(io);
+    var store: Store = try .init(gpa, .sha1, held_store.lend(), held_store.lend(), .{});
     defer store.deinit();
     var listed = try store.readPacked(gpa, io);
     defer listed.deinit();
@@ -3215,7 +3257,9 @@ test "listing loose refs preserves allocation resource failures" {
 }
 
 fn listLooseRefsForAllocation(gpa: Allocator, io: Io, dir: Io.Dir) !void {
-    var store: Store = try .init(gpa, .sha1, dir, dir, .{});
+    var held_store = fs.OwnedDir.init(try dir.openDir(io, ".", .{ .iterate = true }));
+    defer held_store.deinit(io);
+    var store: Store = try .init(gpa, .sha1, held_store.lend(), held_store.lend(), .{});
     defer store.deinit();
     var listed = try store.list(gpa, io, "refs/heads/");
     defer listed.deinit();
@@ -3240,7 +3284,7 @@ fn refFilesSnapshot(gpa: Allocator, io: Io, dir: Io.Dir) !std.array_hash_map.Str
         const path = try gpa.dupe(u8, entry.path);
         errdefer gpa.free(path);
         std.mem.replaceScalar(u8, path, '\\', '/');
-        const bytes = try entry.dir.readFileAlloc(io, entry.basename, gpa, .unlimited);
+        const bytes = try aegis.own.readFile(io, entry.dir, entry.basename, gpa, aegis.units.Bytes(u64).fromRaw(std.math.maxInt(u64)));
         errdefer gpa.free(bytes);
         try out.put(gpa, path, bytes);
     }
@@ -3290,13 +3334,13 @@ test "the watch scopes cover every ref and HEAD move, in a linked worktree too" 
         try git.exec(io, &.{ "branch", "gone" });
         try git.exec(io, &.{ "pack-refs", "--all" });
         try git.exec(io, &.{ "worktree", "add", "-q", "-b", "side", "linked" });
-        var common = try git.dir.openDir(io, ".git", .{ .iterate = true });
-        defer common.close(io);
-        var admin = try common.openDir(io, "worktrees/linked", .{});
-        defer admin.close(io);
-        var main_store: Store = try .init(gpa, .sha1, common, common, .{ .format = format });
+        var common = fs.OwnedDir.init(try git.dir.openDir(io, ".git", .{ .iterate = true }));
+        defer common.deinit(io);
+        var admin = fs.OwnedDir.init(try common.lend().get().openDir(io, "worktrees/linked", .{}));
+        defer admin.deinit(io);
+        var main_store: Store = try .init(gpa, .sha1, common.lend(), common.lend(), .{ .format = format });
         defer main_store.deinit();
-        var linked_store: Store = try .init(gpa, .sha1, admin, common, .{ .format = format });
+        var linked_store: Store = try .init(gpa, .sha1, admin.lend(), common.lend(), .{ .format = format });
         defer linked_store.deinit();
         const main_scopes = main_store.watchScopes();
         const linked_scopes = linked_store.watchScopes();
@@ -3312,10 +3356,10 @@ test "the watch scopes cover every ref and HEAD move, in a linked worktree too" 
             .{ .args = &.{ "-C", "linked", "branch", "-q", "-D", "gone" }, .linked = true, .shared = true },
             .{ .args = &.{ "-C", "linked", "checkout", "-q", "--detach" }, .linked = true, .shared = false },
         }) |step| {
-            var before = try refFilesSnapshot(gpa, io, common);
+            var before = try refFilesSnapshot(gpa, io, common.lend().get());
             defer freeRefFilesSnapshot(gpa, &before);
             try git.exec(io, step.args);
-            var after = try refFilesSnapshot(gpa, io, common);
+            var after = try refFilesSnapshot(gpa, io, common.lend().get());
             defer freeRefFilesSnapshot(gpa, &after);
             var own = false;
             var other = false;
@@ -3338,7 +3382,7 @@ test "the watch scopes cover every ref and HEAD move, in a linked worktree too" 
 }
 
 /// All errors reported by this namespace.
-pub const Error = ReadError || TransactionError || LogReadError || Store.ReadLogError || Store.ExpireLogError || CreateError || Allocator.Error || Io.Dir.ReadFileAllocError || Io.Dir.DeleteFileError;
+pub const Error = ReadError || TransactionError || LogReadError || Store.ReadLogError || Store.ExpireLogError || CreateError || Allocator.Error || aegis.own.ReadFileError || Io.Dir.DeleteFileError;
 
 /// git's `create_ref_symlink`: `name` in `dir` replaced by a symbolic link
 /// to `target`. Whether it was; where it was not, git falls back to the text.

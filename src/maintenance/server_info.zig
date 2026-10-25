@@ -6,6 +6,7 @@
 
 const Self = @This();
 const std = @import("std");
+const aegis = @import("aegis");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const hash = @import("../hash/hash.zig");
@@ -16,7 +17,7 @@ const repo_mod = @import("../repo/repo.zig");
 const Repository = repo_mod.Repository;
 
 /// Failures of `updateServerInfo`.
-pub const Error = repo_mod.Error || Io.File.OpenError || Io.Dir.CreateDirPathError || Io.Dir.RenameError || Io.Dir.DeleteFileError || Io.Dir.ReadFileAllocError || Io.Writer.Error;
+pub const Error = repo_mod.Error || Io.File.OpenError || Io.Dir.CreateDirPathError || Io.Dir.RenameError || Io.Dir.DeleteFileError || aegis.own.ReadFileError || Io.Writer.Error;
 
 /// git's `update_server_info` without `--force`: `info/refs` and
 /// `objects/info/packs` written again when what they would hold differs
@@ -30,14 +31,14 @@ pub fn updateServerInfo(gpa: Allocator, io: Io, repo: *Repository) Self.Error!vo
 
     var refs: std.Io.Writer.Allocating = .init(arena);
     try infoRefs(gpa, io, repo, &refs.writer);
-    try update(arena, io, repo.commonDirectory(), "info", "refs", refs.written(), shared);
+    try update(arena, io, repo.commonDirectory().get(), "info", "refs", refs.written(), shared);
 
     const db = repo.objectDatabase();
     var packs: std.Io.Writer.Allocating = .init(arena);
     try infoPacks(arena, io, db, &packs.writer);
-    try update(arena, io, db.objectsDirectory(), "info", "packs", packs.written(), shared);
+    try update(arena, io, db.objectsDirectory().get(), "info", "packs", packs.written(), shared);
 
-    repo.commonDirectory().deleteFile(io, "info/rev-cache") catch |err| switch (err) {
+    repo.commonDirectory().get().deleteFile(io, "info/rev-cache") catch |err| switch (err) {
         error.FileNotFound, error.NotDir => {},
         else => |e| return e,
     };
@@ -90,7 +91,7 @@ fn infoRefs(gpa: Allocator, io: Io, repo: *Repository, out: *Io.Writer) Self.Err
 /// their places when it lists only packs that are there, as git's
 /// `init_pack_info` keeps them; the others follow.
 fn infoPacks(arena: Allocator, io: Io, db: *odb_mod.Odb, out: *Io.Writer) Self.Error!void {
-    const pack_dir = db.objectsDirectory().openDir(io, "pack", .{ .iterate = true }) catch |err| switch (err) {
+    const pack_dir = db.objectsDirectory().get().openDir(io, "pack", .{ .iterate = true }) catch |err| switch (err) {
         error.FileNotFound, error.NotDir => return out.writeAll("\n"),
         else => |e| return e,
     };
@@ -108,7 +109,7 @@ fn infoPacks(arena: Allocator, io: Io, db: *odb_mod.Odb, out: *Io.Writer) Self.E
     std.mem.sort([]const u8, present.items, {}, lessString);
 
     var ordered: std.ArrayList([]const u8) = .empty;
-    const old: []const u8 = db.objectsDirectory().readFileAlloc(io, "info/packs", arena, .limited(1 << 24)) catch |err| switch (err) {
+    const old: []const u8 = aegis.own.readFile(io, db.objectsDirectory().get(), "info/packs", arena, aegis.units.Bytes(u64).fromRaw(1 << 24)) catch |err| switch (err) {
         error.FileNotFound, error.NotDir => "",
         else => |e| return e,
     };
@@ -154,7 +155,7 @@ fn update(arena: Allocator, io: Io, dir: Io.Dir, sub_dir: []const u8, name: []co
     var path_buf: [64]u8 = undefined;
     // unreachable: both names are this file's own, a few bytes each
     const path = std.mem.print(&path_buf, "{s}/{s}", .{ sub_dir, name }) catch unreachable;
-    if (dir.readFileAlloc(io, path, arena, .limited(bytes.len + 1))) |old| {
+    if (aegis.own.readFile(io, dir, path, arena, aegis.units.Bytes(u64).fromRaw(bytes.len + 1))) |old| {
         if (std.mem.eql(u8, old, bytes)) return;
     } else |err| switch (err) {
         error.FileNotFound, error.NotDir, error.StreamTooLong => {},

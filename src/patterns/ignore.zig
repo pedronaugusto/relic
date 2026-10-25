@@ -14,6 +14,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const shakedown_mod = @import("shakedown");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -24,7 +25,7 @@ const Kind = sweep.Kind;
 const fs = @import("../fs/fs.zig");
 
 /// Errors from loading ignore rules.
-pub const Error = Allocator.Error || Io.Dir.ReadFileAllocError;
+pub const Error = Allocator.Error || aegis.own.ReadFileError;
 
 /// One line of one ignore file.
 pub const Pattern = struct {
@@ -384,7 +385,7 @@ pub const Checker = struct {
 };
 
 fn levelMatcher(level: Level) *sets.Matcher {
-    return @ptrCast(@alignCast(level.compiled)); // safe: a Level's matcher is allocated as a sets.Matcher and never changes type
+    return @ptrCast(@alignCast(level.compiled)); // aegis: no-danger: a Level's matcher is allocated as a sets.Matcher and never changes type
 }
 
 fn relativeTo(base: []const u8, path: []const u8) ?[]const u8 {

@@ -173,7 +173,7 @@ fn move(repo: *testgit.Repo, case: Case) !bool {
             rules.ignore = &ignore_rules;
             rules.attrs = &attrs;
             rules.submodules = mover.submodules();
-            _ = worktree.checkout(gpa, io, native.workDirectory().?, .{ .index = &locked.index, .db = native.objectDatabase(), .tree = tree }, .{
+            _ = worktree.checkout(gpa, io, native.workDirectory().?.get(), .{ .index = &locked.index, .db = native.objectDatabase(), .tree = tree }, .{
                 .rules = rules,
                 .ignore = &ignore_rules,
                 .obstructions = &obstructions,

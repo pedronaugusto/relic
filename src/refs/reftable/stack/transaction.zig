@@ -97,7 +97,7 @@ pub fn readOtherWorktree(gpa: Allocator, io: Io, store: anytype, where: ref_name
 fn loadWorktree(gpa: Allocator, io: Io, store: anytype, id: []const u8) refs.ReadError!?Stack {
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = std.mem.print(&path_buffer, "worktrees/{s}", .{id}) catch return null;
-    var admin = store.commonDir().openDir(io, path, .{}) catch |err| switch (err) {
+    var admin = store.commonDir().get().openDir(io, path, .{}) catch |err| switch (err) {
         error.FileNotFound, error.NotDir, error.NameTooLong => return null,
         else => |e| return e,
     };
@@ -360,12 +360,17 @@ pub const Pending = struct {
     stacks: Stacks,
 
     const Locked = struct {
-        dir: Io.Dir,
+        dir: fs.OwnedDir,
         lock: fs.LockFile,
         buffer: []u8,
         written: bool = false,
         shared: fs.Shared = .umask,
         sync: fs.Sync = .none,
+
+        /// This lock, taken from `l` into a new holder.
+        fn take(l: *Locked) Locked {
+            return .{ .dir = l.dir.move(), .lock = l.lock, .buffer = l.buffer, .written = l.written, .shared = l.shared, .sync = l.sync };
+        }
     };
 
     fn release(p: *Pending, gpa: Allocator, io: Io) void {
@@ -373,7 +378,7 @@ pub const Pending = struct {
             const l = maybe orelse continue;
             if (!l.written) l.lock.deinit(io);
             gpa.free(l.buffer);
-            l.dir.close(io);
+            l.dir.deinit(io);
         }
         cache.internal.deinit(&p.stacks);
     }
@@ -390,7 +395,7 @@ fn lockStack(gpa: Allocator, io: Io, parent: Io.Dir, options: Options) refs.Tran
     errdefer gpa.free(buffer);
     const sync = options.fsync.sync(.reference);
     const lock = try fs.LockFile.open(gpa, io, dir, .{ .sub_path = "tables.list", .buffer = buffer }, .{ .on_contention = options.lock, .shared = options.shared, .sync = sync, .sync_directory = namesDurable(sync), .write_pid = options.pid_file });
-    return .{ .dir = dir, .lock = lock, .buffer = buffer, .shared = options.shared, .sync = sync };
+    return .{ .dir = fs.OwnedDir.init(dir), .lock = lock, .buffer = buffer, .shared = options.shared, .sync = sync };
 }
 
 /// `Transaction.prepare` over reftable: take `tables.list.lock` on every
@@ -404,17 +409,17 @@ pub fn prepare(io: Io, tx: anytype) refs.TransactionError!void {
         if (isLinked(store) and ref_names.isCurrentWorktree(edit.name)) needs_worktree = true;
     }
 
-    var main = try lockStack(gpa, io, store.commonDir(), store.reftableOptions());
+    var main = try lockStack(gpa, io, store.commonDir().get(), store.reftableOptions());
     errdefer {
         main.lock.deinit(io);
         gpa.free(main.buffer);
-        main.dir.close(io);
+        main.dir.deinit(io);
     }
-    var worktree: ?Pending.Locked = if (needs_worktree) try lockStack(gpa, io, store.gitDir(), store.reftableOptions()) else null;
+    var worktree: ?Pending.Locked = if (needs_worktree) try lockStack(gpa, io, store.gitDir().get(), store.reftableOptions()) else null;
     errdefer if (worktree) |*w| {
         w.lock.deinit(io);
         gpa.free(w.buffer);
-        w.dir.close(io);
+        w.dir.deinit(io);
     };
     var stacks = try cache.internal.open(gpa, io, store);
     errdefer cache.internal.deinit(&stacks);
@@ -443,7 +448,7 @@ pub fn prepare(io: Io, tx: anytype) refs.TransactionError!void {
     try checkNames(tx, &stacks, to_check.items);
 
     const pending = try gpa.create(Pending);
-    pending.* = .{ .main = main, .worktree = worktree, .stacks = stacks };
+    pending.* = .{ .main = main.take(), .worktree = if (worktree) |*w| w.take() else null, .stacks = stacks };
     tx.reftable = pending;
 }
 
@@ -504,14 +509,14 @@ pub fn commit(io: Io, tx: anytype, log: ?refs.LogMessage) refs.TransactionError!
     const compact_worktree = pending.worktree != null;
     releasePending(io, tx);
     if (!options.auto_compact) return;
-    compactIn(tx.gpa, io, store.commonDir(), .{ .kind = store.objectFormat(), .which = .auto }, options) catch |err| switch (err) {
+    compactIn(tx.gpa, io, store.commonDir().get(), .{ .kind = store.objectFormat(), .which = .auto }, options) catch |err| switch (err) {
         // Compaction is housekeeping: someone else holding a lock, or
         // compacting already, is not a failure of this transaction.
         error.LockHeld => {},
         else => |e| return e,
     };
     if (compact_worktree) {
-        compactIn(tx.gpa, io, store.gitDir(), .{ .kind = store.objectFormat(), .which = .auto }, options) catch |err| switch (err) {
+        compactIn(tx.gpa, io, store.gitDir().get(), .{ .kind = store.objectFormat(), .which = .auto }, options) catch |err| switch (err) {
             error.LockHeld => {},
             else => |e| return e,
         };
@@ -535,10 +540,10 @@ pub fn appendLog(
     const message = log.message;
     if (std.mem.findAny(u8, who.name, "<>\n") != null or
         std.mem.findAny(u8, who.email, "<>\n") != null) return error.InvalidSignature;
-    const parent = if (isLinked(store) and ref_names.isCurrentWorktree(name)) store.gitDir() else store.commonDir();
+    const parent = if (isLinked(store) and ref_names.isCurrentWorktree(name)) store.gitDir().get() else store.commonDir().get();
     var locked = try lockStack(gpa, io, parent, store.reftableOptions());
     defer releaseLocked(gpa, io, &locked);
-    var stack = try Stack.load(gpa, io, locked.dir, store.objectFormat());
+    var stack = try Stack.load(gpa, io, locked.dir.lend().get(), store.objectFormat());
     defer stack.deinit();
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
@@ -571,10 +576,10 @@ pub fn expireLog(
     options: refs.ExpireOptions,
 ) refs.TransactionError!void {
     const name = options.name;
-    const parent = if (isLinked(store) and ref_names.isCurrentWorktree(name)) store.gitDir() else store.commonDir();
+    const parent = if (isLinked(store) and ref_names.isCurrentWorktree(name)) store.gitDir().get() else store.commonDir().get();
     var locked = try lockStack(gpa, io, parent, store.reftableOptions());
     defer releaseLocked(gpa, io, &locked);
-    var stack = try Stack.load(gpa, io, locked.dir, store.objectFormat());
+    var stack = try Stack.load(gpa, io, locked.dir.lend().get(), store.objectFormat());
     defer stack.deinit();
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
@@ -634,10 +639,10 @@ pub fn expireLog(
 /// `Store.createLog` over reftable: the marker git writes to say a log
 /// exists, in a table of its own, unless the log has an entry already.
 pub fn createLog(gpa: Allocator, io: Io, store: anytype, name: []const u8) refs.TransactionError!void {
-    const parent = if (isLinked(store) and ref_names.isCurrentWorktree(name)) store.gitDir() else store.commonDir();
+    const parent = if (isLinked(store) and ref_names.isCurrentWorktree(name)) store.gitDir().get() else store.commonDir().get();
     var locked = try lockStack(gpa, io, parent, store.reftableOptions());
     defer releaseLocked(gpa, io, &locked);
-    var stack = try Stack.load(gpa, io, locked.dir, store.objectFormat());
+    var stack = try Stack.load(gpa, io, locked.dir.lend().get(), store.objectFormat());
     defer stack.deinit();
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
@@ -654,10 +659,10 @@ pub fn createLog(gpa: Allocator, io: Io, store: anytype, name: []const u8) refs.
 /// a tombstone for every entry of the log, the marker among them, in one
 /// table. A log with no entry adds none.
 pub fn deleteLog(gpa: Allocator, io: Io, store: anytype, name: []const u8) refs.TransactionError!void {
-    const parent = if (isLinked(store) and ref_names.isCurrentWorktree(name)) store.gitDir() else store.commonDir();
+    const parent = if (isLinked(store) and ref_names.isCurrentWorktree(name)) store.gitDir().get() else store.commonDir().get();
     var locked = try lockStack(gpa, io, parent, store.reftableOptions());
     defer releaseLocked(gpa, io, &locked);
-    var stack = try Stack.load(gpa, io, locked.dir, store.objectFormat());
+    var stack = try Stack.load(gpa, io, locked.dir.lend().get(), store.objectFormat());
     defer stack.deinit();
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
@@ -716,7 +721,7 @@ fn entryOf(u: reftable.LogUpdate) reflog.Entry {
 fn releaseLocked(gpa: Allocator, io: Io, locked: *Pending.Locked) void {
     if (!locked.written) locked.lock.deinit(io);
     gpa.free(locked.buffer);
-    locked.dir.close(io);
+    locked.dir.deinit(io);
 }
 
 /// The compaction git's geometric rule asks for after a table is added;
@@ -735,7 +740,7 @@ fn compactAfter(gpa: Allocator, io: Io, parent: Io.Dir, store: anytype) refs.Tra
 fn install(gpa: Allocator, io: Io, locked: *Pending.Locked, stack: *const Stack, bytes: []const u8, update_index: u64) refs.TransactionError!void {
     var name_buf: [64]u8 = undefined;
     const name = tableName(io, &name_buf, update_index, update_index);
-    try writeTable(gpa, io, locked.dir, name, bytes, locked.shared, locked.sync);
+    try writeTable(gpa, io, locked.dir.lend().get(), name, bytes, locked.shared, locked.sync);
     const w = locked.lock.writer();
     w.writeAll(stack.list) catch return error.WriteFailed;
     if (stack.list.len != 0 and stack.list[stack.list.len - 1] != '\n') w.writeByte('\n') catch return error.WriteFailed;
@@ -1005,7 +1010,7 @@ pub fn compactIn(gpa: Allocator, io: Io, parent: Io.Dir, inputs: CompactInputs, 
 /// list names that are no newer than the stack, which a compaction that
 /// could not remove them left behind.
 pub fn pack(gpa: Allocator, io: Io, store: anytype, auto: bool) refs.TransactionError!void {
-    const parent = if (isLinked(store)) store.gitDir() else store.commonDir();
+    const parent = if (isLinked(store)) store.gitDir().get() else store.commonDir().get();
     const options = store.reftableOptions();
     try compactIn(gpa, io, parent, .{ .kind = store.objectFormat(), .which = if (auto) .auto else .all }, options);
     try clean(gpa, io, parent, store.objectFormat(), options);
@@ -1015,7 +1020,7 @@ pub fn pack(gpa: Allocator, io: Io, store: anytype, auto: bool) refs.Transaction
 /// compact anything: two tables or more, and with `auto` a segment the
 /// geometric rule picks.
 pub fn compactionRequired(gpa: Allocator, io: Io, store: anytype, auto: bool) refs.TransactionError!bool {
-    const parent = if (isLinked(store)) store.gitDir() else store.commonDir();
+    const parent = if (isLinked(store)) store.gitDir().get() else store.commonDir().get();
     var dir = parent.openDir(io, "reftable", .{}) catch |err| switch (err) {
         error.FileNotFound => return false,
         else => |e| return e,
@@ -1038,7 +1043,7 @@ fn clean(gpa: Allocator, io: Io, parent: Io.Dir, kind: Kind, options: Options) r
         else => |e| return e,
     };
     defer releaseLocked(gpa, io, &locked);
-    var stack = try Stack.load(gpa, io, locked.dir, kind);
+    var stack = try Stack.load(gpa, io, locked.dir.lend().get(), kind);
     defer stack.deinit();
     const max = stack.maxUpdateIndex();
     var dir = try parent.openDir(io, "reftable", .{ .iterate = true });
@@ -1161,13 +1166,13 @@ fn suggest(sizes: []const u64, factor_in: u8) ?Segment {
 /// `Store.writeInitial` over reftable: `refs`, sorted, none of them in the
 /// shared stack yet, written as one table under its lock, with no logs.
 pub fn writeInitial(gpa: Allocator, io: Io, store: anytype, refs_in: anytype) refs.TransactionError!void {
-    var locked = try lockStack(gpa, io, store.commonDir(), store.reftableOptions());
+    var locked = try lockStack(gpa, io, store.commonDir().get(), store.reftableOptions());
     defer {
         if (!locked.written) locked.lock.deinit(io);
         gpa.free(locked.buffer);
-        locked.dir.close(io);
+        locked.dir.deinit(io);
     }
-    var stack = try Stack.load(gpa, io, locked.dir, store.objectFormat());
+    var stack = try Stack.load(gpa, io, locked.dir.lend().get(), store.objectFormat());
     defer stack.deinit();
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
@@ -1186,7 +1191,7 @@ pub fn writeInitial(gpa: Allocator, io: Io, store: anytype, refs_in: anytype) re
     defer gpa.free(bytes);
     try install(gpa, io, &locked, &stack, bytes, update_index);
     if (!store.reftableOptions().auto_compact) return;
-    compactIn(gpa, io, store.commonDir(), .{ .kind = store.objectFormat(), .which = .auto }, store.reftableOptions()) catch |err| switch (err) {
+    compactIn(gpa, io, store.commonDir().get(), .{ .kind = store.objectFormat(), .which = .auto }, store.reftableOptions()) catch |err| switch (err) {
         error.LockHeld => {},
         else => |e| return e,
     };

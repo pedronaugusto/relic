@@ -196,7 +196,7 @@ fn verifyHere(k: *Keyed, io: Io, rev: []const u8, tag: bool) !signing.Verdict {
     defer k.gpa.free(text);
     const found = try repo.objectDatabase().read(io, try Oid.parse(repo.objectFormat(), text));
     defer k.gpa.free(found.bytes);
-    var signer = try signing.Signer.init(k.gpa, io, repo.configuration(), repo.topDirectory(), k.programs());
+    var signer = try signing.Signer.init(k.gpa, io, repo.configuration(), repo.topDirectory().get(), k.programs());
     defer signer.deinit();
     return if (tag)
         signing.verifyTag(io, &signer, repo.objectFormat(), found.bytes)
@@ -431,7 +431,7 @@ test "a signing setting git dies on is refused wherever it stands, a good one af
         defer repo.deinit(io);
         var environ: std.process.Environ.Map = .init(gpa);
         defer environ.deinit();
-        try testing.expectError(case.err, signing.Signer.init(gpa, io, repo.configuration(), repo.topDirectory(), .{ .environ = &environ }));
+        try testing.expectError(case.err, signing.Signer.init(gpa, io, repo.configuration(), repo.topDirectory().get(), .{ .environ = &environ }));
     }
     // The last good value decides, a lower-case trust level included.
     var config = try @import("../config/config.zig").Config.parseText(gpa, "[gpg]\n\tformat = x509\n\tformat = ssh\n\tminTrustLevel = marginal\n[gpg \"ssh\"]\n\tprogram = /a/ssh-keygen\n[user]\n\tsigningKey = ~/key\n", .local);
@@ -687,7 +687,7 @@ test "for-each-ref's signature atoms check each commit as git's do" {
     defer gpa.free(theirs);
     var repo = try k.open(io);
     defer repo.deinit(io);
-    var signer = try signing.Signer.init(gpa, io, repo.configuration(), repo.topDirectory(), k.programs());
+    var signer = try signing.Signer.init(gpa, io, repo.configuration(), repo.topDirectory().get(), k.programs());
     defer signer.deinit();
     var ours: Io.Writer.Allocating = .init(gpa);
     defer ours.deinit();
@@ -722,7 +722,7 @@ fn logSignatures(format: signing.Format) !void {
 
     var repo = try k.open(io);
     defer repo.deinit(io);
-    var signer = try signing.Signer.init(gpa, io, repo.configuration(), repo.topDirectory(), k.programs());
+    var signer = try signing.Signer.init(gpa, io, repo.configuration(), repo.topDirectory().get(), k.programs());
     defer signer.deinit();
     const listed = try k.repo.run(io, &.{ "rev-list", "main" });
     defer gpa.free(listed);

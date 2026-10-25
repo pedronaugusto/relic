@@ -27,6 +27,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
@@ -93,7 +94,7 @@ pub const Error = error{
     InvalidDisplaySetting,
 } || Allocator.Error || odb_mod.Error || object.ParseError || object.TreeParseError || refs_mod.ReadError ||
     refs_mod.TransactionError || repo_mod.WriteError || rev_parse.Error || rev_walk.Error || diff.Error ||
-    head_mod.Error || Io.Dir.ReadFileAllocError || Io.Dir.OpenError || Io.Dir.Iterator.Error ||
+    head_mod.Error || aegis.own.ReadFileError || Io.Dir.OpenError || Io.Dir.Iterator.Error ||
     Io.Dir.DeleteFileError || Io.File.OpenError || Io.File.Writer.Error || Io.Dir.CreateDirPathError || Io.Dir.DeleteTreeError || error{ NameTooLong, NotACommit };
 
 /// How a note added where one already is meets it: git's `combine_notes_*`.
@@ -543,7 +544,7 @@ pub const Notes = struct {
     /// `construct_path_with_fanout`.
     fn pathWithFanout(t: *const Notes, key: []const u8, fanout: usize, buf: []u8) []u8 {
         var hex_buf: [hash.max_hex_len]u8 = undefined;
-        // unreachable: a raw name of the format's length is at most max_hex_len hex digits
+        // aegis: no-danger: a raw name of the format's length is at most max_hex_len hex digits
         const hex = std.mem.print(&hex_buf, "{x}", .{key[0..t.rawLen()]}) catch unreachable;
         // Each fanout level is two of the name's digits and a slash, and
         // some of the name is left for the file.
@@ -929,7 +930,7 @@ pub const TextconvCaches = struct {
     }
 
     fn getFn(context: *anyopaque, a: Allocator, io: Io, key: textconv_mod.Cache.Key) textconv_mod.Error!?[]const u8 {
-        const c: *TextconvCaches = @ptrCast(@alignCast(context)); // safe: the context handed out with this function is a TextconvCaches
+        const c: *TextconvCaches = @ptrCast(@alignCast(context)); // aegis: no-danger: the context handed out with this function is a TextconvCaches
         const entry = c.entryFor(io, key.driver, key.command) catch |err| return cacheError(err);
         const note = (entry.notes.get(io, key.blob) catch |err| return cacheError(err)) orelse return null;
         const found = c.repo.objectDatabase().read(io, note) catch |err| return cacheError(err);
@@ -940,7 +941,7 @@ pub const TextconvCaches = struct {
     /// `notes_cache_put` and `notes_cache_write`, whose failure git passes
     /// over: the repository may be read-only.
     fn putFn(context: *anyopaque, io: Io, key: textconv_mod.Cache.Key, text: []const u8) textconv_mod.Error!void {
-        const c: *TextconvCaches = @ptrCast(@alignCast(context)); // safe: the context handed out with this function is a TextconvCaches
+        const c: *TextconvCaches = @ptrCast(@alignCast(context)); // aegis: no-danger: the context handed out with this function is a TextconvCaches
         c.put(io, key, text) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Canceled => return error.Canceled,
@@ -1630,9 +1631,9 @@ fn mergeFromDiffs(
 /// `check_notes_merge_worktree`: a merge already under way holds files in
 /// the directory.
 fn checkMergeWorktree(io: Io, repo: *Repository) Error!void {
-    var dir = repo.gitDirectory().openDir(io, merge_worktree, .{ .iterate = true }) catch |err| switch (err) {
+    var dir = repo.gitDirectory().get().openDir(io, merge_worktree, .{ .iterate = true }) catch |err| switch (err) {
         error.FileNotFound => {
-            try repo.gitDirectory().createDirPath(io, merge_worktree);
+            try repo.gitDirectory().get().createDirPath(io, merge_worktree);
             return;
         },
         else => |e| return e,
@@ -1647,7 +1648,7 @@ fn checkMergeWorktree(io: Io, repo: *Repository) Error!void {
 fn writeConflict(gpa: Allocator, io: Io, repo: *Repository, p: Pair, local_ref: []const u8, remote_ref: []const u8) Error!void {
     var name_buf: [hash.max_hex_len]u8 = undefined;
     const name = p.obj.hex(&name_buf);
-    var dir = try repo.gitDirectory().openDir(io, merge_worktree, .{});
+    var dir = try repo.gitDirectory().get().openDir(io, merge_worktree, .{});
     defer dir.close(io);
     var bytes: []const u8 = undefined;
     var owned: ?[]u8 = null;
@@ -1717,7 +1718,7 @@ pub fn mergeCommit(gpa: Allocator, io: Io, repo: *Repository, who: object.Signat
 
     var t = try Notes.open(gpa, io, repo, ref_names.Root.notes_merge_partial.name(), .overwrite);
     defer t.deinit();
-    var dir = repo.gitDirectory().openDir(io, merge_worktree, .{ .iterate = true }) catch |err| switch (err) {
+    var dir = repo.gitDirectory().get().openDir(io, merge_worktree, .{ .iterate = true }) catch |err| switch (err) {
         error.FileNotFound => return error.NoMergeInProgress,
         else => |e| return e,
     };
@@ -1725,7 +1726,7 @@ pub fn mergeCommit(gpa: Allocator, io: Io, repo: *Repository, who: object.Signat
     var it = dir.iterate();
     while (try it.next(io)) |e| {
         const obj = Oid.parse(kind, e.name) catch continue;
-        const bytes = try dir.readFileAlloc(io, e.name, gpa, .unlimited);
+        const bytes = try aegis.own.readFile(io, dir, e.name, gpa, aegis.units.Bytes(u64).fromRaw(std.math.maxInt(u64)));
         defer gpa.free(bytes);
         const blob = try repo.objectDatabase().write(io, .blob, bytes);
         try t.add(io, obj, blob, null);
@@ -1748,7 +1749,7 @@ pub fn mergeCommit(gpa: Allocator, io: Io, repo: *Repository, who: object.Signat
 pub fn mergeAbort(io: Io, repo: *Repository) Self.Error!void {
     try repo.refStore().root().delete(repo.allocator(), io, .notes_merge_partial);
     try repo.refStore().root().delete(repo.allocator(), io, .notes_merge_ref);
-    var dir = repo.gitDirectory().openDir(io, merge_worktree, .{ .iterate = true }) catch |err| switch (err) {
+    var dir = repo.gitDirectory().get().openDir(io, merge_worktree, .{ .iterate = true }) catch |err| switch (err) {
         error.FileNotFound => return,
         else => |e| return e,
     };

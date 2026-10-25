@@ -38,6 +38,7 @@ const Self = @This();
 // The modules relic's API puts under this one, as `relic.lfs.<name>`.
 
 const std = @import("std");
+const aegis = @import("aegis");
 const shakedown = @import("shakedown");
 const repeat = shakedown.corpus.repeat;
 const Allocator = std.mem.Allocator;
@@ -193,9 +194,9 @@ pub const Pointer = struct {
 
     /// `encode` into a buffer of the caller's.
     pub fn encodeBuf(p: *const Pointer, buf: *[max_encoded_len]u8) []const u8 {
-        assert(p.extension_count <= max_extensions);
+        aegis.assert.invariant(p.extension_count <= max_extensions, "p.extension_count <= max_extensions");
         var w: Io.Writer = .fixed(buf);
-        // unreachable: extensions come only from `decode`, out of at most 1024 bytes, and their lines encode no longer than they were read; with the version, oid and size lines that is under max_encoded_len
+        // aegis: no-danger: extensions come only from `decode`, out of at most 1024 bytes, and their lines encode no longer than they were read; with the version, oid and size lines that is under max_encoded_len
         p.encode(&w) catch unreachable;
         return w.buffered();
     }
@@ -343,7 +344,7 @@ pub const Store = struct {
     /// The object, opened for reading, when the store holds it at the size
     /// the pointer says. An object of any other size is not that object, and
     /// is `null` as a missing one is. The file is the caller's to close.
-    pub fn open(store: *const Store, io: Io, pointer: *const Pointer) OpenError!?Io.File {
+    pub fn open(store: *const Store, io: Io, pointer: *const Pointer) OpenError!?fs.OwnedFile {
         var buf: [max_path]u8 = undefined;
         const path = try store.objectPath(&buf, &pointer.oid);
         const file = store.base.openFile(io, path, .{}) catch |err| switch (err) {
@@ -356,7 +357,7 @@ pub const Store = struct {
             file.close(io);
             return null;
         }
-        return file;
+        return .init(file);
     }
 
     /// Errors from opening an object.
@@ -364,8 +365,8 @@ pub const Store = struct {
 
     /// Whether the store holds the object at the size the pointer says.
     pub fn contains(store: *const Store, io: Io, pointer: *const Pointer) OpenError!bool {
-        const file = (try store.open(io, pointer)) orelse return false;
-        file.close(io);
+        var file = (try store.open(io, pointer)) orelse return false;
+        file.deinit(io);
         return true;
     }
 
@@ -450,7 +451,7 @@ fn copyHashing(source: *Io.Reader, sink: ?*Io.Writer) (Io.Reader.ShortError || I
     var digest: [Sha256.digest_length]u8 = undefined;
     sha.final(&digest);
     var p: Pointer = .{ .oid = undefined, .size = size };
-    // unreachable: a SHA-256 digest is 32 bytes, 64 hex digits, the length of oid
+    // aegis: no-danger: a SHA-256 digest is 32 bytes, 64 hex digits, the length of oid
     _ = std.mem.print(&p.oid, "{x}", .{&digest}) catch unreachable;
     return p;
 }
@@ -592,7 +593,7 @@ pub const Lfs = struct {
     extensions: bool,
 
     /// Errors from loading.
-    pub const LoadError = Allocator.Error || Io.Dir.ReadFileAllocError ||
+    pub const LoadError = Allocator.Error || aegis.own.ReadFileError ||
         config_mod.ParseError || error{MalformedValue};
 
     /// How `load` behaves.

@@ -288,8 +288,9 @@ pub fn repack(gpa: Allocator, io: Io, repo: *Repository, asked: Options) Self.Er
     var islands: ?islands_odb.Islands = if (options.delta_islands orelse try config.getBool("repack.usedeltaislands", false)) try islands_mod.load(gpa, io, repo) else null;
     defer if (islands) |*i| i.deinit();
     try db.refresh(io);
-    const pack_dir = try db.openPackDirectory(io);
-    defer pack_dir.close(io);
+    var opened_pack_dir = try db.openPackDirectory(io);
+    defer opened_pack_dir.deinit(io);
+    const pack_dir = opened_pack_dir.lend().get();
     var run: Run = .{
         .gpa = gpa,
         .arena = arena,

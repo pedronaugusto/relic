@@ -213,7 +213,7 @@ fn relicStatus(gpa: Allocator, io: Io, repo: *repo_mod.Repository, index: *index
     defer ignore_rules.deinit();
     var rules = try repo.worktreeRules();
     rules.ignore = &ignore_rules;
-    var status = try worktree.status(gpa, io, repo.workDirectory().?, .{ .index = index, .db = repo.objectDatabase() }, .{
+    var status = try worktree.status(gpa, io, repo.workDirectory().?.get(), .{ .index = index, .db = repo.objectDatabase() }, .{
         .rules = rules,
         .head_tree = try repo.headTree(io),
     });
@@ -335,7 +335,7 @@ test "checkout and reset on a sparse index leave what they leave on the full one
     _ = try worktree.checkout(gpa, io, git.dir, .{ .index = &checked_out, .db = repo.objectDatabase(), .tree = head }, .{ .force = true });
     try std.testing.expect(!checked_out.sparse and !sparseindex_mod.hasSparseDirectories(&checked_out));
     try git.dir.access(io, "D/E/F/f.txt", .{});
-    try checked_out.write(io, repo.gitDirectory(), "index", .{});
+    try checked_out.write(io, repo.gitDirectory().get(), "index", .{});
     try git.exec(io, &.{ "sparse-checkout", "disable" });
     const status = try git.run(io, &.{ "status", "--porcelain" });
     defer gpa.free(status);
@@ -362,7 +362,7 @@ test "a file changed behind its old modification time is seen through its status
         defer index.deinit();
         const entry = index.find("f").?;
         entry.stat.ctime_sec -= 2;
-        try index.write(io, repo.gitDirectory(), "index", .{});
+        try index.write(io, repo.gitDirectory().get(), "index", .{});
     }
     // The index is written well after the file, so the entry is not racy.
     const later: Io.Timestamp = .{ .nanoseconds = before.mtime.nanoseconds + 10 * std.time.ns_per_s };

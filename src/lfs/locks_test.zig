@@ -204,7 +204,7 @@ test "the lock cache is where git-lfs keeps it and what git-lfs writes, read bot
     gpa.free(listed);
     var theirs_repo = try repo_mod.Repository.open(gpa, io, pair.theirs, .{});
     defer theirs_repo.deinit(io);
-    const store: lfs.Store = .{ .base = theirs_repo.commonDirectory(), .root = "lfs" };
+    const store: lfs.Store = .{ .base = theirs_repo.commonDirectory().get(), .root = "lfs" };
     var table = try lfslocks.Table.cached(gpa, io, &store, "refs/heads/main");
     defer table.deinit();
     try testing.expectEqualStrings("ada", table.find("x.bin").?.owner.?);
@@ -425,9 +425,9 @@ test "LFS HTTP pagination ends or fails without publishing partial caches" {
             const remote_bytes = "[{\"id\":\"old\",\"path\":\"old.bin\"}]\n";
             const verify_bytes = "{\"ours\":[{\"id\":\"old\",\"path\":\"old.bin\"}],\"theirs\":[]}\n";
             if (i >= 4) {
-                try repo.commonDirectory().createDirPath(fx.io, cache_path);
-                try repo.commonDirectory().writeFile(fx.io, .{ .sub_path = cache_path ++ "/remote", .data = remote_bytes });
-                try repo.commonDirectory().writeFile(fx.io, .{ .sub_path = cache_path ++ "/verifiable", .data = verify_bytes });
+                try repo.commonDirectory().get().createDirPath(fx.io, cache_path);
+                try repo.commonDirectory().get().writeFile(fx.io, .{ .sub_path = cache_path ++ "/remote", .data = remote_bytes });
+                try repo.commonDirectory().get().writeFile(fx.io, .{ .sub_path = cache_path ++ "/verifiable", .data = verify_bytes });
             }
             if (verify) {
                 if (i >= 4) {
@@ -446,7 +446,7 @@ test "LFS HTTP pagination ends or fails without publishing partial caches" {
                     try testing.expect(result.locks.len != 0);
                 }
             }
-            const store: lfs.Store = .{ .base = repo.commonDirectory(), .root = "lfs" };
+            const store: lfs.Store = .{ .base = repo.commonDirectory().get(), .root = "lfs" };
             var cached = try lfslocks.Table.cached(fx.gpa, fx.io, &store, "refs/heads/main");
             defer cached.deinit();
             try testing.expectEqual(i < 4, cached.find("a.bin") != null);
@@ -455,7 +455,7 @@ test "LFS HTTP pagination ends or fails without publishing partial caches" {
                 for ([_][2][]const u8{ .{ "remote", remote_bytes }, .{ "verifiable", verify_bytes } }) |file| {
                     const path = try fx.gpa.print("{s}/{s}", .{ cache_path, file[0] });
                     defer fx.gpa.free(path);
-                    const actual = try repo.commonDirectory().readFileAlloc(fx.io, path, fx.gpa, .limited(1024));
+                    const actual = try repo.commonDirectory().get().readFileAlloc(fx.io, path, fx.gpa, .limited(1024));
                     defer fx.gpa.free(actual);
                     try testing.expectEqualStrings(file[1], actual);
                 }

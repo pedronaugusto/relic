@@ -16,6 +16,7 @@
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -31,7 +32,7 @@ pub const file_name = "shallow";
 pub const ReadError = error{
     /// A line that is not an object name of the repository's hash.
     MalformedShallowFile,
-} || Allocator.Error || Io.Dir.ReadFileAllocError;
+} || Allocator.Error || aegis.own.ReadFileError;
 
 /// Errors from reading or writing the file.
 pub const Error = error{
@@ -45,7 +46,7 @@ pub const Error = error{
 pub fn read(gpa: Allocator, io: Io, common_dir: Io.Dir, kind: hash.Kind) Self.ReadError!Oid.Set {
     var set: Oid.Set = .empty;
     errdefer set.deinit(gpa);
-    const text = common_dir.readFileAlloc(io, file_name, gpa, .limited(1 << 30)) catch |err| switch (err) {
+    const text = aegis.own.readFile(io, common_dir, file_name, gpa, aegis.units.Bytes(u64).fromRaw(1 << 30)) catch |err| switch (err) {
         error.FileNotFound => return set,
         else => |e| return e,
     };

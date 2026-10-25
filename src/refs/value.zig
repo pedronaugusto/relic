@@ -1,5 +1,6 @@
 const ErrorNamespace = @This();
 const std = @import("std");
+const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const hash = @import("../hash/hash.zig");
@@ -30,7 +31,7 @@ pub const ReadError = error{
     /// which is the name of the file that blocks every update to the ref
     /// without it.
     InvalidRefName,
-} || Allocator.Error || Io.Dir.ReadFileAllocError || Io.Dir.OpenError || Io.Dir.Iterator.Error ||
+} || Allocator.Error || aegis.own.ReadFileError || Io.Dir.OpenError || Io.Dir.Iterator.Error ||
     policy.Error;
 
 /// Errors from a transaction.

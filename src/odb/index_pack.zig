@@ -565,7 +565,7 @@ fn readEntries(tee: *Tee, indexer: *Indexer, count: u32, kind: Kind) Error!struc
     const copied = tee.finish();
     if (copied.size < 12 + raw_len) return error.TruncatedPack;
     if (!copied.trailerMatches(kind)) return error.PackChecksumMismatch;
-    // unreachable: the tail is cut to the format's raw length
+    // aegis: no-danger: the tail is cut to the format's raw length
     const trailer = Oid.fromRaw(kind, copied.tail[0..raw_len]) catch unreachable;
     const body_end = copied.size - raw_len;
     if (parsed_end > body_end) return error.TruncatedPack;
@@ -625,7 +625,7 @@ const Copied = struct {
     tail: [hash.max_raw_len]u8,
 
     fn trailerMatches(c: *const Copied, kind: Kind) bool {
-        // unreachable: the tail is cut to the format's raw length
+        // aegis: no-danger: the tail is cut to the format's raw length
         const trailer = Oid.fromRaw(kind, c.tail[0..kind.rawLen()]) catch unreachable;
         return trailer.eql(c.checksum);
     }
@@ -667,7 +667,7 @@ const Tee = struct {
     }
 
     fn stream(r: *Io.Reader, w: *Io.Writer, limit: Io.Limit) Io.Reader.StreamError!usize {
-        const t: *Tee = @alignCast(@fieldParentPtr("interface", r)); // safe: this function is installed only on a Tee's interface
+        const t: *Tee = @alignCast(@fieldParentPtr("interface", r)); // aegis: no-danger: this function is installed only on a Tee's interface
         const dest = limit.slice(try w.writableSliceGreedy(1));
         const n = t.pull(dest) catch |err| {
             t.err = err;
@@ -753,19 +753,23 @@ const Indexer = struct {
     /// are appended.
     thin_bases: std.ArrayList(Oid) = .empty,
     deltas: u32 = 0,
-    resolved_count: std.atomic.Value(u64) = .init(0),
     /// Held by the threads resolving deltas for what they share: the
     /// first failure and the found blobs, and around `Links`, the
     /// progress, the warnings and the reference deltas claimed.
     shared: aegis.BlockingGuarded(Shared) = .init(.{}),
     /// The whole objects deltas hang from, and the next one a thread takes.
     roots: []u32 = &.{},
-    next_root: std.atomic.Value(usize) = .init(0),
+    next_root: RootClaims = RootClaims.init(Roots.fromRaw(0)),
     /// Whether a thread failed, which stops the others; the failure is
     /// `shared`'s.
-    failed: std.atomic.Value(bool) = .init(false),
+    failed: FailedCell = FailedCell.init(.running),
     /// The stream, while `parse` reads from it.
     tee: ?*Tee = null,
+
+    const Failed = enum(u8) { running, failed };
+    const FailedCell = aegis.Atomic(Failed);
+    const Roots = aegis.units.Count(Entry, usize);
+    const RootClaims = aegis.Atomic(Roots);
 
     /// What `shared` guards.
     const Shared = struct {
@@ -773,6 +777,8 @@ const Indexer = struct {
         failure: ?Error = null,
         /// The blobs trees name as `.gitmodules` and `.gitattributes`.
         found: fsck.Found = .{},
+        /// How many deltas are resolved, for the progress.
+        resolved: u64 = 0,
     };
 
     fn init(gpa: Allocator, io: Io, db: Database, file: Io.File, options: Options) Allocator.Error!Indexer {
@@ -823,7 +829,7 @@ const Indexer = struct {
         const shared = guard.value();
         if (shared.failure != null) return err;
         shared.failure = err;
-        x.failed.store(true, .release);
+        x.failed.store(.failed, .release);
         if (x.options.diagnostic) |d| d.* = diagnostic;
         return err;
     }
@@ -957,7 +963,7 @@ const Indexer = struct {
                 entry.kind = .ref_delta;
                 try x.ref_bases.append(x.gpa, .{
                     .child = @intCast(x.entries.items.len),
-                    // unreachable: the slice is cut to the format's raw length
+                    // aegis: no-danger: the slice is cut to the format's raw length
                     .base = Oid.fromRaw(x.kind, raw[0..x.kind.rawLen()]) catch unreachable,
                 });
             },
@@ -1030,7 +1036,7 @@ const Indexer = struct {
     }
 
     fn noteFinding(context: *anyopaque, finding: fsck.Finding) Allocator.Error!void {
-        const x: *Indexer = @ptrCast(@alignCast(context)); // safe: the context is the Indexer the sink was made from
+        const x: *Indexer = @ptrCast(@alignCast(context)); // aegis: no-danger: the context is the Indexer the sink was made from
         var guard = x.shared.acquireUncancelable(x.io);
         defer guard.deinit(x.io);
         try fsck.note(x.options.warnings, finding);
@@ -1274,7 +1280,7 @@ const Indexer = struct {
         // waiting in a read. When the failure is this task's cancelation,
         // meeting it used the request up, and nothing else would end that
         // wait; so once anything failed, the others are canceled.
-        if (x.failed.load(.acquire)) {
+        if (x.failed.load(.acquire) == .failed) {
             group.cancel(x.io);
             return x.firstFailure().?;
         }
@@ -1559,8 +1565,8 @@ const Worker = struct {
     /// left, or a thread has failed.
     fn run(w: *Worker) void {
         const x = w.x;
-        while (!x.failed.load(.acquire)) {
-            const next = x.next_root.fetchAdd(1, .monotonic);
+        while (x.failed.load(.acquire) == .running) {
+            const next = x.next_root.fetchAddWrapping(Indexer.Roots.fromRaw(1), .monotonic).raw();
             if (next >= x.roots.len) return;
             const index = x.roots[next];
             const entry = x.entries.items[index];
@@ -1568,7 +1574,7 @@ const Worker = struct {
                 var guard = x.shared.acquireUncancelable(x.io);
                 defer guard.deinit(x.io);
                 if (guard.value().failure == null) guard.value().failure = err;
-                x.failed.store(true, .release);
+                x.failed.store(.failed, .release);
                 return;
             };
         }
@@ -1605,7 +1611,7 @@ const Worker = struct {
         };
         w.held += root.bytes.len;
         while (stack.items.len != 0) {
-            if (x.failed.load(.monotonic)) return;
+            if (x.failed.load(.monotonic) == .failed) return;
             try x.io.checkCancel();
             const top = &stack.items[stack.items.len - 1];
             const ofs = if (top.at) |at| x.ofsChildren(at) else &.{};
@@ -1652,8 +1658,8 @@ const Worker = struct {
                 var guard = x.shared.acquireUncancelable(x.io);
                 defer guard.deinit(x.io);
                 if (x.options.links) |l| try l.take(x.kind, top.type, named.oid, bytes);
-                const done = x.resolved_count.fetchAdd(1, .monotonic) + 1;
-                Progress.emit(x.options.progress, .{ .resolved = .{ .done = done, .total = x.deltas } });
+                guard.value().resolved += 1;
+                Progress.emit(x.options.progress, .{ .resolved = .{ .done = guard.value().resolved, .total = x.deltas } });
             }
 
             if (x.ofsChildren(at).len != 0 or x.refChildren(named.oid).len != 0) {
@@ -2312,28 +2318,28 @@ const Peak = struct {
     }
 
     fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
-        const p: *Peak = @ptrCast(@alignCast(ctx)); // safe: only `allocator` hands this pointer out
+        const p: *Peak = @ptrCast(@alignCast(ctx)); // aegis: no-danger: only `allocator` hands this pointer out
         const out = p.child.rawAlloc(len, alignment, ret) orelse return null;
         p.note(len, 0);
         return out;
     }
 
     fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, len: usize, ret: usize) bool {
-        const p: *Peak = @ptrCast(@alignCast(ctx)); // safe: only `allocator` hands this pointer out
+        const p: *Peak = @ptrCast(@alignCast(ctx)); // aegis: no-danger: only `allocator` hands this pointer out
         if (!p.child.rawResize(memory, alignment, len, ret)) return false;
         p.note(len, memory.len);
         return true;
     }
 
     fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, len: usize, ret: usize) ?[*]u8 {
-        const p: *Peak = @ptrCast(@alignCast(ctx)); // safe: only `allocator` hands this pointer out
+        const p: *Peak = @ptrCast(@alignCast(ctx)); // aegis: no-danger: only `allocator` hands this pointer out
         const out = p.child.rawRemap(memory, alignment, len, ret) orelse return null;
         p.note(len, memory.len);
         return out;
     }
 
     fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret: usize) void {
-        const p: *Peak = @ptrCast(@alignCast(ctx)); // safe: only `allocator` hands this pointer out
+        const p: *Peak = @ptrCast(@alignCast(ctx)); // aegis: no-danger: only `allocator` hands this pointer out
         p.child.rawFree(memory, alignment, ret);
         p.note(0, memory.len);
     }
@@ -2516,29 +2522,31 @@ const Park = struct {
     const Layer = shakedown.Layer(State, .{ .fileReadPositional = read });
     const State = struct {
         caller: std.Thread.Id = undefined,
-        armed: std.atomic.Value(bool) = .init(false),
-        beside: std.atomic.Value(bool) = .init(false),
-        on_caller: std.atomic.Value(bool) = .init(false),
-        caller_parked: std.atomic.Value(bool) = .init(false),
-        beside_canceled: std.atomic.Value(bool) = .init(false),
+        armed: FlagCell = FlagCell.init(.unset),
+        beside: FlagCell = FlagCell.init(.unset),
+        on_caller: FlagCell = FlagCell.init(.unset),
+        caller_parked: FlagCell = FlagCell.init(.unset),
+        beside_canceled: FlagCell = FlagCell.init(.unset),
     };
+    const Flag = enum(u8) { unset, set };
+    const FlagCell = aegis.Atomic(Flag);
 
     fn read(userdata: ?*anyopaque, file: Io.File, data: []const []u8, offset: u64) Io.File.ReadPositionalError!usize {
         const l = Layer.of(userdata);
         const s = &l.state;
-        if (s.armed.load(.acquire)) {
+        if (s.armed.load(.acquire) == .set) {
             if (std.Thread.getCurrentId() != s.caller) {
                 // Only the resolving tasks read on another thread.
-                if (s.beside.cmpxchgStrong(false, true, .acq_rel, .acquire) == null) {
+                if (s.beside.cmpxchgStrong(.unset, .set, .acq_rel, .acquire) == null) {
                     wait(l.base) catch |err| {
-                        s.beside_canceled.store(true, .release);
+                        s.beside_canceled.store(.set, .release);
                         return err;
                     };
                     return error.Unexpected;
                 }
-            } else if (s.on_caller.cmpxchgStrong(false, true, .acq_rel, .acquire) == null) {
+            } else if (s.on_caller.cmpxchgStrong(.unset, .set, .acq_rel, .acquire) == null) {
                 try waitBeside(s, l.base);
-                s.caller_parked.store(true, .release);
+                s.caller_parked.store(.set, .release);
                 try wait(l.base);
                 return error.Unexpected;
             }
@@ -2555,7 +2563,7 @@ const Park = struct {
     /// Until a task beside the calling one parks, or twenty seconds.
     fn waitBeside(s: *State, base: Io) Io.Cancelable!void {
         for (0..20_000) |_| {
-            if (s.beside.load(.acquire)) return;
+            if (s.beside.load(.acquire) == .set) return;
             try base.sleep(.fromMilliseconds(1), .awake);
         }
     }
@@ -2563,7 +2571,7 @@ const Park = struct {
     fn receiveOn(gpa: Allocator, io: Io, db: *odb_mod.Odb, pack_dir: Io.Dir, bytes: []const u8) Error!Result {
         const s = &Layer.of(io.userdata).state;
         s.caller = std.Thread.getCurrentId();
-        defer s.armed.store(false, .release);
+        defer s.armed.store(.unset, .release);
         var in: Io.Reader = .fixed(bytes);
         return receive(gpa, io, db, .{ .pack_dir = pack_dir, .in = &in }, .{ .threads = 3, .progress = .{ .context = s, .report = arm } });
     }
@@ -2571,9 +2579,9 @@ const Park = struct {
     /// Armed once every entry is indexed, so that what parks is a read
     /// resolving deltas, not one of the stream's.
     fn arm(context: ?*anyopaque, event: progress_mod.Event) void {
-        const s: *State = @ptrCast(@alignCast(context.?)); // safe: receiveOn hands its layer's state as the context
+        const s: *State = @ptrCast(@alignCast(context.?)); // aegis: no-danger: receiveOn hands its layer's state as the context
         switch (event) {
-            .indexed => |n| if (n.done == n.total) s.armed.store(true, .release),
+            .indexed => |n| if (n.done == n.total) s.armed.store(.set, .release),
             else => {},
         }
     }
@@ -2619,18 +2627,18 @@ test "a receive canceled while it resolves stops every resolving task, even one 
     const s = &park.state;
     var future = try io.concurrent(Park.receiveOn, .{ gpa, park.io(), &repo, pack_dir, bytes });
     for (0..20_000) |_| {
-        if (s.caller_parked.load(.acquire)) break;
+        if (s.caller_parked.load(.acquire) == .set) break;
         try io.sleep(.fromMilliseconds(1), .awake);
     } else {
         // glint-ignore: Z026 -- the test fails next; a task that will not cancel is reported by the leak check
         _ = future.cancel(io) catch {};
-        std.debug.print("the calling task did not park after another (beside: {}, caller read: {})\n", .{ s.beside.load(.acquire), s.on_caller.load(.acquire) });
+        std.debug.print("the calling task did not park after another (beside: {}, caller read: {})\n", .{ s.beside.load(.acquire) == .set, s.on_caller.load(.acquire) == .set });
         return error.TestUnexpectedResult;
     }
     const started = Io.Clock.awake.now(io);
     try testing.expectError(error.Canceled, future.cancel(io));
     // The task that waited was canceled too, rather than left to its wait.
-    if (!s.beside_canceled.load(.acquire)) {
+    if (s.beside_canceled.load(.acquire) == .unset) {
         const waited = started.durationTo(Io.Clock.awake.now(io));
         std.debug.print("the task waiting in a read was left to its wait: the cancel took {d} ms\n", .{waited.toMilliseconds()});
         return error.TestUnexpectedResult;
@@ -2670,7 +2678,7 @@ fn fuzzReceive(_: void, case: *shakedown.Case) anyerror!void {
     } else {
         // A pack that is well formed up to the damage done to it, so the
         // fuzzer spends its time inside the entries and not in the header.
-        var entries: [4]TestEntry = undefined;
+        var entries: [4]TestEntry = @splat(.{ .whole = .{ .t = .blob, .bytes = "" } });
         var bodies: [4][64]u8 = undefined;
         var patches: [4][]u8 = .{ &.{}, &.{}, &.{}, &.{} };
         defer for (patches) |p| gpa.free(p);

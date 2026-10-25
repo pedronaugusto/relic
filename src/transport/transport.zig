@@ -447,7 +447,7 @@ pub const Session = struct {
         return .{
             .config = options.config,
             .remote_name = options.remote_name,
-            .base = if (options.repository) |r| r.topDirectory() else null,
+            .base = if (options.repository) |r| r.topDirectory().get() else null,
             .proxy = options.proxy,
             .programs = options.programs,
             .protocol_v2 = options.protocol_v2 orelse wantsV2(options.config),
@@ -482,7 +482,7 @@ pub const Session = struct {
         const spec = remote_helper.Spec.of(remote_url, options.remote_name, vcs) orelse return null;
         try checkAllowed(options, spec.name);
         const programs = options.programs orelse return error.ProgramsNotGranted;
-        const git_dir: ?[:0]u8 = if (options.repository) |r| try fs.realPathAlloc(gpa, io, r.gitDirectory(), ".") else null;
+        const git_dir: ?[:0]u8 = if (options.repository) |r| try fs.realPathAlloc(gpa, io, r.gitDirectory().get(), ".") else null;
         defer if (git_dir) |d| gpa.free(d);
         const h = try remote_helper.Helper.open(gpa, io, spec, .{
             .programs = programs,
@@ -839,13 +839,14 @@ pub const Session = struct {
                 var with_id = request;
                 with_id.session_id = s.sessionId();
                 if (with_id.server_options.len == 0) with_id.server_options = s.server_options;
-                var protocols: std.ArrayList([]const u8) = .empty;
-                defer protocols.deinit(gpa);
+                var protocols: [][]const u8 = &.{};
+                defer gpa.free(protocols);
                 if (with_id.uri_protocols.len == 0) if (s.transfer.config) |config| if (config.get("fetch.uriprotocols")) |text| {
                     // git's `string_list_split` at commas, nothing trimmed.
+                    protocols = try gpa.alloc([]const u8, std.mem.countScalar(u8, text, ',') + 1);
                     var it = std.mem.splitScalar(u8, text, ',');
-                    while (it.next()) |p| try protocols.append(gpa, p);
-                    with_id.uri_protocols = protocols.items;
+                    for (protocols) |*p| p.* = it.next().?;
+                    with_id.uri_protocols = protocols;
                 };
                 var result = try fetch_pack.fetch(gpa, io, smart.conn, .{ .advertisement = &smart.advertisement, .db = db, .request = with_id }, options);
                 defer result.deinitUris(gpa);

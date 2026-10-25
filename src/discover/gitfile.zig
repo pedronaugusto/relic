@@ -6,6 +6,7 @@
 const ErrorNamespace = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -30,7 +31,7 @@ pub fn target(text: []const u8) ?[]const u8 {
 }
 
 /// Errors from reading a `.git` file.
-pub const Error = Allocator.Error || Io.Dir.ReadFileAllocError;
+pub const Error = Allocator.Error || aegis.own.ReadFileError;
 
 /// The path `<dir>/<sub_path>` names as a `.git` file, in `gpa`; `null` when
 /// there is no such file or it is not a `.git` file. One larger than
@@ -69,8 +70,8 @@ pub fn write(io: Io, dir: Io.Dir, path: []const u8, hide: fs.HideDotFiles) Write
 /// The directory `path` names, opened: absolute, as git writes it for a
 /// linked worktree, or relative to `dir`, the directory the `.git` file is
 /// in, as it writes it for a submodule.
-pub fn open(io: Io, dir: Io.Dir, path: []const u8, options: Io.Dir.OpenOptions) Io.Dir.OpenError!Io.Dir {
-    return if (std.Io.Dir.path.isAbsolute(path)) Io.Dir.openDirAbsolute(io, path, options) else dir.openDir(io, path, options);
+pub fn open(io: Io, dir: Io.Dir, path: []const u8, options: Io.Dir.OpenOptions) Io.Dir.OpenError!fs.OwnedDir {
+    return fs.OwnedDir.init(try if (std.Io.Dir.path.isAbsolute(path)) Io.Dir.openDirAbsolute(io, path, options) else dir.openDir(io, path, options));
 }
 
 test "a .git file is read as git reads it" {
@@ -96,7 +97,7 @@ test "a .git file is read as git reads it" {
     try testing.expectEqual(@as(?[]u8, null), try read(gpa, io, tmp.dir, "missing"));
     try tmp.dir.createDirPath(io, "inner");
     var opened = try open(io, tmp.dir, read_back, .{});
-    opened.close(io);
+    opened.deinit(io);
     try write(io, tmp.dir, "elsewhere/.git", .dot_git_only);
     const written = (try read(gpa, io, tmp.dir, ".git")).?;
     defer gpa.free(written);

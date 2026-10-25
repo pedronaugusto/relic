@@ -15,6 +15,7 @@
 
 const fs = @import("../fs/fs.zig");
 const std = @import("std");
+const aegis = @import("aegis");
 const ctype = @import("../text.zig").ctype;
 const percent = @import("../text.zig").percent;
 const Allocator = std.mem.Allocator;
@@ -98,8 +99,8 @@ pub const Rule = struct {
     /// argument, whose output is the value.
     cmd: ?[]const u8 = null,
     where: Where,
-    if_exists: IfExists,
-    if_missing: IfMissing,
+    if_exists: IfExists, // aegis: no-danger: a trailer's configured action, an option
+    if_missing: IfMissing, // aegis: no-danger: a trailer's configured action, an option
 };
 
 /// How trailers are read and added: the `trailer.*` configuration and the
@@ -168,7 +169,7 @@ pub const Settings = struct {
                 rule.if_missing = if (value) |v| IfMissing.parse(v) orelse rule.if_missing else s.if_missing;
             }
         }
-        s.rules = rules.items;
+        s.rules = try rules.toOwnedSlice(arena);
         return s;
     }
 };
@@ -848,7 +849,7 @@ pub fn process(gpa: Allocator, io: Io, w: *std.Io.Writer, input: []const u8, req
 
 /// Errors from processing a file.
 pub const FileError = errors: {
-    break :errors Error || std.Io.Writer.Error || fs.AtomicWriteError || Io.Dir.ReadFileAllocError || Io.Dir.OpenError ||
+    break :errors Error || std.Io.Writer.Error || fs.AtomicWriteError || aegis.own.ReadFileError || Io.Dir.OpenError ||
         Io.File.StatError || Io.Dir.SetFilePermissionsError;
 };
 
@@ -864,7 +865,7 @@ pub fn processFile(gpa: Allocator, io: Io, dir: Io.Dir, path: []const u8, file_o
     const new = file_options.new;
     const in_place = file_options.in_place;
     const out = file_options.out;
-    var input: std.ArrayList(u8) = .fromOwnedSlice(try dir.readFileAlloc(io, path, gpa, .unlimited));
+    var input: std.ArrayList(u8) = .fromOwnedSlice(try aegis.own.readFile(io, dir, path, gpa, aegis.units.Bytes(u64).fromRaw(std.math.maxInt(u64))));
     defer input.deinit(gpa);
     try completeLine(gpa, &input);
     if (!in_place) return process(gpa, io, out, input.items, .{ .settings = settings, .commands = commands, .formatting = options, .new = new });
@@ -939,7 +940,7 @@ pub fn parsePlaceholderOptions(arena: Allocator, text: []const u8) Allocator.Err
             at += len;
         } else return null;
     }
-    if (keys.items.len != 0) options.keys = keys.items;
+    if (keys.items.len != 0) options.keys = try keys.toOwnedSlice(arena);
     return .{ .options = options, .len = at };
 }
 

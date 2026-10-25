@@ -12,6 +12,7 @@
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -25,7 +26,7 @@ const Oid = hash.Oid;
 const header_len = 12;
 
 /// Errors from reading one.
-pub const ReadError = Allocator.Error || Io.Dir.ReadFileAllocError || error{
+pub const ReadError = Allocator.Error || aegis.own.ReadFileError || error{
     /// Not a version 1 `.mtimes` of a known hash, or not the size its pack
     /// asks for: git's `load_pack_mtimes_file` refuses it, and dies where
     /// it needs the times.
@@ -38,7 +39,7 @@ pub const ReadError = Allocator.Error || Io.Dir.ReadFileAllocError || error{
 /// checksum: so does this.
 pub fn read(gpa: Allocator, io: Io, dir: Io.Dir, sub_path: []const u8, count: u32) Self.ReadError![]u32 {
     const max = header_len + @as(usize, count) * 4 + 2 * hash.max_raw_len;
-    const bytes = dir.readFileAlloc(io, sub_path, gpa, .limited(max + 1)) catch |err| switch (err) {
+    const bytes = aegis.own.readFile(io, dir, sub_path, gpa, aegis.units.Bytes(u64).fromRaw(max + 1)) catch |err| switch (err) {
         error.StreamTooLong => return error.InvalidMtimes,
         else => |e| return e,
     };

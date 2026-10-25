@@ -135,7 +135,7 @@ fn pass(arena: Allocator, io: Io, status: *checkout.Status, inputs: Inputs, opti
         }
         try kept.append(arena, entry);
     }
-    status.entries = kept.items;
+    status.entries = try kept.toOwnedSlice(arena);
 }
 
 /// The renames git's status looks for, as its configuration reads:

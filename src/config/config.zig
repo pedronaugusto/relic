@@ -14,6 +14,7 @@ const Self = @This();
 // The modules relic's API puts under this one, as `relic.config.<name>`.
 
 const std = @import("std");
+const aegis = @import("aegis");
 const ctype = @import("../text.zig").ctype;
 const shakedown = @import("shakedown");
 const builtin = @import("builtin");
@@ -49,7 +50,7 @@ pub const ParseError = error{
     /// given on the command line ("relative config includes must come from
     /// files").
     RelativeIncludeOutsideFile,
-} || PathError || Io.Dir.ReadFileAllocError;
+} || PathError || aegis.own.ReadFileError;
 
 /// Whether an entry is `remote.<name>.url` with a value: what git's
 /// `hasconfig:remote.*.url:` gathers.
@@ -172,6 +173,9 @@ pub const Level = enum {
 };
 
 /// One configuration file, parsed into lines.
+/// Which `SourceFile` of a `Config` an entry came from, its place in `files`.
+pub const FileId = aegis.id.Id(SourceFile, u32);
+
 pub const SourceFile = struct {
     pub const Error = ErrorNamespace.Error;
 
@@ -248,7 +252,7 @@ pub const Entry = struct {
     value: ?[]const u8,
     level: Level,
     /// Which `SourceFile` it came from.
-    file_index: u32,
+    file_index: FileId,
     /// Which line of that file.
     line_index: u32,
 
@@ -509,7 +513,7 @@ pub const Config = struct {
         }
         try config.files.append(gpa, file);
         file_owned = true;
-        try config.indexFile(0);
+        try config.indexFile(FileId.fromRaw(0));
         return .{ .config = config, .failure = failure };
     }
 
@@ -647,7 +651,7 @@ pub const Config = struct {
     }
 
     /// Errors from `isStale`.
-    pub const IsStaleError = Allocator.Error || Io.Dir.ReadFileAllocError;
+    pub const IsStaleError = Allocator.Error || aegis.own.ReadFileError;
 
     /// Whether a file this configuration was read from now holds other
     /// bytes than it did, or is there when it was not, or is gone. Includes
@@ -723,11 +727,11 @@ pub const Config = struct {
         }
         try config.files.append(config.gpa, file);
         errdefer _ = config.files.pop();
-        try config.indexFile(@intCast(config.files.items.len - 1));
+        try config.indexFile(FileId.fromRaw(@intCast(config.files.items.len - 1)));
     }
 
-    fn indexFile(config: *Config, file_index: u32) Allocator.Error!void {
-        const file = &config.files.items[file_index];
+    fn indexFile(config: *Config, file_index: FileId) Allocator.Error!void {
+        const file = &config.files.items[file_index.raw()];
         var section: []const u8 = "";
         var subsection: []const u8 = "";
         var has_subsection = false;
@@ -792,11 +796,11 @@ pub const Config = struct {
     fn followIncludes(config: *Config, io: Io, dir: Io.Dir, level: Level, from: usize, depth: u8) ParseError!void {
         if (from == config.entries.items.len) return;
         const source_file_index = config.entries.items[from].file_index;
-        const source_conditional = config.files.items[source_file_index].conditional;
+        const source_conditional = config.files.items[source_file_index.raw()].conditional;
         var i = from;
         while (i < config.entries.items.len) : (i += 1) {
             const entry = config.entries.items[i];
-            if (entry.file_index != source_file_index) break;
+            if (!entry.file_index.eql(source_file_index)) break;
             const value = entry.value orelse continue;
             var include_path: ?[]const u8 = null;
             var conditional = source_conditional;
@@ -811,7 +815,7 @@ pub const Config = struct {
                 // directory's, absolute and with its links resolved.
                 var dir_buf: [4096]u8 = undefined;
                 const including_dir = if (std.mem.find(u8, entry.subsection, ":./") != null)
-                    absoluteDirOf(io, dir, config.files.items[entry.file_index].path, &dir_buf)
+                    absoluteDirOf(io, dir, config.files.items[entry.file_index.raw()].path, &dir_buf)
                 else
                     null;
                 // A `gitdir:./` pattern needs a file to be relative to.
@@ -827,7 +831,7 @@ pub const Config = struct {
             const path = try interpolatePath(config.gpa, raw_path, config.context.home);
             defer config.gpa.free(path);
             if (!std.Io.Dir.path.isAbsolute(path) and level == .command) return error.RelativeIncludeOutsideFile;
-            const including_path = config.files.items[entry.file_index].path;
+            const including_path = config.files.items[entry.file_index.raw()].path;
             const resolved = try resolveIncludePath(config.gpa, path, including_path);
             defer config.gpa.free(resolved);
             try config.addFile(io, .{ .dir = dir, .sub_path = resolved }, level, false, depth + 1, conditional);
@@ -919,7 +923,7 @@ pub const Config = struct {
         if (std.mem.startsWith(u8, condition, hasconfig_url)) {
             const pattern = condition[hasconfig_url.len..];
             for (config.entries.items) |entry| {
-                if (!isRemoteUrl(entry) or config.files.items[entry.file_index].conditional) continue;
+                if (!isRemoteUrl(entry) or config.files.items[entry.file_index.raw()].conditional) continue;
                 if (try config.urlMatches(pattern, entry.value.?)) return true;
             }
             return false;
@@ -982,7 +986,7 @@ pub const Config = struct {
             urls.deinit(config.gpa);
         }
         for (gathering.entries.items) |entry| {
-            if (!isRemoteUrl(entry) or gathering.files.items[entry.file_index].conditional) continue;
+            if (!isRemoteUrl(entry) or gathering.files.items[entry.file_index.raw()].conditional) continue;
             const url = try config.gpa.dupe(u8, entry.value.?);
             urls.append(config.gpa, url) catch |err| {
                 config.gpa.free(url);
@@ -1103,7 +1107,7 @@ pub const Config = struct {
     pub fn origin(config: *const Config, full_name: []const u8) ?struct { path: []const u8, line: u32, level: Level } {
         const entry = config.find(full_name) orelse return null;
         return .{
-            .path = config.files.items[entry.file_index].path,
+            .path = config.files.items[entry.file_index.raw()].path,
             .line = entry.line_index + 1,
             .level = entry.level,
         };
@@ -1248,11 +1252,11 @@ pub const Config = struct {
 
     const Setting = struct { name: []const u8, value: []const u8 };
 
-    fn setInFile(config: *Config, file_index: u32, setting: Setting, add: bool) SetError!void {
+    fn setInFile(config: *Config, file_index: FileId, setting: Setting, add: bool) SetError!void {
         const full_name = setting.name;
         const value = setting.value;
         const split = try checkKey(full_name);
-        const file = &config.files.items[file_index];
+        const file = &config.files.items[file_index.raw()];
 
         // The last matching line wins on read, so that is the one to change.
         // A new value goes where git puts one: after the last variable of
@@ -1303,11 +1307,11 @@ pub const Config = struct {
                     line.text[name_end..],
                 });
             };
-            // unreachable: the name was read from this line and the escaped value closes every quote it opens
+            // aegis: no-danger: the name was read from this line and the escaped value closes every quote it opens
             const parsed = parseVariableLine(replacement) catch unreachable;
             // The line reads back as the variable it replaced, with a value.
             assert(parsed.has_value);
-            assert(std.ascii.eqlIgnoreCase(parsed.name, line.name));
+            aegis.assert.invariant(std.ascii.eqlIgnoreCase(parsed.name, line.name), "std.ascii.eqlIgnoreCase(parsed.name, line.name)");
             const read = blk: {
                 errdefer config.gpa.free(replacement);
                 break :blk try file.readBack(replacement, parsed);
@@ -1331,12 +1335,12 @@ pub const Config = struct {
         writeValue(&text.writer, value) catch return error.OutOfMemory;
         text.writer.writeByte('\n') catch return error.OutOfMemory;
         const new_text = try text.toOwnedSlice();
-        // unreachable: checkKey passed the name and writeValue closes every quote it opens
+        // aegis: no-danger: checkKey passed the name and writeValue closes every quote it opens
         const parsed = parseVariableLine(new_text) catch unreachable;
         // The line reads back as the variable written, its value running to
         // the newline: writeValue quotes any space it would otherwise lose.
         assert(parsed.has_value);
-        assert(std.ascii.eqlIgnoreCase(parsed.name, split.name));
+        aegis.assert.invariant(std.ascii.eqlIgnoreCase(parsed.name, split.name), "std.ascii.eqlIgnoreCase(parsed.name, split.name)");
         assert(parsed.value_end == new_text.len - 1);
         const read = blk: {
             errdefer config.gpa.free(new_text);
@@ -1429,9 +1433,9 @@ pub const Config = struct {
         return config.unsetInFile(file_index, full_name, value);
     }
 
-    fn unsetInFile(config: *Config, file_index: u32, full_name: []const u8, only: ?[]const u8) SetError!void {
+    fn unsetInFile(config: *Config, file_index: FileId, full_name: []const u8, only: ?[]const u8) SetError!void {
         const split = try checkKey(full_name);
-        const file = &config.files.items[file_index];
+        const file = &config.files.items[file_index.raw()];
 
         const lines = file.lines.items;
         const doomed = try config.gpa.alloc(bool, lines.len);
@@ -1509,7 +1513,7 @@ pub const Config = struct {
     /// `[a.b]` answers to the section `a` with the subsection `b`.
     pub fn removeSectionIn(config: *Config, level: Level, section: []const u8, subsection: ?[]const u8) SetError!bool {
         const file_index = config.writableFileAt(level) orelse return error.NoWritableSource;
-        const file = &config.files.items[file_index];
+        const file = &config.files.items[file_index.raw()];
         const full = if (subsection) |sub|
             try config.gpa.print("{s}.{s}", .{ section, sub })
         else
@@ -1533,24 +1537,24 @@ pub const Config = struct {
         return removed;
     }
 
-    fn writableFileAt(config: *const Config, level: Level) ?u32 {
+    fn writableFileAt(config: *const Config, level: Level) ?FileId {
         for (config.files.items, 0..) |f, i| {
-            if (f.writable and f.level == level) return @intCast(i);
+            if (f.writable and f.level == level) return FileId.fromRaw(@intCast(i));
         }
         return null;
     }
 
-    fn writableFileIndex(config: *const Config) ?u32 {
-        var found: ?u32 = null;
+    fn writableFileIndex(config: *const Config) ?FileId {
+        var found: ?FileId = null;
         for (config.files.items, 0..) |f, i| {
-            if (f.writable) found = @intCast(i);
+            if (f.writable) found = FileId.fromRaw(@intCast(i));
         }
         return found;
     }
 
     fn reindex(config: *Config) Allocator.Error!void {
         config.entries.clearRetainingCapacity();
-        for (0..config.files.items.len) |file_index| try config.indexFile(@intCast(file_index));
+        for (0..config.files.items.len) |file_index| try config.indexFile(FileId.fromRaw(@intCast(file_index)));
     }
 
     /// The permissions `core.sharedRepository` asks for here; a value git
@@ -1566,7 +1570,7 @@ pub const Config = struct {
     /// the file itself asks for.
     pub fn renderWritable(config: *const Config) SetError![]u8 {
         const file_index = config.writableFileIndex() orelse return error.NoWritableSource;
-        return config.files.items[file_index].render();
+        return config.files.items[file_index.raw()].render();
     }
 };
 

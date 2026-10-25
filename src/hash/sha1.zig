@@ -23,6 +23,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const aegis = @import("aegis");
 
 /// SHA-1 as FIPS 180-4 defines it.
 pub const Sha1 = struct {
@@ -146,15 +147,26 @@ pub const Backend = enum {
 /// call and kept. That one cached word is the only thing in this package that
 /// outlives a call without a caller holding it.
 pub fn backend() Backend {
-    const cached = detected.load(.monotonic);
-    if (cached != unknown) return @fromBackingInt(@intCast(cached));
+    switch (detected.load(.monotonic)) {
+        .unknown => {},
+        .software => return .software,
+        .aarch64_crypto => return .aarch64_crypto,
+        .x86_sha_ni => return .x86_sha_ni,
+    }
+    // Two first calls at once both look; they find the same.
     const found = detect();
-    detected.store(@backingInt(found), .monotonic);
+    detected.store(switch (found) {
+        .software => .software,
+        .aarch64_crypto => .aarch64_crypto,
+        .x86_sha_ni => .x86_sha_ni,
+    }, .monotonic);
     return found;
 }
 
-const unknown: u8 = 0xff;
-var detected: std.atomic.Value(u8) = .init(unknown);
+/// `backend`'s answer once found.
+const Detected = enum(u8) { unknown, software, aarch64_crypto, x86_sha_ni };
+const DetectedCell = aegis.Atomic(Detected);
+var detected: DetectedCell = DetectedCell.init(.unknown);
 
 /// Whether the hardware arms exist in this build at all.
 ///
@@ -216,10 +228,11 @@ fn hasX86Sha() bool {
 }
 
 fn cpuid(leaf: u32, subleaf: u32) [4]u32 {
-    var eax: u32 = undefined;
-    var ebx: u32 = undefined;
-    var ecx: u32 = undefined;
-    var edx: u32 = undefined;
+    var eax: u32 = 0;
+    var ebx: u32 = 0;
+    var ecx: u32 = 0;
+    var edx: u32 = 0;
+    // aegis: boundary: the processor's cpuid, the raw instruction alone
     asm volatile ("cpuid"
         : [eax] "={eax}" (eax),
           [ebx] "={ebx}" (ebx),
@@ -315,7 +328,7 @@ const round_constants: [4]u32 align(16) = .{
 fn compressAarch64(s: *[5]u32, blocks: []const u8) void {
     var p = blocks.ptr;
     var left = blocks.len / Sha1.block_length;
-    asm volatile (
+    asm volatile ( // aegis: hot-loop: the hardware SHA-1 rounds, measured against std's by bench/regressions.zig's SHA-1 row; whole blocks only, as compressBlocks hands them
         \\ .arch_extension crypto
         \\ ld1     {v20.4s}, [%[k]]
         \\ dup     v24.4s, v20.s[0]
@@ -474,7 +487,7 @@ fn compressX86(s: *[5]u32, blocks: []const u8) void {
     // `E` travels in the high lane of a vector. Rather than reach for the
     // SSE4.1 insert and extract, it is carried through a sixteen-byte slot.
     var e_slot: [4]u32 align(16) = .{ 0, 0, 0, s[4] };
-    asm volatile (
+    asm volatile ( // aegis: hot-loop: the hardware SHA-1 rounds, measured against std's by bench/regressions.zig's SHA-1 row; whole blocks only, as compressBlocks hands them
         \\ movdqu  (%[st]), %%xmm0
         \\ pshufd  $0x1b, %%xmm0, %%xmm0
         \\ movdqu  (%[e]), %%xmm1

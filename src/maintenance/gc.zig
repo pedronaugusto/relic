@@ -10,6 +10,7 @@ const hash = @import("../hash/hash.zig");
 const Oid = hash.Oid;
 const object = @import("../object/object.zig");
 const refs_mod = @import("../refs/refs.zig");
+const fs = @import("../fs/fs.zig");
 const ref_names = @import("../names.zig").ref;
 const repo_mod = @import("../repo/repo.zig");
 const config_mod = @import("../config/config.zig");
@@ -94,10 +95,10 @@ const Settings = struct {
     patterns: []PatternPolicy,
 
     fn read(arena: Allocator, config: *const config_mod.Config, clock: date.Context) Self.Error!Settings {
-        const now = clock.now.toSeconds();
+        const now = date.instant(clock.now);
         // git 2.55's REFLOG_EXPIRE_OPTIONS_INIT: 30 days for every entry,
         // 90 for unreachable ones, the other way round from its docs.
-        var settings: Settings = .{ .defaults = .{ .total = .fromRaw(now - 30 * std.time.s_per_day), .unreached = .fromRaw(now - 90 * std.time.s_per_day) }, .patterns = &.{} };
+        var settings: Settings = .{ .defaults = .{ .total = now.saturatingSub(date.spanDays(30)), .unreached = now.saturatingSub(date.spanDays(90)) }, .patterns = &.{} };
         var patterns: std.ArrayList(PatternPolicy) = .empty;
         for (config.entries.items) |entry| {
             if (!std.mem.eql(u8, entry.section, "gc")) continue;
@@ -113,7 +114,7 @@ const Settings = struct {
             };
             if (unreachable_slot) policy.unreached = expiry else policy.total = expiry;
         }
-        settings.patterns = patterns.items;
+        settings.patterns = try patterns.toOwnedSlice(arena);
         return settings;
     }
 
@@ -156,12 +157,12 @@ pub fn expireReflogs(gpa: Allocator, io: Io, repo: *Repository, options: ReflogE
         switch (where.owner) {
             .current, .shared => try repo.refStore().expireLog(gpa, io, &keeper, .{ .name = name, .rewrite = options.rewrite, .update_ref = options.update_ref }),
             .main, .other => {
-                var admin = if (where.owner == .main) null else repo.commonDirectory().openDir(io, name[0 .. name.len - where.bare.len - 1], .{}) catch |err| switch (err) {
+                var admin: ?fs.OwnedDir = if (where.owner == .main) null else fs.OwnedDir.init(repo.commonDirectory().get().openDir(io, name[0 .. name.len - where.bare.len - 1], .{}) catch |err| switch (err) {
                     error.FileNotFound, error.NotDir => continue,
                     else => |e| return e,
-                };
-                defer if (admin) |*dir| dir.close(io);
-                var store = try repo.refStore().sibling(admin orelse repo.commonDirectory());
+                });
+                defer if (admin) |*dir| dir.deinit(io);
+                var store = try repo.refStore().sibling(if (admin) |*dir| dir.lend() else repo.commonDirectory());
                 defer store.deinit();
                 try store.expireLog(gpa, io, &keeper, .{ .name = where.bare, .rewrite = options.rewrite, .update_ref = options.update_ref });
             },

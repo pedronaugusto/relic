@@ -19,6 +19,7 @@
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -61,7 +62,7 @@ pub const Error = error{
     /// A `refspecs` entry that does not parse.
     InvalidRefspec,
 } || Allocator.Error || odb_mod.Error || rev_walk.Error || diff.Error || Io.Writer.Error ||
-    Io.Dir.ReadFileAllocError || Io.Dir.CreateDirPathError || fs.LockError || fs.CommitError || object.ParseError;
+    aegis.own.ReadFileError || Io.Dir.CreateDirPathError || fs.LockError || fs.CommitError || object.ParseError;
 
 /// What becomes of a signature: git's `--signed-tags` and
 /// `--signed-commits`.
@@ -572,13 +573,9 @@ const Exporter = struct {
     // Marks
     //=================================================================
 
-    fn marksDir(ex: *Exporter) Io.Dir {
-        return ex.options.cwd orelse Io.Dir.cwd();
-    }
-
     /// git's `import_marks`: every commit marked is taken as written.
     fn importMarks(ex: *Exporter, path: []const u8) Error!void {
-        const bytes = ex.marksDir().readFileAlloc(ex.io, path, ex.gpa, .unlimited) catch |err| switch (err) {
+        const bytes = aegis.own.readFile(ex.io, (ex.options.cwd orelse Io.Dir.cwd()), path, ex.gpa, aegis.units.Bytes(u64).fromRaw(std.math.maxInt(u64))) catch |err| switch (err) {
             error.FileNotFound => if (ex.options.import_marks_if_exists) return else return error.FileNotFound,
             else => |e| return e,
         };
@@ -612,7 +609,7 @@ const Exporter = struct {
             if (try ex.typeOf(e.key_ptr.*) != .commit) continue;
             try out.put(ex.gpa, e.value_ptr.*, e.key_ptr.*);
         }
-        const dir = ex.marksDir();
+        const dir = ex.options.cwd orelse Io.Dir.cwd();
         if (std.Io.Dir.path.dirname(path)) |parent| try dir.createDirPath(ex.io, parent);
         var buffer: [4096]u8 = undefined;
         var lock = try fs.LockFile.open(ex.gpa, ex.io, dir, .{ .sub_path = path, .buffer = &buffer }, .{ .sync = .none });

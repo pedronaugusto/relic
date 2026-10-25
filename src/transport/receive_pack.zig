@@ -549,7 +549,7 @@ pub const Server = struct {
     /// The indexer's last object read is the pack's end: keepalives are
     /// due from there, as git's index-pack tells its muxer with a NUL.
     fn endOfInput(context: ?*anyopaque, event: progress_mod.Event) void {
-        const s: *Server = @ptrCast(@alignCast(context.?)); // safe: unpack hands this function the server itself
+        const s: *Server = @ptrCast(@alignCast(context.?)); // aegis: no-danger: unpack hands this function the server itself
         switch (event) {
             .indexed => |count| if (count.done == count.total) s.startKeepalive(),
             else => {},
@@ -576,7 +576,7 @@ pub const Server = struct {
             const now = Io.Clock.awake.now(s.io);
             const quiet = channel.last.durationTo(now);
             if (!channel.keepalive or quiet.nanoseconds < period.nanoseconds) {
-                wait = if (channel.keepalive) .{ .nanoseconds = period.nanoseconds - quiet.nanoseconds } else period;
+                wait = if (channel.keepalive) now.durationTo(channel.last.addDuration(period)) else period;
                 continue;
             }
             wait = period;
@@ -654,7 +654,7 @@ pub const Server = struct {
                     // As git's `strbuf_addstr`, to a NUL.
                     try cert.appendSlice(arena, text[0 .. std.mem.findScalar(u8, text, 0) orelse text.len]);
                 };
-                s.certificate = cert.items;
+                s.certificate = try cert.toOwnedSlice(arena);
                 if (ended) break;
                 continue;
             }
@@ -728,12 +728,12 @@ pub const Server = struct {
     /// `receive.fsckObjects`'s rules.
     fn unpack(s: *Server, in: *Io.Reader, q: *Quarantine, diagnostic: *index_pack.Diagnostic, progress: progress_mod.Progress) !Received {
         const config = s.remote.repo.configuration();
-        var rules = try fsck.forTransfer(s.gpa, s.io, config, .{ .kind = s.kind(), .scope = .receive, .base = s.remote.repo.gitDirectory() }, .{});
+        var rules = try fsck.forTransfer(s.gpa, s.io, config, .{ .kind = s.kind(), .scope = .receive, .base = s.remote.repo.gitDirectory().get() }, .{});
         defer if (rules) |*r| r.deinit(s.gpa);
         var received: Received = .{ .result = undefined, .links = .init(s.gpa), .gpa = s.gpa };
         errdefer received.links.deinit();
-        try q.db.objectsDirectory().createDirPath(s.io, "pack");
-        var pack_dir = try q.db.objectsDirectory().openDir(s.io, "pack", .{ .iterate = true });
+        try q.db.objectsDirectory().get().createDirPath(s.io, "pack");
+        var pack_dir = try q.db.objectsDirectory().get().openDir(s.io, "pack", .{ .iterate = true });
         defer pack_dir.close(s.io);
         received.result = try index_pack.receive(s.gpa, s.io, &q.db, .{ .pack_dir = pack_dir, .in = in }, .{
             .fsck = if (rules) |*r| r else null,
@@ -1454,8 +1454,8 @@ pub const Server = struct {
         if (!s.remote.repo.isBare()) {
             if (try s.remote.repo.refStore().currentBranch(arena, s.io)) |branch| {
                 if (std.mem.eql(u8, branch, name["refs/heads/".len..])) return .{
-                    .path = try realPath(arena, s.io, s.remote.repo.topDirectory()),
-                    .git_dir = try realPath(arena, s.io, s.remote.repo.gitDirectory()),
+                    .path = try realPath(arena, s.io, s.remote.repo.topDirectory().get()),
+                    .git_dir = try realPath(arena, s.io, s.remote.repo.gitDirectory().get()),
                     .linked = false,
                 };
             }
@@ -1469,7 +1469,7 @@ pub const Server = struct {
         for (listing.entries) |entry| {
             const branch = entry.branch orelse continue;
             if (std.mem.eql(u8, branch, name) or std.mem.eql(u8, branch, name["refs/heads/".len..])) {
-                const common = try realPath(arena, s.io, s.remote.repo.commonDirectory());
+                const common = try realPath(arena, s.io, s.remote.repo.commonDirectory().get());
                 return .{
                     .path = try arena.dupe(u8, entry.path),
                     .git_dir = try Io.Dir.path.join(arena, &.{ common, "worktrees", entry.name }),
@@ -1537,7 +1537,7 @@ pub const Server = struct {
         // `diff-files --quiet --ignore-submodules`, then
         // `diff-index --quiet --cached --ignore-submodules HEAD`.
         const changes = deploy: {
-            const wt_dir = repo.workDirectory() orelse break :deploy error.BareRepository;
+            const wt_dir = (repo.workDirectory() orelse break :deploy error.BareRepository).get();
             var rules = try repo.worktreeRules();
             var attrs = try repo.loadAttrs(s.io);
             defer attrs.deinit();
@@ -1641,7 +1641,7 @@ pub const Server = struct {
         var signer_name: []const u8 = "";
         var key: []const u8 = "";
         verify: {
-            var signer = signing.Signer.init(s.gpa, s.io, s.remote.repo.configuration(), s.remote.repo.gitDirectory(), s.options.programs.?) catch |err| switch (err) {
+            var signer = signing.Signer.init(s.gpa, s.io, s.remote.repo.configuration(), s.remote.repo.gitDirectory().get(), s.options.programs.?) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.Canceled => return error.Canceled,
                 else => break :verify,
@@ -1669,8 +1669,9 @@ pub const Server = struct {
                 if (nonce.status == .SLOP) try vars.append(arena, .{ .name = "GIT_PUSH_CERT_NONCE_SLOP", .value = try arena.print("{d}", .{nonce.slop}) });
             }
         }
-        s.certificate_vars = vars.items;
-        return vars.items;
+        const certificate_vars = try vars.toOwnedSlice(arena);
+        s.certificate_vars = certificate_vars;
+        return certificate_vars;
     }
 
     const NonceStatus = enum { MISSING, UNSOLICITED, OK, BAD, SLOP };
@@ -2023,7 +2024,7 @@ pub fn checkHooks(io: Io, repo: *repo_mod.Repository) local.Error!void {
     var dir = (if (hooks_path) |path|
         Io.Dir.cwd().openDir(io, path, .{})
     else
-        repo.commonDirectory().openDir(io, "hooks", .{})) catch return;
+        repo.commonDirectory().get().openDir(io, "hooks", .{})) catch return;
     defer dir.close(io);
     for ([_][]const u8{
         "pre-receive",  "update",           "post-receive",          "post-update",

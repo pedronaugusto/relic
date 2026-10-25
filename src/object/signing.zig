@@ -187,7 +187,7 @@ pub const Verdict = struct {
 
     gpa: Allocator,
     arena: std.heap.ArenaAllocator.State,
-    result: Result = .none,
+    result: Result = .none, // aegis: no-danger: the verdict gpg's status lines give, as git's parse_gpg_output sets it
     trust: Trust = .undefined,
     /// The key that made the signature: a long key id, or an SSH key's
     /// fingerprint.
@@ -244,7 +244,7 @@ pub const Sign = enum {
 
 /// What a caller writing a commit or a tag says about signing it.
 pub const Request = struct {
-    sign: Sign = .config,
+    sign: Sign = .config, // aegis: no-danger: a caller's request, an option
     /// The key to sign with in place of `user.signingKey`: what `-S<key>`
     /// names.
     key: ?[]const u8 = null,

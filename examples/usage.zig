@@ -81,7 +81,7 @@ fn run(gpa: std.mem.Allocator, io: std.Io, cwd: std.Io.Dir) !void {
     // it. The index goes through `index.lock`; a lock another writer holds
     // is `error.LockHeld` and is never broken.
     const tree = try relic.worktree.writeTree(gpa, io, &index, repo.objectDatabase());
-    try index.write(io, repo.gitDirectory(), "index", .{});
+    try index.write(io, repo.gitDirectory().get(), "index", .{});
 
     // A commit object, with no ref moved: moving one is a transaction.
     const commit = try repo.writeCommit(io, .{

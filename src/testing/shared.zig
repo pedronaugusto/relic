@@ -117,8 +117,8 @@ fn byRelic(gpa: Allocator, io: Io, git: *testgit.Repo) !void {
         .{ .name = "refs/heads/main", .oid = commit, .peeled = null },
         .{ .name = "refs/heads/topic/one", .oid = commit, .peeled = null },
     });
-    try repo.gitDirectory().deleteFile(io, "refs/heads/main");
-    try repo.gitDirectory().deleteFile(io, "refs/heads/topic/one");
+    try repo.gitDirectory().get().deleteFile(io, "refs/heads/main");
+    try repo.gitDirectory().get().deleteFile(io, "refs/heads/topic/one");
     {
         var tx = repo.beginRefs();
         defer tx.deinit(io);
@@ -225,7 +225,7 @@ test "core.sharedRepository reaches the shallow file, MERGE_RR, and LFS objects 
         outcome.deinit();
         try std.testing.expectEqual(file_mode, try modeOf(io, git_dir, "MERGE_RR"));
 
-        var lfs = try relic.lfs.Lfs.load(gpa, io, repo.configuration(), .{ .common_dir = repo.commonDirectory(), .shared = repo.sharedPermissions() });
+        var lfs = try relic.lfs.Lfs.load(gpa, io, repo.configuration(), .{ .common_dir = repo.commonDirectory().get(), .shared = repo.sharedPermissions() });
         defer lfs.deinit();
         var source: Io.Reader = .fixed("object\n");
         const pointer = try lfs.store.install(io, &source, null);

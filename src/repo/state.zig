@@ -5,6 +5,7 @@
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -31,7 +32,7 @@ pub fn write(io: Io, dir: Io.Dir, sub_path: []const u8, bytes: []const u8) Self.
 
 /// The state file `sub_path` under `dir`, or `null`. The bytes are the
 /// caller's.
-pub fn read(gpa: Allocator, io: Io, dir: Io.Dir, sub_path: []const u8) Io.Dir.ReadFileAllocError!?[]u8 {
+pub fn read(gpa: Allocator, io: Io, dir: Io.Dir, sub_path: []const u8) aegis.own.ReadFileError!?[]u8 {
     return fs.readFileAlloc(gpa, io, dir, sub_path, 64 << 20);
 }
 

@@ -38,12 +38,11 @@ pub const Extra = struct {
 
 /// Everything one platform stat call reports about a path, as git takes it.
 ///
-/// The times are nanoseconds since the epoch, which is the shape
-/// `std.Io.File.Stat` uses and the shape the index's split into seconds and
-/// nanoseconds is taken from.
+/// The times are `std.Io.File.Stat`'s, which the index splits into seconds
+/// and nanoseconds.
 pub const Full = struct {
-    mtime_ns: i128,
-    ctime_ns: i128,
+    mtime: Io.Timestamp,
+    ctime: Io.Timestamp,
     size: u64,
     /// The inode git's index keeps: zero on Windows, where git's own stat
     /// reports none.
@@ -95,8 +94,8 @@ pub fn ofStat(io: Io, dir: Io.Dir, sub_path: []const u8, s: airlock.Stat) FullRe
     if (builtin.target.os.tag == .windows) return fullWindows(io, dir, sub_path, s);
     return .{
         .found = .{
-            .mtime_ns = s.mtime.nanoseconds,
-            .ctime_ns = s.ctime.nanoseconds,
+            .mtime = s.mtime,
+            .ctime = s.ctime,
             .size = s.size,
             .inode = s.inode,
             .file_id = s.inode,
@@ -151,8 +150,8 @@ fn fullWindows(io: Io, dir: Io.Dir, sub_path: []const u8, s: airlock.Stat) FullR
         };
     } else s.size;
     return .{ .found = .{
-        .mtime_ns = s.mtime.nanoseconds,
-        .ctime_ns = (s.birth orelse s.ctime).nanoseconds,
+        .mtime = s.mtime,
+        .ctime = s.birth orelse s.ctime,
         .size = size,
         .inode = 0,
         .file_id = s.inode,

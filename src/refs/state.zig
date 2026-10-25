@@ -12,8 +12,9 @@ pub const State = opaque {};
 
 pub const Data = struct {
     gpa: std.mem.Allocator,
-    git_dir: std.Io.Dir,
-    common_dir: std.Io.Dir,
+    /// Lent by the store's caller, which closes them after the store.
+    git_dir: fs.LentDir,
+    common_dir: fs.LentDir,
     kind: hash.Kind,
     format: refs.Format,
     options: policy.Options,
@@ -45,10 +46,10 @@ pub const Locks = struct {
 };
 
 pub fn get(state: *State) *Data {
-    return @ptrCast(@alignCast(state)); // safe: create allocates every State as an aligned Data.
+    return @ptrCast(@alignCast(state)); // aegis: no-danger: create allocates every State as an aligned Data.
 }
 
-pub fn create(gpa: std.mem.Allocator, kind: hash.Kind, format: refs.Format, options: policy.Options, git_dir: std.Io.Dir, common_dir: std.Io.Dir) std.mem.Allocator.Error!*State {
+pub fn create(gpa: std.mem.Allocator, kind: hash.Kind, format: refs.Format, options: policy.Options, git_dir: fs.LentDir, common_dir: fs.LentDir) std.mem.Allocator.Error!*State {
     const data = try gpa.create(Data);
     errdefer gpa.destroy(data);
     const cache = if (format == .reftable) blk: {
@@ -63,7 +64,7 @@ pub fn create(gpa: std.mem.Allocator, kind: hash.Kind, format: refs.Format, opti
         break :blk c;
     } else null;
     data.* = .{ .gpa = gpa, .git_dir = git_dir, .common_dir = common_dir, .kind = kind, .format = format, .options = options, .cache = cache, .packed_refs = packed_refs };
-    return @ptrCast(data); // safe: the opaque owner retains the allocated Data pointer.
+    return @ptrCast(data); // aegis: no-danger: the opaque owner retains the allocated Data pointer.
 }
 
 pub fn destroy(gpa: std.mem.Allocator, state: *State) void {

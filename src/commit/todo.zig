@@ -14,6 +14,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
@@ -348,7 +349,7 @@ pub fn formatItem(w: *std.Io.Writer, item: Item, options: FormatOptions) std.Io.
     // What `parse` reads back: one instruction to a line, and a commit for
     // every instruction that applies one.
     assert(std.mem.findScalar(u8, item.arg, '\n') == null);
-    if (item.command.picksCommit()) assert(item.commit != null);
+    if (item.command.picksCommit()) aegis.assert.invariant(item.commit != null, "item.commit != null");
     if (item.command == .comment) {
         try w.writeAll(item.arg);
         try w.writeByte('\n');
@@ -458,11 +459,14 @@ const TestResolver = struct {
     }
 };
 
-var test_context: u8 = 0;
-const test_resolver: Resolver = .{ .context = &test_context, .resolveFn = TestResolver.resolve };
+/// The resolver the tests read sheets with, over a context it does not read.
+fn testResolver(context: *u8) Resolver {
+    return .{ .context = context, .resolveFn = TestResolver.resolve };
+}
 
 test "every instruction reads and writes back as git writes it" {
     const gpa = std.testing.allocator;
+    var context: u8 = 0;
     const sheet =
         "pick 1234567 one\n" ++
         "p 2345678 # two\n" ++
@@ -483,11 +487,11 @@ test "every instruction reads and writes back as git writes it" {
         "d abcdef0\n" ++
         "# a comment\n" ++
         "\n";
-    var list = try parse(gpa, sheet, test_resolver, .{});
+    var list = try parse(gpa, sheet, testResolver(&context), .{});
     defer list.deinit();
     try std.testing.expectEqual(@as(usize, 19), list.items.items.len);
     try std.testing.expectEqual(@as(usize, 17), list.count());
-    const written = try toBytes(gpa, list.items.items, .{ .short = .{ .context = &test_context, .shortenFn = TestResolver.shorten } });
+    const written = try toBytes(gpa, list.items.items, .{ .short = .{ .context = &context, .shortenFn = TestResolver.shorten } });
     defer gpa.free(written);
     try std.testing.expectEqualStrings(
         "pick 1234567 one\n" ++
@@ -523,6 +527,7 @@ test "every instruction reads and writes back as git writes it" {
 
 test "a bad line is refused with its number and why" {
     const gpa = std.testing.allocator;
+    var context: u8 = 0;
     const cases = [_]struct { sheet: []const u8, line: usize, reason: Diagnostic.Reason }{
         .{ .sheet = "pick 1234567\nfrobnicate 1234567\n", .line = 2, .reason = .unknown_command },
         .{ .sheet = "break now\n", .line = 1, .reason = .unexpected_argument },
@@ -533,15 +538,15 @@ test "a bad line is refused with its number and why" {
     };
     for (cases) |case| {
         var diagnostic: Diagnostic = .{};
-        try std.testing.expectError(error.InvalidTodoLine, parse(gpa, case.sheet, test_resolver, .{ .diagnostic = &diagnostic }));
+        try std.testing.expectError(error.InvalidTodoLine, parse(gpa, case.sheet, testResolver(&context), .{ .diagnostic = &diagnostic }));
         try std.testing.expectEqual(case.line, diagnostic.line);
         try std.testing.expectEqual(case.reason, diagnostic.reason);
     }
     var diagnostic: Diagnostic = .{};
-    try std.testing.expectError(error.InvalidTodoLine, parse(gpa, "pick f123456\n", test_resolver, .{ .rebase = true, .diagnostic = &diagnostic }));
+    try std.testing.expectError(error.InvalidTodoLine, parse(gpa, "pick f123456\n", testResolver(&context), .{ .rebase = true, .diagnostic = &diagnostic }));
     try std.testing.expectEqual(Diagnostic.Reason.merge_commit, diagnostic.reason);
-    try std.testing.expectError(error.FixupWithoutCommit, parse(gpa, "# c\nfixup 1234567\n", test_resolver, .{}));
-    var ok = try parse(gpa, "fixup 1234567\n", test_resolver, .{ .fixup_first_ok = true });
+    try std.testing.expectError(error.FixupWithoutCommit, parse(gpa, "# c\nfixup 1234567\n", testResolver(&context), .{}));
+    var ok = try parse(gpa, "fixup 1234567\n", testResolver(&context), .{ .fixup_first_ok = true });
     ok.deinit();
 }
 
@@ -551,17 +556,18 @@ test "fuzz: any bytes are a sheet or a named error, and a sheet writes back to o
 
 fn fuzzTodo(_: void, case: *shakedown.Case) anyerror!void {
     const gpa = std.testing.allocator;
+    var context: u8 = 0;
     var buf: [512]u8 = undefined;
     const text = buf[0..shakedown.gen.intRange(case.source, usize, 0, buf.len)];
     case.source.bytes(text);
-    var list = parse(gpa, text, test_resolver, .{ .fixup_first_ok = true }) catch |err| switch (err) {
+    var list = parse(gpa, text, testResolver(&context), .{ .fixup_first_ok = true }) catch |err| switch (err) {
         error.InvalidTodoLine, error.FixupWithoutCommit => return,
         error.OutOfMemory => return err,
     };
     defer list.deinit();
     const written = try toBytes(gpa, list.items.items, .{});
     defer gpa.free(written);
-    var again = try parse(gpa, written, test_resolver, .{ .fixup_first_ok = true });
+    var again = try parse(gpa, written, testResolver(&context), .{ .fixup_first_ok = true });
     defer again.deinit();
     try std.testing.expectEqual(list.items.items.len, again.items.items.len);
     for (list.items.items, again.items.items) |a, b| {

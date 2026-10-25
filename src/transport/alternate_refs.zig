@@ -42,7 +42,7 @@ pub fn read(gpa: Allocator, io: Io, repo: *repo_mod.Repository, programs: ?progr
     for (alternates.paths) |path| {
         // As written, from this repository's `objects`, `/`-separated as
         // git's `strbuf_realpath` gives it on Windows too.
-        const objects = fs.realPathAlloc(gpa, io, repo.objectDatabase().objectsDirectory(), path) catch |err| switch (err) {
+        const objects = fs.realPathAlloc(gpa, io, repo.objectDatabase().objectsDirectory().get(), path) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Canceled => return error.Canceled,
             else => continue,

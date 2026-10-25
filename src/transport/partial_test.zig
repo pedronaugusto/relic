@@ -247,13 +247,13 @@ test "git's partial clone is checked out by relic, which fetches what it reads f
     const head = (try repo.headTree(io)).?;
     var index = try repo.openIndex(io);
     defer index.deinit();
-    try testing.expectError(error.ObjectNotFound, worktree.checkout(gpa, io, repo.workDirectory().?, .{ .index = &index, .db = repo.objectDatabase(), .tree = head }, .{ .rules = try repo.worktreeRules() }));
+    try testing.expectError(error.ObjectNotFound, worktree.checkout(gpa, io, repo.workDirectory().?.get(), .{ .index = &index, .db = repo.objectDatabase(), .tree = head }, .{ .rules = try repo.worktreeRules() }));
     var lazy: partial.Lazy = .init(gpa, &repo, .{ .programs = .{ .environ = &env } });
     defer lazy.deinit();
     lazy.install();
     try lazy.prefetchTree(io, head);
-    _ = try worktree.checkout(gpa, io, repo.workDirectory().?, .{ .index = &index, .db = repo.objectDatabase(), .tree = head }, .{ .rules = try repo.worktreeRules() });
-    try index.write(io, repo.gitDirectory(), "index", .{});
+    _ = try worktree.checkout(gpa, io, repo.workDirectory().?.get(), .{ .index = &index, .db = repo.objectDatabase(), .tree = head }, .{ .rules = try repo.worktreeRules() });
+    try index.write(io, repo.gitDirectory().get(), "index", .{});
     try testing.expectEqual(@as(u32, 1), lazy.fetches);
     try expectSame(gpa, io, twins.by_git, twins.by_relic, true);
 }
@@ -417,8 +417,8 @@ test "a promised object is fetched from the next promisor remote when one fails,
     defer lazy.deinit();
     lazy.install();
     try lazy.prefetchTree(io, head);
-    _ = try worktree.checkout(gpa, io, repo.workDirectory().?, .{ .index = &index, .db = repo.objectDatabase(), .tree = head }, .{ .rules = try repo.worktreeRules() });
-    try index.write(io, repo.gitDirectory(), "index", .{});
+    _ = try worktree.checkout(gpa, io, repo.workDirectory().?.get(), .{ .index = &index, .db = repo.objectDatabase(), .tree = head }, .{ .rules = try repo.worktreeRules() });
+    try index.write(io, repo.gitDirectory().get(), "index", .{});
     try expectSame(gpa, io, twins.by_git, twins.by_relic, true);
 
     // With no promisor remote that has them, the read fails by name.

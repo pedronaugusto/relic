@@ -19,6 +19,7 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 
 const program = @import("../process.zig").program;
+const fs = @import("../fs/fs.zig");
 const warning = @import("../report.zig").warning;
 const pkt_line = @import("../codec.zig").pkt_line;
 const progress = @import("../report.zig").progress;
@@ -160,7 +161,7 @@ const Tail = struct {
     task: ?Io.Future(void) = null,
     /// The read end, taken from the child, whose own clean-up would
     /// close it under the reading task.
-    file: ?Io.File = null,
+    file: ?fs.OwnedFile = null,
 
     /// Read the program's standard error to its end, keeping the last
     /// of it.
@@ -181,7 +182,8 @@ const Tail = struct {
     fn finish(tail: *Tail, io: Io) void {
         if (tail.task) |*task| task.cancel(io);
         tail.task = null;
-        const file = tail.file orelse return;
+        const owned = if (tail.file) |*owned| owned else return;
+        const file = owned.lend().get();
         var chunk: [1024]u8 = undefined;
         while (true) {
             const n = program.readAvailable(io, file, &chunk) catch return;
@@ -278,13 +280,12 @@ pub const Process = struct {
         var running = try program.start(gpa, io, programs, effective);
         errdefer running.deinit(io);
         if (tail) |t| {
-            const file = running.child.takeStderr().?;
-            t.file = file;
-            t.task = io.concurrent(Tail.drain, .{ t, io, file }) catch null;
+            t.file = .init(running.child.takeStderr().?);
+            t.task = io.concurrent(Tail.drain, .{ t, io, t.file.?.lend().get() }) catch null;
             if (t.task == null) {
                 // The probe said a task would run and none did: the pipe is
                 // closed rather than left to fill.
-                file.close(io);
+                t.file.?.deinit(io);
                 t.file = null;
             }
         }
@@ -313,17 +314,17 @@ pub const Process = struct {
     fn nothing() void {}
 
     fn advertisement(context: *anyopaque, _: *Connection) Error!*Io.Reader {
-        const p: *Process = @ptrCast(@alignCast(context)); // safe: this vtable's context, a Process, from start
+        const p: *Process = @ptrCast(@alignCast(context)); // aegis: no-danger: this vtable's context, a Process, from start
         return &p.reader.interface;
     }
 
     fn request(context: *anyopaque, _: *Connection) Error!*Io.Writer {
-        const p: *Process = @ptrCast(@alignCast(context)); // safe: this vtable's context, a Process, from start
+        const p: *Process = @ptrCast(@alignCast(context)); // aegis: no-danger: this vtable's context, a Process, from start
         return &p.writer.interface;
     }
 
     fn response(context: *anyopaque, c: *Connection) Error!*Io.Reader {
-        const p: *Process = @ptrCast(@alignCast(context)); // safe: this vtable's context, a Process, from start
+        const p: *Process = @ptrCast(@alignCast(context)); // aegis: no-danger: this vtable's context, a Process, from start
         p.writer.interface.flush() catch return failure(context, c);
         return &p.reader.interface;
     }
@@ -338,7 +339,7 @@ pub const Process = struct {
     }
 
     fn failure(context: *anyopaque, c: *Connection) Error {
-        const p: *Process = @ptrCast(@alignCast(context)); // safe: this vtable's context, a Process, from start
+        const p: *Process = @ptrCast(@alignCast(context)); // aegis: no-danger: this vtable's context, a Process, from start
         if (p.reader.err) |err| switch (err) {
             error.Canceled => return error.Canceled,
             else => {},
@@ -352,7 +353,7 @@ pub const Process = struct {
     }
 
     fn deinit(io: Io, context: *anyopaque) void {
-        const p: *Process = @ptrCast(@alignCast(context)); // safe: this vtable's context, a Process, from start
+        const p: *Process = @ptrCast(@alignCast(context)); // aegis: no-danger: this vtable's context, a Process, from start
         p.writer.io = io;
         if (!p.exited) {
             // The end of the conversation: the program's input ends, and so
@@ -375,7 +376,7 @@ pub const Process = struct {
         }
         if (p.stderr) |tail| {
             tail.finish(io);
-            if (tail.file) |file| file.close(io);
+            if (tail.file) |*file| file.deinit(io);
             if (p.said_to) |sink| {
                 const said = std.mem.trim(u8, tail.buffer[0..tail.len], " \t\r\n");
                 // glint-ignore: Z026 -- the program's words are a courtesy to the caller; losing them to a full allocator loses nothing else
@@ -394,7 +395,7 @@ pub const Process = struct {
     /// `Process` only when it carries its vtable.
     fn of(c: *Connection) ?*Process {
         if (c.vtable != &vtable) return null;
-        return @ptrCast(@alignCast(c.context)); // safe: the vtable is this type's, which only start installs, beside a Process
+        return @ptrCast(@alignCast(c.context)); // aegis: no-danger: the vtable is this type's, which only start installs, beside a Process
     }
 
     /// Borrow a native process's buffered streams for one exclusive operation.

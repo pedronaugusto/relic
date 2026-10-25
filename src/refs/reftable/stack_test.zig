@@ -176,7 +176,7 @@ test "what this writes into a reftable repository git reads, logs and all" {
 
     // Compaction kept the stack short.
     {
-        var dir = try repo.gitDirectory().openDir(io, "reftable", .{});
+        var dir = try repo.gitDirectory().get().openDir(io, "reftable", .{});
         defer dir.close(io);
         var stack = try reftablestack_mod.Stack.load(gpa, io, dir, .sha1);
         defer stack.deinit();
@@ -652,7 +652,7 @@ test "an update goes through HEAD, a deletion takes its log, and the hook hears 
         .config = &config,
         .git_dir = repo.gitDirectory(),
         .common_dir = repo.commonDirectory(),
-        .work_dir = twins[1].dir,
+        .work_dir = repo.workDirectory(),
     }, .{ .environ = &environ }, .{ .output = .ignore });
     defer runner.deinit();
     const Step = struct { name: []const u8, new: ?refs.Ref, expected: refs.Expected, no_deref: bool = false, message: ?[]const u8 };
@@ -757,9 +757,9 @@ test "a linked worktree keeps its own HEAD in its own stack, both ways" {
     var dest = try git.dir.openDir(io, "trees/ours", .{ .iterate = true });
     defer dest.close(io);
     var added = try worktrees.add(gpa, io, repo.refStore(), .{ .name = "ours", .dest_dir = dest }, .{ .branch = "ours" });
-    defer added.admin_dir.close(io);
+    defer added.admin_dir.deinit(io);
     defer gpa.free(added.name);
-    defer added.work_dir.close(io);
+    defer added.work_dir.deinit(io);
 
     // git reads the worktree this made, and this reads the one git made.
     const listed = try git.run(io, &.{ "worktree", "list", "--porcelain" });
@@ -773,7 +773,7 @@ test "a linked worktree keeps its own HEAD in its own stack, both ways" {
 
     // Inside it, HEAD comes from its stack and the branch from the shared
     // one; a per-worktree ref written there stays there.
-    var linked = try repo_mod.Repository.open(gpa, io, added.work_dir, .{ .discover = false });
+    var linked = try repo_mod.Repository.open(gpa, io, added.work_dir.lend().get(), .{ .discover = false });
     defer linked.deinit(io);
     const head = (try linked.head(io)).?;
     defer gpa.free(head.name);

@@ -58,7 +58,7 @@ const Pipe = struct {
     }
 
     fn drain(w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
-        const p: *Pipe = @alignCast(@fieldParentPtr("writer", w)); // safe: this function is installed only on a Pipe's writer
+        const p: *Pipe = @alignCast(@fieldParentPtr("writer", w)); // aegis: no-danger: this function is installed only on a Pipe's writer
         try p.put(w.buffered());
         w.end = 0;
         var n: usize = 0;
@@ -85,7 +85,7 @@ const Pipe = struct {
     }
 
     fn stream(r: *Io.Reader, w: *Io.Writer, limit: Io.Limit) Io.Reader.StreamError!usize {
-        const p: *Pipe = @alignCast(@fieldParentPtr("reader", r)); // safe: this function is installed only on a Pipe's reader
+        const p: *Pipe = @alignCast(@fieldParentPtr("reader", r)); // aegis: no-danger: this function is installed only on a Pipe's reader
         const dest = limit.slice(try w.writableSliceGreedy(1));
         const n = p.queue.get(p.io, dest, 1) catch |err| switch (err) {
             error.Closed => return if (p.failed) error.ReadFailed else error.EndOfStream,
@@ -176,7 +176,7 @@ pub fn InProcess(comptime Server: type, comptime told: fn (ServerError(Server)) 
         }
 
         fn self(context: *anyopaque) *Self {
-            return @ptrCast(@alignCast(context)); // safe: the context handed out with this vtable is this type
+            return @ptrCast(@alignCast(context)); // aegis: no-danger: the context handed out with this vtable is this type
         }
 
         fn advertisement(context: *anyopaque, conn: *Connection) connection.Error!*Io.Reader {

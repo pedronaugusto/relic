@@ -173,7 +173,7 @@ pub const Session = struct {
         return s.native_session.?;
     }
     fn observeMissing(context: *anyopaque, path: []const u8, object: native.Object, declined: bool) Allocator.Error!void {
-        const r: *filter.Report = @ptrCast(@alignCast(context)); // safe: the report context is the filter.Report this callback was registered with
+        const r: *filter.Report = @ptrCast(@alignCast(context)); // aegis: no-danger: the report context is the filter.Report this callback was registered with
         return r.missing(path, object, declined);
     }
     pub fn fallbackCount(s: *const Session) u32 {
@@ -356,12 +356,13 @@ pub const Session = struct {
                 if (try (try s.nativeOf()).canonical(a, out)) |canonical_bytes| return canonical_bytes;
             },
             .program => |driver| {
-                switch (try s.smudge(a, path, driver, out, .{})) {
-                    .bytes => |smudged| out = smudged,
-                    .file => |file| {
-                        defer file.close(s.io);
+                var smudged = try s.smudge(a, path, driver, out, .{});
+                switch (smudged) {
+                    .bytes => |text| out = text,
+                    .file => |*file| {
+                        defer file.deinit(s.io);
                         var buf: [4096]u8 = undefined;
-                        var reader = file.reader(s.io, &buf);
+                        var reader = file.lend().get().reader(s.io, &buf);
                         var all: std.ArrayList(u8) = .empty;
                         try reader.interface.appendRemainingUnlimited(a, &all);
                         out = all.items;

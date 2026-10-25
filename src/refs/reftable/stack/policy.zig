@@ -1,4 +1,5 @@
 const std = @import("std");
+const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const fs = @import("../../../fs/fs.zig");
@@ -35,4 +36,4 @@ pub const Error = error{
     ReftableMissing,
     /// A line of `tables.list` that is not a table's name.
     MalformedTablesList,
-} || reftable.Error || Allocator.Error || Io.Dir.ReadFileAllocError || Io.Dir.OpenError || Io.Cancelable;
+} || reftable.Error || Allocator.Error || aegis.own.ReadFileError || Io.Dir.OpenError || Io.Cancelable;

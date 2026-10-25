@@ -62,7 +62,7 @@ pub fn relicAdd(gpa: std.mem.Allocator, io: Io, dir: Io.Dir, run: Run) !Oid {
         .filter_report = run.report,
     });
     const tree = try worktree.writeTree(gpa, io, &index, repo.objectDatabase());
-    try index.write(io, repo.gitDirectory(), "index", .{});
+    try index.write(io, repo.gitDirectory().get(), "index", .{});
     return tree;
 }
 
@@ -85,7 +85,7 @@ pub fn relicCheckout(gpa: std.mem.Allocator, io: Io, dir: Io.Dir, tree: Oid, run
         .programs = run.programs,
         .filter_report = run.report,
     });
-    try index.write(io, repo.gitDirectory(), "index", .{});
+    try index.write(io, repo.gitDirectory().get(), "index", .{});
     return outcome;
 }
 

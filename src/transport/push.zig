@@ -26,6 +26,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const gitdate = @import("../text.zig").date;
 const httpsettings_mod = @import("../wire.zig").http_settings;
 const Allocator = std.mem.Allocator;
@@ -257,7 +258,7 @@ pub const RefResult = struct {
     old: Oid,
     /// The value pushed, zero for a deletion.
     new: Oid,
-    status: Status,
+    status: Status, // aegis: no-danger: a ref's report, as git's push_refs sets it: each value an outcome
     /// Whether an update that would otherwise be refused was forced.
     forced: bool = false,
     /// The remote's reason, for `rejected_by_remote`, or what it added to
@@ -384,7 +385,7 @@ pub fn push(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8, 
     for (remote.push_urls) |url| {
         try pushTo(arena, gpa, io, repo, &remote, try arena.dupe(u8, url), specs.items, settled, &results, &outcome);
     }
-    outcome.refs = results.items;
+    outcome.refs = try results.toOwnedSlice(arena);
     return outcome;
 }
 
@@ -794,7 +795,7 @@ fn setUpstreams(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, rem
         const upstream = (try branch_mod.installBranchConfig(arena, io, repo, name, .{ .remote = remote_name, .merge = try arena.dupe([]const u8, &.{r.remote_ref}) })) orelse continue;
         try tracked.append(arena, .{ .branch = name, .upstream = upstream });
     }
-    outcome.upstreams = tracked.items;
+    outcome.upstreams = try tracked.toOwnedSlice(arena);
 }
 
 /// `push.gpgSign`, every value read as git's callback reads it: a
@@ -840,7 +841,7 @@ fn pushCertificate(
     options: Options,
 ) Error![]const u8 {
     const programs = options.programs orelse return error.SigningRequiresPrograms;
-    var signer = try signing.Signer.init(gpa, io, repo.configuration(), repo.topDirectory(), programs);
+    var signer = try signing.Signer.init(gpa, io, repo.configuration(), repo.topDirectory().get(), programs);
     defer signer.deinit();
     const key_id = try signer.keyId(io, options.who);
     defer gpa.free(key_id);
@@ -1893,7 +1894,7 @@ const PrePushSeen = struct {
     allow: bool = true,
     fn run(context: ?*anyopaque, remote: []const u8, url: []const u8, updates: []const PrePushUpdate) bool {
         _ = url;
-        const self: *PrePushSeen = @ptrCast(@alignCast(context.?)); // safe: the context handed out with this function is a PrePushSeen
+        const self: *PrePushSeen = @ptrCast(@alignCast(context.?)); // aegis: no-danger: the context handed out with this function is a PrePushSeen
         self.text.print(testing.allocator, "{s}\n", .{remote}) catch return false;
         for (updates) |u| {
             self.text.print(testing.allocator, "{s} {f} {s} {f}\n", .{ u.local_ref, u.local_oid, u.remote_ref, u.remote_oid }) catch return false;
@@ -2051,7 +2052,7 @@ fn signedTwins(twins: *PushTwins, io: Io, server: ?*testremote.HttpServer, seed:
     made.deinit(gpa);
     const public_path = try gpa.print("{s}.pub", .{key});
     defer gpa.free(public_path);
-    const public = try Io.Dir.cwd().readFileAlloc(io, public_path, gpa, .limited(4096));
+    const public = try aegis.own.readFile(io, Io.Dir.cwd(), public_path, gpa, aegis.units.Bytes(u64).fromRaw(4096));
     defer gpa.free(public);
     const allowed = try gpa.print("signer@example.com namespaces=\"git\" {s}", .{public});
     defer gpa.free(allowed);
@@ -2100,7 +2101,7 @@ fn expectSameHookLogs(twins: *PushTwins, io: Io) !void {
     for ([_][]const u8{ "remote-git.git", "remote-relic.git" }, 0..) |name, i| {
         var dir = try twins.root.dir.openDir(io, name, .{});
         defer dir.close(io);
-        logs[i] = try dir.readFileAlloc(io, "hook.log", twins.gpa, .unlimited);
+        logs[i] = try aegis.own.readFile(io, dir, "hook.log", twins.gpa, aegis.units.Bytes(u64).fromRaw(std.math.maxInt(u64)));
     }
     defer for (logs) |l| twins.gpa.free(l);
     try testing.expectEqualStrings(logs[0], logs[1]);

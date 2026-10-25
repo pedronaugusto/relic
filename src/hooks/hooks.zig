@@ -31,6 +31,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -182,11 +183,11 @@ fn matchesTemplate(text: []const u8, template: []const u8, event: []const u8) bo
 pub const Place = struct {
     config: *const config_mod.Config,
     /// The per-worktree directory.
-    git_dir: Io.Dir,
+    git_dir: fs.LentDir,
     /// The shared directory, where `hooks/` lives.
-    common_dir: Io.Dir,
+    common_dir: fs.LentDir,
     /// The working tree, or `null` in a bare repository.
-    work_dir: ?Io.Dir,
+    work_dir: ?fs.LentDir,
 };
 
 /// How a hook that failed ended.
@@ -319,7 +320,7 @@ pub const Runner = struct {
         const arena = arena_instance.allocator();
 
         var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const top = place.work_dir orelse place.git_dir;
+        const top = (place.work_dir orelse place.git_dir).get();
         const cwd = try arena.dupe(u8, try fs.realPath(io, top, &buf));
 
         // Read as git's configset reads it: the last value alone.
@@ -334,7 +335,7 @@ pub const Runner = struct {
             else
                 try std.mem.concat(arena, u8, &.{ cwd, "/", configured })
         else blk: {
-            const common = try fs.realPath(io, place.common_dir, &buf);
+            const common = try fs.realPath(io, place.common_dir.get(), &buf);
             break :blk try std.mem.concat(arena, u8, &.{ common, "/hooks" });
         };
 
@@ -510,11 +511,16 @@ pub const Runner = struct {
         request: Request,
         planned: []const Planned,
         results: []AtOnce,
-        next: std.atomic.Value(usize) = .init(0),
+        /// How many hooks the tasks have claimed: each takes the next by
+        /// its index until none is left.
+        next: Claimed = Claimed.init(Claims.fromRaw(0)),
+
+        const Claims = aegis.units.Count(Planned, usize);
+        const Claimed = aegis.Atomic(Claims);
 
         fn run(w: *AtOnceWork) void {
             while (true) {
-                const at = w.next.fetchAdd(1, .monotonic);
+                const at = w.next.fetchAddWrapping(Claims.fromRaw(1), .monotonic).raw();
                 if (at >= w.planned.len) return;
                 w.results[at] = w.runCaptured(w.planned[at]) catch |err| .{ .err = err };
             }
@@ -957,7 +963,7 @@ fn writeValue(w: *Io.Writer, kind: hash.Kind, value: ?Runner.RefUpdate.Value) Io
 fn formatDate(buf: *[64]u8, who: object.Signature) []const u8 {
     const sign: u8 = if (who.offset_minutes < 0) '-' else '+';
     const abs: u32 = @intCast(@abs(who.offset_minutes));
-    // unreachable: an i64 is at most twenty characters and an i16 offset seven, well under 64
+    // aegis: no-danger: an i64 is at most twenty characters and an i16 offset seven, well under 64
     return std.mem.print(buf, "@{d} {c}{d:0>2}{d:0>2}", .{ who.when_secs, sign, abs / 60, abs % 60 }) catch unreachable;
 }
 
@@ -1115,18 +1121,20 @@ fn testEnviron(gpa: Allocator) !std.process.Environ.Map {
     return map;
 }
 
-fn openRunner(gpa: Allocator, io: Io, repo: *testgit.Repo, environ: *const std.process.Environ.Map, config_text: []const u8) !struct { runner: Runner, config: config_mod.Config, git_dir: Io.Dir } {
-    var git_dir = try repo.gitDir(io);
-    errdefer git_dir.close(io);
+fn openRunner(gpa: Allocator, io: Io, repo: *testgit.Repo, environ: *const std.process.Environ.Map, config_text: []const u8) !struct { runner: Runner, config: config_mod.Config, git_dir: fs.OwnedDir } {
+    var git_dir = fs.OwnedDir.init(try repo.gitDir(io));
+    errdefer git_dir.deinit(io);
+    var work = fs.OwnedDir.init(try repo.dir.openDir(io, ".", .{ .iterate = true }));
+    defer work.deinit(io);
     var config = try config_mod.Config.parseText(gpa, config_text, .local);
     errdefer config.deinit();
     const runner = try Runner.init(gpa, io, .{
         .config = &config,
-        .git_dir = git_dir,
-        .common_dir = git_dir,
-        .work_dir = repo.dir,
+        .git_dir = git_dir.lend(),
+        .common_dir = git_dir.lend(),
+        .work_dir = work.lend(),
     }, .{ .environ = environ }, .{ .output = .capture });
-    return .{ .runner = runner, .config = config, .git_dir = git_dir };
+    return .{ .runner = runner, .config = config, .git_dir = git_dir.move() };
 }
 
 test "a hook runs from the top of the working tree with git's arguments, and nothing that points elsewhere" {
@@ -1140,7 +1148,7 @@ test "a hook runs from the top of the working tree with git's arguments, and not
     try testgit.fixtureHook(gpa, io, repo.dir, ".git/hooks/post-merge", "context", "");
 
     var opened = try openRunner(gpa, io, &repo, &environ, "");
-    defer opened.git_dir.close(io);
+    defer opened.git_dir.deinit(io);
     defer opened.config.deinit();
     defer opened.runner.deinit();
     const ran = try opened.runner.postMerge(io, .{ .squash = true });
@@ -1164,7 +1172,7 @@ test "a hook that is not executable is passed over and said to be" {
     try repo.writeFile(io, ".git/hooks/pre-rebase", "#!/bin/sh\nexit 1\n");
 
     var opened = try openRunner(gpa, io, &repo, &environ, "");
-    defer opened.git_dir.close(io);
+    defer opened.git_dir.deinit(io);
     defer opened.config.deinit();
     defer opened.runner.deinit();
     const ran = try opened.runner.preRebase(io, "main", null);
@@ -1183,7 +1191,7 @@ test "a blocking hook that fails is a named refusal carrying its status" {
     try testgit.fixtureHook(gpa, io, repo.dir, ".git/hooks/pre-rebase", "reject", "3\nno: ");
 
     var opened = try openRunner(gpa, io, &repo, &environ, "");
-    defer opened.git_dir.close(io);
+    defer opened.git_dir.deinit(io);
     defer opened.config.deinit();
     defer opened.runner.deinit();
     try testing.expectError(error.HookRejected, opened.runner.preRebase(io, "origin/main", "topic"));
@@ -1203,7 +1211,7 @@ test "core.hooksPath moves the hooks, relative to where they run" {
     try testgit.fixtureHook(gpa, io, repo.dir, "tools/hooks/post-merge", "text", "moved\n");
 
     var opened = try openRunner(gpa, io, &repo, &environ, "[core]\n\thooksPath = tools/hooks\n");
-    defer opened.git_dir.close(io);
+    defer opened.git_dir.deinit(io);
     defer opened.config.deinit();
     defer opened.runner.deinit();
     _ = try opened.runner.postMerge(io, .{ .squash = false });
@@ -1235,7 +1243,7 @@ test "configured hooks run first, in the order last named, through the shell" {
         \\
     ;
     var opened = try openRunner(gpa, io, &repo, &environ, text);
-    defer opened.git_dir.close(io);
+    defer opened.git_dir.deinit(io);
     defer opened.config.deinit();
     defer opened.runner.deinit();
     const ran = try opened.runner.postMerge(io, .{ .squash = true });
@@ -1249,7 +1257,7 @@ test "configured hooks run first, in the order last named, through the shell" {
     try repo.exec(io, &.{ "branch", "side" });
     try repo.exec(io, &.{ "commit", "-q", "--allow-empty", "-m", "b" });
     try repo.exec(io, &.{ "checkout", "-q", "side" });
-    var config_file = try opened.git_dir.openFile(io, "config", .{ .mode = .read_write });
+    var config_file = try opened.git_dir.lend().get().openFile(io, "config", .{ .mode = .read_write });
     defer config_file.close(io);
     try config_file.writePositionalAll(io, text, try config_file.length(io));
     // Hooks declared in the configuration are git 2.54's.
@@ -1275,7 +1283,7 @@ test "an event's configured hooks can be turned off while its file still runs" {
         \\    enabled = false
         \\
     );
-    defer opened.git_dir.close(io);
+    defer opened.git_dir.deinit(io);
     defer opened.config.deinit();
     defer opened.runner.deinit();
     _ = try opened.runner.postMerge(io, .{ .squash = false });
@@ -1290,7 +1298,7 @@ test "a configured hook named after an event is refused by name" {
     var environ = try testEnviron(gpa);
     defer environ.deinit();
     var opened = try openRunner(gpa, io, &repo, &environ, "[hook \"pre-commit\"]\n\tevent = post-merge\n\tcommand = true\n");
-    defer opened.git_dir.close(io);
+    defer opened.git_dir.deinit(io);
     defer opened.config.deinit();
     defer opened.runner.deinit();
     try testing.expectError(error.HookNameIsAnEvent, opened.runner.postMerge(io, .{ .squash = false }));
@@ -1305,7 +1313,7 @@ test "a configured hook with no command is refused by name" {
     var environ = try testEnviron(gpa);
     defer environ.deinit();
     var opened = try openRunner(gpa, io, &repo, &environ, "[hook \"lint\"]\n\tevent = pre-commit\n");
-    defer opened.git_dir.close(io);
+    defer opened.git_dir.deinit(io);
     defer opened.config.deinit();
     defer opened.runner.deinit();
     try testing.expectError(error.HookCommandMissing, opened.runner.preCommit(io, .{ .index_path = "/i" }));
@@ -1325,7 +1333,7 @@ test "pre-push, reference-transaction and post-rewrite read git's lines" {
         try testgit.fixtureHook(gpa, io, repo.dir, path, "args_stdin", "");
     }
     var opened = try openRunner(gpa, io, &repo, &environ, "");
-    defer opened.git_dir.close(io);
+    defer opened.git_dir.deinit(io);
     defer opened.config.deinit();
     defer opened.runner.deinit();
 
@@ -1365,7 +1373,7 @@ test "a hook that fails where it cannot stop anything is reported, not raised" {
     try testgit.fixtureHook(gpa, io, repo.dir, ".git/hooks/reference-transaction", "status", "1\n");
     try testgit.fixtureHook(gpa, io, repo.dir, ".git/hooks/post-checkout", "status", "2\n");
     var opened = try openRunner(gpa, io, &repo, &environ, "");
-    defer opened.git_dir.close(io);
+    defer opened.git_dir.deinit(io);
     defer opened.config.deinit();
     defer opened.runner.deinit();
     const one = try Oid.parse(.sha1, &@as([40]u8, @splat('1')));
@@ -1429,7 +1437,7 @@ test "an event's hooks run hook.jobs at once when each may, their output whole i
         var environ = try testEnviron(gpa);
         defer environ.deinit();
         var opened = try openRunner(gpa, io, &repo, &environ, text);
-        defer opened.git_dir.close(io);
+        defer opened.git_dir.deinit(io);
         defer opened.config.deinit();
         defer opened.runner.deinit();
         const started = std.Io.Clock.awake.now(io);

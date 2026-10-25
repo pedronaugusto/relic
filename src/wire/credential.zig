@@ -35,6 +35,7 @@ const std = @import("std");
 const aegis = @import("aegis");
 const SecretBytes = aegis.SecretBytes;
 const decimal = @import("../text.zig").decimal;
+const date = @import("../text.zig").date;
 const parts_mod = @import("credential/parts.zig");
 const UrlParts = parts_mod.UrlParts;
 const UrlError = parts_mod.UrlError;
@@ -94,10 +95,13 @@ pub const Prompt = struct {
     /// one is welcome.
     askpass: bool = false,
     /// Answer `field` for the prompt text git would show —
-    /// `Username for 'https://example.com': ` — with an answer the
-    /// caller's allocator owns, or `null` to decline. `null` here asks
-    /// nothing beyond askpass.
-    ask: ?*const fn (gpa: Allocator, context: ?*anyopaque, field: Field, prompt: []const u8) Allocator.Error!?[]u8 = null,
+    /// `Username for 'https://example.com': ` — by writing it to `answer`
+    /// and returning true, or decline with false. `answer` keeps what it is
+    /// given in storage that is wiped when it grows and when it is let go,
+    /// so a password written straight to it is held nowhere else; it fails
+    /// only for want of memory, as the caller may. `null` here asks nothing
+    /// beyond askpass.
+    ask: ?*const fn (context: ?*anyopaque, field: Field, prompt: []const u8, answer: *std.Io.Writer) (Allocator.Error || std.Io.Writer.Error)!bool = null,
 };
 
 /// What `fill` needs besides the URL.
@@ -256,13 +260,6 @@ pub const Session = struct {
         s.* = undefined;
     }
 
-    fn secretFree(gpa: Allocator, bytes: ?[]u8) void {
-        if (bytes) |b| {
-            std.crypto.secureZero(u8, b);
-            gpa.free(b);
-        }
-    }
-
     /// Let a secret go, wiping its bytes.
     fn wipe(slot: *?SecretBytes) void {
         if (slot.*) |*secret| secret.deinit();
@@ -394,7 +391,12 @@ pub const Session = struct {
         s.fromOrigin() catch return null;
         if (reveal(&s.header)) |h| return h;
         if (s.authtype) |kind| if (reveal(&s.credential)) |value| {
-            s.header = adopted(s.gpa, s.gpa.print("{s} {s}", .{ kind, value }) catch return null);
+            var header = SecretBytes.init(s.gpa, kind.len + 1 + value.len) catch return null;
+            parts_mod.appendParts(&header, &.{ kind, " ", value }) catch {
+                header.deinit();
+                return null;
+            };
+            s.header = header;
             return reveal(&s.header);
         };
         const user = s.username orelse return null;
@@ -409,10 +411,14 @@ pub const Session = struct {
         @memcpy(plain[0..user.len], user);
         plain[user.len] = ':';
         @memcpy(plain[user.len + 1 ..], password);
-        const header = s.gpa.alloc(u8, "Basic ".len + encoder.calcSize(plain_len)) catch return null;
-        @memcpy(header[0.."Basic ".len], "Basic ");
-        _ = encoder.encode(header["Basic ".len..], plain);
-        s.header = adopted(s.gpa, header);
+        const header_len = "Basic ".len + encoder.calcSize(plain_len);
+        var header = SecretBytes.init(s.gpa, header_len) catch return null;
+        // unreachable: the owner was made with exactly this capacity.
+        header.resizeWithinCapacity(header_len) catch unreachable;
+        const text = header.exposeMut();
+        @memcpy(text[0.."Basic ".len], "Basic ");
+        _ = encoder.encode(text["Basic ".len..], plain);
+        s.header = header;
         return reveal(&s.header);
     }
 
@@ -479,11 +485,13 @@ pub const Session = struct {
         const arena = arena_state.allocator();
         if (s.username == null) {
             const prompt = try s.promptText(arena, "Username");
-            s.username = try s.ask(io, opts, .username, prompt) orelse return false;
+            var said = try s.ask(io, opts, .username, prompt) orelse return false;
+            defer said.deinit();
+            s.username = try s.gpa.dupe(u8, said.expose());
         }
         if (s.password == null) {
             const prompt = try s.promptText(arena, "Password");
-            s.password = adopted(s.gpa, try s.ask(io, opts, .password, prompt) orelse return false);
+            s.password = try s.ask(io, opts, .password, prompt) orelse return false;
         }
         s.source = .prompt;
         return true;
@@ -496,7 +504,7 @@ pub const Session = struct {
     }
 
     fn expired(s: *const Session, now: ?Io.Timestamp) bool {
-        const t = (now orelse return false).toSeconds();
+        const t = date.seconds(now orelse return false);
         // git compares its unsigned timestamp with `time(NULL)` as C does.
         return s.password_expiry_utc < @as(u64, @bitCast(@as(i64, t)));
     }
@@ -711,7 +719,7 @@ pub const Session = struct {
         try w.optional("oauth_refresh_token", reveal(&s.oauth_refresh_token));
         if (s.password_expiry_utc != no_expiry) {
             var buf: [24]u8 = undefined;
-            // unreachable: a u64 is at most 20 digits.
+            // aegis: no-danger: a u64 is at most 20 digits.
             try w.item("password_expiry_utc", std.mem.print(&buf, "{d}", .{s.password_expiry_utc}) catch unreachable);
         }
         for (s.challenges.items) |c| try w.item("wwwauth[]", c);
@@ -738,27 +746,19 @@ pub const Session = struct {
         }
     };
 
-    /// What a helper is handed (`write`), in secret memory of exactly its
-    /// size: written once to count it and once into place, so no copy of a
-    /// password is left in memory a growing buffer freed.
+    /// What a helper is handed (`write`), in secret memory: a
+    /// `SecretBytes.Writer` wipes what it outgrows, so no copy of a password
+    /// is left in memory a growing buffer freed.
     fn helperInput(s: *Session, audience: Audience) Self.Error!SecretBytes {
-        var counting: std.Io.Writer.Discarding = .init(&.{});
-        s.write(&counting.writer, audience) catch |err| switch (err) {
-            // unreachable: counting writes nothing
-            error.WriteFailed => unreachable,
-            else => |e| return e,
-        };
-        const size: usize = @intCast(counting.fullCount());
-        var input = try SecretBytes.init(s.gpa, size);
+        var input = try SecretBytes.init(s.gpa, 0);
         errdefer input.deinit();
-        // unreachable: the owner was made with exactly this capacity.
-        input.resizeWithinCapacity(size) catch unreachable;
-        var fixed: std.Io.Writer = .fixed(input.exposeMut());
-        s.write(&fixed, audience) catch |err| switch (err) {
-            // unreachable: the same session writes the same bytes, which fit
-            error.WriteFailed => unreachable,
+        var into = SecretBytes.Writer.init(&input);
+        s.write(&into.interface, audience) catch |err| switch (err) {
+            // The writer fails only for want of memory.
+            error.WriteFailed => return error.OutOfMemory,
             else => |e| return e,
         };
+        into.interface.flush() catch return error.OutOfMemory;
         return input;
     }
 
@@ -782,7 +782,7 @@ pub const Session = struct {
         if (helper[0] != '!' and !std.Io.Dir.path.isAbsolute(helper)) {
             if (try nativeHelper(arena, helper, programs.environ)) |native| switch (native) {
                 .cache => |c| return s.runCache(arena, io, programs, cache_daemon, c, operation),
-                else => return s.runNative(arena, io, native, operation),
+                else => return s.runNative(io, native, operation),
             };
         }
         const command = if (helper[0] == '!')
@@ -795,27 +795,24 @@ pub const Session = struct {
         var input = try s.helperInput(if (operation == .get) .helper else .response);
         defer input.deinit();
 
-        var outcome = try program.run(s.gpa, io, programs, .{
+        var answer = try runSecret(s.gpa, io, programs, .{
             .argv = &.{command},
             .shell = true,
             .stderr = .inherit,
         }, .{ .input = input.expose(), .output = .limited(64 * 1024) });
-        defer {
-            std.crypto.secureZero(u8, outcome.stdout);
-            outcome.deinit(s.gpa);
-        }
+        defer answer.stdout.deinit();
         // Only `get` is listened to. A helper that fails, or that is not
         // there, is passed over, but what it wrote first is read, as git
         // reads it before it waits for the helper to end.
-        if (operation != .get) return .{ .failed = !outcome.succeeded(), .any = false };
-        const any = try s.readAnswer(.init(outcome.stdout));
-        return .{ .failed = !outcome.succeeded(), .any = any };
+        if (operation != .get) return .{ .failed = !answer.succeeded(), .any = false };
+        const any = try s.readAnswer(.init(answer.stdout.expose()));
+        return .{ .failed = !answer.succeeded(), .any = any };
     }
 
     /// git's own `credential-store`, run here rather than as `git
     /// credential-store`: what it answers to `get` taken as a helper's
     /// answer; a failure, as a helper's, passed over.
-    fn runNative(s: *Session, arena: Allocator, io: Io, native: Native, operation: Operation) ErrorNamespace.Error!Outcome {
+    fn runNative(s: *Session, io: Io, native: Native, operation: Operation) ErrorNamespace.Error!Outcome {
         const files = switch (native) {
             .usage => return .{ .failed = true, .any = false },
             .store => |files| files,
@@ -841,16 +838,16 @@ pub const Session = struct {
                 break :blk null;
             },
         };
-        const entry = found orelse return .{ .failed = false, .any = false };
+        var entry = found orelse return .{ .failed = false, .any = false };
         defer {
             s.gpa.free(entry.username);
-            std.crypto.secureZero(u8, entry.password);
-            s.gpa.free(entry.password);
+            entry.password.deinit();
         }
         // What git's `credential-store` prints, read as any helper's answer.
-        const answer = try std.mem.concat(arena, u8, &.{ "username=", entry.username, "\npassword=", entry.password, "\n" });
-        defer std.crypto.secureZero(u8, answer);
-        return .{ .failed = false, .any = try s.readAnswer(.init(answer)) };
+        var answer = try SecretBytes.init(s.gpa, 0);
+        defer answer.deinit();
+        try parts_mod.appendParts(&answer, &.{ "username=", entry.username, "\npassword=", entry.password.expose(), "\n" });
+        return .{ .failed = false, .any = try s.readAnswer(.init(answer.expose())) };
     }
 
     /// git's own `credential-cache`, run here rather than as `git
@@ -892,7 +889,7 @@ pub const Session = struct {
         const action = req.action;
         const operation = question.operation;
         const answered = cache.request(s.gpa, io, socket, req) catch |err| return cacheFailed(err);
-        const got = answered orelse retry: {
+        var got = answered orelse retry: {
             if (action != .store) return .{ .failed = false, .any = false };
             if (cache_daemon) |starter| {
                 starter.start(starter.context, io, socket) catch |err| switch (err) {
@@ -902,13 +899,10 @@ pub const Session = struct {
             } else if (!try startGitDaemon(s.gpa, io, programs, socket)) return failed;
             break :retry (cache.request(s.gpa, io, socket, req) catch |err| return cacheFailed(err)) orelse return failed;
         };
-        defer {
-            std.crypto.secureZero(u8, got);
-            s.gpa.free(got);
-        }
+        defer got.deinit();
         // What the daemon prints is the helper's; only `get` is listened to.
         if (operation != .get) return .{ .failed = false, .any = false };
-        return .{ .failed = false, .any = try s.readAnswer(.init(got)) };
+        return .{ .failed = false, .any = try s.readAnswer(.init(got.expose())) };
     }
 
     /// git's `spawn_daemon`: `git credential-cache--daemon <socket>`
@@ -1041,21 +1035,28 @@ pub const Session = struct {
     /// Ask for one field. With the caller's leave, the person's askpass
     /// first — `GIT_ASKPASS`, then `core.askPass`, then `SSH_ASKPASS`, as
     /// git's `git_prompt` — and then the caller's own prompt.
-    fn ask(s: *Session, io: Io, opts: Options, field: Field, prompt: []const u8) ErrorNamespace.Error!?[]u8 {
+    /// The answer is `s.gpa`'s, wiped when it is let go.
+    fn ask(s: *Session, io: Io, opts: Options, field: Field, prompt: []const u8) ErrorNamespace.Error!?SecretBytes {
         const p = opts.prompt orelse return error.CredentialsUnavailable;
         if (p.askpass) {
             if (try s.askpass(io, opts, prompt)) |answer| return answer;
         }
         const ask_fn = p.ask orelse return error.CredentialsUnavailable;
         s.prompted = true;
-        const answer = try ask_fn(s.gpa, p.context, field, prompt);
-        const owned = answer orelse return null;
-        defer secretFree(s.gpa, owned);
-        const copy = try s.gpa.dupe(u8, owned);
-        return copy;
+        var answer = try SecretBytes.init(s.gpa, 0);
+        errdefer answer.deinit();
+        var into = SecretBytes.Writer.init(&answer);
+        // The writer fails only for want of memory.
+        const answered = ask_fn(p.context, field, prompt, &into.interface) catch return error.OutOfMemory;
+        into.interface.flush() catch return error.OutOfMemory;
+        if (!answered) {
+            answer.deinit();
+            return null;
+        }
+        return answer;
     }
 
-    fn askpass(s: *Session, io: Io, opts: Options, prompt: []const u8) ErrorNamespace.Error!?[]u8 {
+    fn askpass(s: *Session, io: Io, opts: Options, prompt: []const u8) ErrorNamespace.Error!?SecretBytes {
         var command: ?[]const u8 = null;
         if (opts.programs) |programs| command = programs.environ.get("GIT_ASKPASS");
         var config_value: ?[]u8 = null;
@@ -1077,18 +1078,20 @@ pub const Session = struct {
         if (line.len == 0) return null;
         const programs = opts.programs orelse return error.ProgramsNotGranted;
         s.prompted = true;
-        var outcome = try program.run(s.gpa, io, programs, .{
+        var answer = try runSecret(s.gpa, io, programs, .{
             .argv = &.{ line, prompt },
             .stderr = .inherit,
         }, .{ .output = .limited(64 * 1024) });
-        defer {
-            std.crypto.secureZero(u8, outcome.stdout);
-            outcome.deinit(s.gpa);
+        if (!answer.succeeded()) {
+            answer.stdout.deinit();
+            return null;
         }
-        if (!outcome.succeeded()) return null;
-        const end = std.mem.findAny(u8, outcome.stdout, "\r\n") orelse outcome.stdout.len;
-        const copy = try s.gpa.dupe(u8, outcome.stdout[0..end]);
-        return copy;
+        // Its first line, as git's `git_prompt` takes it.
+        const said = answer.stdout.expose();
+        const end = std.mem.findAny(u8, said, "\r\n") orelse said.len;
+        // unreachable: a shorter live length is within any capacity.
+        answer.stdout.resizeWithinCapacity(end) catch unreachable;
+        return answer.stdout;
     }
 };
 
@@ -1107,10 +1110,40 @@ fn replaceSecret(gpa: Allocator, slot: *?SecretBytes, value: []const u8) Allocat
     slot.* = fresh;
 }
 
-/// An allocation of `gpa`'s, whole, owned as a secret from here on.
-fn adopted(gpa: Allocator, bytes: []u8) SecretBytes {
-    // unreachable: the live length is the allocation's own.
-    return SecretBytes.adopt(gpa, bytes, bytes.len) catch unreachable;
+/// What a program printed, a secret from its first byte, and how it ended.
+const Answer = struct {
+    term: program.Term,
+    stdout: SecretBytes,
+
+    fn succeeded(answer: Answer) bool {
+        return program.Child.succeeded(answer.term);
+    }
+};
+
+/// `program.run` for a program whose standard output is a secret: read
+/// straight into storage that is wiped as it grows and when it is let go, so
+/// it is never held anywhere else. Its standard error is not captured.
+fn runSecret(
+    gpa: Allocator,
+    io: Io,
+    programs: program.Programs,
+    invocation: program.Invocation,
+    options: program.RunOptions,
+) ErrorNamespace.Error!Answer {
+    // Room for a usual answer, so it seldom grows.
+    var stdout = try SecretBytes.init(gpa, 256);
+    errdefer stdout.deinit();
+    var writer = SecretBytes.Writer.init(&stdout);
+    var stderr = std.Io.Writer.Discarding.init(&.{});
+    const term = program.runInto(gpa, io, programs, invocation, .{
+        .sinks = .{ .stdout = &writer.interface, .stderr = &stderr.writer },
+        .run = options,
+    }) catch |err| switch (err) {
+        // The writer fails only for want of memory.
+        error.WriteFailed => return error.OutOfMemory,
+        else => |e| return e,
+    };
+    return .{ .term = term, .stdout = stdout };
 }
 
 fn appendOwned(gpa: Allocator, list: *std.ArrayList([]u8), value: []const u8) Allocator.Error!void {

@@ -30,6 +30,7 @@
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const shakedown = @import("shakedown");
 const xenoglyph = @import("xenoglyph");
 const assert = std.debug.assert;
@@ -147,15 +148,15 @@ pub fn reencode(a: Allocator, src: []const u8, to: []const u8, from: []const u8)
         switch (out_set) {
             .ascii => {
                 if (cp >= 0x80) return null;
-                try out.append(a, @intCast(cp)); // safe: below 0x80
+                try out.append(a, @intCast(cp)); // aegis: no-danger: below 0x80
             },
             .latin1 => {
                 if (cp > 0xff) return null;
-                try out.append(a, @intCast(cp)); // safe: at most 0xff
+                try out.append(a, @intCast(cp)); // aegis: no-danger: at most 0xff
             },
             .utf8 => {
                 var buf: [4]u8 = undefined;
-                // unreachable: every decoded code point is a scalar value
+                // aegis: no-danger: every decoded code point is a scalar value
                 const n = std.unicode.utf8Encode(cp, &buf) catch unreachable;
                 try out.appendSlice(a, buf[0..n]);
             },
@@ -233,7 +234,7 @@ pub fn ensureUtf8(a: Allocator, text: []const u8) Allocator.Error![]const u8 {
         try out.appendSlice(a, text[from..bad]);
         const c = text[bad];
         // a byte that begins no valid character is at least 0x80
-        assert(c >= 0x80);
+        aegis.assert.invariant(c >= 0x80, "c >= 0x80");
         try out.appendSlice(a, &.{ 0xc0 | (c >> 6), 0x80 | (c & 0x3f) });
         from = bad + 1;
         bad = invalidUtf8At(text, from) orelse break;
@@ -423,10 +424,10 @@ pub fn fromUtf8(a: Allocator, e: Encoding, src: []const u8) Self.Error![]const u
         switch (e.unit()) {
             .u16 => if (cp >= 0x10000) {
                 const v = cp - 0x10000;
-                try appendInt(u16, a, &out, @intCast(0xd800 + (v >> 10)), endian); // safe: v is below 2^20
-                try appendInt(u16, a, &out, @intCast(0xdc00 + (v & 0x3ff)), endian); // safe: ten bits
+                try appendInt(u16, a, &out, @intCast(0xd800 + (v >> 10)), endian); // aegis: no-danger: v is below 2^20
+                try appendInt(u16, a, &out, @intCast(0xdc00 + (v & 0x3ff)), endian); // aegis: no-danger: ten bits
             } else {
-                try appendInt(u16, a, &out, @intCast(cp), endian); // safe: below 0x10000
+                try appendInt(u16, a, &out, @intCast(cp), endian); // aegis: no-danger: below 0x10000
             },
             .u32 => try appendInt(u32, a, &out, cp, endian),
         }

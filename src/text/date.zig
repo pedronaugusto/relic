@@ -27,7 +27,32 @@ pub const Parsed = struct {
 /// The moment `secs` seconds after the epoch, as a time that git's
 /// seconds name.
 pub fn timestamp(secs: i64) std.Io.Timestamp {
-    return .fromNanoseconds(@as(i96, secs) * std.time.ns_per_s);
+    return Expiry.fromRaw(secs).toTimestamp();
+}
+
+/// `t` in the whole seconds since the epoch git names it by, rounded down.
+/// A moment past what 64 bits of seconds hold, which no clock reads, is
+/// held at that end.
+pub fn instant(t: std.Io.Timestamp) Expiry {
+    return Expiry.fromTimestamp(t, .down) catch .fromRaw(if (t.nanoseconds < 0) std.math.minInt(i64) else std.math.maxInt(i64));
+}
+
+/// `instant(t)` as git's `time_t`.
+pub fn seconds(t: std.Io.Timestamp) i64 {
+    return instant(t).raw();
+}
+
+/// A span of git's seconds, as an `Expiry` moves by.
+pub const Span = aegis.units.Duration(.second, i64);
+
+/// `n` days, in seconds.
+pub fn spanDays(comptime n: i64) Span {
+    return comptime aegis.units.Duration(.day, i64).fromRaw(n).convert(.second, i64, .exact) catch @compileError("more days than 64 bits of seconds hold");
+}
+
+/// `n` hours, in seconds.
+pub fn spanHours(comptime n: i64) Span {
+    return comptime aegis.units.Duration(.hour, i64).fromRaw(n).convert(.second, i64, .exact) catch @compileError("more hours than 64 bits of seconds hold");
 }
 
 /// Where a date without a zone is.
@@ -258,14 +283,14 @@ fn matchMultiNumber(num: i64, c: u8, date: []const u8, end_in: usize, tm: *Tm, c
         },
         '-', '/', '.' => {
             var now_tm: Tm = .{};
-            gmtime(ctx.now.toSeconds(), &now_tm);
+            gmtime(seconds(ctx.now), &now_tm);
             if (num > 70) {
-                if (setDate(num, num2, num3, null, ctx.now.toSeconds(), tm)) return end;
-                if (setDate(num, num3, num2, null, ctx.now.toSeconds(), tm)) return end;
+                if (setDate(num, num2, num3, null, seconds(ctx.now), tm)) return end;
+                if (setDate(num, num3, num2, null, seconds(ctx.now), tm)) return end;
             }
-            if (c != '.' and setDate(num3, num, num2, &now_tm, ctx.now.toSeconds(), tm)) return end;
-            if (setDate(num3, num2, num, &now_tm, ctx.now.toSeconds(), tm)) return end;
-            if (c == '.' and setDate(num3, num, num2, &now_tm, ctx.now.toSeconds(), tm)) return end;
+            if (c != '.' and setDate(num3, num, num2, &now_tm, seconds(ctx.now), tm)) return end;
+            if (setDate(num3, num2, num, &now_tm, seconds(ctx.now), tm)) return end;
+            if (c == '.' and setDate(num3, num, num2, &now_tm, seconds(ctx.now), tm)) return end;
             return 0;
         },
         else => {},
@@ -307,7 +332,7 @@ fn matchDigit(date: []const u8, tm: *Tm, offset: *i32, tm_gmt: *bool, ctx: Conte
         const num2 = @divTrunc(@mod(num, 10000), 100);
         const num3 = @mod(num, 100);
         if (n == 8) {
-            _ = setDate(num1, num2, num3, null, ctx.now.toSeconds(), tm);
+            _ = setDate(num1, num2, num3, null, seconds(ctx.now), tm);
         } else if (n == 6 and setTime(num1, num2, num3, tm) and at(date, end) == '.' and isDigit(at(date, end + 1))) {
             end = strtol(date, end + 1).end;
         }
@@ -448,8 +473,8 @@ pub fn parse(text_in: []const u8, ctx: Context) ?Parsed {
 pub fn approximate(text_in: []const u8, ctx: Context) ?i64 {
     if (parse(text_in, ctx)) |p| return p.secs;
     const text = if (std.mem.findScalar(u8, text_in, 0)) |z| text_in[0..z] else text_in;
-    var a: Approx = .{ .off = ctx.local_offset_minutes, .now_secs = ctx.now.toSeconds() };
-    a.localtime(ctx.now.toSeconds(), &a.tm);
+    var a: Approx = .{ .off = ctx.local_offset_minutes, .now_secs = seconds(ctx.now) };
+    a.localtime(seconds(ctx.now), &a.tm);
     a.now = a.tm;
     a.tm.year = -1;
     a.tm.mon = -1;
@@ -492,7 +517,7 @@ pub fn parseExpiry(value: []const u8, clock: Context) ?Expiry {
 }
 
 test "the expiry words git reads" {
-    const clock: Context = .{ .now = .fromNanoseconds(1_700_000_000 * std.time.ns_per_s) };
+    const clock: Context = .{ .now = timestamp(1_700_000_000) };
     const day = 24 * 60 * 60;
     try std.testing.expectEqual(@as(?Expiry, .fromRaw(0)), parseExpiry("never", clock));
     try std.testing.expectEqual(@as(?Expiry, .fromRaw(0)), parseExpiry("false", clock));
@@ -681,7 +706,7 @@ const Approx = struct {
             if (matchString(date, name) >= 3) {
                 var n = a.num - 1;
                 a.num = 0;
-                var diff = a.tm.wday - @as(i64, @intCast(i)); // safe: a weekday's index, below 7
+                var diff = a.tm.wday - @as(i64, @intCast(i)); // aegis: no-danger: a weekday's index, below 7
                 if (diff <= 0) n += 1;
                 diff += 7 * n;
                 _ = a.update(diff * 24 * 60 * 60);
@@ -751,7 +776,7 @@ fn formatUtc(buf: *[32]u8, secs: i64) []const u8 {
         @as(u32, @intCast(tm.year + 1900)), @as(u32, @intCast(tm.mon + 1)),
         @as(u32, @intCast(tm.mday)),        @as(u32, @intCast(tm.hour)),
         @as(u32, @intCast(tm.min)),         @as(u32, @intCast(tm.sec)),
-    }) catch unreachable; // unreachable: a u32 year is at most ten digits, the rest of the stamp fifteen bytes
+    }) catch unreachable; // aegis: no-danger: a u32 year is at most ten digits, the rest of the stamp fifteen bytes
 }
 
 // ---------------------------------------------------------------------------
@@ -875,7 +900,7 @@ fn printTz(w: *std.Io.Writer, tz: i32) std.Io.Writer.Error!void {
 
 /// git's `show_date_relative`.
 pub fn showRelative(w: *std.Io.Writer, secs: i64, now_at: std.Io.Timestamp) std.Io.Writer.Error!void {
-    const now = now_at.toSeconds();
+    const now = seconds(now_at);
     if (now < secs) return w.writeAll("in the future");
     // Saturating: a date an object carries may be as far back as an i64
     // goes, and the difference past it is still "many years ago".
@@ -925,7 +950,7 @@ pub fn show(w: *std.Io.Writer, secs: i64, tz_in: i32, mode: Mode, clock: Clock) 
     var human_tm: Tm = .{ .year = 0, .mon = 0, .mday = 0, .hour = 0, .min = 0, .sec = 0 };
     var human_tz: i32 = -1;
     if (mode.kind == .human) {
-        const now = (clock.now orelse return error.DateNeedsClock).toSeconds();
+        const now = seconds(clock.now orelse return error.DateNeedsClock);
         const zone = clock.local orelse return error.DateNeedsClock;
         human_tz = tzInt(zone.at(zone.context, now).offset_minutes);
         human_tm = tmIn(now, human_tz) orelse epoch: {

@@ -98,7 +98,7 @@ pub fn remove(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.
     defer locked.deinit(io);
     const index = &locked.index;
     try sparse_index.expand(gpa, io, index, repo.objectDatabase(), null);
-    const wt = repo.workDirectory();
+    const wt: ?Io.Dir = if (repo.workDirectory()) |work| work.get() else null;
 
     // Every entry the pathspec names, once a path.
     const seen = try arena.alloc(pathspec_mod.How, spec.items.len);
@@ -133,7 +133,7 @@ pub fn remove(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.
         } else return error.PathspecUnmatched;
         if (!options.recursive and how == .recursively) return error.NotRecursive;
     }
-    outcome.sparse_only = sparse_only.items;
+    outcome.sparse_only = try sparse_only.toOwnedSlice(arena);
     if (!seen_any) return outcome;
 
     const head_tree = try repo.headTree(io);
@@ -163,7 +163,7 @@ pub fn remove(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.
         if (index.cache_tree) |*tree| tree.invalidate(p.path);
         _ = index.remove(p.path);
     }
-    outcome.removed = removed.items;
+    outcome.removed = try removed.toOwnedSlice(arena);
     if (options.dry_run) return outcome;
 
     if (!options.cached) if (wt) |work| {
@@ -242,9 +242,9 @@ fn localChanges(
             if (local) try local_only.append(arena, p.path);
         }
     }
-    outcome.staged_and_local = both.items;
-    outcome.staged = staged_only.items;
-    outcome.local = local_only.items;
+    outcome.staged_and_local = try both.toOwnedSlice(arena);
+    outcome.staged = try staged_only.toOwnedSlice(arena);
+    outcome.local = try local_only.toOwnedSlice(arena);
     return outcome.refused();
 }
 

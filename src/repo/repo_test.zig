@@ -104,9 +104,9 @@ test "a whole commit cycle, and git agrees with every part of it" {
     wt_rules.ignore = &rules;
     wt_rules.attrs = &attrs;
 
-    _ = try worktree.addAll(gpa, io, repo.workDirectory().?, .{ .index = &index, .db = repo.objectDatabase() }, .{ .rules = wt_rules });
+    _ = try worktree.addAll(gpa, io, repo.workDirectory().?.get(), .{ .index = &index, .db = repo.objectDatabase() }, .{ .rules = wt_rules });
     const tree = try worktree.writeTree(gpa, io, &index, repo.objectDatabase());
-    try index.write(io, repo.gitDirectory(), "index", .{});
+    try index.write(io, repo.gitDirectory().get(), "index", .{});
 
     const commit = try repo.writeCommit(io, .{
         .tree = tree,
@@ -183,9 +183,9 @@ test "a sha256 repository this creates is one git uses" {
     defer rules.deinit();
     var wt_rules = try repo.worktreeRules();
     wt_rules.ignore = &rules;
-    _ = try worktree.addAll(gpa, io, repo.workDirectory().?, .{ .index = &index, .db = repo.objectDatabase() }, .{ .rules = wt_rules });
+    _ = try worktree.addAll(gpa, io, repo.workDirectory().?.get(), .{ .index = &index, .db = repo.objectDatabase() }, .{ .rules = wt_rules });
     const tree = try worktree.writeTree(gpa, io, &index, repo.objectDatabase());
-    try index.write(io, repo.gitDirectory(), "index", .{});
+    try index.write(io, repo.gitDirectory().get(), "index", .{});
 
     const commit = try repo.writeCommit(io, .{
         .tree = tree,
@@ -351,13 +351,13 @@ test "a linked worktree is created, listed, opened, removed and pruned" {
     var added = try worktrees.add(gpa, io, repo.refStore(), .{ .name = input_name, .dest_dir = dest }, .{
         .detach_at = commit,
     });
-    defer added.admin_dir.close(io);
+    defer added.admin_dir.deinit(io);
     defer gpa.free(added.name);
-    defer added.work_dir.close(io);
+    defer added.work_dir.deinit(io);
     dest.close(io);
     @memset(input_name, 'x');
     try std.testing.expectEqualStrings("one", added.name);
-    try added.work_dir.access(io, ".git", .{});
+    try added.work_dir.lend().get().access(io, ".git", .{});
 
     // git sees it, and says it is detached at the right commit.
     const listed = try git.run(io, &.{ "worktree", "list", "--porcelain" });
@@ -377,16 +377,16 @@ test "a linked worktree is created, listed, opened, removed and pruned" {
 
     // Opening the destination follows its `.git` file.
     {
-        var linked = try repo_mod.Repository.open(gpa, io, added.work_dir, .{ .discover = false });
+        var linked = try repo_mod.Repository.open(gpa, io, added.work_dir.lend().get(), .{ .discover = false });
         defer linked.deinit(io);
         try std.testing.expect(linked.isLinkedWorktree());
         var linked_index = try linked.openIndex(io);
         defer linked_index.deinit();
-        _ = try worktree.checkout(gpa, io, added.work_dir, .{ .index = &linked_index, .db = linked.objectDatabase(), .tree = tree }, .{});
-        try linked_index.write(io, linked.gitDirectory(), "index", .{});
+        _ = try worktree.checkout(gpa, io, added.work_dir.lend().get(), .{ .index = &linked_index, .db = linked.objectDatabase(), .tree = tree }, .{});
+        try linked_index.write(io, linked.gitDirectory().get(), "index", .{});
     }
     var buf: [64]u8 = undefined;
-    try std.testing.expectEqualStrings("hello\n", try added.work_dir.readFile(io, "a.txt", &buf));
+    try std.testing.expectEqualStrings("hello\n", try added.work_dir.lend().get().readFile(io, "a.txt", &buf));
 
     // git calls the linked worktree clean.
     const linked_status = try git.run(io, &.{ "-C", "trees/one", "status", "--porcelain" });
@@ -394,7 +394,7 @@ test "a linked worktree is created, listed, opened, removed and pruned" {
     try std.testing.expectEqualStrings("", linked_status);
 
     // A lock stops a prune.
-    try worktrees.lock(io, repo.commonDirectory(), "one", "busy\n");
+    try worktrees.lock(io, repo.commonDirectory().get(), "one", "busy\n");
     try git.dir.deleteTree(io, "trees/one");
     {
         var locked = try repo.listWorktrees(io);
@@ -407,7 +407,7 @@ test "a linked worktree is created, listed, opened, removed and pruned" {
     try std.testing.expectEqual(@as(usize, 0), skipped.pruned.len);
     try std.testing.expectEqual(@as(u32, 1), skipped.skipped_locked);
 
-    try worktrees.unlock(io, repo.commonDirectory(), "one");
+    try worktrees.unlock(io, repo.commonDirectory().get(), "one");
     var pruned = try repo.pruneWorktrees(io, .{});
     defer pruned.deinit();
     try std.testing.expectEqual(@as(usize, 1), pruned.pruned.len);
@@ -539,12 +539,12 @@ test "worktree remove takes the tree and the admin directory with it" {
     var added = try worktrees.add(gpa, io, repo.refStore(), .{ .name = "two", .dest_dir = dest }, .{
         .detach_at = try Oid.parse(.sha1, commit_text),
     });
-    added.admin_dir.close(io);
+    added.admin_dir.deinit(io);
     gpa.free(added.name);
-    added.work_dir.close(io);
+    added.work_dir.deinit(io);
     dest.close(io);
 
-    try worktrees.remove(gpa, io, repo.commonDirectory(), "two", .{});
+    try worktrees.remove(gpa, io, repo.commonDirectory().get(), "two", .{});
     try std.testing.expectError(error.FileNotFound, git.dir.access(io, "trees/two", .{}));
     const listed = try git.run(io, &.{ "worktree", "list", "--porcelain" });
     defer gpa.free(listed);
@@ -586,10 +586,10 @@ test "a worktree git added with relative paths lists and removes, and remove tou
     var other_admin = try git.dir.openDir(io, ".git/worktrees/other", .{});
     try other_admin.writeFile(io, .{ .sub_path = "gitdir", .data = "../../../victim/.git\n" });
     other_admin.close(io);
-    try std.testing.expectError(error.CorruptWorktree, worktrees.remove(gpa, io, repo.commonDirectory(), "other", .{}));
+    try std.testing.expectError(error.CorruptWorktree, worktrees.remove(gpa, io, repo.commonDirectory().get(), "other", .{}));
     try git.dir.access(io, "victim/keep", .{});
 
-    try worktrees.remove(gpa, io, repo.commonDirectory(), "linked", .{});
+    try worktrees.remove(gpa, io, repo.commonDirectory().get(), "linked", .{});
     try std.testing.expectError(error.FileNotFound, git.dir.access(io, "linked", .{}));
     const listed = try git.run(io, &.{ "worktree", "list", "--porcelain" });
     defer gpa.free(listed);
@@ -687,7 +687,7 @@ test "discovery stops at a damaged .git file, passes over a .git that is no repo
         var repo = try repo_mod.Repository.open(gpa, io, other, .{});
         defer repo.deinit(io);
         var ours_buf: [4096]u8 = undefined;
-        const len = try repo.workDirectory().?.realPath(io, &ours_buf);
+        const len = try repo.workDirectory().?.get().realPath(io, &ours_buf);
         if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, ours_buf[0..len], '\\', '/');
         try std.testing.expectEqualStrings(theirs, ours_buf[0..len]);
     }
@@ -827,15 +827,15 @@ test "a config refresh keeps only its own refused setting" {
     defer repo.deinit(io);
     var diagnostic = repo_mod.Diagnostic.init(gpa);
     defer diagnostic.deinit();
-    try repo.gitDirectory().writeFile(io, .{ .sub_path = "config", .data = "[core]\nrepositoryformatversion = 1\n[extensions]\nsomethingNew = true\n" });
+    try repo.gitDirectory().get().writeFile(io, .{ .sub_path = "config", .data = "[core]\nrepositoryformatversion = 1\n[extensions]\nsomethingNew = true\n" });
     try std.testing.expectError(error.UnsupportedExtension, repo.refreshConfig(io, .{ .diagnostic = &diagnostic }));
     try std.testing.expectEqualStrings("somethingnew", diagnostic.unsupported_setting);
-    try repo.gitDirectory().writeFile(io, .{ .sub_path = "config", .data = "[core]\nrepositoryformatversion = 0\n" });
+    try repo.gitDirectory().get().writeFile(io, .{ .sub_path = "config", .data = "[core]\nrepositoryformatversion = 0\n" });
     try std.testing.expect(try repo.refreshConfig(io, .{ .diagnostic = &diagnostic }));
     try std.testing.expectEqualStrings("", diagnostic.unsupported_setting);
     try std.testing.expect(!try repo.refreshConfig(io, .{ .diagnostic = &diagnostic }));
     try std.testing.expectEqualStrings("", diagnostic.unsupported_setting);
-    try repo.gitDirectory().writeFile(io, .{ .sub_path = "config", .data = "[core]\nrepositoryformatversion = 1\n[extensions]\nobjectformat = sha256\n" });
+    try repo.gitDirectory().get().writeFile(io, .{ .sub_path = "config", .data = "[core]\nrepositoryformatversion = 1\n[extensions]\nobjectformat = sha256\n" });
     try std.testing.expectError(error.ObjectFormatChanged, repo.refreshConfig(io, .{ .diagnostic = &diagnostic }));
     try std.testing.expectEqualStrings("extensions.objectFormat", diagnostic.unsupported_setting);
 }
@@ -903,7 +903,7 @@ test "a refresh preserves a refused extension beyond sixty-four bytes" {
     {
         var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{ .default_branch = "main" });
         defer repo.deinit(io);
-        try repo.gitDirectory().writeFile(io, .{ .sub_path = "config", .data = "[core]\nrepositoryformatversion = 1\n[extensions]\n" ++ name ++ " = true\n" });
+        try repo.gitDirectory().get().writeFile(io, .{ .sub_path = "config", .data = "[core]\nrepositoryformatversion = 1\n[extensions]\n" ++ name ++ " = true\n" });
         try std.testing.expectError(error.UnsupportedExtension, repo.refreshConfig(io, .{ .diagnostic = &diagnostic }));
     }
     try std.testing.expectEqualStrings(name, diagnostic.unsupported_setting);
@@ -949,7 +949,7 @@ test "a refusal preserves the diagnostic allocator's resource failure" {
     var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
     var diagnostic = repo_mod.Diagnostic.init(failing.allocator());
     defer diagnostic.deinit();
-    try repo.gitDirectory().writeFile(io, .{ .sub_path = "config", .data = "[core]\nrepositoryformatversion = 9\n" });
+    try repo.gitDirectory().get().writeFile(io, .{ .sub_path = "config", .data = "[core]\nrepositoryformatversion = 9\n" });
     try std.testing.expectError(error.OutOfMemory, repo.refreshConfig(io, .{ .diagnostic = &diagnostic }));
     try std.testing.expectEqualStrings("", diagnostic.unsupported_setting);
     try std.testing.expectEqual(@as(i64, 0), try repo.configuration().getInt("core.repositoryformatversion", -1));
@@ -981,7 +981,7 @@ test "a refresh changing the ref backend requires reopening and keeps the old st
             "[core]\nrepositoryformatversion = 1\n[extensions]\nrefStorage = reftable\n[user]\nname = changed\n"
         else
             "[core]\nrepositoryformatversion = 1\n[extensions]\nrefStorage = files\n[user]\nname = changed\n";
-        try repo.gitDirectory().writeFile(io, .{ .sub_path = "config", .data = replacement });
+        try repo.gitDirectory().get().writeFile(io, .{ .sub_path = "config", .data = replacement });
         try std.testing.expectError(error.RefStorageChanged, repo.refreshConfig(io, .{ .diagnostic = &diagnostic }));
         try std.testing.expectEqualStrings("extensions.refStorage", diagnostic.unsupported_setting);
         try std.testing.expectEqual(format, repo.refStore().refFormat());
@@ -993,7 +993,7 @@ test "a refresh changing the ref backend requires reopening and keeps the old st
             "[core]\nrepositoryformatversion = 1\n[extensions]\nrefStorage = files\n[user]\nname = accepted\n"
         else
             "[core]\nrepositoryformatversion = 1\n[extensions]\nrefStorage = reftable\n[user]\nname = accepted\n";
-        try repo.gitDirectory().writeFile(io, .{ .sub_path = "config", .data = restored });
+        try repo.gitDirectory().get().writeFile(io, .{ .sub_path = "config", .data = restored });
         try std.testing.expect(try repo.refreshConfig(io, .{ .diagnostic = &diagnostic }));
         try std.testing.expectEqualStrings("", diagnostic.unsupported_setting);
         try std.testing.expectEqualStrings("accepted", repo.configuration().get("user.name").?);
@@ -1029,7 +1029,7 @@ test "a refresh updates reftable write settings together with the configuration"
     defer repo.deinit(io);
     const cache = refs_state.get(repo.refStore().state).cache;
     const prefix = "[core]\nrepositoryformatversion = 1\n[extensions]\nrefStorage = reftable\n[reftable]\n";
-    try repo.gitDirectory().writeFile(io, .{ .sub_path = "config", .data = prefix ++
+    try repo.gitDirectory().get().writeFile(io, .{ .sub_path = "config", .data = prefix ++
         "blockSize = 8192\nrestartInterval = 32\nindexObjects = false\ngeometricFactor = 4\nlockTimeout = 0\n" });
     try std.testing.expect(try repo.refreshConfig(io, .{}));
     const options = repo.refStore().reftableOptions();
@@ -1039,11 +1039,11 @@ test "a refresh updates reftable write settings together with the configuration"
     try std.testing.expectEqual(@as(u8, 4), options.geometric_factor);
     try std.testing.expectEqual(fs_mod.OnContention.fail, options.lock);
     try std.testing.expectEqual(cache, refs_state.get(repo.refStore().state).cache);
-    try repo.gitDirectory().writeFile(io, .{ .sub_path = "config", .data = prefix ++ "blockSize = invalid\n" });
+    try repo.gitDirectory().get().writeFile(io, .{ .sub_path = "config", .data = prefix ++ "blockSize = invalid\n" });
     try std.testing.expectError(error.NotAnInteger, repo.refreshConfig(io, .{}));
     try std.testing.expectEqualDeep(options, repo.refStore().reftableOptions());
     try std.testing.expectEqualStrings("8192", repo.configuration().get("reftable.blocksize").?);
-    try repo.gitDirectory().writeFile(io, .{ .sub_path = "config", .data = prefix ++ "lockTimeout = 200\n" });
+    try repo.gitDirectory().get().writeFile(io, .{ .sub_path = "config", .data = prefix ++ "lockTimeout = 200\n" });
     try std.testing.expect(try repo.refreshConfig(io, .{}));
     try std.testing.expectEqualDeep(reftable_stack.Options{ .lock = .{ .wait = .fromMilliseconds(200) } }, repo.refStore().reftableOptions());
     try std.testing.expectEqual(cache, refs_state.get(repo.refStore().state).cache);
@@ -1058,14 +1058,14 @@ test "a reftable HEAD read failure does not become a detached branch" {
         var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{ .default_branch = "main", .object_format = kind, .ref_format = .reftable });
         defer repo.deinit(io);
         try std.testing.expectEqualStrings("main", repo.configuration().context.branch.?);
-        const before = try repo.gitDirectory().readFileAlloc(io, "reftable/tables.list", gpa, .limited(4096));
+        const before = try repo.gitDirectory().get().readFileAlloc(io, "reftable/tables.list", gpa, .limited(4096));
         defer gpa.free(before);
         const cases = .{
             .{ "not a table\n", error.MalformedTablesList },
             .{ "missing.ref\n", error.ReftableMissing },
         };
         inline for (cases) |case| {
-            try repo.gitDirectory().writeFile(io, .{ .sub_path = "reftable/tables.list", .data = case[0] });
+            try repo.gitDirectory().get().writeFile(io, .{ .sub_path = "reftable/tables.list", .data = case[0] });
             try std.testing.expectError(case[1], repo.refreshConfig(io, .{}));
             try std.testing.expectEqualStrings("main", repo.configuration().context.branch.?);
             if (repo_mod.Repository.open(gpa, io, tmp.dir, .{})) |opened| {
@@ -1076,7 +1076,7 @@ test "a reftable HEAD read failure does not become a detached branch" {
                 try std.testing.expectEqual(case[1], err);
             }
         }
-        try repo.gitDirectory().writeFile(io, .{ .sub_path = "reftable/tables.list", .data = before });
+        try repo.gitDirectory().get().writeFile(io, .{ .sub_path = "reftable/tables.list", .data = before });
         try std.testing.expect(!try repo.refreshConfig(io, .{}));
         try std.testing.expectEqualStrings("main", repo.configuration().context.branch.?);
     }
@@ -1110,7 +1110,7 @@ test "a malformed signing policy is refused before an unsigned object is written
             }, .{ .diagnostic = &diagnostic }));
         }
         try std.testing.expectEqualStrings(setting, diagnostic.unsupported_setting);
-        var objects = try repo.gitDirectory().openDir(io, "objects", .{ .iterate = true });
+        var objects = try repo.gitDirectory().get().openDir(io, "objects", .{ .iterate = true });
         defer objects.close(io);
         var entries = objects.iterate();
         while (try entries.next(io)) |entry| {
@@ -1233,9 +1233,9 @@ test "a malformed worktree configuration policy is refused instead of disabling 
     defer repo.deinit(io);
     var diagnostic = repo_mod.Diagnostic.init(gpa);
     defer diagnostic.deinit();
-    try repo.gitDirectory().writeFile(io, .{ .sub_path = "config.worktree", .data = "[user]\nname = worktree\n" });
+    try repo.gitDirectory().get().writeFile(io, .{ .sub_path = "config.worktree", .data = "[user]\nname = worktree\n" });
     const shared = "[core]\nrepositoryformatversion = 1\n[extensions]\nworktreeConfig = ";
-    try repo.gitDirectory().writeFile(io, .{ .sub_path = "config", .data = shared ++ "maybe\n" });
+    try repo.gitDirectory().get().writeFile(io, .{ .sub_path = "config", .data = shared ++ "maybe\n" });
     try std.testing.expectError(error.NotABoolean, repo.refreshConfig(io, .{ .diagnostic = &diagnostic }));
     try std.testing.expectEqualStrings("extensions.worktreeConfig", diagnostic.unsupported_setting);
     try std.testing.expect(repo.configuration().get("user.name") == null);
@@ -1247,7 +1247,7 @@ test "a malformed worktree configuration policy is refused instead of disabling 
         try std.testing.expectEqual(error.NotABoolean, err);
         try std.testing.expectEqualStrings("extensions.worktreeConfig", diagnostic.unsupported_setting);
     }
-    try repo.gitDirectory().writeFile(io, .{ .sub_path = "config", .data = shared ++ "true\n" });
+    try repo.gitDirectory().get().writeFile(io, .{ .sub_path = "config", .data = shared ++ "true\n" });
     try std.testing.expect(try repo.refreshConfig(io, .{ .diagnostic = &diagnostic }));
     try std.testing.expectEqualStrings("worktree", repo.configuration().get("user.name").?);
     try std.testing.expectEqualStrings("", diagnostic.unsupported_setting);
@@ -1464,8 +1464,8 @@ test "the git directory of a working tree is found without opening the repositor
         var dir = try git.dir.openDir(io, where, .{});
         defer dir.close(io);
         var found = try repo_mod.Repository.gitDirOf(gpa, io, dir);
-        defer found.close(io);
-        const got = try found.realPathFileAlloc(io, ".", gpa);
+        defer found.deinit(io);
+        const got = try found.lend().get().realPathFileAlloc(io, ".", gpa);
         defer gpa.free(got);
         const said = try git.line(io, &.{ "-C", where, "rev-parse", "--absolute-git-dir" });
         defer gpa.free(said);

@@ -230,8 +230,8 @@ fn ourStatus(gpa: Allocator, io: Io, r: *testgit.Repo) ![]u8 {
     defer env.deinit();
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
-    const source = try fsmonitor.configured(arena.allocator(), io, repo.configuration(), .{ .git_dir = repo.gitDirectory(), .work_tree = repo.workDirectory().? }, .{ .environ = &env });
-    var result = try worktree.status(gpa, io, repo.workDirectory().?, .{ .index = index, .db = repo.objectDatabase() }, .{
+    const source = try fsmonitor.configured(arena.allocator(), io, repo.configuration(), .{ .git_dir = repo.gitDirectory().get(), .work_tree = repo.workDirectory().?.get() }, .{ .environ = &env });
+    var result = try worktree.status(gpa, io, repo.workDirectory().?.get(), .{ .index = index, .db = repo.objectDatabase() }, .{
         .rules = try repo.worktreeRules(),
         .head_tree = try repo.headTree(io),
         .untracked = .no,

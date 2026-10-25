@@ -20,6 +20,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const ctype = @import("../text.zig").ctype;
 const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
@@ -843,9 +844,9 @@ fn parseFragment(p: *Parser, at: usize, file: *FilePatch, frag: *Fragment) Error
     p.linenr = frag.line + (std.math.cast(usize, scanned.lines) orelse return null);
     // Every line the header counts was read, so the context on either side
     // is old lines the hunk keeps: `apply` reduces the context by these.
-    assert(deleted <= frag.old_lines);
-    assert(frag.leading <= frag.old_lines - deleted);
-    assert(frag.trailing <= frag.old_lines - deleted);
+    aegis.assert.invariant(deleted <= frag.old_lines, "deleted <= frag.old_lines");
+    aegis.assert.invariant(frag.leading <= frag.old_lines - deleted, "frag.leading <= frag.old_lines - deleted");
+    aegis.assert.invariant(frag.trailing <= frag.old_lines - deleted, "frag.trailing <= frag.old_lines - deleted");
     // The old file's line endings are compared as they are when a line it has ends in CR LF.
     if (scanned.crlf.context or (if (p.options.reverse) scanned.crlf.added else scanned.crlf.removed)) file.crlf_in_old = true;
     file.lines_added += added;
@@ -871,9 +872,9 @@ fn parseSinglePatch(p: *Parser, at_in: usize, file: *FilePatch) Error!usize {
         try frags.append(p.a, frag);
         at += len;
     }
-    file.fragments = frags.items;
-    if (file.is_new == .unknown and (old_lines != 0 or frags.items.len > 1)) file.is_new = .no;
-    if (file.is_delete == .unknown and (new_lines != 0 or frags.items.len > 1)) file.is_delete = .no;
+    file.fragments = try frags.toOwnedSlice(p.a);
+    if (file.is_new == .unknown and (old_lines != 0 or file.fragments.len > 1)) file.is_new = .no;
+    if (file.is_delete == .unknown and (new_lines != 0 or file.fragments.len > 1)) file.is_delete = .no;
     if (file.is_new == .yes and old_lines != 0) return p.fail(error.NewFileDependsOnOldContents, p.linenr);
     if (file.is_delete == .yes and new_lines != 0) return p.fail(error.DeletedFileStillHasContents, p.linenr);
     return at - at_in;

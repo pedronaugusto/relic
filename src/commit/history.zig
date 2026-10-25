@@ -382,7 +382,7 @@ const History = struct {
             var updates: std.ArrayList(replay.Update) = .empty;
             for (planned.updates) |u| try updates.append(h.a, .{ .ref = try h.a.dupe(u8, u.ref), .old = u.old, .new = u.new });
             try h.onOriginal(f, &updates);
-            outcome.updates = updates.items;
+            outcome.updates = try updates.toOwnedSlice(h.a);
             const move = if (f.moves_worktree) try h.headMove(outcome.updates) else null;
             // git's dry run first: a change in the way refuses it all.
             if (move) |m| try h.moveWorktree(m, true);

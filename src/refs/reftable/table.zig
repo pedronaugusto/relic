@@ -26,6 +26,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const shakedown = @import("shakedown");
 const warp = @import("warp");
 const Allocator = std.mem.Allocator;
@@ -163,6 +164,7 @@ pub const Table = struct {
     version: u8,
     block_size: u32,
     min_update_index: u64,
+    // aegis: no-danger: the two bounds of one range of update indices, of one kind
     max_update_index: u64,
     /// Where the footer begins; no block reaches past it.
     size: usize,
@@ -711,7 +713,7 @@ fn skipValue(t: *const Table, typ: u8, data: []const u8, at: usize, extra: u3, k
 fn readOid(t: *const Table, data: []const u8, at: usize) Error!Oid {
     const len = t.kind.rawLen();
     if (at > data.len or data.len - at < len) return error.CorruptRecord;
-    // unreachable: the slice is cut to the format's raw length
+    // aegis: no-danger: the slice is cut to the format's raw length
     return Oid.fromRaw(t.kind, data[at..][0..len]) catch unreachable;
 }
 
@@ -835,6 +837,7 @@ pub const WriteOptions = struct {
     index_objects: bool = true,
 };
 
+// aegis: no-danger: the two bounds of one range of update indices, of one kind
 pub const WriteInputs = struct { min_update_index: u64, max_update_index: u64, refs: []const RefRecord, logs: []const LogRecord };
 
 /// Write one table holding `inputs.refs`, sorted by name, and `inputs.logs`, sorted by
@@ -1040,7 +1043,7 @@ const Writer = struct {
         var state = try warp.Compressor.init(w.gpa, .{ .level = 9, .max_input = .fromRaw(o.next - skip) });
         defer state.deinit();
         const output = compressed.writer.writableSliceGreedy(warp.Compressor.bound(o.next - skip, .{})) catch return error.OutOfMemory;
-        const n = state.compress(w.block[skip..o.next], output, .{}) catch unreachable; // unreachable: bound reserves the complete stream
+        const n = state.compress(w.block[skip..o.next], output, .{}) catch unreachable; // aegis: no-danger: bound reserves the complete stream
         compressed.writer.advance(n);
         const bytes = compressed.written();
         // A log block is not bounded by the block size once deflated, and
@@ -1283,7 +1286,7 @@ const Writer = struct {
         std.debug.assert(at == footerSize(w.version));
         try w.paddedWrite(footer[0..at], 0);
         std.debug.assert(w.out.items.len >= headerSize(w.version) + footerSize(w.version));
-        std.debug.assert(std.mem.eql(u8, w.out.items[0..4], magic));
+        aegis.assert.invariant(std.mem.eql(u8, w.out.items[0..4], magic), "std.mem.eql(u8, w.out.items[0..4], magic)");
         return w.out.toOwnedSlice(w.gpa);
     }
 };
@@ -1502,18 +1505,14 @@ test "a damaged footer is a named error" {
 }
 
 test "fuzz: any bytes are a table or a named error, and every record reads or is refused" {
-    try shakedown.check(std.testing.allocator, {}, fuzzTable, .{});
+    const base = try fuzzBase(std.testing.allocator);
+    defer std.testing.allocator.free(base);
+    try shakedown.check(std.testing.allocator, base, fuzzTable, .{});
 }
 
 /// A valid table with every section -- several small ref blocks, their
-/// index, the object index, and logs -- for the fuzzer to damage. Made once
-/// and kept for the process, from an allocator the leak check does not
-/// watch.
-var fuzz_base: ?[]u8 = null;
-
-fn fuzzBase() ![]const u8 {
-    if (fuzz_base) |bytes| return bytes;
-    const gpa = std.heap.page_allocator;
+/// index, the object index, and logs -- for the fuzzer to damage, `gpa`'s.
+fn fuzzBase(gpa: Allocator) ![]u8 {
     var refs: [60]RefRecord = undefined;
     var names: [60][32]u8 = undefined;
     for (&refs, 0..) |*r, i| {
@@ -1540,11 +1539,10 @@ fn fuzzBase() ![]const u8 {
         } } },
         .{ .name = "HEAD", .update_index = 2, .value = .deletion },
     };
-    fuzz_base = try write(gpa, .sha1, .{ .min_update_index = 1, .max_update_index = 3, .refs = &refs, .logs = &logs }, .{ .block_size = 256, .restart_interval = 4 });
-    return fuzz_base.?;
+    return write(gpa, .sha1, .{ .min_update_index = 1, .max_update_index = 3, .refs = &refs, .logs = &logs }, .{ .block_size = 256, .restart_interval = 4 });
 }
 
-fn fuzzTable(_: void, case: *shakedown.Case) anyerror!void {
+fn fuzzTable(base: []const u8, case: *shakedown.Case) anyerror!void {
     var buf: [4096]u8 = undefined;
     const input = buf[0..shakedown.gen.intRange(case.source, usize, 0, buf.len)];
     case.source.bytes(input);
@@ -1555,7 +1553,6 @@ fn fuzzTable(_: void, case: *shakedown.Case) anyerror!void {
     // And a valid table with the input's bytes laid over it as damage --
     // pairs of a position and a value -- which reaches every block and
     // every record the door would otherwise keep the fuzzer from.
-    const base = try fuzzBase();
     var damaged: [8192]u8 = undefined;
     if (base.len > damaged.len) return;
     const bytes = damaged[0..base.len];
@@ -1596,7 +1593,8 @@ fn readEverything(bytes: []const u8) !void {
 }
 
 test "the fuzzer's base table reads back whole" {
-    const base = try fuzzBase();
+    const base = try fuzzBase(std.testing.allocator);
+    defer std.testing.allocator.free(base);
     const table = try Table.parse(base, .sha1);
     try table.verify(std.testing.allocator);
     try std.testing.expect(table.ref_index_offset != 0 and table.has_objs and table.has_logs);

@@ -556,7 +556,7 @@ pub const Server = struct {
                 var protocols: std.ArrayList([]const u8) = .empty;
                 var it = std.mem.splitScalar(u8, arg["packfile-uris ".len..], ',');
                 while (it.next()) |protocol_name| try protocols.append(arena, protocol_name);
-                n.uri_protocols = protocols.items;
+                n.uri_protocols = try protocols.toOwnedSlice(arena);
             } else if (try n.takeShallowArg(arg)) {
                 // Recorded.
             } else if (std.mem.startsWith(u8, arg, "filter ")) {
@@ -1412,7 +1412,7 @@ const Negotiation = struct {
         var running = try program.start(s.gpa, s.io, programs, .{
             .argv = argv.items,
             .shell = true,
-            .cwd = .{ .dir = s.remote.repo.gitDirectory() },
+            .cwd = .{ .dir = s.remote.repo.gitDirectory().get() },
             .set = &.{.{ .name = "GIT_DIR", .value = "." }},
             // Without a side band, its words are this process's, as git's
             // are its own standard error.
@@ -1564,7 +1564,7 @@ const Paced = struct {
     }
 
     fn drain(w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
-        const p: *Paced = @alignCast(@fieldParentPtr("interface", w)); // safe: this function is installed only on a Paced's interface
+        const p: *Paced = @alignCast(@fieldParentPtr("interface", w)); // aegis: no-danger: this function is installed only on a Paced's interface
         try p.forwardWhole();
         // Then what fits: what is not taken is offered again.
         var taken: usize = 0;
@@ -1591,7 +1591,7 @@ const Paced = struct {
 
     /// Every whole packet buffered; a packet begun waits for its end.
     fn flush(w: *Io.Writer) Io.Writer.Error!void {
-        const p: *Paced = @alignCast(@fieldParentPtr("interface", w)); // safe: this function is installed only on a Paced's interface
+        const p: *Paced = @alignCast(@fieldParentPtr("interface", w)); // aegis: no-danger: this function is installed only on a Paced's interface
         try p.forwardWhole();
     }
 
@@ -1645,7 +1645,7 @@ const Paced = struct {
             const now = Io.Clock.awake.now(p.io);
             const quiet = line.last.durationTo(now);
             if (quiet.nanoseconds < period.nanoseconds) {
-                wait = .{ .nanoseconds = period.nanoseconds - quiet.nanoseconds };
+                wait = now.durationTo(line.last.addDuration(period));
                 continue;
             }
             wait = period;

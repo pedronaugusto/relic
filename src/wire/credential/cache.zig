@@ -14,6 +14,8 @@
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
+const SecretBytes = aegis.SecretBytes;
 const reactor = @import("reactor");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -82,9 +84,10 @@ pub const Request = struct {
 };
 
 /// git's `send_request`: `req` to the daemon at `socket`, and what it
-/// answers, `gpa`'s; `null` when no daemon listens there (the socket is
-/// not there, or refuses), which git's `do_cache` passes over.
-pub fn request(gpa: Allocator, io: Io, socket: []const u8, req: Request) Self.Error!?[]u8 {
+/// answers, `gpa`'s and wiped when it is let go; `null` when no daemon
+/// listens there (the socket is not there, or refuses), which git's
+/// `do_cache` passes over.
+pub fn request(gpa: Allocator, io: Io, socket: []const u8, req: Request) Self.Error!?SecretBytes {
     const address = Io.net.UnixAddress.init(socket) catch return error.CacheUnreachable;
     const stream = reactor.net.connectUnix(io, &address) catch |err| switch (err) {
         // Winsock's ENETDOWN for a directory missing on the way, which git
@@ -95,36 +98,46 @@ pub fn request(gpa: Allocator, io: Io, socket: []const u8, req: Request) Self.Er
         else => return error.CacheUnreachable,
     };
     defer stream.close(io);
-    var write_buffer: [1024]u8 = undefined;
-    var w = stream.writer(io, &write_buffer);
+    // No buffer of the writer's, which would hold a copy of the input: the
+    // input goes to the daemon from where it is.
+    var w = stream.writer(io, &.{});
     (write: {
         w.interface.print("action={t}\ntimeout={d}\n", .{ req.action, req.timeout }) catch |e| break :write e;
         w.interface.writeAll(req.input) catch |e| break :write e;
         w.interface.flush() catch |e| break :write e;
     }) catch return if (w.err) |e| (if (e == error.Canceled) error.Canceled else error.CacheConversationFailed) else error.CacheConversationFailed;
-    stream.shutdown(io, .send) catch return error.CacheConversationFailed;
+    // git's `send_request` lets the shutdown's result go: a daemon that has
+    // read all it will and closed already leaves the socket unconnected,
+    // and its answer, or none, is still there to read.
+    stream.shutdown(io, .send) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => {},
+    };
 
-    var read_buffer: [1024]u8 = undefined;
-    var r = stream.reader(io, &read_buffer);
-    var answer: std.ArrayList(u8) = .empty;
-    errdefer {
-        std.crypto.secureZero(u8, answer.items);
-        answer.deinit(gpa);
+    // Room for a usual answer, so it seldom grows.
+    var answer = try SecretBytes.init(gpa, 256);
+    errdefer answer.deinit();
+    {
+        var into = SecretBytes.Writer.init(&answer);
+        // No buffer of the reader's: each read lands in `answer`'s own
+        // storage, wiped as it grows and when it is let go.
+        var r = stream.reader(io, &.{});
+        // One byte past the most an answer may be says it is longer.
+        while (into.interface.end <= max_request) {
+            _ = r.interface.stream(&into.interface, Io.Limit.limited(max_request + 1 - into.interface.end)) catch |err| switch (err) {
+                error.EndOfStream => break,
+                error.ReadFailed => switch (r.err.?) {
+                    // The daemon closing on its side ends the answer: git's
+                    // `connection_closed`.
+                    error.ConnectionResetByPeer => break,
+                    error.Canceled => return error.Canceled,
+                    else => return error.CacheConversationFailed,
+                },
+                // The writer fails only for want of memory.
+                error.WriteFailed => return error.OutOfMemory,
+            };
+        } else return error.CacheConversationFailed;
+        into.interface.flush() catch return error.OutOfMemory;
     }
-    while (true) {
-        const chunk = r.interface.peekGreedy(1) catch |err| switch (err) {
-            error.EndOfStream => break,
-            error.ReadFailed => switch (r.err.?) {
-                // The daemon closing on its side ends the answer: git's
-                // `connection_closed`.
-                error.ConnectionResetByPeer => break,
-                error.Canceled => return error.Canceled,
-                else => return error.CacheConversationFailed,
-            },
-        };
-        if (answer.items.len + chunk.len > max_request) return error.CacheConversationFailed;
-        try answer.appendSlice(gpa, chunk);
-        r.interface.toss(chunk.len);
-    }
-    return try answer.toOwnedSlice(gpa);
+    return answer;
 }

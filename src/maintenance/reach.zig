@@ -6,6 +6,7 @@
 
 const Self = @This();
 const std = @import("std");
+const aegis = @import("aegis");
 const date = @import("../text.zig").date;
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
@@ -119,7 +120,7 @@ pub fn collectStarts(gpa: Allocator, arena: Allocator, io: Io, repo: *Repository
     for (others) |id| try admin_paths.append(arena, try arena.print("worktrees/{s}", .{id}));
     for (admin_paths.items) |admin| {
         const path = try std.fs.path.join(arena, &.{ admin, "index" });
-        var index = repo.openIndexAt(io, repo.commonDirectory(), path) catch |err| switch (err) {
+        var index = repo.openIndexAt(io, repo.commonDirectory().get(), path) catch |err| switch (err) {
             error.FileNotFound => continue,
             else => |e| return e,
         };
@@ -145,12 +146,12 @@ pub fn collectStarts(gpa: Allocator, arena: Allocator, io: Io, repo: *Repository
     // Every worktree's rebase state: git's `add_rebase_files`.
     if (options.rebase_state) {
         var git_dirs: std.ArrayList(Io.Dir) = .empty;
-        try git_dirs.append(arena, repo.gitDirectory());
-        if (repo.isLinkedWorktree()) try git_dirs.append(arena, repo.commonDirectory());
+        try git_dirs.append(arena, repo.gitDirectory().get());
+        if (repo.isLinkedWorktree()) try git_dirs.append(arena, repo.commonDirectory().get());
         var opened: std.ArrayList(Io.Dir) = .empty;
         defer for (opened.items) |d| d.close(io);
         for (others) |id| {
-            const dir = repo.commonDirectory().openDir(io, try arena.print("worktrees/{s}", .{id}), .{}) catch |err| switch (err) {
+            const dir = repo.commonDirectory().get().openDir(io, try arena.print("worktrees/{s}", .{id}), .{}) catch |err| switch (err) {
                 error.FileNotFound, error.NotDir => continue,
                 else => |e| return e,
             };
@@ -158,7 +159,7 @@ pub fn collectStarts(gpa: Allocator, arena: Allocator, io: Io, repo: *Repository
             try git_dirs.append(arena, dir);
         }
         for (git_dirs.items) |dir| for ([_][]const u8{ "rebase-apply/autostash", "rebase-apply/orig-head", "rebase-merge/autostash", "rebase-merge/orig-head" }) |file| {
-            const text = dir.readFileAlloc(io, file, arena, .limited(4096)) catch |err| switch (err) {
+            const text = aegis.own.readFile(io, dir, file, arena, aegis.units.Bytes(u64).fromRaw(4096)) catch |err| switch (err) {
                 error.FileNotFound, error.NotDir => continue,
                 else => |e| return e,
             };
@@ -209,7 +210,7 @@ pub fn reachableToPack(gpa: Allocator, io: Io, repo: *Repository, filter: object
         if ((try seen.fetchPut(gpa, blob.oid, {})) != null) continue;
         try entries.append(out, .{ .oid = blob.oid, .hint = try out.dupe(u8, blob.path) });
     }
-    walked.entries = entries.items;
+    walked.entries = try entries.toOwnedSlice(out);
     return walked;
 }
 
@@ -255,7 +256,7 @@ pub fn hookedObjects(gpa: Allocator, io: Io, repo: *Repository, programs: ?progr
         var outcome = program.run(gpa, io, programs orelse return error.ProgramsNotGranted, .{
             .argv = &.{command},
             .shell = true,
-            .cwd = .{ .dir = repo.topDirectory() },
+            .cwd = .{ .dir = repo.topDirectory().get() },
             .unset = &program.repository_variables,
             .stderr = .inherit,
         }, .{}) catch |err| switch (err) {

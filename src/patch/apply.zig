@@ -25,6 +25,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const ctype = @import("../text.zig").ctype;
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
@@ -84,7 +85,7 @@ pub const Error = error{
     /// too large" before reading it, so that no count in it can overflow.
     PatchTooLarge,
 } || patchparse.Error || worktree.Error || index_mod.ReadError || index_mod.WriteError || odb_mod.Error ||
-    convert.Error || attributes.Error || rerere.Error || repo_mod.Error || Io.Dir.ReadFileAllocError ||
+    convert.Error || attributes.Error || rerere.Error || repo_mod.Error || aegis.own.ReadFileError ||
     Io.Dir.ReadLinkError || fs.StatError || Io.Dir.DeleteFileError || Io.Dir.CreateDirPathError ||
     Io.Dir.WriteFileError;
 
@@ -537,7 +538,7 @@ pub fn apply(gpa: Allocator, io: Io, repo: *Repository, text: []const u8, option
     const writes = !options.check;
     const ws = wsPolicy(ws_option, writes);
 
-    const wt: ?Io.Dir = repo.workDirectory();
+    const wt: ?Io.Dir = if (repo.workDirectory()) |work| work.get() else null;
     if (!cached and wt == null) return error.BareRepository;
 
     // the repository's attributes unless the caller brings rules of its
@@ -566,7 +567,7 @@ pub fn apply(gpa: Allocator, io: Io, repo: *Repository, text: []const u8, option
         .wt = wt,
         .rules = rules,
         .conv = .open(gpa, io, .{
-            .wt = wt orelse repo.gitDirectory(),
+            .wt = wt orelse repo.gitDirectory().get(),
             .kind = repo.objectFormat(),
             .core = rules.core,
             .required_filters = rules.required_filters,
@@ -1107,7 +1108,7 @@ fn findPos(
 
 fn updateImage(st: *State, img: *Image, applied_pos: usize, preimage: *const Image, postimage: *const Image) Allocator.Error!void {
     const gpa = st.gpa;
-    assert(applied_pos <= img.lines.items.len);
+    aegis.assert.invariant(applied_pos <= img.lines.items.len, "applied_pos <= img.lines.items.len");
     // The lines replaced and the lines put in their place are each whole.
     assert(preimage.tableLen() == preimage.buf.items.len);
     assert(postimage.tableLen() == postimage.buf.items.len);
@@ -1369,7 +1370,7 @@ fn readOldData(st: *State, path: []const u8, found: fs.Entry, crlf_in_old: bool,
             try out.appendSlice(st.gpa, buf[0..n]);
         },
         .file => {
-            const bytes = try wt.readFileAlloc(st.io, path, st.gpa, .unlimited);
+            const bytes = try aegis.own.readFile(st.io, wt, path, st.gpa, aegis.units.Bytes(u64).fromRaw(std.math.maxInt(u64)));
             defer st.gpa.free(bytes);
             if (crlf_in_old or st.rules.attrs == null) {
                 try out.appendSlice(st.gpa, bytes);

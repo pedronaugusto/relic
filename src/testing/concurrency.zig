@@ -244,7 +244,9 @@ test "concurrent reflog appends preserve every complete line" {
     const gpa = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    var store = try refs_mod.Store.init(gpa, .sha1, tmp.dir, tmp.dir, .{});
+    var held_store = fs.OwnedDir.init(try tmp.dir.openDir(io, ".", .{ .iterate = true }));
+    defer held_store.deinit(io);
+    var store = try refs_mod.Store.init(gpa, .sha1, held_store.lend(), held_store.lend(), .{});
     defer store.deinit();
     try store.createLog(gpa, io, "refs/heads/main");
 
