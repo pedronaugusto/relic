@@ -217,7 +217,7 @@ fn gitWithHome(gpa: std.mem.Allocator, io: Io, cwd: Io.Dir, home: []const u8, ar
     defer argv.deinit(gpa);
     try argv.appendSlice(gpa, &.{ testgit.program(), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.com", "-c", "commit.gpgsign=false" });
     try argv.appendSlice(gpa, args);
-    const result = try std.process.run(gpa, io, .{ .argv = argv.items, .cwd = .{ .dir = cwd }, .environ_map = &environ });
+    const result = try testgit.run(gpa, io, .{ .argv = argv.items, .cwd = .{ .dir = cwd }, .environ_map = &environ });
     defer gpa.free(result.stderr);
     defer gpa.free(result.stdout);
     switch (result.term) {

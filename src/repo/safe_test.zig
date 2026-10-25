@@ -49,7 +49,7 @@ fn gitUses(gpa: Allocator, io: Io, home: *const Home, dir: Io.Dir, assume_differ
     try argv.append(gpa, testgit.program());
     try argv.appendSlice(gpa, args);
     try argv.appendSlice(gpa, &.{ "rev-parse", "--git-dir" });
-    const result = try std.process.run(gpa, io, .{ .argv = argv.items, .cwd = .{ .dir = dir }, .environ_map = &env });
+    const result = try testgit.run(gpa, io, .{ .argv = argv.items, .cwd = .{ .dir = dir }, .environ_map = &env });
     defer gpa.free(result.stdout);
     defer gpa.free(result.stderr);
     return switch (result.term) {

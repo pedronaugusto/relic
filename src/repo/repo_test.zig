@@ -731,7 +731,7 @@ test "an includeIf gitdir:./ starts from the including file's directory, and -c 
     defer environ.deinit();
     const cmd_inc = try gpa.print("include.path={s}/cmd.inc", .{home_path});
     defer gpa.free(cmd_inc);
-    const said = try std.process.run(gpa, io, .{
+    const said = try testgit.run(gpa, io, .{
         .argv = &.{ testgit.program(), "-c", cmd_inc, "config", "--get-regexp", "^probe\\." },
         .cwd = .{ .dir = work },
         .environ_map = &environ,
@@ -793,7 +793,7 @@ test "includeIf gitdir: and onbranch: globs hold where git's wildmatch says they
     }
     var environ = try testgit.isolatedEnviron(gpa, home_path);
     defer environ.deinit();
-    const said = try std.process.run(gpa, io, .{
+    const said = try testgit.run(gpa, io, .{
         .argv = &.{ testgit.program(), "config", "--get-regexp", "^probe\\." },
         .cwd = .{ .dir = work },
         .environ_map = &environ,
@@ -2276,7 +2276,7 @@ test "core.hideDotFiles and core.unsetenvvars, read on Windows as git for Window
     defer tmp.cleanup();
     var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{ .default_branch = "main" });
     defer repo.deinit(io);
-    var env = try std.testing.environ.createMap(gpa);
+    var env: std.process.Environ.Map = .init(gpa);
     defer env.deinit();
     const with = repo.programsWith(.{ .environ = &env });
     try std.testing.expectEqual(@as(usize, 1), with.unset.len);

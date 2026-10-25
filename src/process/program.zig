@@ -534,10 +534,9 @@ test "a command line reaches the shell as git hands it one, and its arguments st
 }
 
 test "what Programs.unset names is gone from every program, before its own set" {
-    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    var env = try std.testing.environ.createMap(gpa);
+    var env = try testgit.programEnviron(gpa);
     defer env.deinit();
     try env.put("RELIC_PERLISH", "taken");
     try env.put("RELIC_KEPT", "kept");

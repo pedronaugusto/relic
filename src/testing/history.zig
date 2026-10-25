@@ -3891,7 +3891,7 @@ fn makeSigningKey(pair: *Pair, io: Io, dir: []const u8, gnupg_home: []const u8, 
         .ssh => {
             const key = try std.Io.Dir.path.join(gpa, &.{ dir, "id" });
             defer gpa.free(key);
-            const made = std.process.run(gpa, io, .{ .argv = &.{ "ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "fixture", "-f", key }, .environ_map = &pair.env }) catch return false;
+            const made = testgit.run(gpa, io, .{ .argv = &.{ "ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "fixture", "-f", key }, .environ_map = &pair.env }) catch return false;
             gpa.free(made.stdout);
             gpa.free(made.stderr);
             const public_path = try gpa.print("{s}.pub", .{key});
@@ -3910,7 +3910,7 @@ fn makeSigningKey(pair: *Pair, io: Io, dir: []const u8, gnupg_home: []const u8, 
             }
         },
         .openpgp => {
-            const made = std.process.run(gpa, io, .{ .argv = &.{
+            const made = testgit.run(gpa, io, .{ .argv = &.{
                 "gpg",                  "--batch",                       "--quiet", "--passphrase", "",
                 "--quick-generate-key", "Fixture <fixture@example.com>", "ed25519", "sign",         "never",
             }, .environ_map = &pair.env }) catch return false;
@@ -3999,7 +3999,7 @@ fn signedHistory(format: signing.Format) !void {
     defer gnupg.deinit(io);
     if (!try makeSigningKey(&pair, io, dir, gnupg.environValue(), format)) return error.SkipZigTest;
     defer if (format == .openpgp) {
-        const stopped = std.process.run(gpa, io, .{ .argv = &.{ "gpgconf", "--kill", "all" }, .environ_map = &pair.env }) catch null;
+        const stopped = testgit.run(gpa, io, .{ .argv = &.{ "gpgconf", "--kill", "all" }, .environ_map = &pair.env }) catch null;
         if (stopped) |s| {
             gpa.free(s.stdout);
             gpa.free(s.stderr);
@@ -4168,7 +4168,7 @@ test "a merge verifying signatures takes a good one and refuses a missing, unkno
             // A key the allowed signers do not name.
             const stranger = try std.Io.Dir.path.join(gpa, &.{ dir, "stranger" });
             defer gpa.free(stranger);
-            const made = try std.process.run(gpa, io, .{ .argv = &.{ "ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "stranger", "-f", stranger }, .environ_map = &pair.env });
+            const made = try testgit.run(gpa, io, .{ .argv = &.{ "ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "stranger", "-f", stranger }, .environ_map = &pair.env });
             gpa.free(made.stdout);
             gpa.free(made.stderr);
             const stranger_key = try gpa.print("user.signingKey={s}", .{stranger});

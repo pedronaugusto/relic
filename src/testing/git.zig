@@ -456,7 +456,9 @@ pub const GnupgHome = struct {
 /// Git for Windows' does: the home `gpg --version` reports starts with
 /// `/`. `false` when there is no gpg to ask.
 fn gpgNamesHomesAsMsys(gpa: Allocator, io: Io) !bool {
-    const result = std.process.run(gpa, io, .{ .argv = &.{ "gpg", "--version" } }) catch |err| switch (err) {
+    var environ = try programEnviron(gpa);
+    defer environ.deinit();
+    const result = run(gpa, io, .{ .argv = &.{ "gpg", "--version" }, .environ_map = &environ }) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return false,
     };
@@ -568,12 +570,15 @@ fn joinSearchPath(gpa: Allocator, dirs: []const []const u8, rest: []const u8) ![
     return out.toOwnedSlice(gpa);
 }
 
-/// Whether the signing comparisons must find their programs on this
-/// machine rather than skip: a Linux hosted job installs them for every git
-/// but the oldest, whose job runs without them.
-pub fn hostedSigners() bool {
-    const git = hostedGit() orelse return false;
-    return builtin.target.os.tag == .linux and git != .old;
+/// Whether a missing gpg, gpgconf or ssh-keygen fails the run rather than
+/// skipping the test: on a Linux hosted job, which installs them for every
+/// git but the oldest, or with `RELIC_REQUIRE_SIGNERS` set on a machine
+/// that has them, so a signing test cannot pass there by never running.
+pub fn signersRequired() bool {
+    if (hostedGit()) |git| if (builtin.target.os.tag == .linux and git != .old) return true;
+    const value = std.testing.environ.getAlloc(std.testing.allocator, "RELIC_REQUIRE_SIGNERS") catch return false;
+    defer std.testing.allocator.free(value);
+    return value.len > 0 and !std.mem.eql(u8, value, "0");
 }
 
 /// The git a test starts itself, with `std.process`: Zig looks a bare name
@@ -645,6 +650,22 @@ pub fn programEnviron(gpa: Allocator) !std.process.Environ.Map {
     try keepSystemVariables(gpa, &map);
     try isolate(&map, no_home);
     return map;
+}
+
+/// Start a program from a test. Its environment is the test's to make
+/// (`isolatedEnviron`, `programEnviron`, `isolate`, or a map of its own):
+/// a child left to inherit the test process's would find the person's git,
+/// gpg and ssh settings, so it is refused with `error.InheritedEnvironment`.
+/// The suite starts its children only here (`ci/layers.zig`).
+pub fn spawn(io: Io, options: std.process.SpawnOptions) (std.process.SpawnError || error{InheritedEnvironment})!std.process.Child {
+    if (options.environ_map == null) return error.InheritedEnvironment;
+    return std.process.spawn(io, options);
+}
+
+/// `spawn`, run to its end with its output kept.
+pub fn run(gpa: Allocator, io: Io, options: std.process.RunOptions) (std.process.RunError || error{InheritedEnvironment})!std.process.RunResult {
+    if (options.environ_map == null) return error.InheritedEnvironment;
+    return std.process.run(gpa, io, options);
 }
 
 /// Install a native hook fixture with `action` and `data` as its sidecar

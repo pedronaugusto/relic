@@ -101,6 +101,17 @@ pub const owned: []const gantry.rules.TokenRule = &.{
     .{ .name = "space class", .tokens = &.{"isWhitespace"}, .owners = &[_][]const u8{ "src/text/**", "src/lfs/netrc.zig" } ++ tests },
     .{ .name = "number grammars", .tokens = &.{ "parseInt", "parseUnsigned" }, .owners = &[_][]const u8{ "src/text/**", "src/config/config.zig" } ++ tests },
     .{ .name = "one character set conversion", .kind = .string, .tokens = &.{ "ISO-8859-1", "iso-8859-1", "latin1", "LATIN1", "US-ASCII", "us-ascii" }, .owners = &[_][]const u8{"src/text/**"} ++ tests },
+    // a test's children run in an environment the test made, never the
+    // test process's own, which holds the person's git, gpg and ssh
+    // settings: only `testing/git.zig` reads that environment, and only it
+    // starts a child, refusing one left to inherit it; the stand-in
+    // programs run in the environment git, relic or the build gave them
+    .{ .name = "a test's environment", .sequences = &.{&.{ "testing", ".", "environ" }}, .owners = &.{"src/testing/git.zig"} },
+    .{
+        .name = "a test's children",
+        .sequences = &.{ &.{ "process", ".", "spawn" }, &.{ "process", ".", "run" } },
+        .owners = &.{ "src/testing/git.zig", "src/testing/held_git.zig", "src/testing/fake_ssh.zig", "src/testing/hook.zig", "src/testing/remote_helper.zig", "src/testing/lfs/tool.zig" },
+    },
 };
 
 // The owner requires every production edge to count. No re-export exemptions.

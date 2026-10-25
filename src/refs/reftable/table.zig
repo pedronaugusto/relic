@@ -1759,7 +1759,7 @@ fn runWithInput(io: Io, repo: *testgit.Repo, args: []const []const u8, input: []
     try argv.append(repo.gpa, testgit.program());
     try argv.appendSlice(repo.gpa, repo.defaults);
     try argv.appendSlice(repo.gpa, args);
-    var child = try std.process.spawn(io, .{
+    var child = try testgit.spawn(io, .{
         .argv = argv.items,
         .cwd = .{ .dir = repo.dir },
         .environ_map = repo.environMap(),

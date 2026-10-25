@@ -26,7 +26,7 @@ const Holder = struct {
         // the person's all the same: every process the suite starts is.
         var env = try testgit.programEnviron(gpa);
         defer env.deinit();
-        var child = try std.process.spawn(io, .{
+        var child = try testgit.spawn(io, .{
             .argv = &.{ suite.path(.lock_helper), lock_path },
             .cwd = .{ .dir = dir },
             .environ_map = &env,

@@ -72,7 +72,7 @@ test "a served repository advertises its promisor remotes as git's upload-pack d
     var env = try testremote.environ(gpa);
     defer env.deinit();
     try env.put("GIT_PROTOCOL", "version=2");
-    const result = try std.process.run(gpa, io, .{
+    const result = try testgit.run(gpa, io, .{
         .argv = &.{ testgit.program(), "upload-pack", "--advertise-refs", path },
         .cwd = .{ .dir = server.dir },
         .environ_map = &env,
