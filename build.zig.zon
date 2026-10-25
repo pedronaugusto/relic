@@ -3,8 +3,8 @@
     .version = "0.29.1",
     .dependencies = .{
         .aegis = .{
-            .url = "git+https://github.com/pedronaugusto/aegis?ref=v0.1.14#5852ab956e97a47926af73abbb7dced5361f9267",
-            .hash = "aegis-0.1.14-rsxouiwFCACpt6FVOECFUhpjUaetlNneWpaDTj95q514",
+            .url = "git+https://github.com/pedronaugusto/aegis?ref=v0.1.17#58751d5713c134b890d0fe0e65be95c289b84983",
+            .hash = "aegis-0.1.17-rsxouvg5CABaJmNEkRXQIkVJ6JqVOG7NN60ctSBvSzO_",
         },
 
         .conduit = .{
@@ -54,8 +54,8 @@
             .hash = "xenoglyph-0.4.1-YKXZlbAoGwCDz2rgL2E8FDIYuuzo2iAi_ZskokH6K1E1",
         },
         .reactor = .{
-            .url = "git+https://github.com/pedronaugusto/reactor?ref=v0.8.2#79e28a7b2831bf4347352531ff34fb4bffb5005b",
-            .hash = "reactor-0.8.2-MjQ-WBVaFACQqYOubhhGUdLUpXOb5_6GjJYxOuppVhO6",
+            .url = "git+https://github.com/pedronaugusto/reactor?ref=v0.8.3#2437003de74b7ff4ee8f8bc8aeae0046df88c47f",
+            .hash = "reactor-0.8.3-MjQ-WNGfFAAbHRloknjugZPHgGmAWw3-FwzVn1B-UyDX",
         },
     },
     .minimum_zig_version = "0.17.0",
@@ -75,8 +75,8 @@
         },
 
         .shakedown = .{
-            .url = "git+https://github.com/pedronaugusto/shakedown?ref=v0.4.15#dd61d84573f79753f700dda4a03562f23d329d6a",
-            .hash = "shakedown-0.4.15-BR8U49ieFgDnMPNf5Wu5s-cnP4bY2ptJMPmHLB-VJasA",
+            .url = "git+https://github.com/pedronaugusto/shakedown?ref=v0.4.18#69b2ef1175c5e58c0d28d62616635f25691dc3cf",
+            .hash = "shakedown-0.4.18-BR8U494oFwC7JpkItoAJO4VXbxc_1CikI-lHrB2PzpUq",
         },
     },
 }
