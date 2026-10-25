@@ -137,7 +137,6 @@ const Pair = struct {
     }
 
     fn initFormat(gpa: Allocator, io: Io, bare: bool, ref_format: []const u8, settings: []const [2][]const u8) !Pair {
-        if (builtin.target.os.tag == .windows) return error.SkipZigTest; // the hooks are shell scripts
         var p: Pair = .{ .gpa = gpa, .io = io, .root = testing.tmpDir(.{ .iterate = true }), .env = undefined, .source = undefined, .theirs = &.{}, .ours = &.{}, .helper = &.{} };
         errdefer p.root.cleanup();
         p.env = try testremote.environ(gpa);
@@ -151,6 +150,9 @@ const Pair = struct {
         p.theirs = try gpa.print("{s}/theirs", .{root_path});
         p.ours = try gpa.print("{s}/ours", .{root_path});
         p.helper = try gpa.dupe(u8, suite.path(.receive_pack_helper));
+        // git hands `--receive-pack` to the shell, which takes a backslash
+        // as an escape.
+        if (builtin.target.os.tag == .windows) std.mem.replaceScalar(u8, p.helper, '\\', '/');
         for ([_][]const u8{ p.theirs, p.ours }) |target| {
             const format_arg = try gpa.print("--ref-format={s}", .{ref_format});
             defer gpa.free(format_arg);
@@ -170,9 +172,13 @@ const Pair = struct {
                 const name = try gpa.print("{s}/hooks/{s}", .{ git_dir, hook[0] });
                 defer gpa.free(name);
                 try dir.writeFile(io, .{ .sub_path = name, .data = hook[1] });
-                const file = try dir.openFile(io, name, .{});
-                defer file.close(io);
-                try file.setPermissions(io, .fromMode(0o755));
+                // Windows has no mode bits: git for Windows and relic run a
+                // hook by its `#!` line.
+                if (builtin.target.os.tag != .windows) {
+                    const file = try dir.openFile(io, name, .{});
+                    defer file.close(io);
+                    try file.setPermissions(io, .fromMode(0o755));
+                }
             }
         }
         return p;

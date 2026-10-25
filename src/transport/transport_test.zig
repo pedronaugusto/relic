@@ -1262,7 +1262,10 @@ test "http.sslVersion=tlsv1.3 and http.pinnedPubkey hold the server as curl hold
         key: []const u8,
         value: []const u8,
         fetched: bool,
-        // macOS's libcurl has no TLS 1.3 to be held to, and git fails there.
+        // Whether git is held to the case: macOS's libcurl has no TLS 1.3 to
+        // be held to, and git fails there; git for Windows fetches with a
+        // pin followed by `;x` (run 40142493751), where curl elsewhere reads
+        // one entry that names no key, as relic does.
         git: bool = true,
         // `http.sslVerify=false`: the pins are checked alone.
         unverified: bool = false,
@@ -1276,7 +1279,7 @@ test "http.sslVersion=tlsv1.3 and http.pinnedPubkey hold the server as curl hold
         .{ .front = front, .key = "http.pinnedPubkey", .value = try arena.print("{s};{s}", .{ wrong, right }), .fetched = true },
         .{ .front = front, .key = "http.pinnedPubkey", .value = wrong, .fetched = false },
         // `;` and anything but another hash is part of the entry.
-        .{ .front = front, .key = "http.pinnedPubkey", .value = try arena.print("{s};x", .{right}), .fetched = false },
+        .{ .front = front, .key = "http.pinnedPubkey", .value = try arena.print("{s};x", .{right}), .fetched = false, .git = builtin.os.tag != .windows },
         .{ .front = front, .key = "http.pinnedPubkey", .value = pem, .fetched = true },
         .{ .front = front, .key = "http.pinnedPubkey", .value = der, .fetched = true },
         // A certificate holds the key but is not one.
@@ -1300,10 +1303,12 @@ test "http.sslVersion=tlsv1.3 and http.pinnedPubkey hold the server as curl hold
             try r.exec(io, &.{ "config", case.key, case.value });
         }
         if (!case.fetched) {
-            const said = try gitFailure(gpa, io, by_git.dir, &env, &.{ "fetch", "-q", "origin" });
-            defer gpa.free(said);
-            // curl's words for a key no pin names, which relic's error is.
-            if (case.refused == error.PinnedPubkeyMismatch) try testing.expect(std.mem.find(u8, said, "public key does not match pinned public key") != null);
+            if (case.git) {
+                const said = try gitFailure(gpa, io, by_git.dir, &env, &.{ "fetch", "-q", "origin" });
+                defer gpa.free(said);
+                // curl's words for a key no pin names, which relic's error is.
+                if (case.refused == error.PinnedPubkeyMismatch) try testing.expect(std.mem.find(u8, said, "public key does not match pinned public key") != null);
+            }
             try testing.expectError(case.refused, relicFetch(gpa, io, by_relic.dir, &env));
             continue;
         }

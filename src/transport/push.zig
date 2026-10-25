@@ -1705,7 +1705,6 @@ test "push.followTags, --set-upstream and push.autoSetupRemote as git's, and a b
 test "push.pushOption gives the push options when none are named, an empty one clearing those before it, as git's push reads it" {
     const gpa = testing.allocator;
     const io = testing.io;
-    if (builtin.target.os.tag == .windows) return error.SkipZigTest; // the hook is a shell script
     var twins = try PushTwins.init(gpa, io);
     defer twins.deinit();
     const hook =
@@ -1720,9 +1719,11 @@ test "push.pushOption gives the push options when none are named, an empty one c
         var dir = try twins.root.dir.openDir(io, name, .{});
         defer dir.close(io);
         try dir.writeFile(io, .{ .sub_path = "hooks/pre-receive", .data = hook });
-        const file = try dir.openFile(io, "hooks/pre-receive", .{});
-        defer file.close(io);
-        try file.setPermissions(io, .fromMode(0o755));
+        if (builtin.target.os.tag != .windows) {
+            const file = try dir.openFile(io, "hooks/pre-receive", .{});
+            defer file.close(io);
+            try file.setPermissions(io, .fromMode(0o755));
+        }
     }
     for ([_][]const u8{ "dropped", "", "first", "second" }) |value| try inBothWorks(&twins, &.{ "config", "--add", "push.pushOption", value });
     var pushed = try twins.pushBoth(&.{ "origin", "main" }, .{ .who = test_who, .refspecs = &.{"main"} });
@@ -2110,7 +2111,6 @@ fn expectSameHookLogs(twins: *PushTwins, io: Io) !void {
 test "a signed push carries a certificate git's receive-pack checks, as git's push signs it, over ssh and HTTP" {
     const gpa = testing.allocator;
     const io = testing.io;
-    if (builtin.target.os.tag == .windows) return error.SkipZigTest; // the hook is a shell script
     for ([_]bool{ false, true }) |over_http| {
         var twins = try PushTwins.init(gpa, io);
         defer twins.deinit();
@@ -2136,7 +2136,6 @@ test "a signed push carries a certificate git's receive-pack checks, as git's pu
 test "push.gpgSign signs a push, and a server asking for no certificate takes one only if asked, as git's push decides" {
     const gpa = testing.allocator;
     const io = testing.io;
-    if (builtin.target.os.tag == .windows) return error.SkipZigTest; // the hook is a shell script
     var twins = try PushTwins.init(gpa, io);
     defer twins.deinit();
     if (!try signedTwins(&twins, io, null, false)) return error.SkipZigTest;

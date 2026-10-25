@@ -1409,7 +1409,6 @@ test "git-lfs's hooks are known by their text from every release, and nothing el
 }
 
 test "an event's hooks run hook.jobs at once when each may, their output whole in the order they started, as git's" {
-    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     const hooks_config = "[hook \"first\"]\n\tevent = pre-commit\n\tcommand = \"echo first start >&2; sleep 0.5; echo first end\"\n" ++

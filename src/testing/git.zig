@@ -496,9 +496,11 @@ test "a Windows path is named as MSYS names it" {
 /// What Windows itself needs in the environment of a program it starts, and
 /// a person does not set: `SystemRoot`, without which Winsock cannot load,
 /// so that git's curl, started with nothing but `PATH`, cannot open a socket
-/// and reports every server as one it could not connect to; and
-/// `ProgramData`, without which Windows' OpenSSH exits 255 before a word.
-const windows_system_variables = [_][]const u8{ "SystemRoot", "ProgramData" };
+/// and reports every server as one it could not connect to; `ProgramData`,
+/// without which Windows' OpenSSH exits 255 before a word; and `TEMP`, where
+/// git for Windows makes its temporary files (its `TMPDIR`), without which
+/// git cannot sign a push certificate with an SSH key.
+const windows_system_variables = [_][]const u8{ "SystemRoot", "ProgramData", "TEMP" };
 
 /// Carry `windows_system_variables` over from the test's own environment
 /// into `map`, on Windows. Elsewhere there are none.

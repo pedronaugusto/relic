@@ -628,12 +628,11 @@ pub const TlsFront = struct {
     }
 
     /// Answer `GET /<target>` with `response`, a whole HTTP response.
-    /// `error.SkipZigTest` for a target with a query on Windows, where a
-    /// `?` cannot name a file.
     pub fn answer(f: *TlsFront, io: Io, target: []const u8, response: []const u8) !void {
-        if (builtin.target.os.tag == .windows and std.mem.findScalar(u8, target, '?') != null) return error.SkipZigTest;
-        if (std.Io.Dir.path.dirname(target)) |parent| try f.www.createDirPath(io, parent);
-        try f.www.writeFile(io, .{ .sub_path = target, .data = response });
+        var name_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
+        const name = if (builtin.target.os.tag == .windows) try msysName(&name_buffer, target) else target;
+        if (std.Io.Dir.path.dirname(name)) |parent| try f.www.createDirPath(io, parent);
+        try f.www.writeFile(io, .{ .sub_path = name, .data = response });
     }
 
     /// Answer git's request for the refs of `repo`, a path under `server`,
@@ -685,6 +684,18 @@ pub fn alreadyHas(gpa: Allocator, io: Io, root: Io.Dir, r: *testgit.Repo) !void 
 /// `environ`, with OpenSSL 3's own directory first on `PATH` where a
 /// package manager keeps it apart from the system's LibreSSL (macOS), and
 /// on Windows where Git for Windows keeps its `openssl.exe`.
+/// `name` as git for Windows' `openssl`, an MSYS program, finds it on disk:
+/// a character Windows refuses in a file name, such as a query's `?`, is
+/// kept at U+F000 plus its code, which in UTF-8 is EF 80 and 80 plus it.
+fn msysName(buffer: []u8, name: []const u8) error{NameTooLong}![]const u8 {
+    var w: Io.Writer = .fixed(buffer);
+    for (name) |c| switch (c) {
+        '?', '*', ':', '<', '>', '|', '"' => w.writeAll(&.{ 0xEF, 0x80, 0x80 | c }) catch return error.NameTooLong,
+        else => w.writeByte(c) catch return error.NameTooLong,
+    };
+    return w.buffered();
+}
+
 fn opensslEnviron(gpa: Allocator) !Environ.Map {
     var env = try environ(gpa);
     errdefer env.deinit();
@@ -696,6 +707,9 @@ fn opensslEnviron(gpa: Allocator) !Environ.Map {
     const path = try std.mem.concat(gpa, u8, &.{ before, env.get("PATH") orelse "" });
     defer gpa.free(path);
     try env.put("PATH", path);
+    // The MSYS runtime would take an argument such as `-subj /CN=127.0.0.1`
+    // for a path and rewrite it.
+    if (builtin.target.os.tag == .windows) try env.put("MSYS2_ARG_CONV_EXCL", "*");
     return env;
 }
 
