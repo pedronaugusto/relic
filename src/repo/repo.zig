@@ -1321,7 +1321,7 @@ pub const Repository = struct {
                 logs_set = template_config.has("core.logallrefupdates");
             }
         }
-        fs.adjustShared(io, git_dir, ".", shared);
+        try fs.adjustShared(io, git_dir, ".", shared);
 
         const object_format = options.object_format orelse initObjectFormat(&user);
         const ref_format = options.ref_format orelse initRefFormat(&user);
@@ -1486,7 +1486,7 @@ pub const Repository = struct {
                 .directory => {
                     if (!exists) {
                         try to.createDir(io, entry.name, .default_dir);
-                        fs.adjustShared(io, to, entry.name, shared);
+                        try fs.adjustShared(io, to, entry.name, shared);
                     }
                     var sub_from = try from.openDir(io, entry.name, .{ .iterate = true });
                     defer sub_from.close(io);
@@ -1509,7 +1509,7 @@ pub const Repository = struct {
                     const file = try to.createFile(io, entry.name, .{ .exclusive = true, .permissions = fs.permissionsFor(executable) });
                     defer file.close(io);
                     try file.writeStreamingAll(io, bytes);
-                    fs.adjustShared(io, to, entry.name, shared);
+                    try fs.adjustShared(io, to, entry.name, shared);
                 },
                 else => {},
             }

@@ -1934,7 +1934,7 @@ pub const WriteError = error{
 } || retention.Error || Allocator.Error || Io.File.OpenError || Io.Writer.Error ||
     fs.SyncError || Io.Dir.RenameError || Io.Dir.DeleteFileError ||
     Io.Dir.CreateDirError || Io.File.WritePositionalError ||
-    Io.File.ReadPositionalError || Io.File.SetLengthError || Io.File.Writer.SeekError;
+    Io.File.ReadPositionalError || Io.File.SetLengthError || Io.File.Writer.SeekError || Io.File.Writer.Error;
 
 /// How hard a pack's entries are compressed.
 ///
@@ -2324,8 +2324,16 @@ pub const Writer = struct {
 
     /// Add a whole object. Returns the offset the entry begins at, which is
     /// what an offset delta against it needs.
+    /// What a write failed with: for `error.WriteFailed` through the file, the
+    /// file's own error, a cancel among them. A pack streamed to a caller's
+    /// writer has only `WriteFailed`, that writer's contract.
+    fn failure(w: *const Writer, err: Self.WriteError) Self.WriteError {
+        if (err == error.WriteFailed and !w.streaming) if (w.file_writer.err) |cause| return cause;
+        return err;
+    }
+
     pub fn add(w: *Writer, oid: Oid, t: object.Type, bytes: []const u8) Self.WriteError!u64 {
-        return w.addEntry(oid, typeBits(t), bytes.len, &.{}, bytes);
+        return w.addEntry(oid, typeBits(t), bytes.len, &.{}, bytes) catch |err| w.failure(err);
     }
 
     /// Add an object stored as a delta against one already in this pack.
@@ -2340,14 +2348,14 @@ pub const Writer = struct {
         var buf: [16]u8 = undefined;
         const encoded = encodeBackOffset(&buf, at - base_offset);
         w.deltas += 1;
-        return w.addEntry(oid, 6, delta_bytes.len, encoded, delta_bytes);
+        return w.addEntry(oid, 6, delta_bytes.len, encoded, delta_bytes) catch |err| w.failure(err);
     }
 
     /// Add an object stored as a delta against a name, which need not be in
     /// this pack. A reader resolves it through the database.
     pub fn addRefDelta(w: *Writer, oid: Oid, base: Oid, delta_bytes: []const u8) Self.WriteError!u64 {
         w.deltas += 1;
-        return w.addEntry(oid, 7, delta_bytes.len, base.raw(), delta_bytes);
+        return w.addEntry(oid, 7, delta_bytes.len, base.raw(), delta_bytes) catch |err| w.failure(err);
     }
 
     /// Add an entry whose zlib stream a `Deflater` already made, ahead of
@@ -2358,6 +2366,10 @@ pub const Writer = struct {
     /// corrupt pack, as wrong delta bytes given to `addOfsDelta` would.
     /// Returns the offset the entry begins at.
     pub fn addDeflated(w: *Writer, oid: Oid, payload: Payload, payload_len: u64, deflated: []const u8) Self.WriteError!u64 {
+        return w.addDeflatedBody(oid, payload, payload_len, deflated) catch |err| w.failure(err);
+    }
+
+    fn addDeflatedBody(w: *Writer, oid: Oid, payload: Payload, payload_len: u64, deflated: []const u8) Self.WriteError!u64 {
         var buf: [16]u8 = undefined;
         const at = w.sink.count;
         const type_bits: u3, const extra: []const u8 = switch (payload) {
@@ -2382,6 +2394,10 @@ pub const Writer = struct {
     /// leaves the pack to be aborted. Returns the offset the entry begins
     /// at.
     pub fn addDeflatedFrom(w: *Writer, in: *Io.Reader, entry: DeflatedEntry) Self.WriteError!u64 {
+        return w.addDeflatedFromBody(in, entry) catch |err| w.failure(err);
+    }
+
+    fn addDeflatedFromBody(w: *Writer, in: *Io.Reader, entry: DeflatedEntry) Self.WriteError!u64 {
         var buf: [16]u8 = undefined;
         const at = w.sink.count;
         const oid = entry.oid;
@@ -2449,6 +2465,10 @@ pub const Writer = struct {
     /// `dropLast` takes the entry back when the caller finds the object
     /// stored elsewhere.
     pub fn addFrom(w: *Writer, io: Io, in: *Io.Reader, options: From) Self.WriteError!Added {
+        return w.addFromBody(io, in, options) catch |err| w.failure(err);
+    }
+
+    fn addFromBody(w: *Writer, io: Io, in: *Io.Reader, options: From) Self.WriteError!Added {
         const t = options.type;
         const size = options.size;
         const at = w.sink.count;
@@ -2501,6 +2521,10 @@ pub const Writer = struct {
     /// written to a file can take bytes back, and only the last entry,
     /// once.
     pub fn dropLast(w: *Writer, io: Io) Self.WriteError!void {
+        return w.dropLastBody(io) catch |err| w.failure(err);
+    }
+
+    fn dropLastBody(w: *Writer, io: Io) Self.WriteError!void {
         std.debug.assert(!w.streaming);
         const mark = w.mark.?;
         w.mark = null;
@@ -2566,6 +2590,10 @@ pub const Writer = struct {
     /// The name both files carry is the pack's own trailing checksum, which
     /// is what git names a pack after.
     pub fn finish(w: *Writer, io: Io) Self.WriteError!WriteReport {
+        return w.finishBody(io) catch |err| w.failure(err);
+    }
+
+    fn finishBody(w: *Writer, io: Io) Self.WriteError!WriteReport {
         if (w.expected) |expected| {
             if (w.entries.items.len != expected) return error.ObjectCountMismatch;
         }
@@ -2627,10 +2655,10 @@ pub const Writer = struct {
         errdefer if (mtimes_temp) |t| w.dir.deleteFile(io, t) catch {};
 
         // read-only, as git leaves a pack and its indexes
-        fs.readOnlyObject(io, w.dir, w.temp[0..w.temp_len], w.options.shared);
-        fs.readOnlyObject(io, w.dir, idx_temp, w.options.shared);
-        if (rev_temp) |t| fs.readOnlyObject(io, w.dir, t, w.options.shared);
-        if (mtimes_temp) |t| fs.readOnlyObject(io, w.dir, t, w.options.shared);
+        try fs.readOnlyObject(io, w.dir, w.temp[0..w.temp_len], w.options.shared);
+        try fs.readOnlyObject(io, w.dir, idx_temp, w.options.shared);
+        if (rev_temp) |t| try fs.readOnlyObject(io, w.dir, t, w.options.shared);
+        if (mtimes_temp) |t| try fs.readOnlyObject(io, w.dir, t, w.options.shared);
         fs.rename(io, w.dir, w.temp[0..w.temp_len], pack_name) catch |err| {
             // glint-ignore: Z026 -- the rename's error is the one to report; temporary files left behind are what `git gc` prunes
             w.dir.deleteFile(io, w.temp[0..w.temp_len]) catch {};
@@ -2734,16 +2762,12 @@ pub fn writeIndexFile(
     sub_path: []const u8,
     options: IndexWriteOptions,
 ) Self.WriteError!u64 {
-    const kind = options.kind;
     const entries = options.entries;
-    const pack_checksum = options.pack_checksum;
     const sync = options.sync;
     std.mem.sort(WrittenEntry, entries, {}, lessThanWritten);
     // The names rise, each once: what `Index.parse` checks before anything
     // is looked up.
     if (entries.len > 1) for (1..entries.len) |i| std.debug.assert(entries[i - 1].oid.order(entries[i].oid) == .lt);
-
-    const raw_len = kind.rawLen();
 
     const buffer = try gpa.alloc(u8, Writer.file_buffer_len);
     defer gpa.free(buffer);
@@ -2755,17 +2779,33 @@ pub fn writeIndexFile(
         dir.deleteFile(io, sub_path) catch {};
     };
     var fw = file.writer(io, buffer);
+    // The file's own error, not the interface's WriteFailed.
+    const written = writeIndexBody(gpa, &fw.interface, options, entries) catch |err| switch (err) {
+        error.WriteFailed => return fw.err orelse error.WriteFailed,
+        error.OutOfMemory => |e| return e,
+    };
+    try fs.syncFile(io, file, .{ .policy = sync });
+    file.close(io);
+    failed = false;
+    return written;
+}
+
+/// The index's bytes through `out`, flushed: header, fanout, names, CRCs,
+/// offsets, large offsets, two checksums. Returns how many.
+fn writeIndexBody(gpa: Allocator, out: *Io.Writer, options: IndexWriteOptions, entries: []WrittenEntry) (Allocator.Error || Io.Writer.Error)!u64 {
+    const kind = options.kind;
+    const pack_checksum = options.pack_checksum;
+    const raw_len = kind.rawLen();
     var hasher: hash.Hasher = .init(kind);
     var written: u64 = 0;
 
     const Emit = struct {
-        fn go(out: *Io.Writer, h: *hash.Hasher, total: *u64, bytes: []const u8) Io.Writer.Error!void {
+        fn go(to: *Io.Writer, h: *hash.Hasher, total: *u64, bytes: []const u8) Io.Writer.Error!void {
             h.update(bytes);
             total.* += bytes.len;
-            try out.writeAll(bytes);
+            try to.writeAll(bytes);
         }
     };
-    const out = &fw.interface;
 
     var largest: u64 = 0;
     for (entries) |e| largest = @max(largest, e.offset);
@@ -2836,9 +2876,6 @@ pub fn writeIndexFile(
     std.debug.assert(written == if (version == 1) 1024 + entries.len * (raw_len + 4) + 2 * raw_len else 8 + 1024 + entries.len * (raw_len + 8) + large.items.len * 8 + 2 * raw_len);
     try out.writeAll(own.raw()[0..raw_len]);
     try out.flush();
-    try fs.syncFile(io, file, .{ .policy = sync });
-    file.close(io);
-    failed = false;
     return written;
 }
 

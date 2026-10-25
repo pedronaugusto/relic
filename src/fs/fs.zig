@@ -791,7 +791,7 @@ pub const LockFile = struct {
 
         var pending = try createLock(io, dir, sub_path, lock_name[baseStart(lock_name)..], options.on_contention);
         errdefer pending.discard(io);
-        adjustShared(io, dir, lock_name, options.shared);
+        try adjustShared(io, dir, lock_name, options.shared);
 
         const pid_name: ?[]u8 = if (options.write_pid) try writePidFile(gpa, io, dir, sub_path, options.shared) else null;
 
@@ -884,20 +884,25 @@ pub const LockFile = struct {
 
 /// git's `create_lock_pid_file`: `<sub_path>~pid.lock` made exclusively and
 /// given `pid <n>`, or `null` where it cannot be, which leaves the lock
-/// itself as good.
-fn writePidFile(gpa: Allocator, io: Io, dir: Io.Dir, sub_path: []const u8, shared: Shared) Allocator.Error!?[]u8 {
+/// itself as good. A cancel is returned, and takes the file it made with it.
+fn writePidFile(gpa: Allocator, io: Io, dir: Io.Dir, sub_path: []const u8, shared: Shared) (Allocator.Error || Io.Cancelable)!?[]u8 {
     const name = try gpa.print("{s}~pid.lock", .{sub_path});
     errdefer gpa.free(name);
-    const file = dir.createFile(io, name, .{ .exclusive = true }) catch {
-        gpa.free(name);
-        return null;
+    const file = dir.createFile(io, name, .{ .exclusive = true }) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => {
+            gpa.free(name);
+            return null;
+        },
     };
     defer file.close(io);
-    adjustShared(io, dir, name, shared);
+    errdefer dir.deleteFile(io, name) catch |e| std.log.warn("unable to remove '{s}': {t}", .{ name, e });
+    try adjustShared(io, dir, name, shared);
     var text: [32]u8 = undefined;
     // unreachable: a u32 pid is at most ten digits
     const line = std.mem.print(&text, "pid {d}\n", .{currentPid()}) catch unreachable;
     file.writePositionalAll(io, line, 0) catch |err| {
+        if (err == error.Canceled) return error.Canceled;
         std.log.warn("could not write lock pid file '{s}': {t}", .{ name, err });
         dir.deleteFile(io, name) catch |e| std.log.warn("unable to remove '{s}': {t}", .{ name, e });
         gpa.free(name);
@@ -1183,12 +1188,16 @@ pub const Shared = union(enum) {
 /// where the group gains anything, set-group-ID set. Nothing where the
 /// platform has no permission bits. Permissions are a courtesy to the
 /// group, and a file system that will not set them leaves the write as it
-/// was rather than failing it.
-pub fn adjustShared(io: Io, dir: Io.Dir, sub_path: []const u8, shared: Shared) void {
+/// was rather than failing it. A cancel is returned.
+pub fn adjustShared(io: Io, dir: Io.Dir, sub_path: []const u8, shared: Shared) Io.Cancelable!void {
     if (shared == .umask or !Io.File.Permissions.has_executable_bit) return;
     const found = switch (platstat.full(io, dir, sub_path)) {
         .found => |f| f,
-        .absent, .failed => return,
+        .absent => return,
+        .failed => |err| {
+            if (err == error.Canceled) return error.Canceled;
+            return;
+        },
     };
     const old = found.mode & 0o7777;
     var new = shared.calc(old);
@@ -1196,18 +1205,25 @@ pub fn adjustShared(io: Io, dir: Io.Dir, sub_path: []const u8, shared: Shared) v
         new |= (new & 0o444) >> 2;
         if (new & 0o060 != 0) new |= 0o2000;
     }
-    if (new != old) dir.setFilePermissions(io, sub_path, @fromBackingInt(@intCast(@as(std.posix.mode_t, @intCast(new)))), .{}) catch return;
+    if (new != old) dir.setFilePermissions(io, sub_path, @fromBackingInt(@intCast(@as(std.posix.mode_t, @intCast(new)))), .{}) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => {},
+    };
 }
 
 /// A file git writes read-only into `objects` — a loose object, a pack and
 /// its index and reverse index, a commit-graph — given git's mode for it:
 /// 0444 less the umask, then as `shared` asks. Nothing where the platform
-/// has no permission bits.
-pub fn readOnlyObject(io: Io, dir: Io.Dir, sub_path: []const u8, shared: Shared) void {
+/// has no permission bits. As `adjustShared`, a failure leaves the file as
+/// it was, and a cancel is returned.
+pub fn readOnlyObject(io: Io, dir: Io.Dir, sub_path: []const u8, shared: Shared) Io.Cancelable!void {
     if (!Io.File.Permissions.has_executable_bit) return;
     const mode: u32 = 0o444 & ~processUmask();
-    dir.setFilePermissions(io, sub_path, @fromBackingInt(@intCast(@as(std.posix.mode_t, @intCast(mode)))), .{}) catch return;
-    adjustShared(io, dir, sub_path, shared);
+    dir.setFilePermissions(io, sub_path, @fromBackingInt(@intCast(@as(std.posix.mode_t, @intCast(mode)))), .{}) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return,
+    };
+    try adjustShared(io, dir, sub_path, shared);
 }
 
 /// Make `sub_path` and the directories above it in `dir`, each one this
@@ -1220,7 +1236,7 @@ pub fn makeDirs(io: Io, dir: Io.Dir, sub_path: []const u8, shared: Shared) Io.Di
         end = std.mem.findAnyPos(u8, sub_path, end + 1, "/\\") orelse sub_path.len;
         const part = sub_path[0..end];
         if (dir.createDir(io, part, .default_dir)) |_| {
-            adjustShared(io, dir, part, shared);
+            try adjustShared(io, dir, part, shared);
         } else |err| switch (err) {
             error.PathAlreadyExists => {},
             else => |e| return e,

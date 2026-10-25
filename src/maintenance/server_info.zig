@@ -177,7 +177,7 @@ fn update(arena: Allocator, io: Io, dir: Io.Dir, sub_dir: []const u8, name: []co
             return err;
         };
     }
-    fs.adjustShared(io, dir, temp, shared);
+    try fs.adjustShared(io, dir, temp, shared);
     fs.rename(io, dir, temp, path) catch |err| {
         // glint-ignore: Z026 -- the rename's error is the one to report; a temporary left behind holds nothing anyone reads
         dir.deleteFile(io, temp) catch {};

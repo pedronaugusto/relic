@@ -420,7 +420,7 @@ pub const Store = struct {
         const object_path = try store.objectPath(&object_buf, &pointer.oid);
         if (try store.contains(io, &pointer)) return pointer;
         try fs.makeDirs(io, store.base, std.Io.Dir.path.dirnamePosix(object_path).?, store.shared);
-        fs.adjustShared(io, store.base, tmp_path, store.shared);
+        try fs.adjustShared(io, store.base, tmp_path, store.shared);
         try fs.rename(io, store.base, tmp_path, object_path);
         installed = true;
         return pointer;

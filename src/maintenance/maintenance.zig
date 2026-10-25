@@ -107,7 +107,7 @@ fn publish(gpa: Allocator, io: Io, db: *const odb.Odb, dir: Io.Dir, path: []cons
     defer lock.deinit(io);
     try lock.writeAll(bytes);
     try lock.commit(io);
-    if (mode == .read_only) fs.readOnlyObject(io, dir, path, db.sharedPermissions());
+    if (mode == .read_only) try fs.readOnlyObject(io, dir, path, db.sharedPermissions());
 }
 
 fn collectGraphNodes(arena: Allocator, io: Io, db: *odb.Odb, pending: *std.ArrayList(Oid), seen: *Oid.Set, nodes: *std.ArrayList(GraphNode)) Error!void {
@@ -234,7 +234,7 @@ pub fn writeCommitGraph(gpa: Allocator, io: Io, db: *odb.Odb, tips: []const Oid,
             try chain_lock.print("{c}", .{'\n'});
         }
         try chain_lock.commit(io);
-        fs.readOnlyObject(io, dir, "info/commit-graphs/commit-graph-chain", db.sharedPermissions());
+        try fs.readOnlyObject(io, dir, "info/commit-graphs/commit-graph-chain", db.sharedPermissions());
         try removeIfPresent(io, dir, "info/commit-graph");
     }
     try expireLayers(arena, io, dir, if (old) |*value| value else null, bases.items, checksum, options);

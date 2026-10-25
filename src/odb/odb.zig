@@ -1648,7 +1648,7 @@ pub const Odb = struct {
             error.FileNotFound => blk: {
                 if (source.dir.createDir(io, text[0..2], .default_dir)) |_| {
                     fan_out_made = true;
-                    fs.adjustShared(io, source.dir, text[0..2], shared);
+                    try fs.adjustShared(io, source.dir, text[0..2], shared);
                 } else |e| switch (e) {
                     error.PathAlreadyExists => {},
                     else => |other| return other,
@@ -1658,7 +1658,7 @@ pub const Odb = struct {
             },
             else => |e| return e,
         };
-        if (shared != .umask) fs.adjustShared(io, source.dir, temp, shared);
+        if (shared != .umask) try fs.adjustShared(io, source.dir, temp, shared);
         var failed = true;
         defer if (failed) {
             file.close(io);
@@ -1772,7 +1772,7 @@ pub const Odb = struct {
         };
         defer file.close(io);
         try file.writePositionalAll(io, contents, 0);
-        fs.adjustShared(io, dir, file_name, db.sharedPermissions());
+        try fs.adjustShared(io, dir, file_name, db.sharedPermissions());
     }
 
     pub fn sharedPermissions(odb: *const Odb) fs.Shared {
@@ -1837,7 +1837,7 @@ pub const Odb = struct {
         var name_buf: [128]u8 = undefined;
         const temp = fs.tempName(io, &name_buf, "tmp_obj_");
         const file = try source.dir.createFile(io, temp, .{ .exclusive = true, .permissions = object_permissions });
-        fs.adjustShared(io, source.dir, temp, odb.backendData().options.shared);
+        try fs.adjustShared(io, source.dir, temp, odb.backendData().options.shared);
         errdefer {
             file.close(io);
             // glint-ignore: Z026 -- the write's error is the one to report; a temporary object left behind is what git gc prunes
@@ -2432,8 +2432,13 @@ pub const Odb = struct {
                     l.dir.?.close(io);
                     l.dir = null;
                     l.it = null;
-                    // glint-ignore: Z026 -- git's `prune_subdir` is an rmdir whose failure, a directory still holding files, is the answer
-                    if (l.remove_empty) l.odb.writableSource().dir.deleteDir(io, &l.hex) catch {};
+                    // git's `prune_subdir` is an rmdir whose failure, a
+                    // directory still holding files, is the answer; a
+                    // cancel is returned.
+                    if (l.remove_empty) l.odb.writableSource().dir.deleteDir(io, &l.hex) catch |err| switch (err) {
+                        error.Canceled => return error.Canceled,
+                        else => {},
+                    };
                     continue;
                 }
                 if (l.present == null) l.present = try l.listFans(io);
@@ -3643,7 +3648,7 @@ pub const Odb = struct {
 
         const source = odb.writableSource();
         if (source.dir.createDir(io, "pack", .default_dir)) |_| {
-            fs.adjustShared(io, source.dir, "pack", odb.backendData().options.shared);
+            try fs.adjustShared(io, source.dir, "pack", odb.backendData().options.shared);
         } else |err| switch (err) {
             error.PathAlreadyExists => {},
             else => |e| return e,
@@ -3899,7 +3904,7 @@ pub const Odb = struct {
     pub fn beginPack(odb: *Odb, io: Io, options: PackOptions) ErrorNamespace.Error!OpenPack {
         const source = odb.writableSource();
         if (source.dir.createDir(io, "pack", .default_dir)) |_| {
-            fs.adjustShared(io, source.dir, "pack", odb.backendData().options.shared);
+            try fs.adjustShared(io, source.dir, "pack", odb.backendData().options.shared);
         } else |err| switch (err) {
             error.PathAlreadyExists => {},
             else => |e| return e,
@@ -4076,7 +4081,7 @@ pub const ObjectStream = struct {
         var fan_out_made = false;
         if (s.dir.createDir(io, text[0..2], .default_dir)) |_| {
             fan_out_made = true;
-            fs.adjustShared(io, s.dir, text[0..2], s.odb.backendData().options.shared);
+            try fs.adjustShared(io, s.dir, text[0..2], s.odb.backendData().options.shared);
         } else |err| switch (err) {
             error.PathAlreadyExists => {},
             else => |e| return e,

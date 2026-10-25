@@ -1431,10 +1431,10 @@ pub fn create(io: Io, git_dir: Io.Dir, format: Format, options: CreateOptions) C
         .reftable => {
             try makeDir(io, git_dir, "reftable", options.shared);
             try git_dir.writeFile(io, .{ .sub_path = "HEAD", .data = "ref: refs/heads/.invalid\n" });
-            fs.adjustShared(io, git_dir, "HEAD", options.shared);
+            try fs.adjustShared(io, git_dir, "HEAD", options.shared);
             try makeDir(io, git_dir, "refs", options.shared);
             try git_dir.writeFile(io, .{ .sub_path = "refs/heads", .data = "this repository uses the reftable format\n" });
-            fs.adjustShared(io, git_dir, "refs/heads", options.shared);
+            try fs.adjustShared(io, git_dir, "refs/heads", options.shared);
         },
     }
 }

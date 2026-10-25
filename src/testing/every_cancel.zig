@@ -21,6 +21,10 @@ const grep = @import("../grep.zig");
 const commit_mod = @import("../commit/commit.zig");
 const object = @import("../object/object.zig");
 const fs = @import("../fs/fs.zig");
+const repack = @import("../maintenance/repack.zig");
+const gc = @import("../maintenance/gc.zig");
+const prune = @import("../maintenance/prune.zig");
+const date = @import("../text.zig").date;
 
 const Op = enum {
     open,
@@ -33,11 +37,16 @@ const Op = enum {
     add,
     commit,
     checkout,
+    repack,
+    repack_cruft,
+    pack_refs,
+    reflog_expire,
+    prune,
 
     /// Whether the operation writes, and so runs on a copy of its own.
     fn writes(op: Op) bool {
         return switch (op) {
-            .add, .commit, .checkout => true,
+            .add, .commit, .checkout, .repack, .repack_cruft, .pack_refs, .reflog_expire, .prune => true,
             else => false,
         };
     }
@@ -60,7 +69,8 @@ fn settle(io: Io, git: *testgit.Repo) !void {
 }
 
 /// Two commits of three files, a tag on the first, a changed file and a new
-/// one in the working tree.
+/// one in the working tree, stored but named by nothing (what prune and a
+/// cruft repack take).
 fn fixture(gpa: std.mem.Allocator, io: Io) !testgit.Repo {
     var git = try testgit.Repo.init(gpa, io, &.{});
     errdefer git.deinit();
@@ -74,6 +84,7 @@ fn fixture(gpa: std.mem.Allocator, io: Io) !testgit.Repo {
     try git.exec(io, &.{ "commit", "-q", "-am", "two" });
     try git.writeFile(io, "d/b", "bees\n");
     try git.writeFile(io, "new", "new\n");
+    try git.exec(io, &.{ "hash-object", "-w", "new" });
     return git;
 }
 
@@ -148,6 +159,11 @@ const Sweep = struct {
                 _ = try worktree.checkout(gpa, io, dir, .{ .index = &locked.index, .db = repo.objectDatabase(), .tree = tree }, .{ .force = true, .rules = try repo.worktreeRules() });
                 try locked.commit(io);
             },
+            .repack => _ = try repack.repack(gpa, io, &repo, .{ .mode = .all, .delete = true, .update_server_info = false, .pack = .{ .threads = 1 } }),
+            .repack_cruft => _ = try repack.repack(gpa, io, &repo, .{ .mode = .cruft, .delete = true, .update_server_info = false, .pack = .{ .threads = 1 } }),
+            .pack_refs => try gc.packRefs(io, &repo, .{ .include = &.{"*"} }),
+            .reflog_expire => try gc.expireReflogs(gpa, io, &repo, .{ .clock = .{ .now = date.timestamp(testgit.fixture_date) }, .expire = date.expire_all }),
+            .prune => _ = try prune.prune(gpa, io, &repo, .{}),
         }
     }
 
@@ -233,4 +249,24 @@ test "every cancellation point of a commit returns error.Canceled (design §11)"
 
 test "every cancellation point of a checkout returns error.Canceled (design §11)" {
     try sweep(.checkout);
+}
+
+test "every cancellation point of a repack -a -d returns error.Canceled (design §11)" {
+    try sweep(.repack);
+}
+
+test "every cancellation point of a repack --cruft -d returns error.Canceled (design §11)" {
+    try sweep(.repack_cruft);
+}
+
+test "every cancellation point of pack-refs returns error.Canceled (design §11)" {
+    try sweep(.pack_refs);
+}
+
+test "every cancellation point of reflog expire returns error.Canceled (design §11)" {
+    try sweep(.reflog_expire);
+}
+
+test "every cancellation point of prune returns error.Canceled (design §11)" {
+    try sweep(.prune);
 }

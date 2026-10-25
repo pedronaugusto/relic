@@ -178,7 +178,7 @@ pub fn append(gpa: Allocator, io: Io, git_dir: Io.Dir, options: AppendOptions) A
     const file = git_dir.openFile(io, path, .{ .mode = .read_write, .lock = .exclusive }) catch |err| switch (err) {
         error.FileNotFound => blk: {
             const created = try git_dir.createFile(io, path, .{ .truncate = false, .read = true, .lock = .exclusive });
-            fs.adjustShared(io, git_dir, path, shared);
+            try fs.adjustShared(io, git_dir, path, shared);
             break :blk created;
         },
         else => |e| return e,
@@ -349,7 +349,7 @@ pub fn create(gpa: Allocator, io: Io, git_dir: Io.Dir, ref: []const u8, shared: 
         else => |e| return e,
     };
     file.close(io);
-    fs.adjustShared(io, git_dir, path, shared);
+    try fs.adjustShared(io, git_dir, path, shared);
 }
 
 /// Errors from `delete`.
