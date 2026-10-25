@@ -454,7 +454,7 @@ fn sameArchive(gpa: Allocator, io: Io, env: *const std.process.Environ.Map, dir:
     try argv.append(gpa, "archive");
     try argv.appendSlice(gpa, args);
     try argv.append(gpa, "HEAD");
-    var child = try std.process.spawn(io, .{ .argv = argv.items, .cwd = .{ .dir = dir }, .environ_map = env, .stdout = .pipe, .stderr = .inherit });
+    var child = try testgit.spawn(io, .{ .argv = argv.items, .cwd = .{ .dir = dir }, .environ_map = env, .stdout = .pipe, .stderr = .inherit });
     defer child.kill(io);
     var in_buffer: [64 << 10]u8 = undefined;
     var theirs = child.stdout.?.reader(io, &in_buffer);
