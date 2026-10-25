@@ -323,8 +323,6 @@ test "export-subst's signature placeholders check the commit as git archive does
 }
 
 test "openpgp signatures made here verify in git, and git's verify here" {
-    // The Windows runner has no GnuPG agent to sign with.
-    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
     try bothWays(.openpgp, &.{});
 }
 
