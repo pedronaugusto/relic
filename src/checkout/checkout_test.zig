@@ -1147,14 +1147,14 @@ test "checkout writes files with git's modes, trimmed by the umask as git's are"
 }
 
 test "checkout writes the same files, index and error whatever the number of tasks" {
-    if (!Io.File.Permissions.has_executable_bit) return error.SkipZigTest;
-    // A folder that refuses writes refuses everyone but root.
-    if (std.c.getuid() == 0) return error.SkipZigTest;
     const io = std.testing.io;
     const gpa = std.testing.allocator;
     var h = try Harness.init(gpa, io, &.{});
     defer h.deinit(io);
     // More files than one batch holds, and a folder that refuses writes.
+    const plan = [_]shakedown.IoPlan.Entry{.{ .at = .{ .nth = .{ .call = .dirCreateFile, .n = 1, .path = .{ .prefix = "locked/" } } }, .fault = .{ .fail = error.AccessDenied }, .times = 0 }};
+    const faults = try shakedown.FaultIo.init(gpa, io, .{ .plan = &plan, .track_paths = false });
+    defer faults.deinit();
     var name: [64]u8 = undefined;
     var text: [64]u8 = undefined;
     for (0..1500) |i| {
@@ -1177,13 +1177,7 @@ test "checkout writes the same files, index and error whatever the number of tas
     for ([_]usize{ 1, 2, 7 }) |workers| {
         try h.repo.exec(io, &.{ "reset", "-q", "--hard", "HEAD" });
         try h.reload(gpa, io);
-        for (0..7) |d| {
-            try h.repo.dir.setFilePermissions(io, try std.mem.print(&name, "locked/d{d}", .{d}), @fromBackingInt(@intCast(@as(std.posix.mode_t, 0o555))), .{});
-        }
-        const result = worktree.checkout(gpa, io, h.repo.dir, .{ .index = &h.index, .db = &h.db, .tree = first }, .{ .rules = h.worktreeRules(), .workers = workers });
-        for (0..7) |d| {
-            try h.repo.dir.setFilePermissions(io, try std.mem.print(&name, "locked/d{d}", .{d}), @fromBackingInt(@intCast(@as(std.posix.mode_t, 0o755))), .{});
-        }
+        const result = worktree.checkout(gpa, faults.io(), h.repo.dir, .{ .index = &h.index, .db = &h.db, .tree = first }, .{ .rules = h.worktreeRules(), .workers = workers });
         // What came back, what the index holds and what the files say.
         var record: std.Io.Writer.Allocating = .init(gpa);
         defer record.deinit();
@@ -1198,7 +1192,7 @@ test "checkout writes the same files, index and error whatever the number of tas
         if (seen) |s| {
             try std.testing.expectEqualStrings(s, record.written());
         } else {
-            try std.testing.expect(std.mem.startsWith(u8, record.written(), "AccessDenied\n") or std.mem.startsWith(u8, record.written(), "PermissionDenied\n"));
+            try std.testing.expect(std.mem.startsWith(u8, record.written(), "AccessDenied\n"));
             seen = try gpa.dupe(u8, record.written());
         }
     }

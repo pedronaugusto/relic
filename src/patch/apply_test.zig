@@ -534,7 +534,8 @@ test "mode changes, symlinks and copies apply as git applies them" {
 }
 
 /// Apply `patch` on both sides and require both to refuse it, both
-/// repositories to be left alike, and what lies past the link untouched.
+/// repositories to be left alike, and `.git/outside/secret`, what a link
+/// points at, untouched.
 fn expectBothRefuse(p: *Pair, io: Io, patch: []const u8) !void {
     const gpa = p.gpa;
     var git_dir = try p.git.gitDir(io);
@@ -570,7 +571,7 @@ fn expectBothRefuse(p: *Pair, io: Io, patch: []const u8) !void {
     }
 }
 
-test "a patch that reads, removes or writes past a symbolic link, or names an invalid path, is refused as git refuses it" {
+test "a patch that reads, removes or writes past a symbolic link is refused as git refuses it" {
     // Git for Windows keeps a link as a file (core.symlinks is false there),
     // so there is no link to write past.
     if (builtin.target.os.tag == .windows) return error.SkipZigTest;
@@ -600,6 +601,25 @@ test "a patch that reads, removes or writes past a symbolic link, or names an in
         // A link the patch makes, then a file written through it.
         "diff --git a/l2 b/l2\nnew file mode 120000\n--- /dev/null\n+++ b/l2\n@@ -0,0 +1 @@\n+.git/outside\n\\ No newline at end of file\n" ++
             "diff --git a/l2/secret b/l2/secret\n--- a/l2/secret\n+++ b/l2/secret\n@@ -1 +1 @@\n-secret\n+changed\n",
+    };
+    for (patches) |patch| {
+        try expectBothRefuse(&p, io, patch);
+        try reset(&p, io);
+    }
+}
+
+test "a patch that names an invalid path is refused as git refuses it" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var p = try Pair.init(gpa, io);
+    defer p.deinit();
+    for ([_]*testgit.Repo{ &p.git, &p.ours }) |r| try r.writeFile(io, ".git/outside/secret", "secret\n");
+    try p.write(io, "b.txt", "one\n");
+    try p.both(io, &.{ "add", "-A" });
+    try p.both(io, &.{ "commit", "-q", "-m", "base" });
+    try p.both(io, &.{ "tag", "base" });
+
+    const patches = [_][]const u8{
         // Names no working tree may hold.
         "diff --git a/../escape b/../escape\nnew file mode 100644\n--- /dev/null\n+++ b/../escape\n@@ -0,0 +1 @@\n+x\n",
         "diff --git a/.git/config b/.git/config\nnew file mode 100644\n--- /dev/null\n+++ b/.git/config\n@@ -0,0 +1 @@\n+x\n",

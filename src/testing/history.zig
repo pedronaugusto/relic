@@ -2457,11 +2457,10 @@ test "a cherry-pick sequence refused for an untracked file leaves what git's lea
 }
 
 /// Paths each side turns into something the other cannot take as it is: a
-/// file where the other made a directory, a symlink where the other kept a
-/// file, and a file both sides renamed differently.
+/// file where the other made a directory, and a file both sides renamed
+/// differently.
 fn shapesScript(io: Io, repo: *testgit.Repo) anyerror!void {
     try repo.writeFile(io, "df", "a file\n");
-    try repo.writeFile(io, "kind", "a regular file\n");
     try repo.writeFile(io, "twice", "one\ntwo\nthree\nfour\nfive\nsix\n");
     try repo.exec(io, &.{ "add", "-A" });
     try repo.exec(io, &.{ "commit", "-q", "-m", "base" });
@@ -2473,48 +2472,74 @@ fn shapesScript(io: Io, repo: *testgit.Repo) anyerror!void {
     try repo.exec(io, &.{ "commit", "-q", "-m", "topic" });
     try repo.exec(io, &.{ "checkout", "-q", "main" });
     try repo.writeFile(io, "df", "a file, changed\n");
+    try repo.exec(io, &.{ "mv", "twice", "twice-main" });
+    try repo.exec(io, &.{ "commit", "-q", "-am", "main" });
+}
+
+/// A symlink on one side where the other kept, and changed, a file.
+fn linkMeetsFileScript(io: Io, repo: *testgit.Repo) anyerror!void {
+    try repo.writeFile(io, "kind", "a regular file\n");
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "base" });
+    try repo.exec(io, &.{ "checkout", "-q", "-b", "topic" });
+    try repo.writeFile(io, "kind", "a regular file, changed\n");
+    try repo.exec(io, &.{ "commit", "-q", "-am", "topic" });
+    try repo.exec(io, &.{ "checkout", "-q", "main" });
     try repo.exec(io, &.{ "rm", "-q", "kind" });
     const link = try repo.runInput(io, &.{ "hash-object", "-w", "--stdin" }, "somewhere");
     defer repo.gpa.free(link);
     const cacheinfo = try repo.gpa.print("120000,{s},kind", .{std.mem.trimEnd(u8, link, "\n")});
     defer repo.gpa.free(cacheinfo);
     try repo.exec(io, &.{ "update-index", "--add", "--cacheinfo", cacheinfo });
-    try repo.exec(io, &.{ "mv", "twice", "twice-main" });
-    try repo.exec(io, &.{ "commit", "-q", "-am", "main" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "main" });
     try repo.exec(io, &.{ "checkout", "-q", "-f", "main" });
 }
 
-test "a file meeting a directory, a symlink meeting a file and a double rename stop as git's merge does" {
+/// Merges `topic` into `main` on both sides, then aborts on both, and
+/// requires each step to leave the two alike.
+fn expectMergeStopsAlike(format: testgit.RefFormat, script: *const fn (Io, *testgit.Repo) anyerror!void) !void {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    try testgit.requireGit(gpa, io);
+    var pair: Pair = undefined;
+    try Pair.init(gpa, io, &pair, format, script);
+    defer pair.deinit();
+
+    try gitMayFail(io, &pair.git, &.{ "merge", "topic" });
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        const target = try merging.resolve(gpa, io, &repo, "topic");
+        var outcome = try merging.start(gpa, io, &repo, target, .{ .who = who });
+        defer outcome.deinit();
+        try std.testing.expectEqual(merging.Outcome.Result.conflicted, outcome.result);
+    }
+    try expectSameState(&pair, io, &merge_state, &main_logs);
+
+    // Each side aborts its own, and they agree on what is left.
+    try pair.git.exec(io, &.{ "merge", "--abort" });
+    {
+        var repo = try pair.open(io);
+        defer repo.deinit(io);
+        _ = try merging.abort(gpa, io, &repo, .{ .who = who });
+    }
+    try expectSameState(&pair, io, &merge_state, &main_logs);
+}
+
+test "a file meeting a directory and a double rename stop as git's merge does" {
     try testgit.eachRefFormat(struct {
         fn inFormat(format: testgit.RefFormat) !void {
-            const gpa = std.testing.allocator;
-            const io = std.testing.io;
+            try expectMergeStopsAlike(format, shapesScript);
+        }
+    }.inFormat);
+}
+
+test "a symlink meeting a file stops as git's merge does" {
+    try testgit.eachRefFormat(struct {
+        fn inFormat(format: testgit.RefFormat) !void {
             // Git for Windows may check out the symbolic link as a plain file.
             if (builtin.target.os.tag == .windows) return error.SkipZigTest;
-            try testgit.requireGit(gpa, io);
-            var pair: Pair = undefined;
-            try Pair.init(gpa, io, &pair, format, shapesScript);
-            defer pair.deinit();
-
-            try gitMayFail(io, &pair.git, &.{ "merge", "topic" });
-            {
-                var repo = try pair.open(io);
-                defer repo.deinit(io);
-                const target = try merging.resolve(gpa, io, &repo, "topic");
-                var outcome = try merging.start(gpa, io, &repo, target, .{ .who = who });
-                defer outcome.deinit();
-                try std.testing.expectEqual(merging.Outcome.Result.conflicted, outcome.result);
-            }
-            try expectSameState(&pair, io, &merge_state, &main_logs);
-
-            // Each side aborts its own, and they agree on what is left.
-            try pair.git.exec(io, &.{ "merge", "--abort" });
-            {
-                var repo = try pair.open(io);
-                defer repo.deinit(io);
-                _ = try merging.abort(gpa, io, &repo, .{ .who = who });
-            }
-            try expectSameState(&pair, io, &merge_state, &main_logs);
+            try expectMergeStopsAlike(format, linkMeetsFileScript);
         }
     }.inFormat);
 }
