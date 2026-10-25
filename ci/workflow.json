@@ -26,7 +26,7 @@
     {
       "name": "ThreadSanitizer (Linux)",
       "step": "test",
-      "args": ["-Dci-tsan=true", "-Doptimize=debug", "-Dci-lint=false"],
+      "args": ["-Dci-tsan=true", "-Doptimize=debug", "-Dci-lint=false", "-Dci-timings=true"],
       "tiers": ["release"],
       "timeout": 30,
       "shards": 8
