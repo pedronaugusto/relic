@@ -15,9 +15,8 @@
 //! than what reading the file drops: a relative url that climbs onto the
 //! host part of the url it is resolved against, and a url whose decoded form
 //! carries a newline into a credential helper, are refused there as well.
-//! `resolveUrl` is git's resolution of a url beginning `./` or `../`
-//! against the superproject's own, including the colon a `host:path` url
-//! turns into when its last directory is taken away.
+//! A relative url is resolved against the superproject's by
+//! `transport.url.relative`, git's `relative_url`.
 
 const ErrorNamespace = @This();
 const testgit = @import("../testing/git.zig");
@@ -394,100 +393,6 @@ fn curlUrlIsSafe(gpa: Allocator, url: []const u8) Allocator.Error!bool {
     return !decodesToNewline(info.url);
 }
 
-/// Errors from resolving a relative url.
-pub const ResolveError = error{
-    /// More `../` than the url it is resolved against has components.
-    CannotStripComponent,
-} || Allocator.Error;
-
-/// Resolve `url`, which begins `./` or `../`, against `base`, the
-/// superproject's own remote url, the way git's `relative_url` does. The
-/// result is the caller's.
-///
-/// Each `../` takes the last `/`-separated component off `base`; where
-/// there is no `/` left but there is a `:`, the `:` is the separator that
-/// goes, and the two parts are joined with `:` rather than `/`, so
-/// `host:repo` and `../sub` make `host:sub`. A `base` that is itself
-/// relative stays relative, and `up_path` — `../` for each component of the
-/// submodule's own path, when the url is for the submodule's own remote —
-/// goes in front of it.
-pub fn resolveUrl(gpa: Allocator, base: []const u8, url: []const u8, up_path: ?[]const u8) Self.ResolveError![]u8 {
-    if (!isLocalNotSsh(url) or isAbsolutePath(url)) return gpa.dupe(u8, url);
-    std.debug.assert(base.len != 0);
-
-    var remote: std.ArrayList(u8) = .empty;
-    defer remote.deinit(gpa);
-    try remote.appendSlice(gpa, base);
-    if (isSep(remote.items[remote.items.len - 1], false)) remote.items.len -= 1;
-
-    const is_relative = isLocalNotSsh(remote.items) and !isAbsolutePath(remote.items);
-    if (is_relative and !startsWithDotSlash(remote.items, false) and !startsWithDotDotSlash(remote.items, false)) {
-        try remote.insertSlice(gpa, 0, "./");
-    }
-
-    var rest = url;
-    var colon_separated = false;
-    while (rest.len > 0) {
-        if (startsWithDotDotSlash(rest, false)) {
-            rest = rest[3..];
-            if (lastDirSep(remote.items)) |at| {
-                remote.items.len = at;
-            } else if (std.mem.findScalarLast(u8, remote.items, ':')) |at| {
-                remote.items.len = at;
-                colon_separated = true;
-            } else {
-                if (is_relative or std.mem.eql(u8, remote.items, ".")) return error.CannotStripComponent;
-                remote.clearRetainingCapacity();
-                try remote.append(gpa, '.');
-            }
-        } else if (startsWithDotSlash(rest, false)) {
-            rest = rest[2..];
-        } else break;
-    }
-
-    var joined: std.ArrayList(u8) = .empty;
-    defer joined.deinit(gpa);
-    try joined.appendSlice(gpa, remote.items);
-    try joined.append(gpa, if (colon_separated) ':' else '/');
-    try joined.appendSlice(gpa, rest);
-    if (rest.len > 0 and rest[rest.len - 1] == '/') joined.items.len -= 1;
-
-    const resolved = if (startsWithDotSlash(joined.items, false)) joined.items[2..] else joined.items;
-    if (up_path == null or !is_relative) return gpa.dupe(u8, resolved);
-    return std.mem.concat(gpa, u8, &.{ up_path.?, resolved });
-}
-
-/// git's `url_is_local_not_ssh`: no colon, or a slash before the first
-/// one, or a drive letter on Windows.
-fn isLocalNotSsh(url: []const u8) bool {
-    const colon = std.mem.findScalar(u8, url, ':') orelse return true;
-    if (std.mem.findScalar(u8, url, '/')) |slash| {
-        if (slash < colon) return true;
-    }
-    return builtin.target.os.tag == .windows and hasDriveLetter(url);
-}
-
-fn isAbsolutePath(path: []const u8) bool {
-    if (path.len > 0 and path[0] == '/') return true;
-    if (builtin.target.os.tag == .windows) {
-        return (path.len > 0 and path[0] == '\\') or hasDriveLetter(path);
-    }
-    return false;
-}
-
-fn hasDriveLetter(path: []const u8) bool {
-    return path.len >= 2 and std.ascii.isAlphabetic(path[0]) and path[1] == ':';
-}
-
-fn lastDirSep(path: []const u8) ?usize {
-    var i = path.len;
-    while (i > 0) {
-        i -= 1;
-        if (isSep(path[i], false)) return i;
-    }
-    return null;
-}
-
 //=========================================================================
 // Tests
 //=========================================================================
@@ -657,63 +562,6 @@ fn expectFsckAgrees(name: []const u8, url: []const u8, accepted: bool) !void {
     }
 }
 
-test "relative urls resolve exactly as git's own table says" {
-    const gpa = testing.allocator;
-    const Case = struct { base: []const u8, url: []const u8, up: ?[]const u8, want: []const u8 };
-    const cases = [_]Case{
-        .{ .base = "../foo", .url = "../submodule", .up = "../", .want = "../../submodule" },
-        .{ .base = "../foo/bar", .url = "../submodule", .up = "../", .want = "../../foo/submodule" },
-        .{ .base = "../foo/submodule", .url = "../submodule", .up = "../", .want = "../../foo/submodule" },
-        .{ .base = "./foo", .url = "../submodule", .up = "../", .want = "../submodule" },
-        .{ .base = "./foo/bar", .url = "../submodule", .up = "../", .want = "../foo/submodule" },
-        .{ .base = "../foo/bar", .url = "../sub/a/b/c", .up = "../../../", .want = "../../../../foo/sub/a/b/c" },
-        .{ .base = "/abs/addtest", .url = "../repo", .up = "../", .want = "/abs/repo" },
-        .{ .base = "foo/bar", .url = "../submodule", .up = "../", .want = "../foo/submodule" },
-        .{ .base = "foo", .url = "../submodule", .up = "../", .want = "../submodule" },
-        .{ .base = "../foo/bar", .url = "../sub/a/b/c", .up = null, .want = "../foo/sub/a/b/c" },
-        .{ .base = "../foo/bar", .url = "../sub/a/b/c/", .up = null, .want = "../foo/sub/a/b/c" },
-        .{ .base = "../foo/bar/", .url = "../sub/a/b/c", .up = null, .want = "../foo/sub/a/b/c" },
-        .{ .base = "./foo/bar", .url = "../submodule", .up = null, .want = "foo/submodule" },
-        .{ .base = "./foo", .url = "../submodule", .up = null, .want = "submodule" },
-        .{ .base = "//somewhere else/repo", .url = "../subrepo", .up = null, .want = "//somewhere else/subrepo" },
-        .{ .base = "//somewhere else/repo", .url = "../../subrepo", .up = null, .want = "//subrepo" },
-        .{ .base = "//somewhere else/repo", .url = "../../../subrepo", .up = null, .want = "/subrepo" },
-        .{ .base = "//somewhere else/repo", .url = "../../../../subrepo", .up = null, .want = "subrepo" },
-        .{ .base = "/abs/.", .url = "../.", .up = null, .want = "/abs/." },
-        .{ .base = "/abs", .url = "./.", .up = null, .want = "/abs/." },
-        .{ .base = "/abs/home2/../remote", .url = "../bundle1", .up = null, .want = "/abs/home2/../bundle1" },
-        .{ .base = "file:///tmp/repo", .url = "../subrepo", .up = null, .want = "file:///tmp/subrepo" },
-        .{ .base = "foo", .url = "../submodule", .up = null, .want = "submodule" },
-        .{ .base = "helper:://hostname/repo", .url = "../subrepo", .up = null, .want = "helper:://hostname/subrepo" },
-        .{ .base = "helper:://hostname/repo", .url = "../../subrepo", .up = null, .want = "helper:://subrepo" },
-        .{ .base = "helper:://hostname/repo", .url = "../../../subrepo", .up = null, .want = "helper::/subrepo" },
-        .{ .base = "helper:://hostname/repo", .url = "../../../../subrepo", .up = null, .want = "helper::subrepo" },
-        .{ .base = "helper:://hostname/repo", .url = "../../../../../subrepo", .up = null, .want = "helper:subrepo" },
-        .{ .base = "helper:://hostname/repo", .url = "../../../../../../subrepo", .up = null, .want = ".:subrepo" },
-        .{ .base = "ssh://hostname/repo", .url = "../subrepo", .up = null, .want = "ssh://hostname/subrepo" },
-        .{ .base = "ssh://hostname/repo", .url = "../../subrepo", .up = null, .want = "ssh://subrepo" },
-        .{ .base = "ssh://hostname/repo", .url = "../../../subrepo", .up = null, .want = "ssh:/subrepo" },
-        .{ .base = "ssh://hostname/repo", .url = "../../../../subrepo", .up = null, .want = "ssh:subrepo" },
-        .{ .base = "ssh://hostname/repo", .url = "../../../../../subrepo", .up = null, .want = ".:subrepo" },
-        .{ .base = "ssh://hostname:22/repo", .url = "../subrepo", .up = null, .want = "ssh://hostname:22/subrepo" },
-        .{ .base = "user@host:path/to/repo", .url = "../subrepo", .up = null, .want = "user@host:path/to/subrepo" },
-        .{ .base = "user@host:repo", .url = "../subrepo", .up = null, .want = "user@host:subrepo" },
-        .{ .base = "user@host:repo", .url = "../../subrepo", .up = null, .want = ".:subrepo" },
-    };
-    for (cases) |case| {
-        const got = try resolveUrl(gpa, case.base, case.url, case.up);
-        defer gpa.free(got);
-        testing.expectEqualStrings(case.want, got) catch |err| {
-            std.debug.print("base {s} url {s}\n", .{ case.base, case.url });
-            return err;
-        };
-    }
-    try testing.expectError(error.CannotStripComponent, resolveUrl(gpa, "./foo", "../../x", null));
-    const absolute = try resolveUrl(gpa, "https://h/a", "/elsewhere", null);
-    defer gpa.free(absolute);
-    try testing.expectEqualStrings("/elsewhere", absolute);
-}
-
 test "fuzz: any bytes are a .gitmodules or a named error" {
     try shakedown.check(std.testing.allocator, {}, fuzzGitmodules, .{});
 }
@@ -725,11 +573,6 @@ fn fuzzGitmodules(_: void, case: *shakedown.Case) anyerror!void {
     case.source.bytes(input);
     _ = try checkUrl(gpa, input);
     _ = checkName(input);
-    if (isRelativeUrl(input)) {
-        if (resolveUrl(gpa, "https://example.com/a/b", input, "../")) |resolved| {
-            gpa.free(resolved);
-        } else |_| {}
-    }
     var g = Gitmodules.parse(gpa, input) catch return;
     defer g.deinit();
     for (g.submodules) |sub| {
@@ -745,4 +588,4 @@ fn fuzzGitmodules(_: void, case: *shakedown.Case) anyerror!void {
 }
 
 /// All errors reported by this namespace.
-pub const Error = ParseError || ResolveError || Self.ParseError || Self.ResolveError;
+pub const Error = ParseError || Self.ParseError;
