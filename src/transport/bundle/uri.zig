@@ -40,7 +40,6 @@ const transport = @import("../transport.zig");
 const repo_mod = @import("../../repo/repo.zig");
 const object = @import("../../object/object.zig");
 const config_mod = @import("../../config/config.zig");
-const gitmodules = @import("../../config/gitmodules.zig");
 const fsck = @import("../../object/fsck.zig");
 const url_mod = @import("../../wire.zig").url;
 const fs = @import("../../fs/fs.zig");
@@ -164,9 +163,8 @@ pub const List = struct {
     /// path as it is, anything else from the base.
     fn resolve(list: *List, value: []const u8) Allocator.Error![]const u8 {
         const base = list.base_uri orelse return list.arena.dupe(u8, value);
-        if (!url_mod.isLocal(value) or std.Io.Dir.path.isAbsolute(value) or base.len == 0) return list.arena.dupe(u8, value);
-        const relative = if (gitmodules.isRelativeUrl(value)) value else try std.mem.concat(list.arena, u8, &.{ "./", value });
-        return gitmodules.resolveUrl(list.arena, base, relative, null) catch |err| switch (err) {
+        if (base.len == 0) return list.arena.dupe(u8, value);
+        return url_mod.relative(list.arena, base, value, null) catch |err| switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             else => list.arena.dupe(u8, value),
         };

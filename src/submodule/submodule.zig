@@ -54,6 +54,7 @@ const worktree = @import("../checkout/checkout.zig");
 const program = @import("../process.zig").program;
 const pathspec_mod = @import("../patterns.zig").pathspec;
 const remote_mod = @import("../wire.zig").remote;
+const url_mod = @import("../wire.zig").url;
 const promisors = @import("../wire.zig").promisors;
 const three_way = @import("../merge/three_way.zig");
 const branch_mod = @import("../commit/branch.zig");
@@ -130,7 +131,7 @@ pub const Error = error{
     DirectoryNotEmpty,
     /// `branch --recurse-submodules` without `submodule.propagateBranches`.
     BranchesNotPropagated,
-} || branch_mod.Error || pathspec_mod.Error || repo_mod.Error || worktree.Error || gitmodules.ParseError || gitmodules.ResolveError ||
+} || branch_mod.Error || pathspec_mod.Error || repo_mod.Error || worktree.Error || gitmodules.ParseError || url_mod.RelativeError ||
     Repository.WriteConfigError || refs_mod.TransactionError || program.Error || gitlink.Error ||
     Io.Dir.RealPathError || Io.Dir.RenameError || Io.Dir.DeleteTreeError;
 
@@ -347,7 +348,7 @@ pub fn defaultRemote(arena: Allocator, io: Io, repo: *Repository) Error![]const 
 /// `defaultRemote`.
 fn moduleRemote(arena: Allocator, io: Io, repo: *Repository, sub: *Repository, module: *const gitmodules.Submodule) Error![]const u8 {
     const raw = module.url orelse return defaultRemote(arena, io, sub);
-    const url = if (gitmodules.isRelativeUrl(raw)) try gitmodules.resolveUrl(arena, try superprojectUrl(arena, io, repo), raw, null) else raw;
+    const url = if (gitmodules.isRelativeUrl(raw)) try url_mod.relative(arena, try superprojectUrl(arena, io, repo), raw, null) else raw;
     const config = sub.configuration();
     const wanted = try remote_mod.rewrite(arena, config, url, .fetch) orelse url;
     for (try remote_mod.names(arena, config)) |name| {
@@ -411,7 +412,7 @@ fn moduleUrl(
     if (!try gitmodules.checkUrl(arena, url)) return refuse(refusal, display, url, error.DisallowedUrl);
     if (!gitmodules.isRelativeUrl(url)) return url;
     const base = try superprojectUrl(arena, io, repo);
-    return gitmodules.resolveUrl(arena, base, url, up_path) catch |err| switch (err) {
+    return url_mod.relative(arena, base, url, up_path) catch |err| switch (err) {
         error.CannotStripComponent => refuse(refusal, display, url, error.CannotStripComponent),
         else => |e| e,
     };

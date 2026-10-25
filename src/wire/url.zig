@@ -376,6 +376,99 @@ pub fn isLocal(text: []const u8) bool {
     return builtin.target.os.tag == .windows and win32.dosDrivePrefixLen(text) != 0 and win32.win32PathReason(text) == null;
 }
 
+/// What `relative` fails with.
+pub const RelativeError = error{
+    /// More `../` than the url it is resolved against has components.
+    CannotStripComponent,
+} || Allocator.Error;
+
+/// git's `relative_url`: `url` resolved against `base`, a remote's own url,
+/// as a submodule's `./` or `../` url is against its superproject's and a
+/// bundle list's entries against its base. The result is the caller's.
+///
+/// A url that is no path (`isLocal`), or an absolute one, is as it is.
+/// Otherwise each `../` takes the last `/`-separated component off `base`;
+/// where there is no `/` left but there is a `:`, the `:` is the separator
+/// that goes, and the two parts are joined with `:` rather than `/`, so
+/// `host:repo` and `../sub` make `host:sub`. A `base` that is itself
+/// relative stays relative, and `up_path` (`../` for each component of a
+/// submodule's own path, when the url is for the submodule's own remote)
+/// goes in front of it.
+pub fn relative(gpa: Allocator, base: []const u8, url: []const u8, up_path: ?[]const u8) RelativeError![]u8 {
+    if (!isLocal(url) or isAbsolutePath(url)) return gpa.dupe(u8, url);
+    std.debug.assert(base.len != 0);
+
+    var remote: std.ArrayList(u8) = .empty;
+    defer remote.deinit(gpa);
+    try remote.appendSlice(gpa, base);
+    if (isDirSep(remote.items[remote.items.len - 1])) remote.items.len -= 1;
+
+    const is_relative = isLocal(remote.items) and !isAbsolutePath(remote.items);
+    if (is_relative and !startsWithDotSlash(remote.items) and !startsWithDotDotSlash(remote.items)) {
+        try remote.insertSlice(gpa, 0, "./");
+    }
+
+    var rest = url;
+    var colon_separated = false;
+    while (rest.len > 0) {
+        if (startsWithDotDotSlash(rest)) {
+            rest = rest[3..];
+            if (lastDirSep(remote.items)) |at| {
+                remote.items.len = at;
+            } else if (std.mem.findScalarLast(u8, remote.items, ':')) |at| {
+                remote.items.len = at;
+                colon_separated = true;
+            } else {
+                if (is_relative or std.mem.eql(u8, remote.items, ".")) return error.CannotStripComponent;
+                remote.clearRetainingCapacity();
+                try remote.append(gpa, '.');
+            }
+        } else if (startsWithDotSlash(rest)) {
+            rest = rest[2..];
+        } else break;
+    }
+
+    var joined: std.ArrayList(u8) = .empty;
+    defer joined.deinit(gpa);
+    try joined.appendSlice(gpa, remote.items);
+    try joined.append(gpa, if (colon_separated) ':' else '/');
+    try joined.appendSlice(gpa, rest);
+    if (rest.len > 0 and rest[rest.len - 1] == '/') joined.items.len -= 1;
+
+    const resolved = if (startsWithDotSlash(joined.items)) joined.items[2..] else joined.items;
+    if (up_path == null or !is_relative) return gpa.dupe(u8, resolved);
+    return std.mem.concat(gpa, u8, &.{ up_path.?, resolved });
+}
+
+/// git's `is_absolute_path`: a directory separator first, or on Windows a
+/// drive (`win32_has_dos_drive_prefix`).
+fn isAbsolutePath(path: []const u8) bool {
+    if (path.len > 0 and isDirSep(path[0])) return true;
+    return builtin.target.os.tag == .windows and win32.dosDrivePrefixLen(path) != 0;
+}
+
+/// git's `is_dir_sep`: `/`, and on Windows `\` too.
+fn isDirSep(c: u8) bool {
+    return c == '/' or (builtin.target.os.tag == .windows and c == '\\');
+}
+
+fn startsWithDotSlash(s: []const u8) bool {
+    return s.len >= 2 and s[0] == '.' and isDirSep(s[1]);
+}
+
+fn startsWithDotDotSlash(s: []const u8) bool {
+    return s.len >= 3 and s[0] == '.' and s[1] == '.' and isDirSep(s[2]);
+}
+
+fn lastDirSep(path: []const u8) ?usize {
+    var i = path.len;
+    while (i > 0) {
+        i -= 1;
+        if (isDirSep(path[i])) return i;
+    }
+    return null;
+}
+
 /// The URL with any `user[:password]@` taken out, which is how git writes a
 /// URL anywhere a person may read it: `FETCH_HEAD`, a reflog message. The
 /// result is the caller's.
@@ -493,6 +586,68 @@ test "a URL shown to a person loses its credentials" {
     }
 }
 
+test "relative urls resolve exactly as git's own table says" {
+    const gpa = testing.allocator;
+    const Case = struct { base: []const u8, url: []const u8, up: ?[]const u8, want: []const u8 };
+    const cases = [_]Case{
+        .{ .base = "../foo", .url = "../submodule", .up = "../", .want = "../../submodule" },
+        .{ .base = "../foo/bar", .url = "../submodule", .up = "../", .want = "../../foo/submodule" },
+        .{ .base = "../foo/submodule", .url = "../submodule", .up = "../", .want = "../../foo/submodule" },
+        .{ .base = "./foo", .url = "../submodule", .up = "../", .want = "../submodule" },
+        .{ .base = "./foo/bar", .url = "../submodule", .up = "../", .want = "../foo/submodule" },
+        .{ .base = "../foo/bar", .url = "../sub/a/b/c", .up = "../../../", .want = "../../../../foo/sub/a/b/c" },
+        .{ .base = "/abs/addtest", .url = "../repo", .up = "../", .want = "/abs/repo" },
+        .{ .base = "foo/bar", .url = "../submodule", .up = "../", .want = "../foo/submodule" },
+        .{ .base = "foo", .url = "../submodule", .up = "../", .want = "../submodule" },
+        .{ .base = "../foo/bar", .url = "../sub/a/b/c", .up = null, .want = "../foo/sub/a/b/c" },
+        .{ .base = "../foo/bar", .url = "../sub/a/b/c/", .up = null, .want = "../foo/sub/a/b/c" },
+        .{ .base = "../foo/bar/", .url = "../sub/a/b/c", .up = null, .want = "../foo/sub/a/b/c" },
+        .{ .base = "./foo/bar", .url = "../submodule", .up = null, .want = "foo/submodule" },
+        .{ .base = "./foo", .url = "../submodule", .up = null, .want = "submodule" },
+        .{ .base = "//somewhere else/repo", .url = "../subrepo", .up = null, .want = "//somewhere else/subrepo" },
+        .{ .base = "//somewhere else/repo", .url = "../../subrepo", .up = null, .want = "//subrepo" },
+        .{ .base = "//somewhere else/repo", .url = "../../../subrepo", .up = null, .want = "/subrepo" },
+        .{ .base = "//somewhere else/repo", .url = "../../../../subrepo", .up = null, .want = "subrepo" },
+        .{ .base = "/abs/.", .url = "../.", .up = null, .want = "/abs/." },
+        .{ .base = "/abs", .url = "./.", .up = null, .want = "/abs/." },
+        .{ .base = "/abs/home2/../remote", .url = "../bundle1", .up = null, .want = "/abs/home2/../bundle1" },
+        .{ .base = "file:///tmp/repo", .url = "../subrepo", .up = null, .want = "file:///tmp/subrepo" },
+        .{ .base = "foo", .url = "../submodule", .up = null, .want = "submodule" },
+        .{ .base = "helper:://hostname/repo", .url = "../subrepo", .up = null, .want = "helper:://hostname/subrepo" },
+        .{ .base = "helper:://hostname/repo", .url = "../../subrepo", .up = null, .want = "helper:://subrepo" },
+        .{ .base = "helper:://hostname/repo", .url = "../../../subrepo", .up = null, .want = "helper::/subrepo" },
+        .{ .base = "helper:://hostname/repo", .url = "../../../../subrepo", .up = null, .want = "helper::subrepo" },
+        .{ .base = "helper:://hostname/repo", .url = "../../../../../subrepo", .up = null, .want = "helper:subrepo" },
+        .{ .base = "helper:://hostname/repo", .url = "../../../../../../subrepo", .up = null, .want = ".:subrepo" },
+        .{ .base = "ssh://hostname/repo", .url = "../subrepo", .up = null, .want = "ssh://hostname/subrepo" },
+        .{ .base = "ssh://hostname/repo", .url = "../../subrepo", .up = null, .want = "ssh://subrepo" },
+        .{ .base = "ssh://hostname/repo", .url = "../../../subrepo", .up = null, .want = "ssh:/subrepo" },
+        .{ .base = "ssh://hostname/repo", .url = "../../../../subrepo", .up = null, .want = "ssh:subrepo" },
+        .{ .base = "ssh://hostname/repo", .url = "../../../../../subrepo", .up = null, .want = ".:subrepo" },
+        .{ .base = "ssh://hostname:22/repo", .url = "../subrepo", .up = null, .want = "ssh://hostname:22/subrepo" },
+        .{ .base = "user@host:path/to/repo", .url = "../subrepo", .up = null, .want = "user@host:path/to/subrepo" },
+        .{ .base = "user@host:repo", .url = "../subrepo", .up = null, .want = "user@host:subrepo" },
+        .{ .base = "user@host:repo", .url = "../../subrepo", .up = null, .want = ".:subrepo" },
+    };
+    for (cases) |case| {
+        const got = try relative(gpa, case.base, case.url, case.up);
+        defer gpa.free(got);
+        testing.expectEqualStrings(case.want, got) catch |err| {
+            std.debug.print("base {s} url {s}\n", .{ case.base, case.url });
+            return err;
+        };
+    }
+    try testing.expectError(error.CannotStripComponent, relative(gpa, "./foo", "../../x", null));
+    // A bundle list's entry with no `./` resolves as one with it: below the
+    // base, which only `../` climbs out of.
+    const bare = try relative(gpa, "https://h/list", "b.bundle", null);
+    defer gpa.free(bare);
+    try testing.expectEqualStrings("https://h/list/b.bundle", bare);
+    const absolute = try relative(gpa, "https://h/a", "/elsewhere", null);
+    defer gpa.free(absolute);
+    try testing.expectEqualStrings("/elsewhere", absolute);
+}
+
 test "fuzz: any bytes are a URL or a named error" {
     try shakedown.check(testing.allocator, {}, fuzzParse, .{});
 }
@@ -501,6 +656,10 @@ fn fuzzParse(_: void, case: *shakedown.Case) anyerror!void {
     var scratch: [256]u8 = undefined;
     const input = scratch[0..shakedown.gen.intRange(case.source, usize, 0, scratch.len)];
     case.source.bytes(input);
+    // Resolved against a remote, any bytes are a url or more `../` than it has.
+    if (relative(testing.allocator, "https://example.com/a/b", input, "../")) |resolved| {
+        testing.allocator.free(resolved);
+    } else |err| try testing.expectEqual(error.CannotStripComponent, err);
     const url = Url.parse(input) catch |err| switch (err) {
         error.UnsupportedTransport, error.MalformedUrl => return,
     };
@@ -642,4 +801,4 @@ test "decoded URL identities own their text and follow Git percent rules" {
 }
 
 /// All errors reported by this namespace.
-pub const Error = ParseError || Url.ParseError || Identity.Error || Allocator.Error;
+pub const Error = ParseError || Url.ParseError || Identity.Error || RelativeError || Allocator.Error;
