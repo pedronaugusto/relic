@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.29.2] - 2026-10-25
+
 ### Security
 
 - A tree whose entry names git's `verify_path` refuses no longer reaches the working tree or the index. A tree may name `..`, an absolute path, `.git` in any spelling a protected file system opens as it, or a path through a symbolic link: git reads such a tree, and a fetch takes one unless `transfer.fsckObjects` is on. In relic 0.29.1 and before, `commit.reset.toTree` (`reset --hard`, `--merge`) deleted the directory such a path named before refusing it, so a fetched history could have `reset --hard` delete the repository's `.git`, a directory outside the working tree, or one reached through a link. A merge could reach the same through its working-tree write, and an index took such a path, where `rm` and the LFS pull would act on it later. Now, as git refuses them:
@@ -1515,7 +1517,8 @@ Decisions worth knowing before reading the source:
 - **`working-tree-encoding` and a required filter are refusals, with the
   value.** Passing the bytes through would write a blob git would not write.
 
-[Unreleased]: https://github.com/pedronaugusto/relic/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/pedronaugusto/relic/compare/v0.29.2...HEAD
+[0.29.2]: https://github.com/pedronaugusto/relic/compare/v0.7.0...v0.29.2
 [0.7.0]: https://github.com/pedronaugusto/relic/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/pedronaugusto/relic/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/pedronaugusto/relic/compare/v0.4.2...v0.5.0
