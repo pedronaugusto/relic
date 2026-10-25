@@ -340,6 +340,9 @@ pub fn dev(b: *std.Build, tools: type) void {
         run.setCwd(p.path("zig-out"));
         examples_step.dependOn(&run.step);
 
+        // The examples' own tests take shakedown, as the suite's do; the
+        // examples themselves use relic alone.
+        example.root_module.addImport("shakedown", shakedown.module("shakedown"));
         const example_tests = b.addTest(.{ .root_module = example.root_module });
         const run_example_tests = b.addRunArtifact(example_tests);
         if (target.result.os.tag == .windows) {
