@@ -78,7 +78,6 @@ const aegis = @import("aegis");
 /// Whether relic was built with HTTP: the `http` build option.
 const http_enabled = @import("relic_options").http;
 const warning = @import("../report.zig").warning;
-const builtin = @import("builtin");
 
 const Connection = connection.Connection;
 const Service = connection.Service;
@@ -572,9 +571,11 @@ const Http = struct {
     /// Read a client certificate and its key, as curl reads them for git.
     /// With `ask`, the passphrase is filled first — `protocol=cert`, the
     /// certificate's path — as git's `has_cert_password` fills it whether
-    /// the key is encrypted or not; a certificate that cannot be used then
-    /// has its passphrase rejected, as git rejects it on
-    /// `CURLE_SSL_CERTPROBLEM`.
+    /// the key is encrypted or not. A certificate file that holds no
+    /// certificate then has its passphrase rejected, as git rejects it on
+    /// `CURLE_SSL_CERTPROBLEM`; a key that does not load keeps it, as curl
+    /// 8.17 and later name that `CURLE_BAD_FUNCTION_ARGUMENT`, on which git
+    /// rejects nothing.
     fn clientCertificate(h: *Http, files: client_cert.Files, ask: bool, session_slot: *?credential.Session) Error!cloak.ClientAuth {
         var passphrase: ?[]const u8 = null;
         if (ask) {
@@ -583,10 +584,7 @@ const Http = struct {
             if (try session.fill(h.io, h.credentialOptions())) passphrase = session.exposePassword();
         }
         return client_cert.load(h.gpa, h.io, files, .{ .passphrase = passphrase }) catch |err| {
-            // Git for Windows leaves the helper's certificate passphrase in
-            // place on a local key parse error; its curl backend does not
-            // classify that error as a rejected credential.
-            if (builtin.target.os.tag != .windows) {
+            if (err == error.SslClientCertificateUnreadable) {
                 if (session_slot.*) |*session| try forgetRefused(h.io, session, h.credentialOptions());
             }
             return switch (err) {

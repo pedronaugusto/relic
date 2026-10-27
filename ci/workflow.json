@@ -12,14 +12,14 @@
   "compile_once": false,
   "setup_step": "ci-setup",
   "test_job_timeout": 45,
-  "windows_job_timeout": 45,
+  "windows_job_timeout": 60,
   "source_job_timeout": 10,
   "fast_shards": 2,
   "shards": {
-    "macos": 2,
-    "windows": 5,
+    "macos": 3,
+    "windows": 6,
     "linux_arm": 2,
-    "windows_arm": 5
+    "windows_arm": 8
   },
   "windows_git_latest": true,
   "jobs": [

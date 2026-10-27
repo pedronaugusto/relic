@@ -805,6 +805,42 @@ pub fn gitAtLeast(gpa: Allocator, io: Io, major: u32, minor: u32) !bool {
     return found.major == major and found.minor >= minor;
 }
 
+/// Whether the libcurl the `git` on the path was built with is at least
+/// `major.minor`, as `git version --build-options` names it. git's HTTP
+/// behaviour is its curl's, so a rule curl changed is held to the curl
+/// this git has, and relic to the current one. `false` where git names
+/// none. `error.SkipZigTest` when there is no git at all.
+pub fn curlAtLeast(gpa: Allocator, io: Io, major: u32, minor: u32) !bool {
+    try requireGit(gpa, io);
+    var env = try isolatedEnviron(gpa, no_home);
+    defer env.deinit();
+    const result = try std.process.run(gpa, io, .{ .argv = &.{ program(), "version", "--build-options" }, .environ_map = &env });
+    defer gpa.free(result.stdout);
+    defer gpa.free(result.stderr);
+    const found = libcurlRelease(result.stdout) orelse return false;
+    if (found.major > major) return true;
+    return found.major == major and found.minor >= minor;
+}
+
+/// The `libcurl: <release>` line of `git version --build-options`.
+fn libcurlRelease(text: []const u8) ?git_release.Version {
+    const label = "libcurl: ";
+    const at = std.mem.find(u8, text, label) orelse return null;
+    const rest = text[at + label.len ..];
+    const end = std.mem.findNone(u8, rest, "0123456789.") orelse rest.len;
+    var numbers = std.mem.splitScalar(u8, rest[0..end], '.');
+    var parts: [2]u32 = undefined;
+    for (&parts) |*part| part.* = std.fmt.parseUnsigned(u32, numbers.next() orelse return null, 10) catch return null;
+    return .{ .major = parts[0], .minor = parts[1], .patch = 0 };
+}
+
+test "the libcurl a git names in its build options" {
+    const found = libcurlRelease("git version 2.56.0\ncpu: arm64\nlibcurl: 8.18.0-DEV\nOpenSSL: OpenSSL 3.5.1\n").?;
+    try std.testing.expectEqual(@as(u32, 8), found.major);
+    try std.testing.expectEqual(@as(u32, 18), found.minor);
+    try std.testing.expectEqual(@as(?git_release.Version, null), libcurlRelease("git version 2.56.0\ncpu: arm64\n"));
+}
+
 test "a git the harness runs reads no configuration but the harness's own" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;

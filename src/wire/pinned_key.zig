@@ -2,11 +2,12 @@
 //! the keys a server's own certificate may hold, each as the SHA-256 of a
 //! SubjectPublicKeyInfo, which is how uplink's TLS checks a pin.
 //!
-//! The value is either `sha256//<base64>` hashes with `;sha256//` between
-//! them, or a file holding one key. curl compares each hash as text with
-//! the base64 of the server key's hash, so an entry that is not exactly
-//! one (`;` with something else after it, a short or unpadded one) never
-//! matches. A file curl compares as the key's DER when it is the key's
+//! The value is either `sha256//<base64>` hashes with `;` between them, or
+//! a file holding one key. curl 8.18 and later read the entries up to the
+//! first that does not start `sha256//`, and compare each hash as text with
+//! the base64 of the server key's hash, so a short or unpadded one never
+//! matches. (curl before 8.18 split only at `;sha256//`, so a `;` with
+//! anything else after it stayed in the entry before it.) A file curl compares as the key's DER when it is the key's
 //! length, and as a `PUBLIC KEY` PEM block otherwise; a file it cannot read
 //! or longer than a mebibyte matches nothing. The hash of the file's bytes
 //! and of the PEM block's key, both kept, match the same keys.
@@ -40,11 +41,14 @@ pub fn read(arena: Allocator, io: Io, value: []const u8) Error![]const [32]u8 {
     return pins.items;
 }
 
-/// The `sha256//` entries that are a hash's base64 as curl writes it.
+/// The `sha256//` entries, up to the first that is none, that are a hash's
+/// base64 as curl writes it.
 fn hashes(arena: Allocator, value: []const u8) Allocator.Error![]const [32]u8 {
     var pins: std.ArrayList([32]u8) = .empty;
-    var entries = std.mem.splitSequence(u8, value[prefix.len..], ";" ++ prefix);
-    while (entries.next()) |entry| {
+    var entries = std.mem.splitScalar(u8, value, ';');
+    while (entries.next()) |field| {
+        if (!std.mem.startsWith(u8, field, prefix)) break;
+        const entry = field[prefix.len..];
         var pin: [32]u8 = undefined;
         if (entry.len != base64.Encoder.calcSize(pin.len)) continue;
         base64.Decoder.decode(&pin, entry) catch continue;
@@ -84,7 +88,7 @@ fn digest(bytes: []const u8) [32]u8 {
 
 const testing = std.testing;
 
-test "sha256// hashes match as curl compares them: each whole entry, the one spelling" {
+test "sha256// hashes match as curl 8.18 compares them: each entry to its `;`, the list to the first that is no hash, the one spelling" {
     var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -96,8 +100,9 @@ test "sha256// hashes match as curl compares them: each whole entry, the one spe
         .{ try std.mem.concat(arena, u8, &.{ prefix, one }), 1 },
         .{ try std.mem.concat(arena, u8, &.{ prefix, "x;", prefix, one }), 1 },
         .{ try std.mem.concat(arena, u8, &.{ prefix, one, ";", prefix, one }), 2 },
-        // `;` and anything but `sha256//` stays in the entry.
-        .{ try std.mem.concat(arena, u8, &.{ prefix, one, ";x" }), 0 },
+        // Each `;` ends an entry; one that is not `sha256//` ends the list.
+        .{ try std.mem.concat(arena, u8, &.{ prefix, one, ";x" }), 1 },
+        .{ try std.mem.concat(arena, u8, &.{ prefix, "x;y;", prefix, one }), 0 },
         // Unpadded.
         .{ try std.mem.concat(arena, u8, &.{ prefix, one[0..43] }), 0 },
         .{ prefix ++ "AAAA", 0 },

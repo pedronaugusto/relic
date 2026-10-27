@@ -309,7 +309,14 @@ fn sideBySide(gpa: Allocator, io: Io, pki: *Pki, root: Io.Dir, front: *testremot
         defer gpa.free(theirs);
         const ours = try tools_relic.dir.readFileAlloc(io, "helper.log", gpa, .unlimited);
         defer gpa.free(ours);
-        try testing.expectEqualStrings(theirs, ours);
+        // curl before 8.17 took a key that does not load for a problem with
+        // the certificate (`CURLE_SSL_CERTPROBLEM`), on which git erases the
+        // passphrase; relic keeps it, as git with a current curl does.
+        const key_refused = if (case.refused) |e| e != error.SslClientCertificateUnreadable else false;
+        if (key_refused and !try testgit.curlAtLeast(gpa, io, 8, 17)) {
+            try testing.expect(std.mem.startsWith(u8, theirs, ours));
+            try testing.expect(std.mem.startsWith(u8, theirs[ours.len..], "== erase\n"));
+        } else try testing.expectEqualStrings(theirs, ours);
     }
 }
 

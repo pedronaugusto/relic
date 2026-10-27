@@ -1267,7 +1267,11 @@ test "http.sslVersion=tlsv1.3 and http.pinnedPubkey hold the server as curl hold
         // `http.sslVerify=false`: the pins are checked alone.
         unverified: bool = false,
         refused: anyerror = error.PinnedPubkeyMismatch,
+        // An outcome curl 8.18 changed, splitting the list at every `;`
+        // (9f979ea683): a git built with an older curl has the other one.
+        split: bool = false,
     };
+    const split_at_each = try testgit.curlAtLeast(gpa, io, 8, 18);
     for ([_]Case{
         .{ .front = old, .key = "http.sslVersion", .value = "tlsv1.3", .fetched = false, .refused = error.TlsFailed },
         .{ .front = old, .key = "http.sslVersion", .value = "tlsv1.2", .fetched = true },
@@ -1275,8 +1279,9 @@ test "http.sslVersion=tlsv1.3 and http.pinnedPubkey hold the server as curl hold
         .{ .front = front, .key = "http.pinnedPubkey", .value = right, .fetched = true },
         .{ .front = front, .key = "http.pinnedPubkey", .value = try arena.print("{s};{s}", .{ wrong, right }), .fetched = true },
         .{ .front = front, .key = "http.pinnedPubkey", .value = wrong, .fetched = false },
-        // `;` and anything but another hash is part of the entry.
-        .{ .front = front, .key = "http.pinnedPubkey", .value = try arena.print("{s};x", .{right}), .fetched = false },
+        // Each `;` ends an entry, and one that is no hash ends the list.
+        .{ .front = front, .key = "http.pinnedPubkey", .value = try arena.print("{s};x", .{right}), .fetched = true, .split = true },
+        .{ .front = front, .key = "http.pinnedPubkey", .value = try arena.print("{s};x;{s}", .{ wrong, right }), .fetched = false, .split = true },
         .{ .front = front, .key = "http.pinnedPubkey", .value = pem, .fetched = true },
         .{ .front = front, .key = "http.pinnedPubkey", .value = der, .fetched = true },
         // A certificate holds the key but is not one.
@@ -1299,18 +1304,18 @@ test "http.sslVersion=tlsv1.3 and http.pinnedPubkey hold the server as curl hold
             if (case.unverified) try r.exec(io, &.{ "config", "http.sslVerify", "false" }) else try r.exec(io, &.{ "config", "http.sslCAInfo", case.front.cert_path });
             try r.exec(io, &.{ "config", case.key, case.value });
         }
-        if (!case.fetched) {
+        if (case.fetched) try relicFetch(gpa, io, by_relic.dir, &env) else try testing.expectError(case.refused, relicFetch(gpa, io, by_relic.dir, &env));
+        if (!case.git) continue;
+        const git_fetched = if (case.split and !split_at_each) !case.fetched else case.fetched;
+        if (!git_fetched) {
             const said = try gitFailure(gpa, io, by_git.dir, &env, &.{ "fetch", "-q", "origin" });
             defer gpa.free(said);
             // curl's words for a key no pin names, which relic's error is.
             if (case.refused == error.PinnedPubkeyMismatch) try testing.expect(std.mem.find(u8, said, "public key does not match pinned public key") != null);
-            try testing.expectError(case.refused, relicFetch(gpa, io, by_relic.dir, &env));
             continue;
         }
-        try relicFetch(gpa, io, by_relic.dir, &env);
-        if (!case.git) continue;
         gpa.free(try testremote.gitInputEnv(gpa, io, by_git.dir, &env, &.{ "fetch", "-q", "origin" }, "", true));
-        try expectSameFetch(gpa, io, &by_git, &by_relic);
+        if (case.fetched) try expectSameFetch(gpa, io, &by_git, &by_relic);
     }
 }
 
