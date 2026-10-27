@@ -585,10 +585,10 @@ const Walker = struct {
     /// is staged as git's `add -A` stages it: a gitlink to the commit it has
     /// checked out, its directory never walked.
     fn stageRepository(w: *Walker, path: []const u8, found: fs.Entry) Error!void {
-        if (!safe_path.isSafeStoredPath(path, w.options.rules.protect)) {
+        _ = safe_path.checked(path, .{ .use = .stored, .protect = w.options.rules.protect }) catch {
             w.outcome.unsafe_paths += 1;
             return;
-        }
+        };
         const checked_out = (try gitlink.head(w.gpa, w.io, w.wt, path)) orelse {
             if (w.options.refusal) |r| r.set(null, path);
             return error.NoCommitCheckedOut;
@@ -629,10 +629,10 @@ const Walker = struct {
             try w.markSeen(path);
             return;
         }
-        if (!safe_path.isSafeStoredPath(path, w.options.rules.protect)) {
+        _ = safe_path.checked(path, .{ .use = .stored, .protect = w.options.rules.protect }) catch {
             w.outcome.unsafe_paths += 1;
             return;
-        }
+        };
         try w.markSeen(path);
 
         const mode = modeOnDisk(found, if (tracked) |entry| entry.mode else null, w.options.rules);
@@ -2194,18 +2194,26 @@ fn describeTree(index: *Index, tree_oid: Oid) Allocator.Error!void {
 /// Every path out of the tree is checked before it becomes a filesystem
 /// path. A tree is a file format and anyone may write one.
 fn refuseUnsafeTree(arena: Allocator, wanted: *std.StringHashMapUnmanaged(TreeEntry), options: CheckoutOptions) Error!void {
-    var check_it = wanted.iterator();
-    while (check_it.next()) |entry| {
-        const path = entry.key_ptr.*;
-        if (safe_path.checkEntry(path, .worktree, entry.value_ptr.mode == .symlink, options.rules.protect)) |refused| {
-            if (options.refusal) |out| out.set(refused.reason, path);
-            return error.UnsafePath;
-        }
-    }
+    try refuseUnsafePaths(wanted, options.rules.protect, options.refusal);
     if (options.rules.ignore_case) {
         try refuseCaseCollisions(arena, wanted);
     }
     try refuseCollidingPaths(arena, wanted, options.rules.ignore_case, options.refusal);
+}
+
+/// Refuse a tree whose paths git's `verify_path` refuses, before any of
+/// them reaches the working tree, as unpack-trees refuses one: `refusal`
+/// says which path and why.
+pub fn refuseUnsafePaths(wanted: *const std.StringHashMapUnmanaged(TreeEntry), protect: safe_path.Protect, refusal: ?*Refusal) Error!void {
+    var check_it = wanted.iterator();
+    while (check_it.next()) |entry| {
+        const path = entry.key_ptr.*;
+        var refused: safe_path.Refusal = undefined;
+        _ = safe_path.checked(path, .{ .use = .worktree, .protect = protect, .symlink = entry.value_ptr.mode == .symlink, .refusal = &refused }) catch {
+            if (refusal) |out| out.set(refused.reason, path);
+            return error.UnsafePath;
+        };
+    }
 }
 
 /// An entry standing where another entry of the tree has its directory --
@@ -3005,10 +3013,11 @@ pub fn writePaths(
     defer if (options.rules.attrs) |attrs| attrs.leave();
     for (writes) |w| {
         const symlink = if (w.blob) |b| b.mode == .symlink else false;
-        if (safe_path.checkEntry(w.path, .worktree, symlink, options.rules.protect)) |refused| {
+        var refused: safe_path.Refusal = undefined;
+        _ = safe_path.checked(w.path, .{ .use = .worktree, .protect = options.rules.protect, .symlink = symlink, .refusal = &refused }) catch {
             if (options.refusal) |out| out.set(refused.reason, w.path);
             return error.UnsafePath;
-        }
+        };
     }
 
     var conv: convert.Session = .open(gpa, io, .{
@@ -3166,11 +3175,10 @@ pub const WriteEntryOptions = struct { db: *Odb, conv: *convert.Session, path: [
 pub fn writeEntry(gpa: Allocator, io: Io, wt: Io.Dir, options: WriteEntryOptions) Self.Error!Written {
     const db = options.db;
     const conv = options.conv;
-    const path = options.path;
     const mode = options.mode;
+    const path = (safe_path.checked(options.path, .{ .use = .worktree, .protect = options.rules.protect, .symlink = mode == .symlink }) catch return error.UnsafePath).bytes;
     const oid = options.oid;
     const rules = options.rules;
-    if (safe_path.checkEntry(path, .worktree, mode == .symlink, options.rules.protect) != null) return error.UnsafePath;
     try makeLeadingDirs(io, wt, path, rules.hide_dot_files);
     defer fs.hideIfAsked(io, wt, path, rules.hide_dot_files);
     var written: Written = .{ .stat = .none };
@@ -3215,11 +3223,10 @@ pub fn writeEntry(gpa: Allocator, io: Io, wt: Io.Dir, options: WriteEntryOptions
 pub const WriteBytesOptions = struct { conv: *convert.Session, path: []const u8, mode: object.Mode, bytes: []const u8, rules: Rules };
 pub fn writeBytes(gpa: Allocator, io: Io, wt: Io.Dir, options: WriteBytesOptions) Self.Error!Written {
     const conv = options.conv;
-    const path = options.path;
     const mode = options.mode;
+    const path = (safe_path.checked(options.path, .{ .use = .worktree, .protect = options.rules.protect, .symlink = mode == .symlink }) catch return error.UnsafePath).bytes;
     const bytes = options.bytes;
     const rules = options.rules;
-    if (safe_path.checkEntry(path, .worktree, mode == .symlink, options.rules.protect) != null) return error.UnsafePath;
     try makeLeadingDirs(io, wt, path, rules.hide_dot_files);
     defer fs.hideIfAsked(io, wt, path, rules.hide_dot_files);
     if (try fs.statAt(io, wt, path)) |found| {
@@ -3282,8 +3289,8 @@ const GitlinkWrite = struct { path: []const u8, oid: Oid, rules: Rules, force: b
 /// what it could not is left; then its directory goes once empty. A
 /// populated submodule without a mover keeps its directory, as git keeps
 /// it with a warning.
-pub fn removeGitlink(io: Io, wt: Io.Dir, path: []const u8, rules: Rules) Self.Error!void {
-    if (safe_path.check(path, .worktree, rules.protect) != null) return error.UnsafePath;
+pub fn removeGitlink(io: Io, wt: Io.Dir, raw_path: []const u8, rules: Rules) Self.Error!void {
+    const path = (safe_path.checked(raw_path, .{ .use = .worktree, .protect = rules.protect }) catch return error.UnsafePath).bytes;
     if (!try realLeadingPath(io, wt, path)) return;
     if (rules.submodules) |mover| {
         if (try fs.statAt(io, wt, path) != null) {
@@ -3302,8 +3309,8 @@ pub fn removeGitlink(io: Io, wt: Io.Dir, path: []const u8, rules: Rules) Self.Er
 
 /// Remove one file from the working tree, and every directory above it that
 /// it leaves empty. A file that is already gone is not an error.
-pub fn removeEntry(io: Io, wt: Io.Dir, path: []const u8, protect: safe_path.Protect) Self.Error!void {
-    if (safe_path.check(path, .worktree, protect) != null) return error.UnsafePath;
+pub fn removeEntry(io: Io, wt: Io.Dir, raw_path: []const u8, protect: safe_path.Protect) Self.Error!void {
+    const path = (safe_path.checked(raw_path, .{ .use = .worktree, .protect = protect }) catch return error.UnsafePath).bytes;
     // A file past a symbolic link is not the working tree's: git's
     // `unlink_entry` leaves it.
     if (!try realLeadingPath(io, wt, path)) return;
@@ -3946,10 +3953,11 @@ pub fn applySparse(
             continue;
         }
         if (included and entry.skip_worktree) {
-            if (safe_path.checkEntry(entry.path, .worktree, entry.mode == .symlink, options.rules.protect)) |refused| {
+            var refused: safe_path.Refusal = undefined;
+            _ = safe_path.checked(entry.path, .{ .use = .worktree, .protect = options.rules.protect, .symlink = entry.mode == .symlink, .refusal = &refused }) catch {
                 if (options.refusal) |out| out.set(refused.reason, entry.path);
                 return error.UnsafePath;
-            }
+            };
             if (try fs.statAt(io, wt, entry.path)) |_| {
                 entry.skip_worktree = false;
                 outcome.already_present += 1;

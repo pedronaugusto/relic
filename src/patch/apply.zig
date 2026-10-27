@@ -1736,8 +1736,8 @@ fn checkUnsafePath(p: *const FilePatch, protect: safe_path.Protect) bool {
     if (p.is_delete != .yes) new_name = p.new_name;
     // git's `verify_path(name, mode)`: the mode decides whether the name
     // may be `.gitmodules`.
-    if (old_name) |n| if (safe_path.checkEntry(n, .worktree, patchparse.kind(p.old_mode) == patchparse.mode_symlink, protect) != null) return false;
-    if (new_name) |n| if (safe_path.checkEntry(n, .worktree, patchparse.kind(p.new_mode) == patchparse.mode_symlink, protect) != null) return false;
+    if (old_name) |n| _ = safe_path.checked(n, .{ .use = .worktree, .protect = protect, .symlink = patchparse.kind(p.old_mode) == patchparse.mode_symlink }) catch return false;
+    if (new_name) |n| _ = safe_path.checked(n, .{ .use = .worktree, .protect = protect, .symlink = patchparse.kind(p.new_mode) == patchparse.mode_symlink }) catch return false;
     return true;
 }
 

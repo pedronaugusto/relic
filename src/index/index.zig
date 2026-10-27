@@ -30,6 +30,7 @@ const Io = std.Io;
 const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
 const fs = @import("../fs/fs.zig");
+const names_path = @import("../names.zig").path;
 const varint = @import("../codec.zig").varint;
 const untracked_mod = @import("untracked.zig");
 const odb_mod = @import("../odb/odb.zig");
@@ -665,6 +666,9 @@ pub const ReadOptions = struct {
     git_dir: ?Io.Dir = null,
     kind: Kind,
     timestamp_resolution: ?fs.Resolution = null,
+    /// What `Index.add` refuses, as `core.protectNTFS` and `core.protectHFS`
+    /// say; git's defaults unless given.
+    protect: names_path.Protect = .{},
 };
 
 pub const WriteOptions = struct {
@@ -800,6 +804,10 @@ pub const Index = struct {
     /// directory entries. `sparse_index.expand` clears it and
     /// `sparse_index.collapse` sets it; it decides whether `sdir` is written.
     sparse: bool = false,
+    /// The spellings of `.git` another file system opens as it, which `add`
+    /// refuses beside the plain one: `core.protectNTFS` and
+    /// `core.protectHFS`, git's defaults unless the repository says.
+    protect: names_path.Protect = .{},
     /// The delete mask a split index carried, until it is merged.
     split_delete: ?ewah.Bits = null,
     /// The replace mask a split index carried, until it is merged.
@@ -835,12 +843,16 @@ pub const Index = struct {
         const git_dir = options.git_dir orelse dir;
         const kind = options.kind;
         const timestamp_resolution = options.timestamp_resolution;
-        const bytes = (try fs.readFileAlloc(gpa, io, dir, sub_path, 1 << 31)) orelse
-            return initEmpty(gpa, kind);
+        const bytes = (try fs.readFileAlloc(gpa, io, dir, sub_path, 1 << 31)) orelse {
+            var empty = initEmpty(gpa, kind);
+            empty.protect = options.protect;
+            return empty;
+        };
         defer gpa.free(bytes);
 
         var index = try parse(gpa, kind, bytes);
         errdefer index.deinit();
+        index.protect = options.protect;
 
         if (dir.statFile(io, sub_path, .{})) |stat| {
             const s = fs.Stat.fromIo(stat, .{});
@@ -1327,8 +1339,25 @@ pub const Index = struct {
         return std.mem.startsWith(u8, index.entries.items[at].path, prefix);
     }
 
+    /// Errors from `add` and `addMany`.
+    pub const AddError = Allocator.Error || error{
+        /// A path git's `verify_path` refuses: an empty, `.` or `..`
+        /// component, `.git` in any spelling `protect` names, `.gitmodules`
+        /// for a symbolic link. git's `add_index_entry_with_check` refuses
+        /// it ("invalid path"), so no tree or patch puts it in an index.
+        UnsafePath,
+    };
+
+    /// Whether git's `verify_path` lets `entry`'s path into an index: a
+    /// sparse directory is its directory's name with a `/` after it.
+    pub fn verifyPath(index: *const Index, entry: Entry) AddError!void {
+        const path = if (entry.isSparseDirectory()) entry.path[0 .. entry.path.len - 1] else entry.path;
+        _ = names_path.checked(path, .{ .use = .worktree, .protect = index.protect, .symlink = entry.mode == .symlink }) catch return error.UnsafePath;
+    }
+
     /// Add or replace an entry. `entry.path` is copied.
-    pub fn add(index: *Index, entry: Entry) Allocator.Error!void {
+    pub fn add(index: *Index, entry: Entry) AddError!void {
+        try index.verifyPath(entry);
         const at = index.position(entry.path, entry.stage);
         if (at < index.entries.items.len) {
             const existing = &index.entries.items[at];
@@ -1361,8 +1390,9 @@ pub const Index = struct {
     /// order rather than index order, so it hits that every time. Each
     /// `path` is copied; an entry whose path and stage are already there is
     /// replaced.
-    pub fn addMany(index: *Index, entries: []const Entry) Allocator.Error!void {
+    pub fn addMany(index: *Index, entries: []const Entry) AddError!void {
         if (entries.len == 0) return;
+        for (entries) |entry| try index.verifyPath(entry);
         const gpa = index.gpa;
         // The new entries sorted among themselves, then merged with the
         // sorted list in one pass: a few entries added to a large index
@@ -1461,10 +1491,12 @@ pub const Index = struct {
     /// there, as `add_index_entry` replacing does: `to` at every stage, the
     /// entries under `to/`, and one for a directory above `to`. The cache
     /// tree forgets both paths. `false` when `from` has no stage-0 entry.
-    pub fn rename(index: *Index, from: []const u8, to: []const u8) Allocator.Error!bool {
+    pub fn rename(index: *Index, from: []const u8, to: []const u8) AddError!bool {
         const found = index.find(from) orelse return false;
         var moved = found.*;
         moved.path = to;
+        // Refused before anything moves, so a refusal leaves the index whole.
+        try index.verifyPath(moved);
         moved.shared_at = 0;
         if (index.cache_tree) |*tree| {
             tree.invalidate(from);
@@ -2905,4 +2937,4 @@ test "an entry added many at once replaces the one already there, whatever the c
 }
 
 /// All errors reported by this namespace.
-pub const Error = ReadError || WriteError || CacheTree.RebuildError || CacheTree.RebuildIntoError || Index.WriteToError || Index.ToBytesError || Allocator.Error || Self.ReadError || Self.WriteError;
+pub const Error = ReadError || WriteError || CacheTree.RebuildError || CacheTree.RebuildIntoError || Index.WriteToError || Index.ToBytesError || Allocator.Error || Self.ReadError || Self.WriteError || Index.AddError;

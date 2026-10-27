@@ -2193,7 +2193,7 @@ pub const Repository = struct {
 
     /// How this repository's index file is read.
     fn indexReadOptions(repo: *const Repository) index_mod.ReadOptions {
-        return .{ .git_dir = repo.gitDirectory().get(), .kind = repo.objectFormat(), .timestamp_resolution = repo.data().odb.timestamp_resolution };
+        return .{ .git_dir = repo.gitDirectory().get(), .kind = repo.objectFormat(), .timestamp_resolution = repo.data().odb.timestamp_resolution, .protect = repo.settings().protect };
     }
 
     /// The stores a revision expression is read against (`rev_parse`).
@@ -2250,7 +2250,7 @@ pub const Repository = struct {
         dir: Io.Dir,
         sub_path: []const u8,
     ) index_mod.ReadError!index_mod.Index {
-        var index = try index_mod.Index.read(repo.data().gpa, io, dir, sub_path, .{ .git_dir = repo.gitDirectory().get(), .kind = repo.objectFormat() });
+        var index = try index_mod.Index.read(repo.data().gpa, io, dir, sub_path, .{ .git_dir = repo.gitDirectory().get(), .kind = repo.objectFormat(), .protect = repo.settings().protect });
         errdefer index.deinit();
         try repo.tweakUntrackedCache(&index);
         return index;

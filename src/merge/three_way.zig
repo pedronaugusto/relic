@@ -22,6 +22,7 @@ const hash = @import("../hash/hash.zig");
 const index_mod = @import("../index/index.zig");
 const merge = @import("merge.zig");
 const worktree = @import("../checkout/checkout.zig");
+const names_path = @import("../names.zig").path;
 const fs = @import("../fs/fs.zig");
 const repo_mod = @import("../repo/repo.zig");
 const ort = @import("ort.zig");
@@ -444,6 +445,8 @@ fn carry(
     std.mem.sort([]const u8, changes.items, {}, lessThanPath);
     if (rules.submodules != null) worktree.gitmodulesFirst(changes.items);
 
+    try refuseUnsafeChanges(&desired, rules.protect, options.blocked);
+
     // Nothing is written until every change has been checked, by the same
     // rules a checkout keeps.
     try verifyCarry(gpa, io, repo, .{ .index = index, .updates = &updates }, rules, options);
@@ -527,6 +530,19 @@ fn carry(
 /// Each path the merge changes, with what the merged tree has there:
 /// `null` where it has nothing.
 const Desired = std.array_hash_map.String(?TreeEntry);
+
+/// A path git's `verify_path` refuses is refused before the working tree is
+/// looked at for it, as unpack-trees refuses one: the merged tree is the
+/// trees' paths, and a tree is a file format.
+fn refuseUnsafeChanges(desired: *const Desired, protect: names_path.Protect, blocked: ?*Blocked) Error!void {
+    for (desired.keys(), desired.values()) |path, want| {
+        const entry = want orelse continue;
+        _ = names_path.checked(path, .{ .use = .worktree, .protect = protect, .symlink = entry.mode == .symlink }) catch {
+            if (blocked) |b| b.set(path);
+            return error.UnsafePath;
+        };
+    }
+}
 
 /// `worktree.verifyUpdates` over what a merge carries into the working
 /// tree, the first path refused into `options.blocked`.

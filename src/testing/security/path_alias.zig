@@ -9,6 +9,13 @@ const builtin = @import("builtin");
 
 const hostile = @import("hostile.zig");
 const safe_path = @import("../../names.zig").path;
+
+/// Why `names.path` refuses `path`, or `null` where it lets it through.
+fn refusedFor(path: []const u8, use: safe_path.Use, symlink: bool, protect: safe_path.Protect) ?safe_path.Reason {
+    var refused: safe_path.Refusal = undefined;
+    _ = safe_path.checked(path, .{ .use = use, .protect = protect, .symlink = symlink, .refusal = &refused }) catch return refused.reason;
+    return null;
+}
 const fsck = @import("../../object/fsck.zig");
 const hash = @import("../../hash/hash.zig");
 
@@ -105,7 +112,7 @@ test "CVE-2018-11233, t0060-path-utils 'match .gitmodules': the NTFS and HFS+ ma
         for (0..name.len + 1) |len| {
             _ = matches(name[0..len]);
             _ = safe_path.isNtfsDotGit(name[0..len]);
-            _ = safe_path.checkEntry(name[0..len], .worktree, true, .{ .ntfs = true, .hfs = true });
+            _ = refusedFor(name[0..len], .worktree, true, .{ .ntfs = true, .hfs = true });
         }
     }
 }
@@ -120,8 +127,8 @@ test "CVE-2019-1351, t0060-path-utils (MINGW): a drive named by any character su
     for ([_][]const u8{ "1:/escape", "\u{e4}:x", "C:x" }) |path| {
         for ([_]safe_path.Use{ .stored, .worktree }) |use| {
             if (windows) {
-                try std.testing.expectEqual(safe_path.Reason.absolute, safe_path.check(path, use, .{ .ntfs = true, .hfs = true }).?.reason);
-            } else if (use == .stored) try std.testing.expectEqual(null, safe_path.check(path, use, .{ .ntfs = true, .hfs = true }));
+                try std.testing.expectEqual(safe_path.Reason.absolute, refusedFor(path, use, false, .{ .ntfs = true, .hfs = true }).?);
+            } else if (use == .stored) try std.testing.expectEqual(null, refusedFor(path, use, false, .{ .ntfs = true, .hfs = true }));
         }
     }
 }

@@ -37,6 +37,7 @@ pub const StatusOptions = @import("checkout/checkout.zig").StatusOptions;
 pub const status = @import("checkout/checkout.zig").status;
 pub const TreeEntry = @import("checkout/checkout.zig").TreeEntry;
 pub const flatten = @import("checkout/checkout.zig").flatten;
+pub const refuseUnsafePaths = @import("checkout/checkout.zig").refuseUnsafePaths;
 pub const ResetOutcome = @import("checkout/checkout.zig").ResetOutcome;
 pub const resetIndex = @import("checkout/checkout.zig").resetIndex;
 pub const CheckoutOutcome = @import("checkout/checkout.zig").CheckoutOutcome;

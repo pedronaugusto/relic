@@ -1818,7 +1818,8 @@ fn checkDepth(path: []const u8) Error!void {
 /// `.git` a protected file system opens as it, nor of `.gitmodules` for a
 /// symlink.
 fn validPath(path: []const u8, mode: u32, protect: safe_path.Protect) bool {
-    return safe_path.checkEntry(path, .stored, mode == 0o120000, protect) == null;
+    _ = safe_path.checked(path, .{ .use = .stored, .protect = protect, .symlink = mode == 0o120000 }) catch return false;
+    return true;
 }
 
 fn validSignatureFormat(text: []const u8) bool {

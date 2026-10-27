@@ -13,7 +13,6 @@
 //! Neither moves `HEAD`.
 
 const std = @import("std");
-const path_mod = @import("../names.zig").path;
 const git_mod = @import("../testing/git.zig");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
@@ -85,6 +84,9 @@ pub fn toTree(
     rules.attrs = &attrs;
 
     var wanted = try worktree.flatten(arena, io, db, tree);
+    // Every path of the tree, before any reaches the working tree: one git
+    // refuses would otherwise be deleted below or written through.
+    try worktree.refuseUnsafePaths(&wanted, rules.protect, null);
 
     var conflicted: std.StringHashMapUnmanaged(void) = .empty;
     var current: std.array_hash_map.String(?index_mod.Entry) = .empty;
@@ -161,13 +163,14 @@ pub fn toTree(
         const want = wanted.get(path).?;
         const old = current.get(path) orelse null;
         const was_gitlink = old != null and old.?.mode == .gitlink;
-        if (try fs.statAt(io, wt, path)) |found| {
+        // Past a symbolic link nothing is removed; `writeEntry` refuses the
+        // write.
+        const in_tree = try worktree.realLeadingPath(io, wt, path);
+        if (if (in_tree) try fs.statAt(io, wt, path) else null) |found| {
             // A submodule's checkout stays, for the mover to move or, with
             // none, as git leaves it.
             if (found.kind == .directory and !(want.mode == .gitlink and was_gitlink)) try wt.deleteTree(io, path);
         }
-        // Validate before `enter` consults a directory in the working tree.
-        if (path_mod.checkEntry(path, .worktree, want.mode == .symlink, rules.protect) != null) return error.UnsafePath;
         try write_attrs.enter(io, wt, path);
         const written = try worktree.writeEntry(gpa, io, wt, .{ .db = db, .conv = &conv, .path = path, .mode = want.mode, .oid = want.oid, .rules = rules });
         try stats.put(arena, path, written.stat);

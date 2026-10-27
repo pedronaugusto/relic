@@ -41,7 +41,7 @@ pub const Error = error{
     NotATree,
     /// Trees nested deeper than a walk will follow.
     TreeTooDeep,
-} || Allocator.Error || odb_mod.Error || index_mod.ReadError ||
+} || Allocator.Error || odb_mod.Error || index_mod.ReadError || index_mod.Index.AddError ||
     object.TreeParseError || object.Tree.Builder.AddError;
 
 /// How deep an expansion follows trees.
@@ -197,6 +197,8 @@ fn expandSelected(
         try expandTree(gpa, io, db, cone, entry.oid, &path_buf, &out, 0);
     }
 
+    // A tree's paths go in as `Index.add` lets them in.
+    for (out.items) |e| try index.verifyPath(e);
     // The new entries take the old ones' place; the old paths go.
     for (index.entries.items) |e| gpa.free(e.path);
     index.entries.clearRetainingCapacity();

@@ -355,6 +355,7 @@ test {
     _ = @import("testing/security/submodule_name.zig");
     _ = @import("testing/security/symlink_traversal.zig");
     _ = @import("testing/security/terminal_escape.zig");
+    _ = @import("testing/security/tree_paths.zig");
 }
 
 test {}

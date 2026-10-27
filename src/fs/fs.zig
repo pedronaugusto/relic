@@ -414,10 +414,20 @@ pub const Stat = struct {
         return fromParts(
             s.mtime,
             s.ctime,
-            @bitCast(@as(i64, @intCast(s.inode))),
+            inodeBits(s.inode),
             s.size,
             extra,
         );
+    }
+
+    /// The inode as 64 bits: Windows' signed file id by its bits, a POSIX
+    /// one as it is. An unsigned inode past 2^63, which some file systems
+    /// hand out, does not fit a signed one.
+    fn inodeBits(inode: Io.File.INode) u64 {
+        return switch (@typeInfo(Io.File.INode).int.signedness) {
+            .signed => @bitCast(@as(i64, inode)),
+            .unsigned => inode,
+        };
     }
 
     /// Take every field from one platform stat.

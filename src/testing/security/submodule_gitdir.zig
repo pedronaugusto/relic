@@ -12,6 +12,13 @@ const builtin = @import("builtin");
 const submodule = @import("../../submodule/submodule.zig");
 const repo_mod = @import("../../repo/repo.zig");
 const safe_path = @import("../../names.zig").path;
+
+/// Why `names.path` refuses `path`, or `null` where it lets it through.
+fn refusedFor(path: []const u8, use: safe_path.Use, symlink: bool, protect: safe_path.Protect) ?safe_path.Reason {
+    var refused: safe_path.Refusal = undefined;
+    _ = safe_path.checked(path, .{ .use = use, .protect = protect, .symlink = symlink, .refusal = &refused }) catch return refused.reason;
+    return null;
+}
 const hostile = @import("hostile.zig");
 const testgit = @import("../git.zig");
 
@@ -21,8 +28,8 @@ test "CVE-2019-1349, t7450-bad-git-dotfiles 'prevent git~1 squatting on Windows'
     // On Windows the squatting paths themselves are refused: `d\a` is a
     // path and `d.` is `d`.
     if (builtin.target.os.tag == .windows) {
-        try std.testing.expectEqual(safe_path.Reason.separator_inside_component, safe_path.check("d\\a", .worktree, .{}).?.reason);
-        try std.testing.expectEqual(safe_path.Reason.trailing_dot_or_space, safe_path.check("d./a/x", .worktree, .{}).?.reason);
+        try std.testing.expectEqual(safe_path.Reason.separator_inside_component, refusedFor("d\\a", .worktree, false, .{}).?);
+        try std.testing.expectEqual(safe_path.Reason.trailing_dot_or_space, refusedFor("d./a/x", .worktree, false, .{}).?);
     }
     // Everywhere: files already in the submodule's path, as the aliased
     // checkout leaves them, keep the clone out.

@@ -18,6 +18,7 @@
 
 const std = @import("std");
 const shakedown = @import("shakedown");
+const aegis = @import("aegis");
 const builtin = @import("builtin");
 
 /// Why a path was refused. Each is reported by name so a caller can say which
@@ -225,7 +226,7 @@ pub const Refusal = struct {
 
 /// Whether a whole `/`-separated path is allowed, and which component
 /// decided when it is not.
-pub fn check(path: []const u8, use: Use, protect: Protect) ?Refusal {
+fn check(path: []const u8, use: Use, protect: Protect) ?Refusal {
     if (path.len == 0) return .{ .reason = .empty, .component = path };
     // A backslash and `C:\x` or `C:x` name something outside the working
     // tree where they are separators.
@@ -247,7 +248,7 @@ pub fn check(path: []const u8, use: Use, protect: Protect) ?Refusal {
 /// Whether a whole path is allowed for an entry that is, or is not, a
 /// symbolic link: `check`, and for a link git's `verify_path` rule that no
 /// component spells `.gitmodules`.
-pub fn checkEntry(path: []const u8, use: Use, symlink: bool, protect: Protect) ?Refusal {
+fn checkEntry(path: []const u8, use: Use, symlink: bool, protect: Protect) ?Refusal {
     if (check(path, use, protect)) |refused| return refused;
     if (!symlink) return null;
     var it = std.mem.splitScalar(u8, path, '/');
@@ -261,14 +262,42 @@ pub fn checkEntry(path: []const u8, use: Use, symlink: bool, protect: Protect) ?
     return null;
 }
 
-/// Whether a path may be written into a working tree.
-pub fn isSafeWorktreePath(path: []const u8, protect: Protect) bool {
-    return check(path, .worktree, protect) == null;
+/// A path from a tree, an index, a patch or a peer, before `parse` has let
+/// it through.
+pub const Untrusted = aegis.input.Untrusted([]const u8);
+
+/// A path `parse` let through for its use. Only `parse` makes one, so a
+/// function that takes one is handed nothing its rules refuse.
+pub const Checked = struct {
+    bytes: []const u8,
+};
+
+/// What `parse` holds a path to.
+pub const Rules = struct {
+    use: Use,
+    protect: Protect,
+    /// The entry is a symbolic link, whose path git's `verify_path` also
+    /// refuses with `.gitmodules` in any spelling.
+    symlink: bool = false,
+    /// Where a refusal says which rule and which component decided.
+    refusal: ?*Refusal = null,
+};
+
+pub const ParseError = error{UnsafePath};
+
+/// `raw` held to git's `verify_path` for `rules.use`: the parser an
+/// `Untrusted` path goes through (`Untrusted.init(raw).parse(rules, parse)`).
+pub fn parse(rules: Rules, raw: []const u8) ParseError!Checked {
+    if (checkEntry(raw, rules.use, rules.symlink, rules.protect)) |refused| {
+        if (rules.refusal) |out| out.* = refused;
+        return error.UnsafePath;
+    }
+    return .{ .bytes = raw };
 }
 
-/// Whether a path may be stored in a tree or an index.
-pub fn isSafeStoredPath(path: []const u8, protect: Protect) bool {
-    return check(path, .stored, protect) == null;
+/// `raw` through `parse`, as an `Untrusted` path.
+pub fn checked(raw: []const u8, rules: Rules) ParseError!Checked {
+    return Untrusted.init(raw).parse(rules, parse);
 }
 
 /// The byte at `i`, or NUL past the end, as git's NUL-terminated buffers

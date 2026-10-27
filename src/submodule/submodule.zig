@@ -500,9 +500,9 @@ fn connect(
 /// symbolic link for any component, which is git's
 /// `validate_submodule_path`.
 fn validatePath(io: Io, wt: Io.Dir, path: []const u8, display: []const u8, refusal: ?*Refusal, protect: safe_path.Protect) Error!void {
-    if (safe_path.check(path, .worktree, protect)) |refused| {
+    var refused: safe_path.Refusal = undefined;
+    _ = safe_path.checked(path, .{ .use = .worktree, .protect = protect, .refusal = &refused }) catch
         return refuse(refusal, display, @tagName(refused.reason), error.UnsafePath);
-    }
     var end: usize = 0;
     while (end <= path.len) : (end += 1) {
         if (end < path.len and path[end] != '/') continue;

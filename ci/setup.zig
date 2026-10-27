@@ -204,7 +204,11 @@ pub fn main(init: std.process.Init) !void {
     var arena = std.heap.ArenaAllocator.init(init.gpa);
     defer arena.deinit();
     const a = arena.allocator();
-    if (!std.mem.eql(u8, init.environ_map.get("GITHUB_ACTIONS") orelse "", "true")) return error.HostedSetupOnly;
+    // A gate run here, outside GitHub Actions, installs nothing: the
+    // machine's own git and git-lfs are what its tests run with, and the
+    // tests stop at a git other than the release they are held to
+    // (`relic-held-git`).
+    if (!std.mem.eql(u8, init.environ_map.get("GITHUB_ACTIONS") orelse "", "true")) return;
     const c: Context = .{ .a = a, .io = init.io, .env = init.environ_map };
     const args = try init.minimal.args.toSlice(a);
     const root = try std.Io.Dir.path.join(a, &.{ init.environ_map.get("RUNNER_TEMP") orelse return error.HostedSetupOnly, "preflight-tools" });

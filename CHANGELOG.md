@@ -70,6 +70,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A whole file is read through aegis's `own.readFile`, which reads at offsets and keeps a cancel that lands on the file's length (std's `Dir.readFileAlloc` guessed the length there and lost it): every error set that held `Io.Dir.ReadFileAllocError` holds `aegis.own.ReadFileError`, `credential.store.Error` among them.
 - `config.Entry.file_index` is a `config.FileId`.
 
+- `names.path` parses a path, as aegis's `input.Untrusted` names a boundary: `names.path.checked(raw, rules)`, which is `names.path.Untrusted.init(raw).parse(rules, names.path.parse)`, returns a `names.path.Checked` or `error.UnsafePath`. Its `Rules` name the use, the protections, whether the entry is a symbolic link and where a refusal says which rule decided. `check`, `checkEntry`, `isSafeWorktreePath` and `isSafeStoredPath` are gone; the checkout, submodule paths, fast-import, apply and rerere take their paths through it.
+- `index.Index.rename` returns `Index.AddError` and refuses a destination git's `verify_path` refuses before anything moves, as `add` does since 0.29.2.
+
 ### Added
 
 - relic's upload-pack serves packfile URIs and `sideband-all` as git 2.56's does: `uploadpack.allowSidebandAll` (`upload_pack.Options.allow_sideband_all`) offers `sideband-all`, and a fetch that asks for it is answered with every line on the side band (`side_band.Lines`, git's `packet_writer`); any `uploadpack.blobPackfileUri` with a value offers `packfile-uris`, and an object a value names at a URI of a protocol the client asked for is left out of the pack and named in the response's `packfile-uris` section, unless a pack holds it, as git's pack-objects leaves out loose objects alone; a value not of git's form ends the pack in git's words; `uploadpack.packObjectsHook` is handed `--uri-protocol` and what it prints before the pack is relayed.
@@ -252,6 +255,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A file whose inode number is past 2^63, which some file systems give, no longer panics in `fs.Stat.fromIo`: the unsigned inode was cast to a signed one. Windows' signed file id is taken by its bits, a POSIX inode as it is.
 - A credential-cache store with no daemon and no starter starts git's `credential-cache--daemon` with git's exec path ahead of `PATH`, as git's `spawn_daemon` does (`setup_path`, `git_cmd`), where it ran the `git` on the caller's `PATH`: on Windows that is Git for Windows' wrapper, which waits on the git it starts and so held the daemon's output open, and the store failed with nothing cached.
 - A tracked file past `core.bigFileThreshold` that nothing converts is named as it is read where git's `index_fd` streams it, never held: status's and a diff's comparison of a file whose stat no longer vouches for it (`worktree.Tracked`), `worktree.differsFromIndex` (reset, mv, apply, submodules), sparse checkout's racy check before it removes a file, and stash, which writes such a file into a pack as it reads it, as `git add` does (design §10). Each read the file whole, failing past 2 GiB, and `differsFromIndex` took the failure for a change. One decision for all of them and add: `worktree.streamsIn`, by `worktree.Rules.big_file_bytes`, which `Repository.worktreeRules` fills from the object database's settings; `worktree.hashFile` and `worktree.writeFileInto` read the file in pieces, its length the opened file's.
 - A fixup or squash that fails and is skipped finishes its chain as git 2.56's sequencer does (`commit_staged_changes`): the stop is one to amend (`error_failed_squash`), the skipped one leaves `current-fixups`, and where it was the chain's last and others came before it `HEAD` is committed again with the chain's message cleaned, in the editor where the chain had a `squash` or a `fixup -c`; where a fixup follows, the squash message starts again from `HEAD`'s. `current-fixups` records a `fixup -c` as git 2.56 writes it.
@@ -301,8 +305,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `stash.apply`, `pop` and `applyEntry` write `AUTO_MERGE` and drop the index's resolve-undo record, as git's stash apply leaves them (merge-ort's `merge_switch_to_result`).
 - receive-pack stages the deletion of a ref that is not there, as git does, so the ref transaction and its hook see it.
 - receive-pack says git's explanations when `receive.denyCurrentBranch` or `receive.denyDeleteCurrent` is unset (the latter's before its refusal, as git orders them), and an object `receive.fsckObjects` refuses as git's unpacker says it (`object <oid>: <msg-id>: <text>`, `fsck error in packed object`).
-- receive-pack says git's explanations when `receive.denyCurrentBranch` or `receive.denyDeleteCurrent` is unset, and an object `receive.fsckObjects` refuses as git's unpacker says it (`object <oid>: <msg-id>: <text>`, `fsck error in packed object`).
 - `Odb.repack` took a replaced pack's `.pack` away before its `.idx`, so a reader could find an index whose pack was gone; it now removes in git's order, through `Odb.removePacks`' path, and reports a removal that fails.
+
+## [0.29.2] - 2026-10-25
+
+### Security
+
+- A tree whose entry names git's `verify_path` refuses no longer reaches the working tree or the index. A tree may name `..`, an absolute path, `.git` in any spelling a protected file system opens as it, or a path through a symbolic link: git reads such a tree, and a fetch takes one unless `transfer.fsckObjects` is on. In relic 0.29.1 and before, `commit.reset.toTree` (`reset --hard`, `--merge`) deleted the directory such a path named before refusing it, so a fetched history could have `reset --hard` delete the repository's `.git`, a directory outside the working tree, or one reached through a link. A merge could reach the same through its working-tree write, and an index took such a path, where `rm` and the LFS pull would act on it later. Now, as git refuses them:
+  - every path of the tree is checked before any reaches the working tree, in `reset.toTree` and in the working-tree merge (`worktree.refuseUnsafePaths`, the check a checkout already made);
+  - nothing is deleted through a symbolic link;
+  - `index.Index.add` and `addMany`, and a sparse directory's expansion, refuse a path git's `add_index_entry` refuses, `error.UnsafePath`, by `Index.protect` (`core.protectNTFS` and `core.protectHFS`, which `Repository.openIndex` reads; `ReadOptions.protect`).
+
+  `Index.add`'s error set is `Index.AddError` now, `Allocator.Error` with `UnsafePath`; a caller that named `Allocator.Error` names `AddError`. `testing/security/tree_paths.zig`: `reset --hard`, a merge and an index reset to a tree holding `../x`, `a/../../x`, an absolute name, `.git`, `.GIT`, `.g\u{200c}it`, `git~1` and `.git/hooks/…` each refuse with nothing deleted, and nothing is deleted through a linked directory.
 
 ## [0.29.1] - 2026-10-21
 
