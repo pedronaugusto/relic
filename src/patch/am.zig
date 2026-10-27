@@ -379,7 +379,7 @@ fn applyOptionsFrom(a: Allocator, words: []const []const u8) Error!apply_mod.Opt
         } else if (std.mem.startsWith(u8, w, "-C")) {
             // `OPT_UNSIGNED` into an `unsigned int`, as `git apply` reads
             // the `-C<n>` `git am` passes it.
-            o.min_context = @intCast(config_mod.parseNonNegative(w[2..], std.math.maxInt(u32)) catch return error.UnsupportedApplyOption);
+            o.min_context = config_mod.parseInteger(c_uint, w[2..]) catch return error.UnsupportedApplyOption;
         } else if (std.mem.startsWith(u8, w, "-p")) {
             // `strtol_i` of the rest, as `git apply` reads `-p<n>`, and not
             // negative.

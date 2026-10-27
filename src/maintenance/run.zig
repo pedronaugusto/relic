@@ -318,7 +318,7 @@ pub fn autoMaintenance(repo: *Repository) config_mod.ValueError!?Auto {
     const enabled = if (config.has("maintenance.auto"))
         try config.getBool("maintenance.auto", true)
     else
-        try config.getInt("gc.auto", 6700) > 0;
+        try config.getInt(c_int, "gc.auto", 6700) > 0;
     if (!enabled) return null;
     const detach = if (config.has("maintenance.autodetach"))
         try config.getBool("maintenance.autodetach", true)
@@ -339,11 +339,11 @@ fn hasPhase(task: Task, phase: Phase) bool {
 }
 
 /// A `maintenance.<task>.<key>` integer.
-fn taskInt(repo: *Repository, task: Task, key: []const u8, default: i64) config_mod.ValueError!i64 {
+fn taskInt(repo: *Repository, task: Task, key: []const u8, default: c_int) config_mod.ValueError!c_int {
     var name_buf: [96]u8 = undefined;
     // unreachable: the longest task name and key fit
     const name = std.mem.print(&name_buf, "maintenance.{s}.{s}", .{ task.name(), key }) catch unreachable;
-    return repo.configuration().getInt(name, default);
+    return repo.configuration().getInt(c_int, name, default);
 }
 
 /// Each task's `auto_condition`; the prefetch has none, so never runs

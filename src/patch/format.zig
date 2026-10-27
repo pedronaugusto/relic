@@ -593,9 +593,8 @@ const Settings = struct {
             } else if (std.mem.eql(u8, name, "subjectprefix")) {
                 st.subject_prefix = v orelse return error.InvalidFormatSetting;
             } else if (std.mem.eql(u8, name, "filenamemaxlength")) {
-                const n = config_mod.parseInteger(v orelse return error.InvalidFormatSetting) catch return error.InvalidFormatSetting;
-                _ = std.math.cast(i32, n) orelse return error.InvalidFormatSetting;
-                st.filename_max_length = if (n > 0) @intCast(n) else 0;
+                const n = config_mod.parseInteger(c_int, v orelse return error.InvalidFormatSetting) catch return error.InvalidFormatSetting;
+                st.filename_max_length = std.math.cast(@TypeOf(st.filename_max_length), @max(n, 0)) orelse return error.InvalidFormatSetting;
             } else if (std.mem.eql(u8, name, "encodeemailheaders")) {
                 st.encode_email_headers = try boolSetting(v);
             }

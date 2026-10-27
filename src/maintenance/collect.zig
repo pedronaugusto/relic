@@ -166,17 +166,17 @@ const Settings = struct {
         return .{
             .pack_refs = pack_refs,
             .prune_reflogs = !(try isNever(config, "gc.reflogexpire", clock) and try isNever(config, "gc.reflogexpireunreachable", clock)),
-            .aggressive_window = try config.getInt("gc.aggressivewindow", 250),
-            .aggressive_depth = try config.getInt("gc.aggressivedepth", 50),
-            .auto_threshold = try config.getInt("gc.auto", 6700),
-            .auto_pack_limit = try config.getInt("gc.autopacklimit", 50),
+            .aggressive_window = try config.getInt(c_int, "gc.aggressivewindow", 250),
+            .aggressive_depth = try config.getInt(c_int, "gc.aggressivedepth", 50),
+            .auto_threshold = try config.getInt(c_int, "gc.auto", 6700),
+            .auto_pack_limit = try config.getInt(c_int, "gc.autopacklimit", 50),
             .detach_auto = try config.getBool("gc.autodetach", true),
             .cruft = try config.getBool("gc.cruftpacks", true),
-            .max_cruft = @intCast(@max(try config.getInt("gc.maxcruftsize", 0), 0)),
+            .max_cruft = @intCast(@max(try config.getInt(c_ulong, "gc.maxcruftsize", 0), 0)),
             .prune = try parsePrune(config.get("gc.pruneexpire") orelse "2.weeks.ago", clock),
             .worktree_expire = try parseDate(config.get("gc.worktreepruneexpire") orelse "3.months.ago", clock),
             .log_expire = try parseDate(config.get("gc.logexpiry") orelse "1.day.ago", clock),
-            .big_pack = @intCast(@max(try config.getInt("gc.bigpackthreshold", 0), 0)),
+            .big_pack = @intCast(@max(try config.getInt(c_ulong, "gc.bigpackthreshold", 0), 0)),
         };
     }
 };

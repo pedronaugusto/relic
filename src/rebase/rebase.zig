@@ -935,7 +935,7 @@ fn isHex(text: []const u8) bool {
 /// by `merge -C <commit>` with the labels of the tips it merges.
 fn scriptWithMerges(r: *Run, w: *Walker, s: MergesScript) Error![]todo.Item {
     const a = r.arena;
-    var labels: Labels = .{ .r = r, .max_len = try r.repo.configuration().getInt("rebase.maxlabellength", 255 - ".lock".len - 16) };
+    var labels: Labels = .{ .r = r, .max_len = try r.repo.configuration().getInt(c_int, "rebase.maxlabellength", 255 - ".lock".len - 16) };
     // The merge base, where the walk's range begins, is `onto`.
     {
         const bases = try rev_walk.mergeBases(r.gpa, r.io, r.repo.objectDatabase(), .{ .a = s.upstream, .b = s.orig_head }, .{});

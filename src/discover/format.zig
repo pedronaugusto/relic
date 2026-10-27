@@ -104,7 +104,7 @@ const known_extensions = [_][]const u8{
 /// parsed: the configuration shared by its worktrees, none of whose
 /// settings has a say.
 pub fn decide(config: *const config_mod.Config, diagnostic: ?*Diagnostic) Self.Error!Format {
-    const version = try config.getInt("core.repositoryformatversion", 0);
+    const version = try config.getInt(c_int, "core.repositoryformatversion", 0);
     if (version < 0 or version > 1) {
         try diagnostic_mod.refuse(diagnostic, "core.repositoryFormatVersion");
         return error.UnsupportedRepositoryVersion;

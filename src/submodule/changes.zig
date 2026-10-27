@@ -403,15 +403,16 @@ fn containsName(names: []const []const u8, name: []const u8) bool {
 /// `.gitmodules`, else `fetch.parallel`; 0 is one per processor.
 pub fn fetchJobs(repo: *Repository, modules: *const Gitmodules, explicit: ?u32) Self.Error!u32 {
     const config = repo.configuration();
-    const jobs: i64 = if (explicit) |j| j else if (config.find("submodule.fetchjobs") != null)
-        config.getInt("submodule.fetchjobs", 1) catch return error.InvalidFetchJobs
+    // git's `parse_submodule_fetchjobs` and `fetch.parallel`: an `int`,
+    // refused below zero.
+    const jobs: c_int = if (explicit) |j| std.math.cast(c_int, j) orelse std.math.maxInt(c_int) else if (config.find("submodule.fetchjobs") != null)
+        config.getInt(c_int, "submodule.fetchjobs", 1) catch return error.InvalidFetchJobs
     else if (modules.fetch_jobs) |text|
-        config_mod.parseInteger(text) catch return error.InvalidFetchJobs
+        config_mod.parseInteger(c_int, text) catch return error.InvalidFetchJobs
     else
-        config.getInt("fetch.parallel", 1) catch return error.InvalidFetchJobs;
-    if (jobs < 0) return error.InvalidFetchJobs;
-    if (jobs == 0) return @intCast(std.Thread.getCpuCount() catch 1);
-    return @intCast(@min(jobs, std.math.maxInt(u32)));
+        config.getInt(c_int, "fetch.parallel", 1) catch return error.InvalidFetchJobs;
+    if (jobs == 0) return std.math.cast(u32, std.Thread.getCpuCount() catch 1) orelse std.math.maxInt(u32);
+    return std.math.cast(u32, jobs) orelse error.InvalidFetchJobs;
 }
 
 //=========================================================================

@@ -881,7 +881,7 @@ const Machinery = struct {
             .blocked = options.blocked,
             .renormalize = if (settings.renormalize) &m.normalizer else null,
             .attributes_from_merge = if (setup.wt) |wt| (if (wt.access(io, ".gitattributes", .{})) |_| false else |_| true) else true,
-            .inner_messages = options.inner_messages or (repo.configuration().getInt("merge.verbosity", 2) catch 2) >= 5,
+            .inner_messages = options.inner_messages or (repo.configuration().getInt(c_int, "merge.verbosity", 2) catch 2) >= 5,
         };
     }
 
@@ -958,8 +958,7 @@ const MergeConfig = struct {
 
     /// git's `git_config_int` through `repo_config_get_int`.
     fn mergeInt(value: ?[]const u8) Error!i64 {
-        const n = config_mod.parseInteger(value orelse return error.InvalidMergeSetting) catch return error.InvalidMergeSetting;
-        return std.math.cast(i32, n) orelse error.InvalidMergeSetting;
+        return config_mod.parseInteger(c_int, value orelse return error.InvalidMergeSetting) catch error.InvalidMergeSetting;
     }
 };
 

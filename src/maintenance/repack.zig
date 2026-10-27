@@ -330,9 +330,9 @@ pub fn repack(gpa: Allocator, io: Io, repo: *Repository, asked: Options) Self.Er
     // `--cruft`: `write_cruft_pack`.
     if (mode == .cruft) {
         var cruft_options = pack_options;
-        if (config.has("repack.cruftwindow")) cruft_options.window = std.math.cast(u32, @max(try config.getInt("repack.cruftwindow", 0), 0)) orelse std.math.maxInt(u32);
-        if (config.has("repack.cruftdepth")) cruft_options.depth = std.math.cast(u32, @max(try config.getInt("repack.cruftdepth", 0), 0)) orelse std.math.maxInt(u32);
-        if (config.has("repack.cruftthreads")) cruft_options.threads = std.math.cast(u16, @max(try config.getInt("repack.cruftthreads", 0), 0)) orelse std.math.maxInt(u16);
+        if (config.has("repack.cruftwindow")) cruft_options.window = std.math.cast(u32, @max(try config.getInt(c_int, "repack.cruftwindow", 0), 0)) orelse std.math.maxInt(u32);
+        if (config.has("repack.cruftdepth")) cruft_options.depth = std.math.cast(u32, @max(try config.getInt(c_int, "repack.cruftdepth", 0), 0)) orelse std.math.maxInt(u32);
+        if (config.has("repack.cruftthreads")) cruft_options.threads = std.math.cast(u16, @max(try config.getInt(c_int, "repack.cruftthreads", 0), 0)) orelse std.math.maxInt(u16);
         const limit: ?u64 = if (options.max_cruft_bytes) |l| @max(l, 1 << 20) else run.max_pack;
         run.report.cruft_written = try writeCruft(gpa, arena, io, repo, &run.existing, run.fresh.items, &run.retained, options, cruft_options, limit, pack_dir);
         try db.refresh(io);
@@ -760,8 +760,8 @@ fn lastBool(config: *const config_mod.Config, names: []const []const u8) config_
 
 /// A size setting with git's `k`, `m` and `g`, or `null` when unset or 0.
 fn sizeSetting(config: *const config_mod.Config, name: []const u8) config_mod.ValueError!?u64 {
-    const value = try config.getInt(name, 0);
-    return if (value <= 0) null else @intCast(value);
+    const value = try config.getInt(c_ulong, name, 0);
+    return if (value == 0) null else value;
 }
 
 fn baseName(arena: Allocator, name: Oid) Allocator.Error![]const u8 {

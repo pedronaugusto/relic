@@ -998,9 +998,8 @@ pub fn configured(config: *const config_mod.Config, options: Options) ConfigErro
 /// git's `git_config_int` refusing a negative, as `diff.context` and
 /// `diff.interHunkContext` are read.
 fn configCount(value: ?[]const u8) ConfigError!u32 {
-    const n = config_mod.parseInteger(value orelse return error.InvalidDiffSetting) catch return error.InvalidDiffSetting;
-    const int = std.math.cast(i32, n) orelse return error.InvalidDiffSetting;
-    return std.math.cast(u32, int) orelse error.InvalidDiffSetting;
+    const n = config_mod.parseInteger(c_int, value orelse return error.InvalidDiffSetting) catch return error.InvalidDiffSetting;
+    return std.math.cast(u32, n) orelse error.InvalidDiffSetting;
 }
 
 /// `diff.relative`, every value as git's callback reads it: whether a
@@ -1078,8 +1077,7 @@ pub fn parseRenameSetting(value: ?[]const u8) ConfigError!RenameDetection {
 /// A rename limit as git's `git_config_int` reads it: an `int`, unit
 /// suffixes included, and a bare name refused.
 pub fn parseRenameLimit(value: ?[]const u8) ConfigError!i32 {
-    const n = config_mod.parseInteger(value orelse return error.InvalidDiffSetting) catch return error.InvalidDiffSetting;
-    return std.math.cast(i32, n) orelse error.InvalidDiffSetting;
+    return config_mod.parseInteger(i32, value orelse return error.InvalidDiffSetting) catch error.InvalidDiffSetting;
 }
 
 /// What `diff.renames` and `diff.renameLimit` say, read as git's diff

@@ -360,9 +360,9 @@ const Pending = struct { type: object.Type, bytes: []u8 };
 const pending_limit: usize = 64 << 20;
 
 /// `fastimport.unpackLimit`, else `transfer.unpackLimit`, else git's 100.
-fn unpackLimitOf(config: *const config_mod.Config) config_mod.ValueError!i64 {
+fn unpackLimitOf(config: *const config_mod.Config) config_mod.ValueError!c_int {
     for ([_][]const u8{ "fastimport.unpacklimit", "transfer.unpacklimit" }) |key| {
-        if (config.get(key) != null) return config.getInt(key, 100);
+        if (config.get(key) != null) return config.getInt(c_int, key, 100);
     }
     return 100;
 }

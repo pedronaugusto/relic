@@ -333,8 +333,7 @@ pub const Rules = struct {
         if (problem == .large_pathname) {
             if (std.mem.findScalar(u8, value, ':')) |colon| {
                 level_text = value[0..colon];
-                const n = config_mod.parseInteger(value[colon + 1 ..]) catch return error.InvalidFsckValue;
-                r.max_entry_len = std.math.cast(usize, n) orelse return error.InvalidFsckValue;
+                r.max_entry_len = config_mod.parseInteger(usize, value[colon + 1 ..]) catch return error.InvalidFsckValue;
             }
         }
         const new = Level.parse(level_text) orelse return error.UnknownFsckLevel;

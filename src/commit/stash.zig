@@ -838,7 +838,7 @@ fn writeCommit(io: Io, repo: *Repository, tree: Oid, parents: []const Oid, who: 
 fn abbreviate(io: Io, repo: *Repository, oid: Oid, buf: *[hash.max_hex_len]u8) Error![]const u8 {
     const hex = oid.hex(buf);
     var len: usize = 7;
-    if (repo.configuration().getInt("core.abbrev", 7)) |configured| {
+    if (repo.configuration().getInt(c_int, "core.abbrev", 7)) |configured| {
         if (configured >= 4) len = @intCast(@min(configured, @as(i64, @intCast(hex.len))));
     } else |_| {}
     while (len < hex.len) : (len += 1) {

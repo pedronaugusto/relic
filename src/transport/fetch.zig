@@ -755,7 +755,7 @@ const Brought = struct {
 /// git's `fetch.unpackLimit`, else `transfer.unpackLimit`, else 100.
 fn unpackLimit(config: *const config_mod.Config) u64 {
     for ([_][]const u8{ "fetch.unpacklimit", "transfer.unpacklimit" }) |key| {
-        const value = config.getInt(key, -1) catch -1;
+        const value = config.getInt(c_int, key, -1) catch -1;
         if (value >= 0) return @intCast(value);
     }
     return 100;
@@ -1005,7 +1005,7 @@ pub fn fetchMany(gpa: Allocator, io: Io, repo: *Repository, names: []const []con
     var each = options;
     each.append = true;
     each.write_commit_graph = false;
-    const configured = try repo.configuration().getInt("fetch.parallel", 1);
+    const configured = try repo.configuration().getInt(c_int, "fetch.parallel", 1);
     var limit: usize = jobs orelse @intCast(@max(configured, 0));
     if (limit == 0) limit = std.Thread.getCpuCount() catch 1;
     if (limit > 1 and names.len > 1) {

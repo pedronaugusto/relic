@@ -1025,7 +1025,7 @@ fn tarUmask(repo: *Repository, user: ?u32) Error!u32 {
     if (std.mem.eql(u8, text, "user")) return user orelse fs.processUmask();
     // git's `git_config_int`: base 0 and a size suffix, as every integer
     // setting is read.
-    const value = config_mod.parseInteger(text) catch return error.InvalidTarUmask;
+    const value = config_mod.parseInteger(c_int, text) catch return error.InvalidTarUmask;
     return @intCast(value & 0o7777);
 }
 

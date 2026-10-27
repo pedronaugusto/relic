@@ -411,7 +411,7 @@ fn parseOpts(gpa: Allocator, arena: Allocator, text: []const u8, options: *Optio
         } else if (std.mem.eql(u8, key, "allow-ff")) {
             options.allow_ff = on;
         } else if (std.mem.eql(u8, key, "mainline")) {
-            const n = config_mod.parseInteger(value) catch return error.MalformedState;
+            const n = config_mod.parseInteger(c_int, value) catch return error.MalformedState;
             options.mainline = if (n > 0) std.math.cast(u32, n) orelse return error.MalformedState else null;
         } else if (std.mem.eql(u8, key, "strategy")) {
             if (!std.mem.eql(u8, value, "ort") and !std.mem.eql(u8, value, "recursive")) return error.UnsupportedStrategy;

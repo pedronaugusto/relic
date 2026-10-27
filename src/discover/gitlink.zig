@@ -144,6 +144,7 @@ pub fn head(gpa: Allocator, io: Io, wt: Io.Dir, path: []const u8) Self.Error!?Oi
         error.UnsupportedRefStorage,
         error.NotABoolean,
         error.NotAnInteger,
+        error.OutOfRange,
         error.MalformedSectionHeader,
         error.InvalidVariableName,
         error.MalformedValue,

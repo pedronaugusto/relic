@@ -154,7 +154,7 @@ const Settings = struct {
     unpack_limit: u64,
 
     fn read(config: *const config_mod.Config) Settings {
-        const max = config.getInt("receive.maxinputsize", 0) catch 0;
+        const max = config.getInt(i64, "receive.maxinputsize", 0) catch 0;
         return .{
             .deny_deletes = config.getBool("receive.denydeletes", false) catch false,
             .deny_non_fast_forwards = config.getBool("receive.denynonfastforwards", false) catch false,
@@ -166,14 +166,14 @@ const Settings = struct {
             .shallow_update = config.getBool("receive.shallowupdate", false) catch false,
             .max_input_size = if (max > 0) .fromRaw(@intCast(max)) else null,
             .cert_nonce_seed = config.get("receive.certnonceseed"),
-            .cert_nonce_slop = .fromRaw(@intCast(@max(0, config.getInt("receive.certnonceslop", 0) catch 0))),
-            .keepalive = .fromRaw(config.getInt("receive.keepalive", 5) catch 5),
+            .cert_nonce_slop = .fromRaw(@intCast(@max(0, config.getInt(c_ulong, "receive.certnonceslop", 0) catch 0))),
+            .keepalive = .fromRaw(config.getInt(c_int, "receive.keepalive", 5) catch 5),
             .update_server_info = config.getBool("receive.updateserverinfo", false) catch false,
             .auto_gc = config.getBool("receive.autogc", true) catch true,
             .advertise_sid = config.getBool("transfer.advertisesid", false) catch false,
             .unpack_limit = limit: {
                 for ([_][]const u8{ "receive.unpacklimit", "transfer.unpacklimit" }) |key| {
-                    const value = config.getInt(key, -1) catch -1;
+                    const value = config.getInt(c_int, key, -1) catch -1;
                     if (value >= 0) break :limit @intCast(value);
                 }
                 break :limit 100;

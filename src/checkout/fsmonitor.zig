@@ -120,7 +120,7 @@ pub fn configured(arena: Allocator, io: Io, config: *const config_mod.Config, di
     } else |_| {}
     const command = (try config_mod.pathSetting(arena, io, dirs.work_tree, config.context.home, value)) orelse return null;
     if (!try compatible(io, config, dirs)) return null;
-    const version: ?u2 = if (config.get("core.fsmonitorhookversion")) |text| switch (config_mod.parseInteger(text) catch return error.InvalidFsmonitorHookVersion) {
+    const version: ?u2 = if (config.get("core.fsmonitorhookversion")) |text| switch (config_mod.parseInteger(c_int, text) catch return error.InvalidFsmonitorHookVersion) {
         1 => 1,
         2 => 2,
         else => return error.InvalidFsmonitorHookVersion,

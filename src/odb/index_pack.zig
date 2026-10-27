@@ -167,7 +167,7 @@ pub const Options = struct {
 /// the processors; a value that is not a number is zero.
 pub fn configuredThreads(config: ?*const config_mod.Config) u32 {
     const c = config orelse return 0;
-    const n = c.getInt("pack.threads", 0) catch return 0;
+    const n = c.getInt(c_int, "pack.threads", 0) catch return 0;
     return std.math.cast(u32, n) orelse 0;
 }
 

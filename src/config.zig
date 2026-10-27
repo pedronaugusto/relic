@@ -21,7 +21,6 @@ pub const parseBool = @import("config/config.zig").parseBool;
 pub const parseInteger = @import("config/config.zig").parseInteger;
 pub const BoolOrInt = @import("config/config.zig").BoolOrInt;
 pub const parseBoolOrInt = @import("config/config.zig").parseBoolOrInt;
-pub const parseNonNegative = @import("config/config.zig").parseNonNegative;
 pub const interpolatePath = @import("config/config.zig").interpolatePath;
 pub const pathSetting = @import("config/config.zig").pathSetting;
 pub const checkKey = @import("config/config.zig").checkKey;

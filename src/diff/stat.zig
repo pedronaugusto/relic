@@ -58,8 +58,8 @@ pub const Widths = struct {
     /// `git format-patch` reads neither.
     pub fn configured(config: *const config_mod.Config, widths: Widths) config_mod.ValueError!Widths {
         var out = widths;
-        if (out.name == null) out.name = limit(try config.getInt("diff.statnamewidth", 0));
-        if (out.graph == null) out.graph = limit(try config.getInt("diff.statgraphwidth", 0));
+        if (out.name == null) out.name = limit(try config.getInt(c_int, "diff.statnamewidth", 0));
+        if (out.graph == null) out.graph = limit(try config.getInt(c_int, "diff.statgraphwidth", 0));
         return out;
     }
 

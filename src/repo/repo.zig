@@ -415,7 +415,7 @@ pub const Settings = struct {
             (if (std.ascii.eqlIgnoreCase(text, "default")) .full else if (std.ascii.eqlIgnoreCase(text, "minimal")) .minimal else return error.MalformedValue)
         else
             .full;
-        const depth = try config.getInt("core.maxtreedepth", object.max_tree_depth);
+        const depth = try config.getInt(c_int, "core.maxtreedepth", object.max_tree_depth);
         if (depth < 0 or depth > std.math.maxInt(u32)) return error.MalformedValue;
         return .{
             .ignore_case = try config.getBool("core.ignorecase", false),
@@ -1060,23 +1060,23 @@ pub const Repository = struct {
     /// `core.bigFileThreshold` (`odb_policy.bigFileThreshold`).
     fn packingOf(config: *const config_mod.Config) ErrorNamespace.Error!odb_policy.Packing {
         var packing: odb_policy.Packing = .{};
-        if (config.has("pack.window")) packing.window = std.math.cast(u32, @max(try config.getInt("pack.window", 10), 0)) orelse std.math.maxInt(u32);
-        if (config.has("pack.depth")) packing.depth = @intCast(std.math.clamp(try config.getInt("pack.depth", 50), 0, 4095));
+        if (config.has("pack.window")) packing.window = std.math.cast(u32, @max(try config.getInt(c_int, "pack.window", 10), 0)) orelse std.math.maxInt(u32);
+        if (config.has("pack.depth")) packing.depth = @intCast(std.math.clamp(try config.getInt(c_int, "pack.depth", 50), 0, 4095));
         if (config.has("pack.windowmemory")) {
-            const bytes = try config.getInt("pack.windowmemory", 0);
+            const bytes = try config.getInt(c_ulong, "pack.windowmemory", 0);
             packing.window_bytes = .fromRaw(if (bytes <= 0) std.math.maxInt(usize) else std.math.cast(usize, bytes) orelse std.math.maxInt(usize));
         }
-        const core_level: ?i64 = if (config.has("core.compression")) try config.getInt("core.compression", -1) else null;
+        const core_level: ?i64 = if (config.has("core.compression")) try config.getInt(c_int, "core.compression", -1) else null;
         if (config.has("pack.compression") or core_level != null) {
-            const level = if (config.has("pack.compression")) try config.getInt("pack.compression", -1) else core_level.?;
+            const level = if (config.has("pack.compression")) try config.getInt(c_int, "pack.compression", -1) else core_level.?;
             packing.compression = pack_mod.Compression.fromLevel(level) orelse return error.MalformedValue;
         }
         if (config.has("core.loosecompression") or core_level != null) {
-            const level = if (config.has("core.loosecompression")) try config.getInt("core.loosecompression", -1) else core_level.?;
+            const level = if (config.has("core.loosecompression")) try config.getInt(c_int, "core.loosecompression", -1) else core_level.?;
             packing.loose_compression = pack_mod.Compression.fromLevel(level) orelse return error.MalformedValue;
         }
         if (config.has("pack.indexversion")) {
-            const version = try config.getInt("pack.indexversion", 2);
+            const version = try config.getInt(c_int, "pack.indexversion", 2);
             if (version < 0 or version > 2) return error.MalformedValue;
             packing.index_version = @intCast(@max(version, 1));
         }
@@ -1138,7 +1138,7 @@ pub const Repository = struct {
         const config = repo.configuration();
         const many_files = try config.getBool("feature.manyfiles", false);
         const new_version: u32 = if (config.find("index.version")) |entry| blk: {
-            const value = try config_mod.parseInteger(entry.value orelse return error.NotAnInteger);
+            const value = try config_mod.parseInteger(c_int, entry.value orelse return error.NotAnInteger);
             break :blk if (value >= 2 and value <= 4) @intCast(value) else 3;
         } else if (many_files) 4 else 3;
         // git's `repo_config_get_index_threads`: `true` is 0, as many as
@@ -1178,7 +1178,7 @@ pub const Repository = struct {
         const split = index.split orelse return null;
         const config = repo.configuration();
         const max_percent: i64 = blk: {
-            const value = try config.getInt("splitindex.maxpercentchange", -1);
+            const value = try config.getInt(c_int, "splitindex.maxpercentchange", -1);
             break :blk if (value >= 0 and value <= 100) value else 20;
         };
         const entries: i64 = @intCast(index.entries.items.len);
@@ -1223,12 +1223,12 @@ pub const Repository = struct {
 
     fn reftableOptions(config: *const config_mod.Config) ErrorNamespace.Error!reftable_stack.Options {
         var options: reftable_stack.Options = .{};
-        const block_size = try config.getInt("reftable.blocksize", options.write.block_size);
+        const block_size = try config.getInt(c_ulong, "reftable.blocksize", options.write.block_size);
         if (block_size > 0 and block_size < (1 << 24)) options.write.block_size = @intCast(block_size);
-        const restart = try config.getInt("reftable.restartinterval", options.write.restart_interval);
+        const restart = try config.getInt(c_ulong, "reftable.restartinterval", options.write.restart_interval);
         if (restart > 0 and restart <= std.math.maxInt(u16)) options.write.restart_interval = @intCast(restart);
         options.write.index_objects = try config.getBool("reftable.indexobjects", true);
-        const factor = try config.getInt("reftable.geometricfactor", options.geometric_factor);
+        const factor = try config.getInt(c_ulong, "reftable.geometricfactor", options.geometric_factor);
         if (factor > 0 and factor <= std.math.maxInt(u8)) options.geometric_factor = @intCast(factor);
         options.lock = try lockTimeout(config, "reftable.locktimeout", 100);
         options.pid_file = try config.getBool("core.lockfilepid", false);
@@ -1247,8 +1247,8 @@ pub const Repository = struct {
     /// A lock timeout in milliseconds, as git reads one: zero means try
     /// once, a negative number means wait for ever, which here is as long
     /// as a wait can be written down.
-    fn lockTimeout(config: *const config_mod.Config, key: []const u8, default: i64) ErrorNamespace.Error!fs.OnContention {
-        const timeout = try config.getInt(key, default);
+    fn lockTimeout(config: *const config_mod.Config, key: []const u8, default: c_int) ErrorNamespace.Error!fs.OnContention {
+        const timeout = try config.getInt(c_int, key, default);
         if (timeout == 0) return .fail;
         if (timeout < 0) return .{ .wait = .max };
         return .{ .wait = .fromMilliseconds(timeout) };
@@ -1457,7 +1457,7 @@ pub const Repository = struct {
         var config = config_mod.Config.parseText(gpa, text, .local) catch return false;
         defer config.deinit();
         if (!config.has("core.repositoryformatversion")) return true;
-        const version = config.getInt("core.repositoryformatversion", 0) catch return false;
+        const version = config.getInt(c_int, "core.repositoryformatversion", 0) catch return false;
         return version == 0 or version == 1;
     }
 

@@ -1054,9 +1054,9 @@ fn readConfigured(
 /// many as there are processors; `null` for what it ignores.
 fn jobsOf(value: ?[]const u8) ?u32 {
     const text = value orelse return null;
-    const n = config_mod.parseInteger(text) catch return null;
-    if (n == -1) return @intCast(std.Thread.getCpuCount() catch 1);
-    if (n > 0 and n <= std.math.maxInt(u32)) return @intCast(n);
+    const n = config_mod.parseInteger(c_int, text) catch return null;
+    if (n == -1) return std.math.cast(u32, std.Thread.getCpuCount() catch 1) orelse std.math.maxInt(u32);
+    if (n > 0) return std.math.cast(u32, n);
     return null;
 }
 

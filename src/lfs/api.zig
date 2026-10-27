@@ -383,7 +383,7 @@ pub const Settings = struct {
     /// set or is not one.
     pub fn getInt(s: *const Settings, full_name: []const u8, fallback: i64) i64 {
         const entry = s.lastEntry(full_name) orelse return fallback;
-        return config_mod.parseInteger(entry.value orelse "") catch fallback;
+        return config_mod.parseInteger(i64, entry.value orelse "") catch fallback;
     }
 
     /// git-lfs's URL-scoped lookup: `<section>.<url>.<key>` for the
@@ -2809,7 +2809,7 @@ fn timeoutsFor(settings: *const Settings, scratch: Allocator, url: url_mod.Url) 
 /// `n` seconds, above zero, as uplink's span; one past what it holds is the
 /// longest there is.
 fn seconds(n: i64) uplink.Duration {
-    return .fromRaw(std.math.mul(u64, @intCast(n), std.time.ns_per_s) catch std.math.maxInt(u64)); // aegis: no-danger: n is above zero at every call
+    return .fromRaw(std.math.mul(u64, @intCast(n), std.time.ns_per_s) catch std.math.maxInt(u64));
 }
 
 /// How long a `Retry-After` value asks to wait, as git-lfs reads it: whole

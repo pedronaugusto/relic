@@ -610,7 +610,7 @@ pub const Session = struct {
                 if (entry.subsection.len != 0 and !try s.patternMatches(arena, entry.subsection, normalized)) continue;
                 try settings.take(s, entry.name, entry.value);
             }
-            const timeout = c.getInt("credentialstore.locktimeoutms", 1000) catch return error.InvalidCredentialSetting;
+            const timeout = c.getInt(c_int, "credentialstore.locktimeoutms", 1000) catch return error.InvalidCredentialSetting;
             settings.store_lock_timeout_ms = std.math.cast(u32, timeout) orelse 0;
         }
         s.settings = settings;
@@ -1316,8 +1316,7 @@ fn cacheHelper(words: []const []const u8) Native {
             break :blk words[i];
         };
         if (which == 0) {
-            const n = config_mod.parseInteger(value) catch return .usage;
-            helper.timeout = std.math.cast(i32, n) orelse return .usage;
+            helper.timeout = config_mod.parseInteger(i32, value) catch return .usage;
         } else helper.socket = value;
     }
     return .{ .cache = helper };

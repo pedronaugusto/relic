@@ -1168,7 +1168,7 @@ pub fn migrateGitDirConfigs(gpa: Allocator, io: Io, repo: *Repository) Self.Erro
             migrated += 1;
         }
     } else |_| {}
-    const version = try repo.configuration().getInt("core.repositoryformatversion", 0);
+    const version = try repo.configuration().getInt(c_int, "core.repositoryformatversion", 0);
     if (version == 0) try edits.set("core.repositoryformatversion", "1");
     try edits.set("extensions.submodulePathConfig", "true");
     try edits.commit(io, repo);

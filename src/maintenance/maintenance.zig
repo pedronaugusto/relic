@@ -968,7 +968,7 @@ pub fn writeConfiguredCommitGraph(gpa: Allocator, io: Io, repo: *repo_mod.Reposi
     const followed = repo.objectDatabase().pauseReplacements();
     defer repo.objectDatabase().resumeReplacements(followed);
     if (repo.objectDatabase().shallow.count() != 0) return null;
-    const generation_version = try config.getInt("commitgraph.generationversion", 2);
+    const generation_version = try config.getInt(c_int, "commitgraph.generationversion", 2);
     if (generation_version != 1 and generation_version != 2) return error.UnsupportedGenerationVersion;
     const tips = try repositoryTips(gpa, io, repo);
     defer gpa.free(tips);
@@ -976,7 +976,7 @@ pub fn writeConfiguredCommitGraph(gpa: Allocator, io: Io, repo: *repo_mod.Reposi
     // `commitGraph.readChangedPaths` is false: git's repo settings. A
     // version it does not know writes no graph, as git only warns.
     const version: i64 = if (config.has("commitgraph.changedpathsversion"))
-        try config.getInt("commitgraph.changedpathsversion", -1)
+        try config.getInt(c_int, "commitgraph.changedpathsversion", -1)
     else if (try config.getBool("commitgraph.readchangedpaths", true)) -1 else 0;
     if (version < -1 or version > 2) return null;
     var settings: ?graph_mod.bloom.Settings = null;
@@ -994,7 +994,7 @@ pub fn writeConfiguredCommitGraph(gpa: Allocator, io: Io, repo: *repo_mod.Reposi
     var max_new_filters: ?u32 = null;
     if (purpose == .maintenance) {
         if (settings == null and try config.getBool("commitgraph.changedpaths", false)) settings = .{};
-        const limit = try config.getInt("commitgraph.maxnewfilters", -1);
+        const limit = try config.getInt(c_int, "commitgraph.maxnewfilters", -1);
         if (limit >= 0) max_new_filters = std.math.cast(u32, limit) orelse std.math.maxInt(u32);
     }
     // The version is the configuration's unless it is -1; git writes 2

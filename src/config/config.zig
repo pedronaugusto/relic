@@ -65,6 +65,9 @@ pub const ValueError = error{
     NotABoolean,
     /// The value was not a number, with or without a `k`, `m` or `g`.
     NotAnInteger,
+    /// The value is a number its setting's type cannot hold: git's "out of
+    /// range", which it dies on.
+    OutOfRange,
 } || Allocator.Error;
 
 /// Errors from expanding a path setting.
@@ -1160,13 +1163,13 @@ pub const Config = struct {
         return parseBool(value);
     }
 
-    /// The value of `full_name` as an integer, or `fallback`.
-    ///
-    /// A `k`, `m` or `g` suffix multiplies by 1024, 1024² or 1024³, which is
-    /// what git accepts for a size.
-    pub fn getInt(config: *const Config, full_name: []const u8, fallback: i64) Self.ValueError!i64 {
+    /// The value of `full_name` as a `T`, or `fallback`: git's
+    /// `git_config_int`, `git_config_ulong` and `git_config_int64` by `T`
+    /// (`c_int`, `c_ulong`, `i64`), each setting read as the type git reads
+    /// it with (`parseInteger`).
+    pub fn getInt(config: *const Config, comptime T: type, full_name: []const u8, fallback: T) Self.ValueError!T {
         const value = config.get(full_name) orelse return fallback;
-        return parseInteger(value);
+        return parseInteger(T, value);
     }
 
     /// The value of `full_name` as a path, as git's config callback reads
@@ -1612,8 +1615,7 @@ pub fn parseBool(raw: []const u8) Self.ValueError!bool {
         if (std.ascii.eqlIgnoreCase(raw, f)) return false;
     }
     // `git_parse_int`: an `int`, or no boolean at all.
-    const n = parseInteger(raw) catch return error.NotABoolean;
-    _ = std.math.cast(i32, n) orelse return error.NotABoolean;
+    const n = parseInteger(c_int, raw) catch return error.NotABoolean;
     return n != 0;
 }
 
@@ -1625,7 +1627,8 @@ pub const BoolOrInt = union(enum) {
 
 /// git's `git_config_bool_or_int`: a bare name and git's boolean spellings
 /// are a boolean, anything else an `int` as `git_parse_int` reads it
-/// (`error.NotAnInteger` where git dies with "bad numeric config value").
+/// (`error.NotAnInteger` or `error.OutOfRange` where git dies with "bad
+/// numeric config value").
 /// `null` is a bare name.
 pub fn parseBoolOrInt(raw: ?[]const u8) Self.ValueError!BoolOrInt {
     const text = raw orelse return .{ .boolean = true };
@@ -1636,8 +1639,7 @@ pub fn parseBoolOrInt(raw: ?[]const u8) Self.ValueError!BoolOrInt {
     for ([_][]const u8{ "false", "no", "off" }) |f| {
         if (std.ascii.eqlIgnoreCase(text, f)) return .{ .boolean = false };
     }
-    const n = try parseInteger(text);
-    return .{ .integer = std.math.cast(i32, n) orelse return error.NotAnInteger };
+    return .{ .integer = try parseInteger(i32, text) };
 }
 
 /// git's `interpolate_path`: `~` alone or before a `/` is `home` (on
@@ -1709,7 +1711,7 @@ fn userHome(gpa: Allocator, user: []const u8) PathError![]u8 {
 /// `strtoimax` in base 0 -- leading blanks and a sign, `0x` for
 /// hexadecimal, a leading `0` for octal -- then a `k`, `m` or `g` size
 /// suffix, and nothing after.
-pub fn parseInteger(raw: []const u8) Self.ValueError!i64 {
+fn parseWide(raw: []const u8) Self.ValueError!i64 {
     var i: usize = 0;
     while (i < raw.len and (raw[i] == ' ' or (raw[i] >= '\t' and raw[i] <= '\r'))) i += 1;
     var negative = false;
@@ -1728,8 +1730,8 @@ pub fn parseInteger(raw: []const u8) Self.ValueError!i64 {
     var value: i64 = 0;
     while (i < raw.len) : (i += 1) {
         const digit = std.fmt.charToDigit(raw[i], base) catch break;
-        value = std.math.mul(i64, value, base) catch return error.NotAnInteger;
-        value = (if (negative) std.math.sub(i64, value, digit) else std.math.add(i64, value, digit)) catch return error.NotAnInteger;
+        value = std.math.mul(i64, value, base) catch return error.OutOfRange;
+        value = (if (negative) std.math.sub(i64, value, digit) else std.math.add(i64, value, digit)) catch return error.OutOfRange;
     }
     if (i == digits_start) return error.NotAnInteger;
     var multiplier: i64 = 1;
@@ -1743,7 +1745,18 @@ pub fn parseInteger(raw: []const u8) Self.ValueError!i64 {
         i += 1;
     }
     if (i != raw.len) return error.NotAnInteger;
-    return std.math.mul(i64, value, multiplier) catch error.NotAnInteger;
+    return std.math.mul(i64, value, multiplier) catch error.OutOfRange;
+}
+
+/// `raw` as a `T`: git's `git_parse_signed` for a signed `T` and
+/// `git_parse_unsigned` for an unsigned one, a `k`, `m` or `g` suffix
+/// multiplying by 1024, 1024² or 1024³. A number `T` cannot hold, once
+/// multiplied, is `error.OutOfRange`; an unsigned `T` takes no `-`.
+pub fn parseInteger(comptime T: type, raw: []const u8) Self.ValueError!T {
+    return switch (@typeInfo(T).int.signedness) {
+        .signed => aegis.int.narrow(T, try parseWide(raw)) orelse error.OutOfRange,
+        .unsigned => aegis.int.narrow(T, try parseUnsigned(raw, std.math.maxInt(T))) orelse error.OutOfRange,
+    };
 }
 
 /// git's `git_parse_unsigned`, what an `OPT_UNSIGNED` option and an
@@ -1751,11 +1764,11 @@ pub fn parseInteger(raw: []const u8) Self.ValueError!i64 {
 /// and a `+`, `0x` for hexadecimal, a leading `0` for octal -- then a `k`,
 /// `m` or `g` size suffix and nothing after, no `-` anywhere, and at most
 /// `max` once multiplied.
-pub fn parseNonNegative(raw: []const u8, max: u64) Self.ValueError!u64 {
+fn parseUnsigned(raw: []const u8, max: u64) Self.ValueError!u64 {
     if (std.mem.findScalar(u8, raw, '-') != null) return error.NotAnInteger;
     // Read as `i64`, which holds every `max` a caller passes.
-    const value: u64 = @intCast(try parseInteger(raw));
-    if (value > max) return error.NotAnInteger;
+    const value = aegis.int.cast(u64, try parseWide(raw)) catch return error.OutOfRange;
+    if (value > max) return error.OutOfRange;
     return value;
 }
 
@@ -2223,16 +2236,15 @@ test "values read with the last one winning" {
 }
 
 test "an unsigned value reads as git_parse_unsigned reads it" {
-    const max: u64 = std.math.maxInt(u32);
-    try std.testing.expectEqual(@as(u64, 3), try parseNonNegative("3", max));
-    try std.testing.expectEqual(@as(u64, 16), try parseNonNegative("0x10", max));
-    try std.testing.expectEqual(@as(u64, 8), try parseNonNegative("010", max));
-    try std.testing.expectEqual(@as(u64, 2048), try parseNonNegative(" +2k", max));
-    try std.testing.expectEqual(@as(u64, 1 << 30), try parseNonNegative("1g", max));
-    try std.testing.expectError(error.NotAnInteger, parseNonNegative("4g", max));
-    try std.testing.expectError(error.NotAnInteger, parseNonNegative("-0", max));
-    try std.testing.expectError(error.NotAnInteger, parseNonNegative("", max));
-    try std.testing.expectError(error.NotAnInteger, parseNonNegative("3x", max));
+    try std.testing.expectEqual(@as(u32, 3), try parseInteger(u32, "3"));
+    try std.testing.expectEqual(@as(u32, 16), try parseInteger(u32, "0x10"));
+    try std.testing.expectEqual(@as(u32, 8), try parseInteger(u32, "010"));
+    try std.testing.expectEqual(@as(u32, 2048), try parseInteger(u32, " +2k"));
+    try std.testing.expectEqual(@as(u32, 1 << 30), try parseInteger(u32, "1g"));
+    try std.testing.expectError(error.OutOfRange, parseInteger(u32, "4g"));
+    try std.testing.expectError(error.NotAnInteger, parseInteger(u32, "-0"));
+    try std.testing.expectError(error.NotAnInteger, parseInteger(u32, ""));
+    try std.testing.expectError(error.NotAnInteger, parseInteger(u32, "3x"));
 }
 
 test "a boolean or a count reads as git_config_bool_or_int reads it" {
@@ -2242,7 +2254,7 @@ test "a boolean or a count reads as git_config_bool_or_int reads it" {
     try std.testing.expectEqual(BoolOrInt{ .integer = 1 }, try parseBoolOrInt("1"));
     try std.testing.expectEqual(BoolOrInt{ .integer = 2048 }, try parseBoolOrInt("2k"));
     try std.testing.expectEqual(BoolOrInt{ .integer = -3 }, try parseBoolOrInt("-3"));
-    try std.testing.expectError(error.NotAnInteger, parseBoolOrInt("2g"));
+    try std.testing.expectError(error.OutOfRange, parseBoolOrInt("2g"));
     try std.testing.expectError(error.NotAnInteger, parseBoolOrInt("maybe"));
 }
 
@@ -2386,7 +2398,7 @@ test "integers and booleans read as git config --type reads them" {
             defer config.deinit();
             var buf: [64]u8 = undefined;
             const ours: anyerror![]const u8 = if (kind[0] == 'i')
-                (if (config.getInt("a.x", 0)) |n| std.mem.print(&buf, "{d}\n", .{n}) else |err| err)
+                (if (config.getInt(i64, "a.x", 0)) |n| std.mem.print(&buf, "{d}\n", .{n}) else |err| err)
             else
                 (if (config.getBool("a.x", false)) |b| std.mem.print(&buf, "{}\n", .{b}) else |err| err);
             if (theirs) |t| {
@@ -2403,10 +2415,15 @@ test "integers and booleans read as git config --type reads them" {
 }
 
 test "integers take git's size suffixes" {
-    try std.testing.expectEqual(@as(i64, 1024), try parseInteger("1k"));
-    try std.testing.expectEqual(@as(i64, 5 * 1024 * 1024), try parseInteger("5M"));
-    try std.testing.expectEqual(@as(i64, -7), try parseInteger("-7"));
-    try std.testing.expectError(error.NotAnInteger, parseInteger("x"));
+    try std.testing.expectEqual(@as(i64, 1024), try parseInteger(i64, "1k"));
+    try std.testing.expectEqual(@as(i64, 5 * 1024 * 1024), try parseInteger(i64, "5M"));
+    try std.testing.expectEqual(@as(i64, -7), try parseInteger(i64, "-7"));
+    try std.testing.expectError(error.NotAnInteger, parseInteger(i64, "x"));
+    // git's `int` stops at its range, as `git_parse_signed` does.
+    try std.testing.expectEqual(@as(c_int, std.math.maxInt(c_int)), try parseInteger(c_int, "2147483647"));
+    try std.testing.expectError(error.OutOfRange, parseInteger(c_int, "2g"));
+    try std.testing.expectError(error.OutOfRange, parseInteger(c_int, "-2147483649"));
+    try std.testing.expectError(error.OutOfRange, parseInteger(i64, "9223372036854775808"));
 }
 
 test "typed getters unquote values before parsing them" {
@@ -2419,7 +2436,7 @@ test "typed getters unquote values before parsing them" {
     config.context.home = "/home/ada";
 
     try std.testing.expect(try config.getBool("typed.flag", false));
-    try std.testing.expectEqual(@as(i64, 5 * 1024), try config.getInt("typed.size", 0));
+    try std.testing.expectEqual(@as(i64, 5 * 1024), try config.getInt(i64, "typed.size", 0));
     const path = (try config.getPath(gpa, std.testing.io, Io.Dir.cwd(), "typed.path")).?;
     defer gpa.free(path);
     try std.testing.expectEqualStrings("/home/ada/a b", path);
@@ -3125,7 +3142,7 @@ fn fuzzConfig(_: void, case: *shakedown.Case) anyerror!void {
     // glint-ignore: Z026 -- refusing a malformed input is the expected outcome; only a crash or a leak fails the fuzzer
     _ = config.getBool("core.bare", false) catch {};
     // glint-ignore: Z026 -- refusing a malformed input is the expected outcome; only a crash or a leak fails the fuzzer
-    _ = config.getInt("core.bigfilethreshold", 0) catch {};
+    _ = config.getInt(c_ulong, "core.bigfilethreshold", 0) catch {};
     const values = config.all("core.autocrlf") catch return;
     gpa.free(values);
 

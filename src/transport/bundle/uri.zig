@@ -93,7 +93,7 @@ pub const List = struct {
         const dot = std.mem.findScalarLast(u8, rest, '.') orelse {
             const v = value orelse return error.InvalidBundleList;
             if (std.mem.eql(u8, rest, "version")) {
-                const n = config_mod.parseInteger(v) catch return error.InvalidBundleList;
+                const n = config_mod.parseInteger(c_int, v) catch return error.InvalidBundleList;
                 if (n != 1) return error.InvalidBundleList;
                 list.version = 1;
             } else if (std.mem.eql(u8, rest, "mode")) {

@@ -1107,11 +1107,10 @@ fn mtimeOf(r: *Run, sub: []const u8) Error!i64 {
 /// `never` and `false` for none, `now` and `all` for everything.
 fn expiryInDays(repo: *Repository, key: []const u8, cutoff: *i64, now: i64) Error!void {
     const text = repo.configuration().get(key) orelse return;
-    if (config_mod.parseInteger(text)) |days| {
-        if (days >= std.math.minInt(i32) and days <= std.math.maxInt(i32)) {
-            cutoff.* = now - days * 86400;
-            return;
-        }
+    // An `int` of days, as `git_parse_int` reads one.
+    if (config_mod.parseInteger(c_int, text)) |days| {
+        cutoff.* = now - @as(i64, days) * 86400;
+        return;
     } else |_| {}
     if (std.mem.eql(u8, text, "never") or std.mem.eql(u8, text, "false")) {
         cutoff.* = 0;

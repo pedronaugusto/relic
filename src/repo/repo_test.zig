@@ -952,7 +952,7 @@ test "a refusal preserves the diagnostic allocator's resource failure" {
     try repo.gitDirectory().get().writeFile(io, .{ .sub_path = "config", .data = "[core]\nrepositoryformatversion = 9\n" });
     try std.testing.expectError(error.OutOfMemory, repo.refreshConfig(io, .{ .diagnostic = &diagnostic }));
     try std.testing.expectEqualStrings("", diagnostic.unsupported_setting);
-    try std.testing.expectEqual(@as(i64, 0), try repo.configuration().getInt("core.repositoryformatversion", -1));
+    try std.testing.expectEqual(@as(c_int, 0), try repo.configuration().getInt(c_int, "core.repositoryformatversion", -1));
     try std.testing.expectError(error.UnsupportedRepositoryVersion, repo.refreshConfig(io, .{}));
     try repo.editConfig(io, &.{.{ .name = "tag.gpgSign", .value = "true" }}, .{});
     const fields: object.Tag.Fields = .{

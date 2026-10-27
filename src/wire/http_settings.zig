@@ -156,8 +156,7 @@ pub const Settings = struct {
         if (kind) |k| switch (k) {
             .boolean => flag = if (value) |v| config_mod.parseBool(v) catch return error.InvalidHttpSetting else true,
             .integer => {
-                const n = config_mod.parseInteger(value orelse return error.InvalidHttpSetting) catch return error.InvalidHttpSetting;
-                number = std.math.cast(i32, n) orelse return error.InvalidHttpSetting;
+                number = config_mod.parseInteger(i32, value orelse return error.InvalidHttpSetting) catch return error.InvalidHttpSetting;
             },
             .string => text = value orelse return error.InvalidHttpSetting,
             .path => text = try pathValue(arena, io, paths, value),
@@ -201,7 +200,7 @@ pub const Settings = struct {
             }
         } else if (std.mem.eql(u8, name, "postbuffer")) {
             // `git_config_ssize_t`; below git's largest packet, that size.
-            const n = config_mod.parseInteger(value orelse return error.InvalidHttpSetting) catch return error.InvalidHttpSetting;
+            const n = config_mod.parseInteger(isize, value orelse return error.InvalidHttpSetting) catch return error.InvalidHttpSetting;
             settings.post_buffer = .fromRaw(@intCast(@max(n, large_packet_max)));
         } else if (std.mem.eql(u8, name, "useragent")) {
             settings.user_agent = text;
