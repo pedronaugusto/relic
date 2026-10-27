@@ -24,6 +24,7 @@ const warp = @import("warp");
 const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
 const delta = @import("../codec.zig").delta;
+const Rows = @import("../codec.zig").Rows;
 const rev_index = @import("rev_index.zig");
 const mtimes = @import("mtimes.zig");
 const fs = @import("../fs/fs.zig");
@@ -95,6 +96,9 @@ pub const IndexError = error{
     BadLargeOffset,
     /// The trailing digest did not match the index bytes before it.
     ChecksumMismatch,
+    /// A position past the index's last object: a corrupt bitmap, graph or
+    /// multi-pack index named it.
+    PositionOutOfRange,
 } || Allocator.Error || aegis.own.ReadFileError;
 
 /// A packfile's `.idx`, version 2 or the version 1 git still reads.
@@ -108,20 +112,26 @@ pub const Index = struct {
 
     gpa: Allocator,
     kind: Kind,
+    /// The file, which the index owns and the tables below are cut from.
     bytes: []const u8,
     /// 1 or 2.
     version: u32,
-    /// How many objects the pack holds.
+    /// How many objects the pack holds: the rows of `names`.
     count: u32,
-    fanout_at: usize,
-    names_at: usize,
-    /// From one name to the next: the name, and in version 1 the offset
-    /// beside it.
-    names_stride: usize,
-    crcs_at: usize,
-    offsets_at: usize,
-    large_at: usize,
-    large_count: u32,
+    /// How many names begin with a byte up to each byte.
+    fanout_table: *const [256][4]u8,
+    /// One row per object, in name order: the name, which in version 1
+    /// follows the object's 4-byte offset (`name_at` into the row).
+    names: Rows,
+    name_at: usize,
+    /// One 4-byte offset per object: version 2's offset table, or version
+    /// 1's name rows, each beginning with its offset.
+    offsets: Rows,
+    /// Version 2's CRC32 per object; none in version 1.
+    crcs: Rows,
+    /// Version 2's 8-byte offsets, which a 4-byte one with its high bit set
+    /// names by row; none in version 1.
+    large: Rows,
     /// The name of the pack this index belongs to, from its trailer.
     pack_checksum: Oid,
 
@@ -189,13 +199,14 @@ pub const Index = struct {
         const count = previous;
 
         const names_at = fanout_at + 1024;
-        const crcs_at = names_at + @as(usize, count) * raw_len;
-        const offsets_at = crcs_at + @as(usize, count) * 4;
-        const large_at = offsets_at + @as(usize, count) * 4;
-        if (bytes.len < large_at + 2 * raw_len) return error.TruncatedIndex;
+        const names = Rows.cut(bytes, names_at, count, raw_len) orelse return error.TruncatedIndex;
+        const crcs = Rows.cut(bytes, names_at + names.bytes.len, count, 4) orelse return error.TruncatedIndex;
+        const offsets = Rows.cut(bytes, names_at + names.bytes.len + crcs.bytes.len, count, 4) orelse return error.TruncatedIndex;
+        const large_at = names_at + names.bytes.len + crcs.bytes.len + offsets.bytes.len;
+        if (bytes.len - large_at < 2 * raw_len) return error.TruncatedIndex;
         const remaining = bytes.len - large_at - 2 * raw_len;
         if (remaining % 8 != 0) return error.TruncatedIndex;
-        const large_count: u32 = @intCast(remaining / 8);
+        const large = Rows.cut(bytes, large_at, remaining / 8, 8) orelse return error.TruncatedIndex;
 
         // aegis: no-danger: the slice is cut to the format's raw length
         const pack_checksum = Oid.fromRaw(kind, bytes[bytes.len - 2 * raw_len ..][0..raw_len]) catch unreachable;
@@ -205,14 +216,13 @@ pub const Index = struct {
             .kind = kind,
             .bytes = bytes,
             .version = 2,
-            .count = count,
-            .fanout_at = fanout_at,
-            .names_at = names_at,
-            .names_stride = raw_len,
-            .crcs_at = crcs_at,
-            .offsets_at = offsets_at,
-            .large_at = large_at,
-            .large_count = large_count,
+            .count = @intCast(names.count()),
+            .fanout_table = std.mem.bytesAsValue([256][4]u8, bytes[fanout_at..][0..1024]),
+            .names = names,
+            .name_at = 0,
+            .offsets = offsets,
+            .crcs = crcs,
+            .large = large,
             .pack_checksum = pack_checksum,
         };
 
@@ -241,19 +251,19 @@ pub const Index = struct {
         const stored_checksum = Oid.fromRaw(kind, bytes[bytes.len - raw_len ..][0..raw_len]) catch unreachable;
         if (!checksum_hasher.final().eql(stored_checksum)) return error.ChecksumMismatch;
 
+        const names = Rows.cut(bytes, 1024, count, stride) orelse return error.TruncatedIndex;
         const index: Index = .{
             .gpa = gpa,
             .kind = kind,
             .bytes = bytes,
             .version = 1,
-            .count = count,
-            .fanout_at = 0,
-            .names_at = 1024 + 4,
-            .names_stride = stride,
-            .crcs_at = 0,
-            .offsets_at = 1024,
-            .large_at = 0,
-            .large_count = 0,
+            .count = @intCast(names.count()),
+            .fanout_table = std.mem.bytesAsValue([256][4]u8, bytes[0..1024]),
+            .names = names,
+            .name_at = 4,
+            .offsets = names,
+            .crcs = .empty,
+            .large = .empty,
             // aegis: no-danger: the slice is cut to the format's raw length
             .pack_checksum = Oid.fromRaw(kind, bytes[bytes.len - 2 * raw_len ..][0..raw_len]) catch unreachable,
         };
@@ -267,21 +277,21 @@ pub const Index = struct {
     fn checkOrder(index: Index) Self.IndexError!void {
         var i: u32 = 1;
         while (i < index.count) : (i += 1) {
-            const a = index.rawNameAt(i - 1);
-            const b = index.rawNameAt(i);
+            const a = try index.rawNameAt(i - 1);
+            const b = try index.rawNameAt(i);
             if (std.mem.order(u8, a, b) != .lt) return error.UnsortedIndex;
         }
         for (0..256) |bucket| {
-            const end = index.fanout(bucket);
+            const end = index.fanout(@intCast(bucket));
             if (end > index.count) return error.CorruptIndexFanout;
-            if (end > 0 and index.rawNameAt(end - 1)[0] > bucket) return error.CorruptIndexFanout;
-            if (end < index.count and index.rawNameAt(end)[0] < bucket) return error.CorruptIndexFanout;
+            if (end > 0 and (try index.rawNameAt(end - 1))[0] > bucket) return error.CorruptIndexFanout;
+            if (end < index.count and (try index.rawNameAt(end))[0] < bucket) return error.CorruptIndexFanout;
         }
     }
 
     /// How many names begin with a byte up to `bucket`.
-    fn fanout(index: Index, bucket: usize) u32 {
-        return std.mem.readInt(u32, index.bytes[index.fanout_at + bucket * 4 ..][0..4], .big);
+    fn fanout(index: Index, bucket: u8) u32 {
+        return std.mem.readInt(u32, &index.fanout_table[bucket], .big);
     }
 
     /// Release the index.
@@ -290,32 +300,31 @@ pub const Index = struct {
         index.* = undefined;
     }
 
-    fn rawNameAt(index: Index, i: u32) []const u8 {
-        const raw_len = index.kind.rawLen();
-        return index.bytes[index.names_at + @as(usize, i) * index.names_stride ..][0..raw_len];
+    fn rawNameAt(index: Index, i: u32) Self.IndexError![]const u8 {
+        const row = index.names.at(i) orelse return error.PositionOutOfRange;
+        return row[index.name_at..][0..index.kind.rawLen()];
     }
 
     /// The name of the object at position `i`.
-    pub fn nameAt(index: Index, i: u32) Oid {
+    pub fn nameAt(index: Index, i: u32) Self.IndexError!Oid {
         // aegis: no-danger: rawNameAt cuts the name to the format's raw length
-        return Oid.fromRaw(index.kind, index.rawNameAt(i)) catch unreachable;
+        return Oid.fromRaw(index.kind, try index.rawNameAt(i)) catch unreachable;
     }
 
     /// The pack offset of the object at position `i`.
     pub fn offsetAt(index: Index, i: u32) Self.IndexError!u64 {
-        if (index.version == 1) return std.mem.readInt(u32, index.bytes[index.offsets_at + @as(usize, i) * index.names_stride ..][0..4], .big);
-        const small = std.mem.readInt(u32, index.bytes[index.offsets_at + @as(usize, i) * 4 ..][0..4], .big);
-        if (small & 0x8000_0000 == 0) return small;
-        const row = small & 0x7fff_ffff;
-        if (row >= index.large_count) return error.BadLargeOffset;
-        return std.mem.readInt(u64, index.bytes[index.large_at + @as(usize, row) * 8 ..][0..8], .big);
+        const small = std.mem.readInt(u32, (index.offsets.at(i) orelse return error.PositionOutOfRange)[0..4], .big);
+        if (index.version == 1 or small & 0x8000_0000 == 0) return small;
+        const row = index.large.at(small & 0x7fff_ffff) orelse return error.BadLargeOffset;
+        return std.mem.readInt(u64, row[0..8], .big);
     }
 
     /// The CRC32 of the compressed entry at position `i`; `null` in a
     /// version 1 index, which carries none.
-    pub fn crcAt(index: Index, i: u32) ?u32 {
+    pub fn crcAt(index: Index, i: u32) Self.IndexError!?u32 {
         if (index.version == 1) return null;
-        return std.mem.readInt(u32, index.bytes[index.crcs_at + @as(usize, i) * 4 ..][0..4], .big);
+        const row = index.crcs.at(i) orelse return error.PositionOutOfRange;
+        return std.mem.readInt(u32, row[0..4], .big);
     }
 
     /// Where `oid` lives, or `null` if this pack does not hold it.
@@ -326,13 +335,13 @@ pub const Index = struct {
         var hi: u32 = index.fanout(raw[0]);
         while (lo < hi) {
             const mid = lo + (hi - lo) / 2;
-            switch (std.mem.order(u8, index.rawNameAt(mid), raw)) {
+            switch (std.mem.order(u8, try index.rawNameAt(mid), raw)) {
                 .lt => lo = mid + 1,
                 .gt => hi = mid,
                 .eq => return .{
                     .index = mid,
                     .offset = try index.offsetAt(mid),
-                    .crc = index.crcAt(mid),
+                    .crc = try index.crcAt(mid),
                 },
             }
         }
@@ -369,13 +378,13 @@ pub const Index = struct {
         }
         while (lo < hi) {
             const mid = lo + (hi - lo) / 2;
-            if (std.mem.order(u8, index.rawNameAt(mid), raw) == .lt) lo = mid + 1 else hi = mid;
+            if (std.mem.order(u8, try index.rawNameAt(mid), raw) == .lt) lo = mid + 1 else hi = mid;
         }
         // Every name that begins with the prefix is in one run from here.
         if (lo >= index.count) return null;
-        const found = index.nameAt(lo);
+        const found = try index.nameAt(lo);
         if (!found.startsWithHex(prefix)) return null;
-        if (lo + 1 < index.count and index.nameAt(lo + 1).startsWithHex(prefix)) return error.AmbiguousPrefix;
+        if (lo + 1 < index.count and (try index.nameAt(lo + 1)).startsWithHex(prefix)) return error.AmbiguousPrefix;
         return found;
     }
 
@@ -395,8 +404,8 @@ pub const Index = struct {
             const i = it.i;
             it.i += 1;
             return .{
-                .oid = it.index.nameAt(i),
-                .located = .{ .index = i, .offset = try it.index.offsetAt(i), .crc = it.index.crcAt(i) },
+                .oid = try it.index.nameAt(i),
+                .located = .{ .index = i, .offset = try it.index.offsetAt(i), .crc = try it.index.crcAt(i) },
             };
         }
     };
@@ -1306,8 +1315,8 @@ pub const Pack = struct {
             if (entry.kind == .object and entry.size > options.stream_past) {
                 var crc: warp.Crc32 = .init;
                 try p.sumStored(io, offset, end, .{ .crc = &crc });
-                if (crc.final() != p.index.crcAt(position)) return error.ChecksumMismatch;
-                if (!(try p.nameStreamed(io, offset)).eql(p.index.nameAt(position))) return error.ObjectNameMismatch;
+                if (crc.final() != try p.index.crcAt(position)) return error.ChecksumMismatch;
+                if (!(try p.nameStreamed(io, offset)).eql(try p.index.nameAt(position))) return error.ObjectNameMismatch;
                 report.objects += 1;
                 report.bytes += entry.size;
                 continue;
@@ -1316,12 +1325,12 @@ pub const Pack = struct {
             const span = try p.gpa.alloc(u8, @intCast(end - offset));
             defer p.gpa.free(span);
             try p.readAtExact(io, offset, span);
-            if (warp.Crc32.hash(span) != p.index.crcAt(position)) return error.ChecksumMismatch;
+            if (warp.Crc32.hash(span) != (try p.index.crcAt(position))) return error.ChecksumMismatch;
 
             const obj = try p.readAt(io, offset, .{ .cache = options.cache, .pack_id = options.pack_id });
             defer p.gpa.free(obj.bytes);
             const name = hash.Hasher.object(p.kind, obj.type.name(), obj.bytes);
-            if (!name.eql(p.index.nameAt(position))) return error.ObjectNameMismatch;
+            if (!name.eql(try p.index.nameAt(position))) return error.ObjectNameMismatch;
             report.objects += 1;
             report.bytes += obj.bytes.len;
         }

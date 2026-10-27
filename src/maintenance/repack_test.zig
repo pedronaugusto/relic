@@ -171,7 +171,7 @@ pub fn state(repo: *testgit.Repo) ![]u8 {
         };
         for (0..index.count) |i| {
             var hex: [hash.max_hex_len]u8 = undefined;
-            try line.print(arena, " {s}", .{index.nameAt(@intCast(i)).hex(&hex)});
+            try line.print(arena, " {s}", .{(try index.nameAt(@intCast(i))).hex(&hex)});
             if (times) |t| try line.print(arena, "@{d}", .{t[i]});
         }
         try lines.append(arena, line.items);
@@ -825,7 +825,7 @@ fn expiredPacks(repo: *testgit.Repo, sub: []const u8) ![]u8 {
         try line.appendSlice(gpa, "cruft");
         for (0..index.count) |i| {
             var hex: [hash.max_hex_len]u8 = undefined;
-            try line.print(gpa, " {s}@{d}", .{ index.nameAt(@intCast(i)).hex(&hex), times[i] });
+            try line.print(gpa, " {s}@{d}", .{ (try index.nameAt(@intCast(i))).hex(&hex), times[i] });
         }
         try lines.append(gpa, try line.toOwnedSlice(gpa));
     }

@@ -209,7 +209,7 @@ pub fn dropCandidates(gpa: Allocator, io: Io, repo: *Repository, filter: object_
         if (!listing.promisor) continue;
         const p = db.packNamed(listing.name) orelse continue;
         for (0..p.index.count) |i| {
-            const oid = p.index.nameAt(@intCast(i));
+            const oid = try p.index.nameAt(@intCast(i));
             if (found.contains(oid)) continue;
             const header = db.readHeader(io, oid) catch |err| switch (err) {
                 error.ObjectNotFound => continue,
@@ -405,7 +405,7 @@ const Run = struct {
             if (isListed(run.existing.kept.items, name)) continue;
             const p = run.db.packNamed(name) orelse continue;
             for (0..p.index.count) |i| {
-                const oid = p.index.nameAt(@intCast(i));
+                const oid = try p.index.nameAt(@intCast(i));
                 if (run.kept_objects.contains(oid) or run.drop.contains(oid)) continue;
                 try entries.append(run.arena, .{ .oid = oid, .in_pack = true });
             }
@@ -480,7 +480,7 @@ const Run = struct {
         for (sources.items) |name| {
             const p = db.packNamed(name) orelse continue;
             for (0..p.index.count) |i| {
-                const oid = p.index.nameAt(@intCast(i));
+                const oid = try p.index.nameAt(@intCast(i));
                 if (run.drop.contains(oid)) continue;
                 if ((try skip.fetchPut(gpa, oid, {})) != null) continue;
                 try entries.append(run.arena, .{ .oid = oid, .in_pack = true });
@@ -566,7 +566,7 @@ const Run = struct {
         for (packs[0..split]) |p| {
             const found = db.packNamed(p.name) orelse continue;
             for (0..found.index.count) |i| {
-                const oid = found.index.nameAt(@intCast(i));
+                const oid = try found.index.nameAt(@intCast(i));
                 if (main and run.promised.contains(oid)) continue;
                 if ((try skip.fetchPut(gpa, oid, {})) != null) continue;
                 try entries.append(run.arena, .{ .oid = oid, .in_pack = true });
@@ -785,10 +785,10 @@ fn hasKeepFile(io: Io, pack_dir: Io.Dir, base: []const u8) Io.Dir.AccessError!bo
 }
 
 /// Every object of the pack `name` into `set`.
-fn addPackObjects(gpa: Allocator, db: *Odb, name: []const u8, set: *Oid.Set) Allocator.Error!void {
+fn addPackObjects(gpa: Allocator, db: *Odb, name: []const u8, set: *Oid.Set) pack_mod.IndexError!void {
     const p = db.packNamed(name) orelse return;
     try set.ensureUnusedCapacity(gpa, p.index.count);
-    for (0..p.index.count) |i| set.putAssumeCapacity(p.index.nameAt(@intCast(i)), {});
+    for (0..p.index.count) |i| set.putAssumeCapacity(try p.index.nameAt(@intCast(i)), {});
 }
 
 /// `existing_packs_collect`: the local packs by kind, a pack `keep_packs`
@@ -867,7 +867,7 @@ fn loosenUnreachable(gpa: Allocator, arena: Allocator, io: Io, repo: *Repository
         const p = db.packNamed(name) orelse continue;
         const time = existing.times.get(name) orelse 0;
         for (0..p.index.count) |i| {
-            const oid = p.index.nameAt(@intCast(i));
+            const oid = try p.index.nameAt(@intCast(i));
             if (fresh.contains(oid) or kept.contains(oid)) continue;
             if (!try db.existsOwn(io, oid)) continue;
             if (options.unpack_unreachable) |after| {
@@ -1009,9 +1009,9 @@ fn writeLimited(db: *Odb, io: Io, pack_dir: Io.Dir, entries: []const odb_mod.Pac
     return reports;
 }
 
-fn addFresh(gpa: Allocator, db: *Odb, name: []const u8, fresh: *Oid.Map(?i64), time: ?i64) Allocator.Error!void {
+fn addFresh(gpa: Allocator, db: *Odb, name: []const u8, fresh: *Oid.Map(?i64), time: ?i64) pack_mod.IndexError!void {
     const p = db.packNamed(name) orelse return;
-    for (0..p.index.count) |i| try fresh.put(gpa, p.index.nameAt(@intCast(i)), time);
+    for (0..p.index.count) |i| try fresh.put(gpa, try p.index.nameAt(@intCast(i)), time);
 }
 
 fn oidBefore(_: void, l: Oid, r: Oid) bool {

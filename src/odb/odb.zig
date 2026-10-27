@@ -1291,7 +1291,7 @@ pub const Odb = struct {
                 const at = try p.index.offsetAt(i);
                 if (at > located.offset and at < end) end = at;
                 if (base_offset) |want| if (at == want) {
-                    base = p.index.nameAt(i);
+                    base = try p.index.nameAt(i);
                 };
             }
             return .{ .disk_size = end - located.offset, .delta_base = base };
@@ -1626,7 +1626,7 @@ pub const Odb = struct {
         defer fresh.deinit(gpa);
         var path_buf: [hash.max_hex_len + 2]u8 = undefined;
         objects: for (0..p.index.count) |i| {
-            const oid = p.index.nameAt(@intCast(i));
+            const oid = try p.index.nameAt(@intCast(i));
             const path = odb.loosePath(oid, &path_buf);
             for (odb.backendData().sources.items) |source| {
                 if (try opening.exists(io, source.directory().get(), path)) continue :objects;
@@ -2016,15 +2016,15 @@ pub const Odb = struct {
                 const item = items[start];
                 var crc: warp.Crc32 = .init;
                 try p.sumStored(io, item.offset, item.end, .{ .crc = &crc, .checksum = &checksum });
-                if (p.index.crcAt(item.position)) |want| if (crc.final() != want) return error.ChecksumMismatch;
+                if (try p.index.crcAt(item.position)) |want| if (crc.final() != want) return error.ChecksumMismatch;
                 const header = try p.entryHeaderAt(io, item.offset);
                 if (header.kind == .object) {
-                    if (!(try p.nameStreamed(io, item.offset)).eql(p.index.nameAt(item.position))) return error.ObjectNameMismatch;
+                    if (!(try p.nameStreamed(io, item.offset)).eql(try p.index.nameAt(item.position))) return error.ObjectNameMismatch;
                     report.bytes += header.size;
                 } else {
                     const obj = try p.readAt(io, item.offset, .{ .cache = &odb.backendData().cache, .pack_id = pack_id });
                     defer gpa.free(obj.bytes);
-                    if (!hash.Hasher.object(p.kind, obj.type.name(), obj.bytes).eql(p.index.nameAt(item.position))) return error.ObjectNameMismatch;
+                    if (!hash.Hasher.object(p.kind, obj.type.name(), obj.bytes).eql(try p.index.nameAt(item.position))) return error.ObjectNameMismatch;
                     report.bytes += obj.bytes.len;
                 }
                 report.objects += 1;
@@ -2081,7 +2081,7 @@ pub const Odb = struct {
                     continue;
                 }
                 if (item.streamed) {
-                    if (!(try p.nameStreamed(io, item.offset)).eql(p.index.nameAt(item.position))) return error.ObjectNameMismatch;
+                    if (!(try p.nameStreamed(io, item.offset)).eql(try p.index.nameAt(item.position))) return error.ObjectNameMismatch;
                     report.objects += 1;
                     report.bytes += item.header.size;
                     continue;
@@ -2089,7 +2089,7 @@ pub const Odb = struct {
                 const obj = try p.readAt(io, item.offset, .{ .cache = &odb.backendData().cache, .pack_id = pack_id });
                 defer gpa.free(obj.bytes);
                 const name = hash.Hasher.object(p.kind, obj.type.name(), obj.bytes);
-                if (!name.eql(p.index.nameAt(item.position))) return error.ObjectNameMismatch;
+                if (!name.eql(try p.index.nameAt(item.position))) return error.ObjectNameMismatch;
                 report.objects += 1;
                 report.bytes += obj.bytes.len;
             }
@@ -2128,14 +2128,14 @@ pub const Odb = struct {
             const stored = c.span[@intCast(item.offset - c.span_at)..@intCast(item.end - c.span_at)];
             // A version 1 index has no CRC; the inflate and the name below
             // check the entry there, as git's verify does.
-            if (c.p.index.crcAt(item.position)) |crc| if (warp.Crc32.hash(stored) != crc) return error.ChecksumMismatch;
+            if (try c.p.index.crcAt(item.position)) |crc| if (warp.Crc32.hash(stored) != crc) return error.ChecksumMismatch;
             if (item.body.len == 0) return;
             const len: usize = @intCast(item.header.size);
             var entry_data: Io.Reader = .fixed(stored[@intCast(item.header.data_at - item.offset)..]);
             const got = c.readers[worker].decoder.inflateReader(&entry_data, item.body, .{}) catch return error.CorruptPackEntry;
             if (got.out_len != len) return error.CorruptPackEntry;
             const name = hash.Hasher.object(c.p.kind, item.header.kind.object.name(), item.body[0..len]);
-            if (!name.eql(c.p.index.nameAt(item.position))) return error.ObjectNameMismatch;
+            if (!name.eql(try c.p.index.nameAt(item.position))) return error.ObjectNameMismatch;
         }
     };
 
@@ -2290,7 +2290,7 @@ pub const Odb = struct {
             };
             try out.ensureUnusedCapacity(gpa, index.count);
             for (0..index.count) |i| out.appendAssumeCapacity(.{
-                .oid = index.nameAt(@intCast(i)),
+                .oid = try index.nameAt(@intCast(i)),
                 .time = if (times) |t| t[i] else pack_time,
                 .pack = named.name,
             });
@@ -2961,7 +2961,7 @@ pub const Odb = struct {
                     continue;
                 },
                 .ref_delta => |oid| oid,
-                .ofs_delta => |back| order.nameAt(at.pack, at.offset -| back) orelse continue,
+                .ofs_delta => |back| (try order.nameAt(at.pack, at.offset -| back)) orelse continue,
             };
             // A delta its pack holds is reused whatever the object's size,
             // as git's `check_object` reuses it.
@@ -5450,9 +5450,9 @@ const PackEntryOrder = struct {
         return if (i < o.offsets.len and o.offsets[i] == offset) i else null;
     }
 
-    fn nameAt(o: *const PackEntryOrder, p: *pack.Pack, offset: u64) ?Oid {
+    fn nameAt(o: *const PackEntryOrder, p: *pack.Pack, offset: u64) pack.IndexError!?Oid {
         const i = o.find(offset) orelse return null;
-        return p.index.nameAt(o.positions[i]);
+        return try p.index.nameAt(o.positions[i]);
     }
 
     /// Where the entry at `offset` ends: the next entry, or the trailer.
@@ -5925,7 +5925,7 @@ test "an index offset past its pack is refused by verify, not read as another en
     defer index.deinit();
     const entries = try gpa.alloc(pack.IndexEntry, index.count);
     defer gpa.free(entries);
-    for (entries, 0..) |*e, i| e.* = .{ .oid = index.nameAt(@intCast(i)), .offset = try index.offsetAt(@intCast(i)), .crc = index.crcAt(@intCast(i)).? };
+    for (entries, 0..) |*e, i| e.* = .{ .oid = try index.nameAt(@intCast(i)), .offset = try index.offsetAt(@intCast(i)), .crc = (try index.crcAt(@intCast(i))).? };
     // The entry at the pack's first offset, said to be 4 GiB further on:
     // a 64-bit offset in a pack far smaller.
     for (entries) |*e| if (e.offset == 12) {

@@ -59,6 +59,7 @@ test {
         // the plumbing the API keeps to itself: reached by no public name,
         // so named here for its tests to run
         _ = @import("codec/varint.zig");
+        _ = @import("codec/rows.zig");
         _ = @import("odb/keep.zig");
         _ = @import("names/ref.zig");
         _ = @import("refs/refs_test.zig");

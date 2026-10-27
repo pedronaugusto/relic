@@ -94,7 +94,7 @@ pub const Store = struct {
             const offsets = try gpa.alloc(u64, index.count);
             defer gpa.free(offsets);
             for (names, reverse, offsets, 0..) |*name, *pos, *offset, i| {
-                name.* = index.nameAt(@intCast(i));
+                name.* = try index.nameAt(@intCast(i));
                 pos.* = @intCast(i);
                 offset.* = try index.offsetAt(@intCast(i));
             }

@@ -386,7 +386,7 @@ fn readPackInputs(gpa: Allocator, io: Io, dir: Io.Dir, kind: hash.Kind, only: ?[
         const pack_path = try arena.print("{s}.pack", .{base});
         const stat = (try dir.statFile(io, pack_path, .{}));
         const objects = try arena.alloc(midx_mod.WriteEntry, index.count);
-        for (objects, 0..) |*obj, i| obj.* = .{ .oid = index.nameAt(@intCast(i)), .offset = try index.offsetAt(@intCast(i)) };
+        for (objects, 0..) |*obj, i| obj.* = .{ .oid = try index.nameAt(@intCast(i)), .offset = try index.offsetAt(@intCast(i)) };
         try packs.append(arena, .{ .name = try arena.dupe(u8, entry.name), .mtime = @intCast(date.seconds(stat.mtime)), .entries = objects });
     }
     result.packs = try packs.toOwnedSlice(arena);
@@ -779,7 +779,7 @@ pub fn writePackBitmap(gpa: Allocator, io: Io, db: *odb.Odb, inputs: BitmapInput
     const offsets = try gpa.alloc(u64, index.count);
     defer gpa.free(offsets);
     for (names, reverse, offsets, 0..) |*oid, *pos, *offset, i| {
-        oid.* = index.nameAt(@intCast(i));
+        oid.* = try index.nameAt(@intCast(i));
         pos.* = @intCast(i);
         offset.* = try index.offsetAt(@intCast(i));
     }
