@@ -8,13 +8,22 @@ const Allocator = std.mem.Allocator;
 const hash = @import("../hash/hash.zig");
 const ewah = @import("../codec.zig").ewah;
 const format = @import("accelerators/chunks.zig");
+const Rows = @import("../codec.zig").Rows;
 const Oid = hash.Oid;
 
 /// Malformed, incompatible or unsupported optional accelerator data.
 pub const Error = ewah.Error || Allocator.Error || error{ NotABitmap, UnsupportedBitmapVersion, UnsupportedBitmapOptions, CorruptReachabilityBitmap, BitmapChecksumMismatch };
 
 /// One stored commit's compressed delta. The base precedes it by xor_offset rows.
-pub const Entry = struct { position: u32, xor_offset: u8, flags: u8, start: usize, len: usize };
+pub const Entry = struct {
+    position: u32,
+    xor_offset: u8,
+    flags: u8,
+    /// Where its row begins in the file, as the lookup table names it.
+    offset: u64,
+    /// Its EWAH words, as stored.
+    words: []const u8,
+};
 
 /// A checked bitmap, borrowing its pack's name order and reverse order from the caller.
 pub const Index = struct {
@@ -28,7 +37,9 @@ pub const Index = struct {
     options: u16,
     types: [4][]u64,
     entries: []Entry,
-    hash_cache: ?[]const u8,
+    /// One name hash per object in name order, where the bitmap has the
+    /// cache.
+    hash_cache: ?Rows,
 
     /// Take ownership of a bitmap and check its digest against the named pack or MIDX.
     /// Pseudo-merge extensions are refused by name; ordinary reachability remains usable without them.
@@ -48,19 +59,19 @@ pub const Index = struct {
         const entry_count = std.mem.readInt(u32, bytes[8..12], .big);
         if (entry_count > object_count or @as(u64, entry_count) * 26 > data_end - header_len) return error.CorruptReachabilityBitmap;
         var end = data_end;
-        var cache: ?[]const u8 = null;
+        var cache: ?Rows = null;
         if (options & 4 != 0) {
             const size = @as(usize, object_count) * 4;
             if (size > end - header_len) return error.CorruptReachabilityBitmap;
-            cache = bytes[end - size .. end];
             end -= size;
+            cache = Rows.cut(bytes, end, object_count, 4) orelse return error.CorruptReachabilityBitmap;
         }
-        var lookup: ?[]const u8 = null;
+        var lookup: ?Rows = null;
         if (options & 16 != 0) {
             const size = @as(usize, entry_count) * 16;
             if (size > end - header_len) return error.CorruptReachabilityBitmap;
-            lookup = bytes[end - size .. end];
             end -= size;
+            lookup = Rows.cut(bytes, end, entry_count, 16) orelse return error.CorruptReachabilityBitmap;
         }
         var types: [4][]u64 = undefined;
         var loaded: usize = 0;
@@ -87,16 +98,17 @@ pub const Index = struct {
         errdefer gpa.free(entries);
         for (entries, 0..) |*entry, i| {
             if (at > end or end - at < 6) return error.CorruptReachabilityBitmap;
-            entry.* = .{ .position = std.mem.readInt(u32, bytes[at..][0..4], .big), .xor_offset = bytes[at + 4], .flags = bytes[at + 5], .start = at + 6, .len = 0 };
+            const head = bytes[at..][0..6];
+            const len = try ewah.encodedLength(bytes[at + 6 .. end], @as(u64, object_count) + 63);
+            entry.* = .{ .position = std.mem.readInt(u32, head[0..4], .big), .xor_offset = head[4], .flags = head[5], .offset = at, .words = bytes[at + 6 ..][0..len] };
             if (entry.position >= object_count or entry.xor_offset > i or entry.xor_offset > 160) return error.CorruptReachabilityBitmap;
-            entry.len = try ewah.encodedLength(bytes[at + 6 .. end], @as(u64, object_count) + 63);
-            at += 6 + entry.len;
+            at += 6 + len;
         }
         if (at != end) return error.CorruptReachabilityBitmap;
         if (lookup) |table| {
             var previous: ?u32 = null;
             for (0..entry_count) |i| {
-                const row = table[i * 16 ..][0..16];
+                const row = table.at(i) orelse return error.CorruptReachabilityBitmap;
                 const pos = std.mem.readInt(u32, row[0..4], .big);
                 const offset = std.mem.readInt(u64, row[4..12], .big);
                 const xor_row = std.mem.readInt(u32, row[12..16], .big);
@@ -111,7 +123,8 @@ pub const Index = struct {
                     if (xor_row != 0xffff_ffff) return error.CorruptReachabilityBitmap;
                 } else {
                     if (xor_row == 0xffff_ffff) return error.CorruptReachabilityBitmap;
-                    if (std.mem.readInt(u32, table[@as(usize, xor_row) * 16 ..][0..4], .big) != entries[j - entries[j].xor_offset].position) return error.CorruptReachabilityBitmap;
+                    const base = table.at(xor_row) orelse return error.CorruptReachabilityBitmap;
+                    if (std.mem.readInt(u32, base[0..4], .big) != entries[j - entries[j].xor_offset].position) return error.CorruptReachabilityBitmap;
                 }
             }
         }
@@ -119,7 +132,7 @@ pub const Index = struct {
     }
 
     fn orderEntryOffset(offset: u64, entry: Entry) std.math.Order {
-        return std.math.order(offset, entry.start - 6);
+        return std.math.order(offset, entry.offset);
     }
 
     pub fn deinit(index: *Index) void {
@@ -143,7 +156,7 @@ pub const Index = struct {
         @memset(out, 0);
         while (true) {
             const entry = index.entries[i];
-            const decoded = try ewah.readWords(gpa, index.bytes[entry.start..][0..entry.len], @as(u64, index.object_count) + 63);
+            const decoded = try ewah.readWords(gpa, entry.words, @as(u64, index.object_count) + 63);
             defer gpa.free(decoded.words);
             if (decoded.words.len > out.len) return error.CorruptReachabilityBitmap;
             for (decoded.words, 0..) |word, j| out[j] ^= word;
@@ -156,9 +169,9 @@ pub const Index = struct {
 
     /// The name hash of an object in name order, when the optional cache is present.
     pub fn nameHashAt(index: *const Index, position: u32) ?u32 {
-        if (position >= index.object_count) return null;
         const cache = index.hash_cache orelse return null;
-        return std.mem.readInt(u32, cache[@as(usize, position) * 4 ..][0..4], .big);
+        const row = cache.at(position) orelse return null;
+        return std.mem.readInt(u32, row[0..4], .big);
     }
 };
 
