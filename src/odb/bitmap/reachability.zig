@@ -55,7 +55,7 @@ pub const Store = struct {
                 const reverse = try gpa.alloc(u32, index.count);
                 errdefer gpa.free(reverse);
                 for (names, reverse, 0..) |*name, *pos, i| {
-                    name.* = index.nameAt(@intCast(i));
+                    name.* = try index.nameAt(@intCast(i));
                     pos.* = (try index.reverseAt(@intCast(i))) orelse return error.CorruptMultiPackIndex;
                 }
                 for (0..index.pack_count) |i| {

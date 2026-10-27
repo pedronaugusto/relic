@@ -24,6 +24,20 @@ pub const Rows = struct {
         return .{ .bytes = file[start..][0..len], .width = width };
     }
 
+    /// `bytes` as exactly `rows` rows of `width` bytes, or `null` where it
+    /// is any other length: a chunk whose rows the format counts elsewhere.
+    pub fn exactly(bytes: []const u8, rows: usize, width: usize) ?Rows {
+        const table = cut(bytes, 0, rows, width) orelse return null;
+        return if (table.bytes.len == bytes.len) table else null;
+    }
+
+    /// The whole rows of `width` bytes in `bytes`, any bytes after the last
+    /// left out: a chunk git reads as its length over the row's width.
+    pub fn whole(bytes: []const u8, width: usize) Rows {
+        std.debug.assert(width != 0);
+        return .{ .bytes = bytes[0 .. bytes.len - bytes.len % width], .width = width };
+    }
+
     /// How many rows the table holds.
     pub fn count(rows: Rows) usize {
         return rows.bytes.len / rows.width;
@@ -48,4 +62,13 @@ test "a table is cut to the rows it declares and read only within them" {
     try std.testing.expectEqual(@as(?Rows, null), Rows.cut(file, 30, 0, 4));
     try std.testing.expectEqual(@as(?Rows, null), Rows.cut(file, 0, std.math.maxInt(usize), 4));
     try std.testing.expectEqual(@as(usize, 0), Rows.empty.count());
+}
+
+test "a chunk is a table of exactly its rows, or of its whole rows" {
+    try std.testing.expectEqual(@as(usize, 2), Rows.exactly("AAAABBBB", 2, 4).?.count());
+    try std.testing.expectEqual(@as(?Rows, null), Rows.exactly("AAAABBBBC", 2, 4));
+    try std.testing.expectEqual(@as(?Rows, null), Rows.exactly("AAAA", 2, 4));
+    const rows = Rows.whole("AAAABBBBCC", 4);
+    try std.testing.expectEqual(@as(usize, 2), rows.count());
+    try std.testing.expectEqual(@as(?[]const u8, null), rows.at(2));
 }

@@ -452,7 +452,7 @@ pub fn writeMidx(gpa: Allocator, io: Io, db: *odb.Odb, options: MidxOptions) Sel
             var assigned: std.ArrayList(midx_mod.WriteEntry) = .empty;
             for (0..old.count) |i| {
                 const located = try old.locate(@intCast(i));
-                if (located.pack == pack_position) try assigned.append(arena, .{ .oid = old.nameAt(@intCast(i)), .offset = located.offset });
+                if (located.pack == pack_position) try assigned.append(arena, .{ .oid = try old.nameAt(@intCast(i)), .offset = located.offset });
             }
             p.entries = try assigned.toOwnedSlice(arena);
         };
@@ -825,7 +825,7 @@ pub fn writeMidxBitmap(gpa: Allocator, io: Io, db: *odb.Odb, inputs: MidxBitmapI
     const reverse = try gpa.alloc(u32, index.count);
     defer gpa.free(reverse);
     for (names, reverse, 0..) |*oid, *pos, i| {
-        oid.* = index.nameAt(@intCast(i));
+        oid.* = try index.nameAt(@intCast(i));
         pos.* = (try index.reverseAt(@intCast(i))).?;
     }
     const bytes = try buildBitmap(gpa, io, db, checksum, names, reverse, tips, options, true, if (previous) |*value| value else null);
@@ -909,7 +909,7 @@ pub fn repackMidx(gpa: Allocator, io: Io, db: *odb.Odb, options: MidxRepackOptio
     if (count_packs <= 1) return null;
     var entries: std.ArrayList(odb.PackEntry) = .empty;
     for (0..index.count) |i| if (selected[(try index.locate(@intCast(i))).pack]) {
-        try entries.append(arena, .{ .oid = index.nameAt(@intCast(i)), .in_pack = true });
+        try entries.append(arena, .{ .oid = try index.nameAt(@intCast(i)), .in_pack = true });
     };
     const written = try db.writePack(io, dir, entries.items, options.pack);
     try db.refresh(io);

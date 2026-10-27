@@ -784,7 +784,7 @@ test "the commit-graph and the multi-pack index read what git wrote" {
 
     var i: u32 = 0;
     while (i < @min(index.count, 50)) : (i += 1) {
-        const oid = index.nameAt(i);
+        const oid = try index.nameAt(i);
         const located = (try index.find(oid)).?;
         try std.testing.expect(located.pack < index.pack_count);
         // And the object really is readable, which is the only thing the
