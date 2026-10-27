@@ -434,7 +434,7 @@ fn graphFilters(repo: *testgit.Repo) ![]u8 {
     }
     for (0..graph.count) |i| {
         var hex: [@import("../hash/hash.zig").max_hex_len]u8 = undefined;
-        const name = graph.nameAt(@intCast(i)).hex(&hex);
+        const name = (try graph.nameAt(@intCast(i))).hex(&hex);
         const filter = try graph.changedPaths(@intCast(i));
         try lines.append(gpa, if (filter) |f| (if (f.bytes.len == 0) try gpa.print("{s} none", .{name}) else try gpa.print("{s} v{d} {x}", .{ name, f.settings.version, f.bytes })) else try gpa.print("{s} none", .{name}));
     }

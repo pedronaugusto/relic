@@ -25,6 +25,7 @@ const fs = @import("../fs/fs.zig");
 
 const Oid = hash.Oid;
 const format = @import("accelerators/chunks.zig");
+const Rows = @import("../codec.zig").Rows;
 pub const bloom = @import("commit_graph/bloom.zig");
 
 /// The four bytes a commit-graph begins with.
@@ -43,6 +44,10 @@ pub const Error = error{
     /// A detached split layer passed to parse without its base graphs.
     SplitGraphUnsupported,
 } || Allocator.Error || aegis.own.ReadFileError;
+
+/// Errors from reading a position in a held graph: the file names a row
+/// past one of its own tables.
+pub const PositionError = error{CorruptCommitGraph};
 
 /// One commit, as the graph stores it.
 pub const Commit = struct {
@@ -63,17 +68,29 @@ pub const Commit = struct {
 /// A commit-graph file, held in memory.
 pub const Graph = struct {
     pub const Error = ErrorNamespace.Error;
+    pub const PositionError = ErrorNamespace.PositionError;
 
     gpa: Allocator,
     kind: hash.Kind,
+    /// The file, which the graph owns and the tables below are cut from.
     bytes: []const u8,
+    /// How many commits it and its base graphs hold.
     count: u32,
-    fanout_at: usize,
-    names_at: usize,
-    data_at: usize,
-    edges_at: ?usize,
-    generation_at: ?usize,
-    generation_overflow_at: ?usize,
+    /// How many names begin with a byte up to each byte.
+    fanout_table: *const [256][4]u8,
+    /// One name per commit, in name order.
+    names: Rows,
+    /// One row per commit: its tree, two parents and packed time.
+    data: Rows,
+    /// The third and later parents, which a second parent with its high
+    /// bit set names by row; none where the graph has no `EDGE` chunk.
+    edges: Rows,
+    /// One corrected commit date offset per commit, where the graph has a
+    /// `GDA2` chunk.
+    generation: ?Rows,
+    /// 8-byte offsets, which an offset with its high bit set names by row;
+    /// none where the graph has no `GDO2` chunk.
+    generation_overflow: Rows,
     base: ?*Graph = null,
     base_count: u32 = 0,
     local_count: u32,
@@ -170,48 +187,22 @@ pub const Graph = struct {
         format.validate(kind, bytes, 8, chunk_count) catch return error.CorruptCommitGraph;
         const base_count = if (base) |g| g.count else 0;
 
-        const table_at: usize = 8;
-        const table_len = (@as(usize, chunk_count) + 1) * 12;
-        if (bytes.len < table_at + table_len) return error.CorruptCommitGraph;
-
-        var fanout_at: ?usize = null;
-        var names_at: ?usize = null;
-        var data_at: ?usize = null;
-        var edges_at: ?usize = null;
-        var generation_at: ?usize = null;
-        var generation_overflow_at: ?usize = null;
-
-        var i: usize = 0;
-        while (i < chunk_count) : (i += 1) {
-            const row = bytes[table_at + i * 12 ..];
-            const id = row[0..4];
-            const offset = std.mem.readInt(u64, row[4..12], .big);
-            if (offset > bytes.len) return error.CorruptCommitGraph;
-            const at: usize = @intCast(offset);
-            if (std.mem.eql(u8, id, "OIDF")) fanout_at = at;
-            if (std.mem.eql(u8, id, "OIDL")) names_at = at;
-            if (std.mem.eql(u8, id, "CDAT")) data_at = at;
-            if (std.mem.eql(u8, id, "EDGE")) edges_at = at;
-            if (std.mem.eql(u8, id, "GDA2")) generation_at = at;
-            if (std.mem.eql(u8, id, "GDO2")) generation_overflow_at = at;
-        }
-
-        const fanout = fanout_at orelse return error.CorruptCommitGraph;
-        if (fanout + 1024 > bytes.len) return error.CorruptCommitGraph;
-        const count = std.mem.readInt(u32, bytes[fanout + 255 * 4 ..][0..4], .big);
-
         const raw_len = kind.rawLen();
-        const names = names_at orelse return error.CorruptCommitGraph;
-        const data = data_at orelse return error.CorruptCommitGraph;
-        if (names + @as(usize, count) * raw_len > bytes.len) return error.CorruptCommitGraph;
-        if (data + @as(usize, count) * (raw_len + 16) > bytes.len) return error.CorruptCommitGraph;
+        const fanout_chunk = format.get(bytes, 8, chunk_count, "OIDF") orelse return error.CorruptCommitGraph;
+        if (fanout_chunk.len != 1024) return error.CorruptCommitGraph;
+        const fanout_table = std.mem.bytesAsValue([256][4]u8, fanout_chunk[0..1024]);
+        const count = std.mem.readInt(u32, &fanout_table[255], .big);
+        const names = Rows.exactly(format.get(bytes, 8, chunk_count, "OIDL") orelse return error.CorruptCommitGraph, count, raw_len) orelse return error.CorruptCommitGraph;
+        const data = Rows.exactly(format.get(bytes, 8, chunk_count, "CDAT") orelse return error.CorruptCommitGraph, count, raw_len + 16) orelse return error.CorruptCommitGraph;
+        const generation: ?Rows = if (format.get(bytes, 8, chunk_count, "GDA2")) |chunk|
+            Rows.exactly(chunk, count, 4) orelse return error.CorruptCommitGraph
+        else
+            null;
 
         var names_seen: u32 = 0;
         var previous_name: ?[]const u8 = null;
-        for (0..256) |bucket| {
-            while (names_seen < count) : (names_seen += 1) {
-                const at = names + @as(usize, names_seen) * raw_len;
-                const name = bytes[at..][0..raw_len];
+        for (fanout_table, 0..) |*row, bucket| {
+            while (names.at(names_seen)) |name| : (names_seen += 1) {
                 if (previous_name) |previous| {
                     if (std.mem.order(u8, previous, name) != .lt) return error.CorruptCommitGraph;
                 }
@@ -219,26 +210,18 @@ pub const Graph = struct {
                 if (name[0] < bucket) return error.CorruptCommitGraph;
                 previous_name = name;
             }
-            const fanout_count = std.mem.readInt(u32, bytes[fanout + bucket * 4 ..][0..4], .big);
-            if (fanout_count != names_seen) return error.CorruptCommitGraph;
-        }
-        if (generation_at) |at| {
-            if (at + @as(usize, count) * 4 > bytes.len) return error.CorruptCommitGraph;
+            if (std.mem.readInt(u32, row, .big) != names_seen) return error.CorruptCommitGraph;
         }
 
-        if ((format.get(bytes, 8, chunk_count, "OIDF") orelse return error.CorruptCommitGraph).len != 1024 or
-            (format.get(bytes, 8, chunk_count, "OIDL") orelse return error.CorruptCommitGraph).len != @as(usize, count) * raw_len or
-            (format.get(bytes, 8, chunk_count, "CDAT") orelse return error.CorruptCommitGraph).len != @as(usize, count) * (raw_len + 16)) return error.CorruptCommitGraph;
-        if (format.get(bytes, 8, chunk_count, "GDA2")) |chunk| if (chunk.len != @as(usize, count) * 4) return error.CorruptCommitGraph;
         if (bytes[7] != 0) {
-            const bases = format.get(bytes, 8, chunk_count, "BASE") orelse return error.CorruptCommitGraph;
-            if (bases.len != @as(usize, bytes[7]) * raw_len) return error.CorruptCommitGraph;
+            const bases = Rows.exactly(format.get(bytes, 8, chunk_count, "BASE") orelse return error.CorruptCommitGraph, bytes[7], raw_len) orelse return error.CorruptCommitGraph;
             var g = base;
             var i_base: usize = bytes[7];
             while (g) |parent| : (g = parent.base) {
                 if (i_base == 0) return error.CorruptCommitGraph;
                 i_base -= 1;
-                if (!std.mem.eql(u8, bases[i_base * raw_len ..][0..raw_len], parent.checksum().raw())) return error.CorruptCommitGraph;
+                const name = bases.at(i_base) orelse return error.CorruptCommitGraph;
+                if (!std.mem.eql(u8, name, parent.checksum().raw())) return error.CorruptCommitGraph;
             }
             if (i_base != 0) return error.CorruptCommitGraph;
         }
@@ -252,12 +235,12 @@ pub const Graph = struct {
             .base = base,
             .bloom_index = format.get(bytes, 8, chunk_count, "BIDX"),
             .bloom_data = format.get(bytes, 8, chunk_count, "BDAT"),
-            .fanout_at = fanout,
-            .names_at = names,
-            .data_at = data,
-            .edges_at = edges_at,
-            .generation_at = generation_at,
-            .generation_overflow_at = generation_overflow_at,
+            .fanout_table = fanout_table,
+            .names = names,
+            .data = data,
+            .edges = if (format.get(bytes, 8, chunk_count, "EDGE")) |chunk| .whole(chunk, 4) else .empty,
+            .generation = generation,
+            .generation_overflow = if (format.get(bytes, 8, chunk_count, "GDO2")) |chunk| .whole(chunk, 8) else .empty,
         };
     }
 
@@ -268,15 +251,16 @@ pub const Graph = struct {
     }
 
     /// The changed-path filter at a global graph position, or null.
-    pub fn changedPaths(graph: *const Graph, position: u32) Self.Error!?struct { bytes: []const u8, settings: bloom.Settings } {
+    pub fn changedPaths(graph: *const Graph, position: u32) Self.PositionError!?struct { bytes: []const u8, settings: bloom.Settings } {
         if (position >= graph.count) return error.CorruptCommitGraph;
         if (position < graph.base_count) return graph.base.?.changedPaths(position);
-        const index = graph.bloom_index orelse return null;
+        const chunk = graph.bloom_index orelse return null;
         const data = graph.bloom_data orelse return error.CorruptCommitGraph;
-        if (index.len != @as(usize, graph.local_count) * 4 or data.len < 12) return error.CorruptCommitGraph;
+        const index = Rows.exactly(chunk, graph.local_count, 4) orelse return error.CorruptCommitGraph;
+        if (data.len < 12) return error.CorruptCommitGraph;
         const local = position - graph.base_count;
-        const start = if (local == 0) 0 else std.mem.readInt(u32, index[@as(usize, local - 1) * 4 ..][0..4], .big);
-        const end = std.mem.readInt(u32, index[@as(usize, local) * 4 ..][0..4], .big);
+        const start = if (local == 0) 0 else std.mem.readInt(u32, (index.at(local - 1) orelse return error.CorruptCommitGraph)[0..4], .big);
+        const end = std.mem.readInt(u32, (index.at(local) orelse return error.CorruptCommitGraph)[0..4], .big);
         if (start > end or end > data.len - 12) return error.CorruptCommitGraph;
         return .{ .bytes = data[12 + start .. 12 + end], .settings = .{
             .version = std.mem.readInt(u32, data[0..4], .big),
@@ -311,30 +295,26 @@ pub const Graph = struct {
 
     /// Whether the graph carries corrected commit dates.
     pub fn hasGenerations(graph: *const Graph) bool {
-        return graph.generation_at != null and (if (graph.base) |base| base.hasGenerations() else true);
+        return graph.generation != null and (if (graph.base) |base| base.hasGenerations() else true);
     }
 
     /// The name of the commit at `position`.
-    pub fn nameAt(graph: *const Graph, position: u32) Oid {
+    pub fn nameAt(graph: *const Graph, position: u32) Self.PositionError!Oid {
         if (position < graph.base_count) return graph.base.?.nameAt(position);
-        const local = position - graph.base_count;
-        const raw_len = graph.kind.rawLen();
-        // aegis: no-danger: the slice is cut to the format's raw length
-        return Oid.fromRaw(graph.kind, graph.bytes[graph.names_at + @as(usize, local) * raw_len ..][0..raw_len]) catch unreachable;
+        const row = graph.names.at(position - graph.base_count) orelse return error.CorruptCommitGraph;
+        // aegis: no-danger: a row of `names` is the format's raw length
+        return Oid.fromRaw(graph.kind, row) catch unreachable;
     }
 
     /// Where `oid` is in the graph, or `null`.
-    pub fn find(graph: *const Graph, oid: Oid) ?u32 {
+    pub fn find(graph: *const Graph, oid: Oid) Self.PositionError!?u32 {
         if (oid.kind != graph.kind) return null;
         const raw = oid.raw();
-        var lo: u32 = if (raw[0] == 0)
-            0
-        else
-            std.mem.readInt(u32, graph.bytes[graph.fanout_at + (@as(usize, raw[0]) - 1) * 4 ..][0..4], .big);
-        var hi: u32 = std.mem.readInt(u32, graph.bytes[graph.fanout_at + @as(usize, raw[0]) * 4 ..][0..4], .big);
+        var lo: u32 = if (raw[0] == 0) 0 else std.mem.readInt(u32, &graph.fanout_table[raw[0] - 1], .big);
+        var hi: u32 = std.mem.readInt(u32, &graph.fanout_table[raw[0]], .big);
         while (lo < hi) {
             const mid = lo + (hi - lo) / 2;
-            const name = graph.nameAt(mid + graph.base_count);
+            const name = try graph.nameAt(mid + graph.base_count);
             switch (std.mem.order(u8, name.raw(), raw)) {
                 .lt => lo = mid + 1,
                 .gt => hi = mid,
@@ -345,13 +325,13 @@ pub const Graph = struct {
     }
 
     /// The commit at `position`.
-    pub fn commitAt(graph: *const Graph, position: u32) Self.Error!Commit {
+    pub fn commitAt(graph: *const Graph, position: u32) Self.PositionError!Commit {
         if (position >= graph.count) return error.CorruptCommitGraph;
         if (position < graph.base_count) return graph.base.?.commitAt(position);
         const local = position - graph.base_count;
         const raw_len = graph.kind.rawLen();
-        const row = graph.bytes[graph.data_at + @as(usize, local) * (raw_len + 16) ..];
-        // aegis: no-danger: the slice is cut to the format's raw length
+        const row = graph.data.at(local) orelse return error.CorruptCommitGraph;
+        // aegis: no-danger: a row of `data` is the format's raw length and 16 bytes
         const tree = Oid.fromRaw(graph.kind, row[0..raw_len]) catch unreachable;
         const first = std.mem.readInt(u32, row[raw_len..][0..4], .big);
         const second = std.mem.readInt(u32, row[raw_len + 4 ..][0..4], .big);
@@ -382,21 +362,18 @@ pub const Graph = struct {
         }
 
         var generation: ?u64 = null;
-        if (graph.generation_at) |at| {
-            const offset = std.mem.readInt(u32, graph.bytes[at + @as(usize, local) * 4 ..][0..4], .big);
+        if (graph.generation) |table| {
+            const offset = std.mem.readInt(u32, (table.at(local) orelse return error.CorruptCommitGraph)[0..4], .big);
             if (offset & 0x8000_0000 == 0) {
                 generation = @as(u64, @intCast(time)) + offset;
-            } else if (graph.generation_overflow_at) |overflow_at| {
-                const row_at = overflow_at + @as(usize, offset & 0x7fff_ffff) * 8;
-                const overflow = format.get(graph.bytes, 8, graph.bytes[6], "GDO2") orelse return error.CorruptCommitGraph;
-                if (row_at + 8 > overflow_at + overflow.len) return error.CorruptCommitGraph;
-                const wide = std.mem.readInt(u64, graph.bytes[row_at..][0..8], .big);
-                generation = std.math.add(u64, @intCast(time), wide) catch return error.CorruptCommitGraph;
-            } else return error.CorruptCommitGraph;
+            } else {
+                const wide = graph.generation_overflow.at(offset & 0x7fff_ffff) orelse return error.CorruptCommitGraph;
+                generation = std.math.add(u64, @intCast(time), std.mem.readInt(u64, wide[0..8], .big)) catch return error.CorruptCommitGraph;
+            }
         }
 
         return .{
-            .oid = graph.nameAt(position),
+            .oid = try graph.nameAt(position),
             .tree = tree,
             .parents = parents,
             .has_extra_parents = has_extra,
@@ -406,8 +383,8 @@ pub const Graph = struct {
     }
 
     /// The commit named `oid`, or `null` when the graph does not hold it.
-    pub fn commit(graph: *const Graph, oid: Oid) Self.Error!?Commit {
-        const position = graph.find(oid) orelse return null;
+    pub fn commit(graph: *const Graph, oid: Oid) Self.PositionError!?Commit {
+        const position = (try graph.find(oid)) orelse return null;
         const value = try graph.commitAt(position);
         return value;
     }
@@ -423,27 +400,23 @@ pub const Graph = struct {
         errdefer out.deinit(gpa);
         if (found.parents[0]) |at| {
             if (at >= graph.count) return error.CorruptCommitGraph;
-            try out.append(gpa, graph.nameAt(at));
+            try out.append(gpa, try graph.nameAt(at));
         }
         if (!found.has_extra_parents) {
             if (found.parents[1]) |at| {
                 if (at >= graph.count) return error.CorruptCommitGraph;
-                try out.append(gpa, graph.nameAt(at));
+                try out.append(gpa, try graph.nameAt(at));
             }
             return out.toOwnedSlice(gpa);
         }
-        const edges_at = graph.edges_at orelse return error.CorruptCommitGraph;
-        const edge_chunk = format.get(graph.bytes, 8, graph.bytes[6], "EDGE") orelse return error.CorruptCommitGraph;
-        var edge = edges_at + @as(usize, found.parents[1].?) * 4;
-        while (true) {
-            if (edge + 4 > edges_at + edge_chunk.len) return error.CorruptCommitGraph;
-            const value = std.mem.readInt(u32, graph.bytes[edge..][0..4], .big);
-            const last = value & 0x8000_0000 != 0;
+        var edge: usize = found.parents[1].?;
+        while (true) : (edge += 1) {
+            const row = graph.edges.at(edge) orelse return error.CorruptCommitGraph;
+            const value = std.mem.readInt(u32, row[0..4], .big);
             const at = value & 0x7fff_ffff;
             if (at >= graph.count) return error.CorruptCommitGraph;
-            try out.append(gpa, graph.nameAt(at));
-            if (last) break;
-            edge += 4;
+            try out.append(gpa, try graph.nameAt(at));
+            if (value & 0x8000_0000 != 0) break;
         }
         return out.toOwnedSlice(gpa);
     }
@@ -503,6 +476,30 @@ fn fuzzGraph(_: void, case: *shakedown.Case) anyerror!void {
         const parents = graph.parentsOf(gpa, i) catch continue;
         gpa.free(parents);
     }
+}
+
+test "a position past a commit graph's tables is refused, not read past" {
+    const gpa = std.testing.allocator;
+    const tree = try Oid.fromRaw(.sha1, &@as([20]u8, @splat(0x99)));
+    var names: [4]Oid = undefined;
+    for (&names, [_]u8{ 0x11, 0x22, 0x33, 0xee }) |*name, byte| name.* = try Oid.fromRaw(.sha1, &@as([20]u8, @splat(byte)));
+    const commits = [_]WriteCommit{
+        .{ .oid = names[0], .tree = tree, .parents = &.{}, .time = 10, .level = 1, .generation = 10 },
+        .{ .oid = names[1], .tree = tree, .parents = &.{}, .time = 10, .level = 1, .generation = 10 },
+        .{ .oid = names[2], .tree = tree, .parents = &.{}, .time = 10, .level = 1, .generation = 10 },
+        // An octopus merge, its third parent in `EDGE`, its generation in `GDO2`.
+        .{ .oid = names[3], .tree = tree, .parents = &.{ 0, 1, 2 }, .time = 20, .level = 2, .generation = 20 + 0x9000_0000 },
+    };
+    var graph = try Graph.parse(gpa, .sha1, try encode(gpa, .sha1, &commits, .{}));
+    defer graph.deinit();
+    const parents = try graph.parentsOf(gpa, 3);
+    defer gpa.free(parents);
+    try std.testing.expectEqual(@as(usize, 3), parents.len);
+    for (names[0..3], parents) |want, got| try std.testing.expect(want.eql(got));
+    try std.testing.expectEqual(@as(?u64, 20 + 0x9000_0000), (try graph.commitAt(3)).generation);
+    try std.testing.expectEqual(@as(?u32, 3), try graph.find(names[3]));
+    try std.testing.expectError(error.CorruptCommitGraph, graph.nameAt(4));
+    try std.testing.expectError(error.CorruptCommitGraph, graph.commitAt(4));
 }
 
 test "a refused on-disk commit graph releases its bytes once" {

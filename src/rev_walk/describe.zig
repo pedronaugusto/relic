@@ -786,7 +786,7 @@ const NameRev = struct {
             if (try nr.repo.objectDatabase().commitGraph(io)) |graph_value| {
                 var graph = graph_value;
                 defer graph.deinit();
-                if (graph.find(cmit) != null) return;
+                if ((try graph.find(cmit)) != null) return;
             }
         }
         const time = (try nr.commit(io, cmit)).time;

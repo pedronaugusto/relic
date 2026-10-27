@@ -427,7 +427,7 @@ fn notInGraph(gpa: Allocator, io: Io, repo: *Repository, limit: usize) Self.Erro
     var count: usize = 0;
     for (tips) |tip| {
         if ((try seen.getOrPut(gpa, tip)).found_existing) continue;
-        if (graph) |*g| if (g.find(tip) != null) continue;
+        if (graph) |*g| if ((try g.find(tip)) != null) continue;
         count += 1;
         if (count >= limit) return count;
         try stack.append(gpa, tip);
@@ -437,7 +437,7 @@ fn notInGraph(gpa: Allocator, io: Io, repo: *Repository, limit: usize) Self.Erro
             var commit = try object.Commit.parse(gpa, repo.objectFormat(), found.bytes);
             defer commit.deinit();
             for (commit.parents) |parent| {
-                if (graph) |*g| if (g.find(parent) != null) continue;
+                if (graph) |*g| if ((try g.find(parent)) != null) continue;
                 if ((try seen.getOrPut(gpa, parent)).found_existing) continue;
                 count += 1;
                 if (count >= limit) return count;

@@ -752,7 +752,7 @@ test "the commit-graph and the multi-pack index read what git wrote" {
     while (lines.next()) |line| {
         if (line.len == 0) continue;
         const oid = try Oid.parse(.sha1, line);
-        const position = graph.find(oid) orelse {
+        const position = (try graph.find(oid)) orelse {
             std.debug.print("commit missing from the graph: {s}\n", .{line});
             return error.TestUnexpectedResult;
         };

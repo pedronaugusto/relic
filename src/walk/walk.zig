@@ -215,7 +215,7 @@ pub const Walk = struct {
         // A commit-graph knows the parents a shallow repository does not
         // have, so a shallow walk reads the commits themselves.
         if (walk.db.shallow.count() == 0) if (walk.graph) |graph| {
-            if (graph.find(n.oid)) |position| {
+            if (graph.find(n.oid) catch null) |position| {
                 if (graph.commitAt(position)) |entry| {
                     if (graph.parentsOf(walk.gpa, position)) |parents| {
                         n.parents = parents;
@@ -784,7 +784,7 @@ const Painter = struct {
             return loaded;
         }
         if (p.db.shallow.count() == 0) if (p.graph) |graph| {
-            if (graph.find(oid)) |position| {
+            if (graph.find(oid) catch null) |position| {
                 if (graph.commitAt(position)) |entry| {
                     if (graph.parentsOf(p.gpa, position)) |parents| {
                         const loaded: Loaded = .{ .parents = parents, .time = entry.time, .generation = entry.generation orelse infinity };

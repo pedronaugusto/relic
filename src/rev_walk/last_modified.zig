@@ -174,7 +174,7 @@ const LastModified = struct {
         const commit = try object.Commit.parse(lm.a, lm.repo.objectFormat(), try lm.a.dupe(u8, found.bytes));
         const generation: u64 = blk: {
             const g = lm.graph orelse break :blk std.math.maxInt(u64);
-            const at = g.find(oid) orelse break :blk std.math.maxInt(u64);
+            const at = (try g.find(oid)) orelse break :blk std.math.maxInt(u64);
             break :blk (try g.commitAt(at)).generation orelse std.math.maxInt(u64);
         };
         const n = try lm.a.create(Node);

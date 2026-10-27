@@ -51,7 +51,7 @@ pub const CommitGraphOptions = struct {
 /// than computes again.
 fn heldFilter(old: ?*const graph_mod.Graph, oid: Oid, settings: graph_mod.bloom.Settings) graph_mod.Graph.Error!?[]const u8 {
     const graph = old orelse return null;
-    const position = graph.find(oid) orelse return null;
+    const position = (try graph.find(oid)) orelse return null;
     const held = (try graph.changedPaths(position)) orelse return null;
     if (held.settings.version != settings.version or held.settings.hashes != settings.hashes or held.settings.bits_per_entry != settings.bits_per_entry) return null;
     return held.bytes;
@@ -152,7 +152,7 @@ pub fn writeCommitGraph(gpa: Allocator, io: Io, db: *odb.Odb, tips: []const Oid,
     var pending: std.ArrayList(Oid) = .empty;
     try pending.appendSlice(arena, tips);
     if (old) |*g| if (options.append and options.split != .replace) {
-        for (0..g.count) |i| try pending.append(arena, g.nameAt(@intCast(i)));
+        for (0..g.count) |i| try pending.append(arena, try g.nameAt(@intCast(i)));
     };
     try collectGraphNodes(arena, io, db, &pending, &seen, &nodes);
     if (nodes.items.len == 0) return null;
@@ -175,7 +175,7 @@ pub fn writeCommitGraph(gpa: Allocator, io: Io, db: *odb.Odb, tips: []const Oid,
     const base_count = if (retained) |g| g.count else 0;
     var selected: std.ArrayList(GraphNode) = .empty;
     for (nodes.items) |node| {
-        if (retained) |g| if (g.find(node.oid)) |pos| {
+        if (retained) |g| if (try g.find(node.oid)) |pos| {
             if (pos < base_count) continue;
         };
         try selected.append(arena, node);
@@ -186,7 +186,7 @@ pub fn writeCommitGraph(gpa: Allocator, io: Io, db: *odb.Odb, tips: []const Oid,
     var inputs: std.ArrayList(graph_mod.WriteCommit) = .empty;
     for (selected.items) |node| {
         const parents = try arena.alloc(u32, node.parents.len);
-        for (node.parents, parents) |parent, *position| position.* = positions.get(parent) orelse (if (retained) |g| g.find(parent) else null) orelse return error.InvalidGraphInput;
+        for (node.parents, parents) |parent, *position| position.* = positions.get(parent) orelse (if (retained) |g| try g.find(parent) else null) orelse return error.InvalidGraphInput;
         var changed: []const u8 = &.{};
         if (options.changed_paths) |settings| {
             if (try heldFilter(if (old) |*g| g else null, node.oid, settings)) |held| {

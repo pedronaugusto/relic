@@ -153,7 +153,7 @@ test "split commit graph chains and merge thresholds agree byte for byte with gi
             std.debug.print("verify {s}: {s}\n", .{ @tagName(mode), @errorName(err) });
             return err;
         };
-        try std.testing.expect(parsed.find(head) != null);
+        try std.testing.expect((try parsed.find(head)) != null);
     }
 }
 
