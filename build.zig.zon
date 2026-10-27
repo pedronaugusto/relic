@@ -55,8 +55,8 @@
         },
 
         .reactor = .{
-            .url = "git+https://github.com/pedronaugusto/reactor?ref=v0.8.5#49d65f118c2ff33e30b0ae6c4ff23f4ccb90451d",
-            .hash = "reactor-0.8.5-MjQ-WG0bFQB41F2V4LHHOThKjKmC_bDQMvoDEzf7nCWj",
+            .url = "git+https://github.com/pedronaugusto/reactor?ref=v0.8.7#8a372239d992ab55a23a213d7a5170e685fe0c81",
+            .hash = "reactor-0.8.7-MjQ-WIFqFQD1keiWubqhx0GP-3j0RNQXt_WFwOlbC5go",
         },
     },
     .minimum_zig_version = "0.17.0",

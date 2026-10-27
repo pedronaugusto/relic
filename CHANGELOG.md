@@ -261,6 +261,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- reactor 0.8.7, with shuttle 0.3.4: on Windows, a task of reactor's IOCP runtime that parked at a certain depth into a stack page ended the process with no message, worst in Debug builds; shuttle's switch set the next stack's bounds and then called on the stack it was leaving.
 - A file whose inode number is past 2^63, which some file systems give, no longer panics in `fs.Stat.fromIo`: the unsigned inode was cast to a signed one. Windows' signed file id is taken by its bits, a POSIX inode as it is.
 - A credential-cache store with no daemon and no starter starts git's `credential-cache--daemon` with git's exec path ahead of `PATH`, as git's `spawn_daemon` does (`setup_path`, `git_cmd`), where it ran the `git` on the caller's `PATH`: on Windows that is Git for Windows' wrapper, which waits on the git it starts and so held the daemon's output open, and the store failed with nothing cached.
 - A tracked file past `core.bigFileThreshold` that nothing converts is named as it is read where git's `index_fd` streams it, never held: status's and a diff's comparison of a file whose stat no longer vouches for it (`worktree.Tracked`), `worktree.differsFromIndex` (reset, mv, apply, submodules), sparse checkout's racy check before it removes a file, and stash, which writes such a file into a pack as it reads it, as `git add` does (design §10). Each read the file whole, failing past 2 GiB, and `differsFromIndex` took the failure for a change. One decision for all of them and add: `worktree.streamsIn`, by `worktree.Rules.big_file_bytes`, which `Repository.worktreeRules` fills from the object database's settings; `worktree.hashFile` and `worktree.writeFileInto` read the file in pieces, its length the opened file's.
@@ -312,6 +313,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - receive-pack stages the deletion of a ref that is not there, as git does, so the ref transaction and its hook see it.
 - receive-pack says git's explanations when `receive.denyCurrentBranch` or `receive.denyDeleteCurrent` is unset (the latter's before its refusal, as git orders them), and an object `receive.fsckObjects` refuses as git's unpacker says it (`object <oid>: <msg-id>: <text>`, `fsck error in packed object`).
 - `Odb.repack` took a replaced pack's `.pack` away before its `.idx`, so a reader could find an index whose pack was gone; it now removes in git's order, through `Odb.removePacks`' path, and reports a removal that fails.
+
+### Security
+
+- reactor 0.8.7 (from 0.8.5); its 0.8.6 fixes data written into the wrong file. On reactor's io_uring runtime (Linux, a `reactor.Runtime` with the io_uring backend), a file opened or closed outside the Io, as airlock's temporary files and a raw descriptor are, left its descriptor in reactor's fixed-file table, and a later file given the same number was read and written through the stale entry. Every reactor from 0.2.0 through 0.8.5 has it. relic 0.29.x and earlier reach an affected reactor through conduit and uplink; a caller running relic on std's threaded Io is not exposed. There is no 0.29 release with the fix: a caller on 0.29 that runs relic on reactor's io_uring runtime should run it on std's threaded Io until it moves to 0.30.0.
 
 ## [0.29.2] - 2026-10-25
 
