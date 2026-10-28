@@ -242,25 +242,62 @@ fn strtol(s: []const u8, start: usize) struct { value: i64, end: usize } {
     return .{ .value = if (neg) -v else v, .end = i };
 }
 
-fn gmtime(secs: i64, tm: *Tm) void {
+/// The calendar a moment falls on, in UTC: C's `struct tm` as `gmtime` fills
+/// it, each field in its range.
+const Calendar = struct {
+    /// The year, in full.
+    year: i64,
+    /// From 0, January, to 11.
+    month: u4,
+    /// From 1 to 31.
+    day: u5,
+    /// From 0 to 23.
+    hour: u5,
+    /// From 0 to 59.
+    minute: u6,
+    /// From 0 to 59.
+    second: u6,
+    /// From 0, Sunday, to 6.
+    weekday: u3,
+
+    /// The day of the year, from 0.
+    fn yearDay(cal: Calendar) u9 {
+        const before = [12]u9{ 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334 };
+        const leap_day: u9 = @intFromBool(cal.month > 1 and isLeap(cal.year));
+        return before[cal.month] + leap_day + cal.day - 1;
+    }
+};
+
+/// The calendar `secs` seconds after the epoch falls on, in UTC: C's
+/// `gmtime`, by days counted in eras of 400 years from 0000-03-01.
+fn calendarOf(secs: i64) Calendar {
     const days = @divFloor(secs, 86400);
-    const rem = secs - days * 86400;
+    const time = @mod(secs, 86400);
     const z = days + 719468;
     const era = @divFloor(z, 146097);
-    const doe = z - era * 146097;
+    // The day of the era, the year of the era and the day of that year, from March.
+    const doe = @mod(z, 146097);
     const yoe = @divFloor(doe - @divFloor(doe, 1460) + @divFloor(doe, 36524) - @divFloor(doe, 146096), 365);
-    const y = yoe + era * 400;
     const doy = doe - (365 * yoe + @divFloor(yoe, 4) - @divFloor(yoe, 100));
     const mp = @divFloor(5 * doy + 2, 153);
-    const d = doy - @divFloor(153 * mp + 2, 5) + 1;
-    const m = if (mp < 10) mp + 3 else mp - 9;
-    tm.year = (if (m <= 2) y + 1 else y) - 1900;
-    tm.mon = m - 1;
-    tm.mday = d;
-    tm.hour = @divFloor(rem, 3600);
-    tm.min = @divFloor(@mod(rem, 3600), 60);
-    tm.sec = @mod(rem, 60);
-    tm.wday = @mod(days + 4, 7);
+    const day = doy - @divFloor(153 * mp + 2, 5) + 1;
+    // A day of a month of the year from March is the first to the 31st.
+    aegis.assert.invariant(day >= 1 and day <= 31, "day >= 1 and day <= 31");
+    const month = @mod(mp + 2, 12);
+    return .{
+        .year = yoe + era * 400 + @intFromBool(month < 2),
+        .month = @intCast(month),
+        .day = @intCast(day),
+        .hour = @intCast(@divFloor(time, 3600)),
+        .minute = @intCast(@divFloor(@mod(time, 3600), 60)),
+        .second = @intCast(@mod(time, 60)),
+        .weekday = @intCast(@mod(days + 4, 7)),
+    };
+}
+
+/// `cal` as C's `struct tm`: the year less 1900, the month from zero.
+fn tmOf(cal: Calendar) Tm {
+    return .{ .year = cal.year - 1900, .mon = cal.month, .mday = cal.day, .hour = cal.hour, .min = cal.minute, .sec = cal.second, .wday = cal.weekday };
 }
 
 fn matchMultiNumber(num: i64, c: u8, date: []const u8, end_in: usize, tm: *Tm, ctx: Context) usize {
@@ -282,8 +319,7 @@ fn matchMultiNumber(num: i64, c: u8, date: []const u8, end_in: usize, tm: *Tm, c
             } else return 0;
         },
         '-', '/', '.' => {
-            var now_tm: Tm = .{};
-            gmtime(seconds(ctx.now), &now_tm);
+            const now_tm = tmOf(calendarOf(seconds(ctx.now)));
             if (num > 70) {
                 if (setDate(num, num2, num3, null, seconds(ctx.now), tm)) return end;
                 if (setDate(num, num3, num2, null, seconds(ctx.now), tm)) return end;
@@ -311,7 +347,7 @@ fn matchDigit(date: []const u8, tm: *Tm, offset: *i32, tm_gmt: *bool, ctx: Conte
     var num: i64 = 0;
     while (end < date.len and isDigit(date[end])) : (end += 1) num = num *| 10 +| (date[end] - '0');
     if (num >= 100000000 and nodate(tm)) {
-        gmtime(num, tm);
+        tm.* = tmOf(calendarOf(num));
         tm_gmt.* = true;
         return end;
     }
@@ -496,7 +532,8 @@ pub fn approximate(text_in: []const u8, ctx: Context) ?i64 {
     }
     a.pendingNumber();
     if (!a.touched) return null;
-    return a.update(0);
+    const secs = a.update(0);
+    return if (a.overflowed) null else secs;
 }
 
 /// An expiry: an entry dated before it goes, in seconds since the epoch
@@ -538,17 +575,32 @@ const Approx = struct {
     off: i32,
     num: i64 = 0,
     touched: bool = false,
+    /// The date went past what 64 bits of seconds hold, as a clock near
+    /// their end takes it: no date.
+    overflowed: bool = false,
 
-    fn localtime(a: *const Approx, secs: i64, tm: *Tm) void {
-        gmtime(secs + @as(i64, a.off) * 60, tm);
+    fn localtime(a: *Approx, secs: i64, tm: *Tm) void {
+        const shifted = std.math.add(i64, secs, @as(i64, a.off) * 60) catch {
+            a.overflowed = true;
+            return;
+        };
+        tm.* = tmOf(calendarOf(shifted));
     }
 
-    /// `mktime`: the fields normalized, in the caller's zone.
-    fn mktime(a: *const Approx, tm: *const Tm) i64 {
-        const year = tm.year + 1900 + @divFloor(tm.mon, 12);
-        const mon = @mod(tm.mon, 12);
-        const days = daysFromCivil(year, mon + 1, 1) + tm.mday - 1;
-        return days * 86400 + tm.hour * 3600 + tm.min * 60 + tm.sec - @as(i64, a.off) * 60;
+    /// `mktime`: the fields normalized, in the caller's zone; null past what
+    /// 64 bits of seconds hold.
+    fn mktime(a: *const Approx, tm: *const Tm) ?i64 {
+        const year = std.math.add(i64, tm.year, 1900 + @divFloor(tm.mon, 12)) catch return null;
+        const first = monthStart(year, @intCast(@mod(tm.mon, 12))) orelse return null;
+        const days = std.math.add(i64, first, tm.mday - 1) catch return null;
+        const clock = tm.hour * 3600 + tm.min * 60 + tm.sec - @as(i64, a.off) * 60;
+        return std.math.add(i64, std.math.mul(i64, days, 86400) catch return null, clock) catch null;
+    }
+
+    /// The date went past what 64 bits of seconds hold: no time to give.
+    fn overflow(a: *Approx) i64 {
+        a.overflowed = true;
+        return 0;
     }
 
     /// git's `update_tm`: fill what is unset from now, go back `sec`
@@ -566,7 +618,7 @@ const Approx = struct {
             a.tm.year = a.now.year;
             if (a.tm.mon > a.now.mon) a.tm.year -= 1;
         }
-        const n = a.mktime(&a.tm) - sec;
+        const n = std.math.sub(i64, a.mktime(&a.tm) orelse return a.overflow(), sec) catch return a.overflow();
         a.localtime(n, &a.tm);
         return n;
     }
@@ -594,7 +646,7 @@ const Approx = struct {
 
     /// git's `date_time`: the most recent `hour` o'clock, which may be
     /// yesterday's.
-    fn atHour(a: *Approx, hour: i64) void {
+    fn atHour(a: *Approx, hour: u5) void {
         if (a.tm.mday < 0 and a.tm.hour < hour) a.tm.mday = -2;
         a.tm.hour = hour;
         a.tm.min = 0;
@@ -757,26 +809,28 @@ const Approx = struct {
     }
 };
 
-/// Days since the epoch of a proleptic Gregorian date, month 1 to 12.
-fn daysFromCivil(year_in: i64, month: i64, day: i64) i64 {
-    const year = if (month <= 2) year_in - 1 else year_in;
+/// Days from the epoch to the first of `month` (from 0) of `year`, in the
+/// proleptic Gregorian calendar; null past what 64 bits hold.
+fn monthStart(year_in: i64, month: u4) ?i64 {
+    // The year from March, as eras count it.
+    const year = if (month < 2) std.math.sub(i64, year_in, 1) catch return null else year_in;
     const era = @divFloor(year, 400);
-    const yoe = year - era * 400;
-    const mp = if (month > 2) month - 3 else month + 9;
-    const doy = @divFloor(153 * mp + 2, 5) + day - 1;
-    const doe = yoe * 365 + @divFloor(yoe, 4) - @divFloor(yoe, 100) + doy;
-    return era * 146097 + doe - 719468;
+    const yoe = @mod(year, 400);
+    const mp: i64 = if (month > 1) @as(i64, month) - 2 else @as(i64, month) + 10;
+    const doe = yoe * 365 + @divFloor(yoe, 4) - @divFloor(yoe, 100) + @divFloor(153 * mp + 2, 5);
+    const days = std.math.mul(i64, era, 146097) catch return null;
+    return std.math.add(i64, days, doe - 719468) catch null;
 }
 
 /// The date `secs` is in UTC, as `YYYY-MM-DD hh:mm:ss`.
-fn formatUtc(buf: *[32]u8, secs: i64) []const u8 {
-    var tm: Tm = .{};
-    gmtime(secs, &tm);
+fn formatUtc(buf: *[40]u8, secs: i64) []const u8 {
+    const cal = calendarOf(secs);
+    // A year before the first is written as 0, as in `show`.
+    const year: u64 = std.math.cast(u64, cal.year) orelse 0;
     return std.mem.print(buf, "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2}", .{
-        @as(u32, @intCast(tm.year + 1900)), @as(u32, @intCast(tm.mon + 1)),
-        @as(u32, @intCast(tm.mday)),        @as(u32, @intCast(tm.hour)),
-        @as(u32, @intCast(tm.min)),         @as(u32, @intCast(tm.sec)),
-    }) catch unreachable; // aegis: no-danger: a u32 year is at most ten digits, the rest of the stamp fifteen bytes
+        year,     cal.month + 1, cal.day,
+        cal.hour, cal.minute,    cal.second,
+    }) catch unreachable; // aegis: no-danger: a u64 year is at most twenty bytes, the rest of the stamp fifteen
 }
 
 // ---------------------------------------------------------------------------
@@ -885,10 +939,12 @@ pub fn tzMinutes(tz: i32) i32 {
     return if (tz < 0) -minutes else minutes;
 }
 
-/// Minutes east of UTC as git's `tz` integer.
+/// Minutes east of UTC as git's `tz` integer. An offset whose integer is
+/// past what an `i32` holds, which no `tzMinutes` gives, is held at its end.
 pub fn tzInt(offset_minutes: i32) i32 {
-    const abs: i32 = @intCast(@abs(offset_minutes));
-    const v = @divTrunc(abs, 60) * 100 + @rem(abs, 60);
+    // In unsigned arithmetic, as `tzMinutes`: the most negative offset has no positive i32.
+    const abs: u32 = @abs(offset_minutes);
+    const v: i32 = std.math.cast(i32, abs / 60 * 100 + abs % 60) orelse std.math.maxInt(i32);
     return if (offset_minutes < 0) -v else v;
 }
 
@@ -931,15 +987,14 @@ fn plural(w: *std.Io.Writer, n: i64, unit: []const u8, after: []const u8) std.Io
     try w.print("{d} {s}{s}{s}", .{ n, unit, if (n == 1) "" else "s", after });
 }
 
-/// The calendar fields of `secs` shown in zone `tz`, as git's `time_to_tm`,
-/// or `null` where its `gmtime_r` has none: a time the zone moves past what
-/// a timestamp holds, or a year past what C's `int` holds.
-fn tmIn(secs: i64, tz: i32) ?Tm {
+/// The calendar `secs` falls on in zone `tz`, as git's `time_to_tm`, or
+/// `null` where its `gmtime_r` has none: a time the zone moves past what a
+/// timestamp holds, or a year past what C's `int` holds as `tm_year`.
+fn calendarIn(secs: i64, tz: i32) ?Calendar {
     const shifted = std.math.add(i64, secs, @as(i64, tzMinutes(tz)) * 60) catch return null;
-    var tm: Tm = .{};
-    gmtime(shifted, &tm);
-    if (tm.year < std.math.minInt(i32) or tm.year > std.math.maxInt(i32)) return null;
-    return tm;
+    const cal = calendarOf(shifted);
+    if (cal.year - 1900 < std.math.minInt(i32) or cal.year - 1900 > std.math.maxInt(i32)) return null;
+    return cal;
 }
 
 /// `secs`, in the zone `tz` (git's `+0100` as 100), as `mode` shows it:
@@ -947,16 +1002,13 @@ fn tmIn(secs: i64, tz: i32) ?Tm {
 pub fn show(w: *std.Io.Writer, secs: i64, tz_in: i32, mode: Mode, clock: Clock) ShowError!void {
     var tz = tz_in;
     if (mode.kind == .unix) return w.print("{d}", .{secs});
-    var human_tm: Tm = .{ .year = 0, .mon = 0, .mday = 0, .hour = 0, .min = 0, .sec = 0 };
-    var human_tz: i32 = -1;
+    // `human` shows a date against the time now, in the local zone.
+    var human: ?Human = null;
     if (mode.kind == .human) {
         const now = seconds(clock.now orelse return error.DateNeedsClock);
         const zone = clock.local orelse return error.DateNeedsClock;
-        human_tz = tzInt(zone.at(zone.context, now).offset_minutes);
-        human_tm = tmIn(now, human_tz) orelse epoch: {
-            human_tz = 0;
-            break :epoch tmIn(0, 0).?;
-        };
+        const now_tz = tzInt(zone.at(zone.context, now).offset_minutes);
+        human = if (calendarIn(now, now_tz)) |cal| .{ .cal = cal, .tz = now_tz } else .{ .cal = calendarOf(0), .tz = 0 };
     }
     var zone_name: []const u8 = "";
     if (mode.local) {
@@ -972,19 +1024,20 @@ pub fn show(w: *std.Io.Writer, secs: i64, tz_in: i32, mode: Mode, clock: Clock) 
     if (mode.kind == .relative) return showRelative(w, secs, clock.now orelse return error.DateNeedsClock);
     // A time with no calendar date is shown as the epoch in UTC, as git's
     // `show_date` shows it.
-    const tm = tmIn(secs, tz) orelse epoch: {
+    const cal = calendarIn(secs, tz) orelse epoch: {
         tz = 0;
-        break :epoch tmIn(0, 0).?;
+        break :epoch calendarOf(0);
     };
-    const year: i64 = tm.year + 1900;
+    // A year before the first is written as 0.
+    const year: u64 = std.math.cast(u64, cal.year) orelse 0;
     switch (mode.kind) {
-        .short => try w.print("{d:0>4}-{d:0>2}-{d:0>2}", .{ @as(u64, @intCast(@max(year, 0))), @as(u64, @intCast(tm.mon + 1)), @as(u64, @intCast(tm.mday)) }),
+        .short => try w.print("{d:0>4}-{d:0>2}-{d:0>2}", .{ year, cal.month + 1, cal.day }),
         .iso8601 => {
-            try w.print("{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2} ", .{ @as(u64, @intCast(@max(year, 0))), @as(u64, @intCast(tm.mon + 1)), @as(u64, @intCast(tm.mday)), @as(u64, @intCast(tm.hour)), @as(u64, @intCast(tm.min)), @as(u64, @intCast(tm.sec)) });
+            try w.print("{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2} ", .{ year, cal.month + 1, cal.day, cal.hour, cal.minute, cal.second });
             try printTz(w, tz);
         },
         .iso8601_strict => {
-            try w.print("{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}", .{ @as(u64, @intCast(@max(year, 0))), @as(u64, @intCast(tm.mon + 1)), @as(u64, @intCast(tm.mday)), @as(u64, @intCast(tm.hour)), @as(u64, @intCast(tm.min)), @as(u64, @intCast(tm.sec)) });
+            try w.print("{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}", .{ year, cal.month + 1, cal.day, cal.hour, cal.minute, cal.second });
             if (tz == 0) {
                 try w.writeByte('Z');
             } else {
@@ -993,89 +1046,98 @@ pub fn show(w: *std.Io.Writer, secs: i64, tz_in: i32, mode: Mode, clock: Clock) 
             }
         },
         .rfc2822 => {
-            try w.print("{s}, {d} {s} {d} {d:0>2}:{d:0>2}:{d:0>2} ", .{ short_weekdays[@intCast(tm.wday)], tm.mday, short_months[@intCast(tm.mon)], year, @as(u64, @intCast(tm.hour)), @as(u64, @intCast(tm.min)), @as(u64, @intCast(tm.sec)) });
+            try w.print("{s}, {d} {s} {d} {d:0>2}:{d:0>2}:{d:0>2} ", .{ short_weekdays[cal.weekday], cal.day, short_months[cal.month], cal.year, cal.hour, cal.minute, cal.second });
             try printTz(w, tz);
         },
-        .strftime => try strftime(w, mode.strftime, secs, tm, tz, .{ .zone_name = if (mode.local) zone_name else null, .date_full_year = clock.locale_date_full_year }),
-        else => try showNormal(w, secs, tm, tz, human_tm, human_tz, mode.local, clock),
+        .strftime => try strftime(w, mode.strftime, secs, cal, tz, .{ .zone_name = if (mode.local) zone_name else null, .date_full_year = clock.locale_date_full_year }),
+        else => try showNormal(w, secs, cal, tz, human, mode.local, clock),
     }
 }
 
+/// The time now and the local zone, which `human` shows a date against.
+const Human = struct { cal: Calendar, tz: i32 };
+
 /// git's `show_date_normal`, which `human` shares.
-fn showNormal(w: *std.Io.Writer, secs: i64, tm: Tm, tz: i32, human_tm: Tm, human_tz: i32, local: bool, clock: Clock) ShowError!void {
+fn showNormal(w: *std.Io.Writer, secs: i64, cal: Calendar, tz: i32, human: ?Human, local: bool, clock: Clock) ShowError!void {
     var hide_year = false;
     var hide_date = false;
     var hide_wday = false;
     var hide_time = false;
     var hide_seconds = false;
-    var hide_tz = local or tz == human_tz;
-    hide_year = tm.year == human_tm.year;
-    if (hide_year) {
-        if (tm.mon == human_tm.mon) {
-            if (tm.mday > human_tm.mday) {
+    var hide_tz = local;
+    if (human) |now| {
+        hide_tz = hide_tz or tz == now.tz;
+        hide_year = cal.year == now.cal.year;
+        if (hide_year and cal.month == now.cal.month) {
+            if (cal.day > now.cal.day) {
                 // a future date: think time zones
-            } else if (tm.mday == human_tm.mday) {
+            } else if (cal.day == now.cal.day) {
                 hide_date = true;
                 hide_wday = true;
-            } else if (tm.mday + 5 > human_tm.mday) {
+            } else if (@as(u6, cal.day) + 5 > now.cal.day) {
                 hide_date = true;
             }
         }
-    }
-    if (hide_wday) return showRelative(w, secs, clock.now orelse return error.DateNeedsClock);
-    if (human_tm.year != 0) {
-        hide_seconds = true;
-        hide_tz = hide_tz or !hide_date;
-        hide_wday = !hide_year;
-        hide_time = !hide_year;
+        if (hide_wday) return showRelative(w, secs, clock.now orelse return error.DateNeedsClock);
+        // git's `human` hides more once the year is known to be this one.
+        if (now.cal.year != 1900) {
+            hide_seconds = true;
+            hide_tz = hide_tz or !hide_date;
+            hide_wday = !hide_year;
+            hide_time = !hide_year;
+        }
+    } else {
+        // git compares with a zeroed `struct tm`, the year 1900, a date in which it shows
+        // without its year, and a zone of -1.
+        hide_tz = hide_tz or tz == -1;
+        hide_year = cal.year == 1900;
     }
     // git writes each part with a space after it and trims the last
     // when the time is hidden: the parts, spaces between them.
-    if (!hide_wday) try w.writeAll(short_weekdays[@intCast(tm.wday)]);
+    if (!hide_wday) try w.writeAll(short_weekdays[cal.weekday]);
     if (!hide_date) {
         if (!hide_wday) try w.writeByte(' ');
-        try w.print("{s} {d}", .{ short_months[@intCast(tm.mon)], tm.mday });
+        try w.print("{s} {d}", .{ short_months[cal.month], cal.day });
     }
     if (!hide_time) {
         if (!hide_wday or !hide_date) try w.writeByte(' ');
-        try w.print("{d:0>2}:{d:0>2}", .{ @as(u64, @intCast(tm.hour)), @as(u64, @intCast(tm.min)) });
-        if (!hide_seconds) try w.print(":{d:0>2}", .{@as(u64, @intCast(tm.sec))});
+        try w.print("{d:0>2}:{d:0>2}", .{ cal.hour, cal.minute });
+        if (!hide_seconds) try w.print(":{d:0>2}", .{cal.second});
     }
-    if (!hide_year) try w.print(" {d}", .{tm.year + 1900});
+    if (!hide_year) try w.print(" {d}", .{cal.year});
     if (!hide_tz) {
         try w.writeByte(' ');
         try printTz(w, tz);
     }
 }
 
-fn yearDay(tm: Tm) i64 {
-    const year = tm.year + 1900;
-    return daysFromCivil(year, tm.mon + 1, tm.mday) - daysFromCivil(year, 1, 1);
-}
-
 fn isLeap(year: i64) bool {
     return (@mod(year, 4) == 0 and @mod(year, 100) != 0) or @mod(year, 400) == 0;
 }
 
-/// The ISO 8601 week-based year and week of `tm`.
-fn isoWeek(tm: Tm) struct { year: i64, week: i64 } {
-    const year = tm.year + 1900;
-    const yday = yearDay(tm);
-    const wday_mon = @mod(tm.wday + 6, 7); // Monday is 0
-    var week = @divFloor(yday - wday_mon + 10, 7);
+/// The ISO 8601 week-based year and week of `cal`.
+fn isoWeek(cal: Calendar) struct { year: i64, week: i64 } {
+    const yday: i64 = cal.yearDay();
+    const wday_mon = @mod(@as(i64, cal.weekday) + 6, 7); // Monday is 0
+    const week = @divFloor(yday - wday_mon + 10, 7);
     if (week < 1) {
-        const prev = year - 1;
-        const prev_days: i64 = if (isLeap(prev)) 366 else 365;
-        week = @divFloor(yday + prev_days - wday_mon + 10, 7);
-        return .{ .year = prev, .week = week };
+        const prev_days: i64 = if (isLeap(cal.year - 1)) 366 else 365;
+        return .{ .year = cal.year - 1, .week = @divFloor(yday + prev_days - wday_mon + 10, 7) };
     }
-    const days: i64 = if (isLeap(year)) 366 else 365;
-    if (week == 53 and yday - wday_mon + 3 >= days) return .{ .year = year + 1, .week = 1 };
-    return .{ .year = year, .week = week };
+    const days: i64 = if (isLeap(cal.year)) 366 else 365;
+    if (week == 53 and yday - wday_mon + 3 >= days) return .{ .year = cal.year + 1, .week = 1 };
+    return .{ .year = cal.year, .week = week };
+}
+
+/// `value` as C's `%0*d` writes it, `fmt` naming the width: a sign only where it is
+/// negative, where Zig's formatting signs any signed value it pads.
+fn writePadded(w: *std.Io.Writer, comptime fmt: []const u8, value: i64) std.Io.Writer.Error!void {
+    if (std.math.cast(u64, value)) |unsigned| return w.print(fmt, .{unsigned});
+    return w.print(fmt, .{value});
 }
 
 /// C-library details the caller supplies to `strftime`.
-pub const StrftimeContext = struct {
+const StrftimeContext = struct {
     /// `%Z`'s text for a local date; `null` writes nothing for it, as git
     /// does for a date in its own zone.
     zone_name: ?[]const u8 = null,
@@ -1086,67 +1148,93 @@ pub const StrftimeContext = struct {
 /// git's `strbuf_addftime` over the C library's `strftime` in the C
 /// locale: `%z`, `%Z` and `%s` as git rewrites them, every other
 /// conversion the C library's, with machine details supplied in `context`.
-pub fn strftime(w: *std.Io.Writer, fmt: []const u8, secs: i64, tm: Tm, tz: i32, context: StrftimeContext) std.Io.Writer.Error!void {
-    var i: usize = 0;
-    while (i < fmt.len) {
-        const c = fmt[i];
-        if (c != '%' or i + 1 >= fmt.len) {
-            try w.writeByte(c);
-            i += 1;
+fn strftime(w: *std.Io.Writer, fmt: []const u8, secs: i64, cal: Calendar, tz: i32, context: StrftimeContext) std.Io.Writer.Error!void {
+    var rest = fmt;
+    while (rest.len != 0) {
+        if (rest[0] != '%' or rest.len < 2) {
+            try w.writeByte(rest[0]);
+            rest = rest[1..];
             continue;
         }
-        var j = i + 1;
-        // the E and O modifiers change nothing in the C locale
-        if ((fmt[j] == 'E' or fmt[j] == 'O') and j + 1 < fmt.len) j += 1;
-        const conv = fmt[j];
-        i = j + 1;
-        const year = tm.year + 1900;
-        const hour12: i64 = if (@mod(tm.hour, 12) == 0) 12 else @mod(tm.hour, 12);
-        switch (conv) {
+        // The conversion, after the E and O modifiers, which change nothing
+        // in the C locale.
+        const spec = if ((rest[1] == 'E' or rest[1] == 'O') and rest.len > 2) rest[0..3] else rest[0..2];
+        rest = rest[spec.len..];
+        const year = cal.year;
+        // A year before the first is written as 0 in four digits, and as its last two
+        // digits, which `@mod` keeps from 0 to 99.
+        const full_year: u64 = std.math.cast(u64, year) orelse 0;
+        const short_year: u7 = @intCast(@mod(year, 100));
+        const hour12: u5 = if (cal.hour % 12 == 0) 12 else cal.hour % 12;
+        const yday: i64 = cal.yearDay();
+        switch (spec[spec.len - 1]) {
             '%' => try w.writeByte('%'),
-            'a' => try w.writeAll(short_weekdays[@intCast(tm.wday)]),
-            'A' => try w.writeAll(long_weekdays[@intCast(tm.wday)]),
-            'b', 'h' => try w.writeAll(short_months[@intCast(tm.mon)]),
-            'B' => try w.writeAll(month_names[@intCast(tm.mon)]),
-            'c' => try w.print("{s} {s} {d: >2} {d:0>2}:{d:0>2}:{d:0>2} {d}", .{ short_weekdays[@intCast(tm.wday)], short_months[@intCast(tm.mon)], @as(u64, @intCast(tm.mday)), @as(u64, @intCast(tm.hour)), @as(u64, @intCast(tm.min)), @as(u64, @intCast(tm.sec)), year }),
-            'C' => try w.print("{d:0>2}", .{@as(u64, @intCast(@divFloor(year, 100)))}),
-            'd' => try w.print("{d:0>2}", .{@as(u64, @intCast(tm.mday))}),
-            'D' => try w.print("{d:0>2}/{d:0>2}/{d:0>2}", .{ @as(u64, @intCast(tm.mon + 1)), @as(u64, @intCast(tm.mday)), @as(u64, @intCast(@mod(year, 100))) }),
-            'e' => try w.print("{d: >2}", .{@as(u64, @intCast(tm.mday))}),
-            'F' => try w.print("{d:0>4}-{d:0>2}-{d:0>2}", .{ @as(u64, @intCast(@max(year, 0))), @as(u64, @intCast(tm.mon + 1)), @as(u64, @intCast(tm.mday)) }),
-            'g' => try w.print("{d:0>2}", .{@as(u64, @intCast(@mod(isoWeek(tm).year, 100)))}),
-            'G' => try w.print("{d}", .{isoWeek(tm).year}),
-            'H' => try w.print("{d:0>2}", .{@as(u64, @intCast(tm.hour))}),
-            'I' => try w.print("{d:0>2}", .{@as(u64, @intCast(hour12))}),
-            'j' => try w.print("{d:0>3}", .{@as(u64, @intCast(yearDay(tm) + 1))}),
-            'k' => try w.print("{d: >2}", .{@as(u64, @intCast(tm.hour))}),
-            'l' => try w.print("{d: >2}", .{@as(u64, @intCast(hour12))}),
-            'm' => try w.print("{d:0>2}", .{@as(u64, @intCast(tm.mon + 1))}),
-            'M' => try w.print("{d:0>2}", .{@as(u64, @intCast(tm.min))}),
+            'a' => try w.writeAll(short_weekdays[cal.weekday]),
+            'A' => try w.writeAll(long_weekdays[cal.weekday]),
+            'b', 'h' => try w.writeAll(short_months[cal.month]),
+            'B' => try w.writeAll(month_names[cal.month]),
+            'c' => try w.print("{s} {s} {d: >2} {d:0>2}:{d:0>2}:{d:0>2} {d}", .{ short_weekdays[cal.weekday], short_months[cal.month], cal.day, cal.hour, cal.minute, cal.second, year }),
+            'C' => try writePadded(w, "{d:0>2}", @divFloor(year, 100)),
+            'd' => try w.print("{d:0>2}", .{cal.day}),
+            'D' => try w.print("{d:0>2}/{d:0>2}/{d:0>2}", .{ cal.month + 1, cal.day, short_year }),
+            'e' => try w.print("{d: >2}", .{cal.day}),
+            'F' => try w.print("{d:0>4}-{d:0>2}-{d:0>2}", .{ full_year, cal.month + 1, cal.day }),
+            'g' => try writePadded(w, "{d:0>2}", @mod(isoWeek(cal).year, 100)),
+            'G' => try w.print("{d}", .{isoWeek(cal).year}),
+            'H' => try w.print("{d:0>2}", .{cal.hour}),
+            'I' => try w.print("{d:0>2}", .{hour12}),
+            'j' => try writePadded(w, "{d:0>3}", yday + 1),
+            'k' => try w.print("{d: >2}", .{cal.hour}),
+            'l' => try w.print("{d: >2}", .{hour12}),
+            'm' => try w.print("{d:0>2}", .{cal.month + 1}),
+            'M' => try w.print("{d:0>2}", .{cal.minute}),
             'n' => try w.writeByte('\n'),
-            'p' => try w.writeAll(if (tm.hour < 12) "AM" else "PM"),
-            'r' => try w.print("{d:0>2}:{d:0>2}:{d:0>2} {s}", .{ @as(u64, @intCast(hour12)), @as(u64, @intCast(tm.min)), @as(u64, @intCast(tm.sec)), if (tm.hour < 12) "AM" else "PM" }),
-            'R' => try w.print("{d:0>2}:{d:0>2}", .{ @as(u64, @intCast(tm.hour)), @as(u64, @intCast(tm.min)) }),
+            'p' => try w.writeAll(if (cal.hour < 12) "AM" else "PM"),
+            'r' => try w.print("{d:0>2}:{d:0>2}:{d:0>2} {s}", .{ hour12, cal.minute, cal.second, if (cal.hour < 12) "AM" else "PM" }),
+            'R' => try w.print("{d:0>2}:{d:0>2}", .{ cal.hour, cal.minute }),
             's' => try w.print("{d}", .{secs}),
-            'S' => try w.print("{d:0>2}", .{@as(u64, @intCast(tm.sec))}),
+            'S' => try w.print("{d:0>2}", .{cal.second}),
             't' => try w.writeByte('\t'),
-            'T', 'X' => try w.print("{d:0>2}:{d:0>2}:{d:0>2}", .{ @as(u64, @intCast(tm.hour)), @as(u64, @intCast(tm.min)), @as(u64, @intCast(tm.sec)) }),
-            'u' => try w.print("{d}", .{if (tm.wday == 0) 7 else tm.wday}),
-            'U' => try w.print("{d:0>2}", .{@as(u64, @intCast(@divFloor(yearDay(tm) + 7 - tm.wday, 7)))}),
-            'V' => try w.print("{d:0>2}", .{@as(u64, @intCast(isoWeek(tm).week))}),
-            'w' => try w.print("{d}", .{tm.wday}),
-            'W' => try w.print("{d:0>2}", .{@as(u64, @intCast(@divFloor(yearDay(tm) + 7 - @mod(tm.wday + 6, 7), 7)))}),
+            'T', 'X' => try w.print("{d:0>2}:{d:0>2}:{d:0>2}", .{ cal.hour, cal.minute, cal.second }),
+            'u' => try w.print("{d}", .{if (cal.weekday == 0) 7 else cal.weekday}),
+            'U' => try writePadded(w, "{d:0>2}", @divFloor(yday + 7 - cal.weekday, 7)),
+            'V' => try writePadded(w, "{d:0>2}", isoWeek(cal).week),
+            'w' => try w.print("{d}", .{cal.weekday}),
+            'W' => try writePadded(w, "{d:0>2}", @divFloor(yday + 7 - @mod(@as(i64, cal.weekday) + 6, 7), 7)),
             'x' => {
-                try w.print("{d:0>2}/{d:0>2}/", .{ @as(u64, @intCast(tm.mon + 1)), @as(u64, @intCast(tm.mday)) });
-                if (context.date_full_year) try w.print("{d:0>4}", .{@as(u64, @intCast(@max(year, 0)))}) else try w.print("{d:0>2}", .{@as(u64, @intCast(@mod(year, 100)))});
+                try w.print("{d:0>2}/{d:0>2}/", .{ cal.month + 1, cal.day });
+                if (context.date_full_year) try w.print("{d:0>4}", .{full_year}) else try w.print("{d:0>2}", .{short_year});
             },
-            'y' => try w.print("{d:0>2}", .{@as(u64, @intCast(@mod(year, 100)))}),
+            'y' => try w.print("{d:0>2}", .{short_year}),
             'Y' => try w.print("{d}", .{year}),
             'z' => try printTz(w, tz),
             'Z' => if (context.zone_name) |name| try w.writeAll(name),
-            else => try w.writeAll(fmt[i - 2 .. i]),
+            else => try w.writeAll(spec[spec.len - 2 ..]),
         }
     }
+}
+
+test "a date before the first year shows its year signed, its century and two digits too" {
+    const gpa = std.testing.allocator;
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    // The last second of the year 1 BC, -0001-12-31 23:59:59 UTC.
+    const secs: i64 = -62167219201;
+    try show(&out.writer, secs, 0, .{ .kind = .strftime, .strftime = "%Y %C %y %F %j %U" }, .{});
+    try std.testing.expectEqualStrings("-1 -1 99 0000-12-31 365 52", out.written());
+    out.clearRetainingCapacity();
+    try show(&out.writer, secs, 0, .{ .kind = .short }, .{});
+    try std.testing.expectEqualStrings("0000-12-31", out.written());
+}
+
+test "an approximate date past what 64 bits of seconds hold is no date" {
+    const ctx: Context = .{ .now = timestamp(1_700_000_000) };
+    // A clock at the last second 64 bits hold, an hour east of UTC: its local time is past them.
+    const end: Context = .{ .now = timestamp(std.math.maxInt(i64)), .local_offset_minutes = 60 };
+    try std.testing.expectEqual(@as(?i64, null), approximate("yesterday", end));
+    try std.testing.expectEqual(@as(?i64, null), approximate("3 days ago", end));
+    // A day before the time now is a date.
+    try std.testing.expectEqual(@as(?i64, 1_700_000_000 - 24 * 60 * 60), approximate("yesterday", ctx));
 }
 
 test "locale date year width changes percent x without changing percent D" {
@@ -1235,7 +1323,7 @@ test "approximate dates read as git's t0006 reads them" {
             std.debug.print("{s}: no date\n", .{case.text});
             return error.TestUnexpectedResult;
         };
-        var buf: [32]u8 = undefined;
+        var buf: [40]u8 = undefined;
         std.testing.expectEqualStrings(case.want, formatUtc(&buf, got)) catch |err| {
             std.debug.print("{s} (shifted {d}s)\n", .{ case.text, case.shift });
             return err;
@@ -1252,7 +1340,7 @@ test "an approximate date is taken in the caller's zone" {
     // 2009-08-30 19:20:00 UTC is 21:20 at +0200, so midnight there is
     // 22:00 the day before in UTC.
     const ctx: Context = .{ .now = timestamp(1251660000), .local_offset_minutes = 120 };
-    var buf: [32]u8 = undefined;
+    var buf: [40]u8 = undefined;
     try std.testing.expectEqualStrings("2009-08-29 22:00:00", formatUtc(&buf, approximate("today", ctx).?));
     try std.testing.expectEqualStrings("2009-08-30 10:00:00", formatUtc(&buf, approximate("noon", ctx).?));
 }
