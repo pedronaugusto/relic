@@ -1239,7 +1239,11 @@ fn userInfo(ctx: *Ctx, out: *std.ArrayList(u8), name: []const u8, email: []const
     if (date) |d| {
         try out.appendSlice(a, "Date: ");
         var w: Io.Writer.Allocating = .fromArrayList(a, out);
-        mailfmt.writeRfc2822(&w.writer, d.secs, d.offset) catch return error.OutOfMemory;
+        gitdate.show(&w.writer, d.secs, gitdate.tzInt(d.offset), .{ .kind = .rfc2822 }, .{}) catch |err| switch (err) {
+            error.WriteFailed => return error.OutOfMemory,
+            // `rfc2822` shows a date in its own zone and asks no clock.
+            error.DateNeedsClock => unreachable,
+        };
         out.* = w.toArrayList();
         try out.append(a, '\n');
     }

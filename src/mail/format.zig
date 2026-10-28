@@ -1,6 +1,6 @@
-//! The pieces of an email git writes and reads: RFC 2822 dates, RFC 2047
-//! encoded words, RFC 822 quoting, and git's text wrapping, each as git's
-//! `date.c`, `pretty.c` and `utf8.c` produce them.
+//! The pieces of an email git writes and reads: RFC 2047 encoded words,
+//! RFC 822 quoting, and git's text wrapping, each as git's `pretty.c` and
+//! `utf8.c` produce them. An RFC 2822 date is `text.date.show`'s.
 
 const std = @import("std");
 const ctype = @import("../text.zig").ctype;
@@ -8,9 +8,6 @@ const Allocator = std.mem.Allocator;
 
 const unicode_width = @import("../text.zig").unicode_width;
 const text_encoding = @import("../text.zig").encoding;
-
-const weekday_names = [_][]const u8{ "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
-const month_names = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
 
 /// A calendar date and time of day.
 pub const Civil = struct {
@@ -47,26 +44,6 @@ pub fn civil(secs: i64) Civil {
         .second = @intCast(@mod(rem, 60)),
         .weekday = @intCast(weekday),
     };
-}
-
-/// git's `tz` integer for an offset in minutes: `+0100` is 100.
-pub fn tzInt(offset_minutes: i32) i32 {
-    const abs: i32 = @intCast(@abs(offset_minutes));
-    const v = @divTrunc(abs, 60) * 100 + @rem(abs, 60);
-    return if (offset_minutes < 0) -v else v;
-}
-
-/// `Tue, 14 Nov 2023 23:13:20 +0100`: git's `DATE_RFC2822`, in the
-/// author's own zone.
-pub fn writeRfc2822(w: *std.Io.Writer, secs: i64, offset_minutes: i32) std.Io.Writer.Error!void {
-    const c = civil(secs + @as(i64, offset_minutes) * 60);
-    const tz = tzInt(offset_minutes);
-    const sign: u8 = if (tz < 0) '-' else '+';
-    try w.print("{s}, {d} {s} {d} {d:0>2}:{d:0>2}:{d:0>2} {c}{d:0>4}", .{
-        weekday_names[c.weekday], c.day,    month_names[c.month - 1], c.year,
-        c.hour,                   c.minute, c.second,                 sign,
-        @abs(tz),
-    });
 }
 
 /// git's `non_ascii`: a byte with the high bit, or an escape.
@@ -176,7 +153,8 @@ pub fn writeWrapped(out: *std.Io.Writer, text_in: []const u8, indent1: i32, inde
         var w: i32 = indent1;
         var space: ?usize = null;
         if (indent < 0) {
-            w = -indent;
+            // Saturating: the most negative indent has no positive i32.
+            w = 0 -| indent;
             space = 0;
         }
         while (true) {
@@ -188,7 +166,7 @@ pub fn writeWrapped(out: *std.Io.Writer, text_in: []const u8, indent1: i32, inde
                     if (c == 0 and pos == start) return;
                     if (space) |s| {
                         start = s;
-                    } else try out.splatByteAll(' ', @intCast(@max(indent, 0)));
+                    } else try out.splatByteAll(' ', @abs(@max(indent, 0)));
                     try out.writeAll(text[start..pos]);
                     if (c == 0) return;
                     space = pos;
@@ -220,7 +198,7 @@ pub fn writeWrapped(out: *std.Io.Writer, text_in: []const u8, indent1: i32, inde
                             try out.writeByte(' ');
                         }
                     }
-                    w += 1;
+                    w +|= 1;
                     pos += 1;
                 } else {
                     // new_line
@@ -237,10 +215,11 @@ pub fn writeWrapped(out: *std.Io.Writer, text_in: []const u8, indent1: i32, inde
             if (assume_utf8) {
                 // unreachable: `decodable` decoded every character the wrap measures
                 const decoded = unicode_width.decode(text[pos..]) orelse unreachable;
-                w += unicode_width.width(decoded.char);
+                // Saturating: a line past an i32 of columns is past any width.
+                w +|= unicode_width.width(decoded.char);
                 pos += decoded.len;
             } else {
-                w += 1;
+                w +|= 1;
                 pos += 1;
             }
         }
@@ -277,21 +256,11 @@ fn writeIndented(out: *std.Io.Writer, text_in: []const u8, indent_in: i32, inden
     while (text.len > 0) {
         const eol = std.mem.findScalar(u8, text, '\n');
         const len = if (eol) |e| e + 1 else text.len;
-        try out.splatByteAll(' ', @intCast(indent));
+        try out.splatByteAll(' ', @abs(@max(indent, 0)));
         try out.writeAll(text[0..len]);
         text = text[len..];
         indent = indent2;
     }
-}
-
-test "an RFC 2822 date is the author's local time with git's zone text" {
-    var buf: [64]u8 = undefined;
-    var w: std.Io.Writer = .fixed(&buf);
-    try writeRfc2822(&w, 1700000000, 60);
-    try std.testing.expectEqualStrings("Tue, 14 Nov 2023 23:13:20 +0100", w.buffered());
-    w = .fixed(&buf);
-    try writeRfc2822(&w, 0, -330);
-    try std.testing.expectEqualStrings("Wed, 31 Dec 1969 18:30:00 -0530", w.buffered());
 }
 
 test "encoded words, quoting and wrapping come out as git's" {

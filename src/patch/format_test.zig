@@ -541,3 +541,24 @@ test "format.notes and --notes put the notes below the message as git's format-p
     try compareSet(gpa, io, &git, &.{.{ "format.notes", "true" }}, &.{ "--no-signature", "--no-notes" }, "base..HEAD", range, .{ .who = fixture, .signature = .off, .notes = &.{.off} });
     try compareSet(gpa, io, &git, &.{ .{ "format.notes", "true" }, .{ "format.signOff", "true" } }, &.{"--no-signature"}, "base..HEAD", range, off);
 }
+
+test "a mail's Date: is git's DATE_RFC2822, in the author's own zone" {
+    const gitdate = @import("../text.zig").date;
+    var buf: [64]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try gitdate.show(&w, 1700000000, gitdate.tzInt(60), .{ .kind = .rfc2822 }, .{});
+    try std.testing.expectEqualStrings("Tue, 14 Nov 2023 23:13:20 +0100", w.buffered());
+    w = .fixed(&buf);
+    try gitdate.show(&w, 0, gitdate.tzInt(-330), .{ .kind = .rfc2822 }, .{});
+    try std.testing.expectEqualStrings("Wed, 31 Dec 1969 18:30:00 -0530", w.buffered());
+}
+
+test "a wrap's columns cannot overflow, whatever the indent" {
+    const mailfmt = @import("../mail/format.zig");
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    // The most negative first indent: its column count saturates, past
+    // any width, so the text starts on a new line at the second indent.
+    try mailfmt.writeWrapped(&out.writer, "a b c", std.math.minInt(i32), 1, 78);
+    try std.testing.expectEqualStrings("\n a b c", out.written());
+}
