@@ -53,9 +53,9 @@ pub const Group = union(enum) {
 
 /// `-w<width>,<indent1>,<indent2>`.
 pub const Wrap = struct {
-    width: u32 = 76,
-    indent1: u32 = 6,
-    indent2: u32 = 9,
+    width: i32 = 76,
+    indent1: i32 = 6,
+    indent2: i32 = 9,
 };
 
 /// How a shortlog groups and prints.
@@ -292,7 +292,7 @@ pub const Shortlog = struct {
                 j -= 1;
                 const msg = record.subjects.items[j];
                 if (s.options.wrap) |opt| {
-                    try mailfmt.writeWrapped(w, msg, @intCast(opt.indent1), @intCast(opt.indent2), @intCast(opt.width));
+                    try mailfmt.writeWrapped(w, msg, opt.indent1, opt.indent2, opt.width);
                     try w.writeByte('\n');
                 } else {
                     try w.print("      {s}\n", .{msg});
