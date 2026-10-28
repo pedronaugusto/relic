@@ -71,7 +71,8 @@ pub fn build(gpa: Allocator, paths: []const []const u8, settings: Settings) Buil
     }
     if (unique.count() == 0) return gpa.dupe(u8, &.{0});
     if (paths.len > settings.max_changed_paths or unique.count() > settings.max_changed_paths) return gpa.dupe(u8, &.{255});
-    const out = try gpa.alloc(u8, (unique.count() * @as(usize, settings.bits_per_entry) + 7) / 8);
+    const bits = std.math.mul(usize, unique.count(), settings.bits_per_entry) catch return error.OutOfMemory;
+    const out = try gpa.alloc(u8, (bits >> 3) + @intFromBool(bits & 7 != 0));
     @memset(out, 0);
     var it = unique.keyIterator();
     while (it.next()) |path| {

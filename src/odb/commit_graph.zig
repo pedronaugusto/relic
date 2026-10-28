@@ -258,11 +258,12 @@ pub const Graph = struct {
         const data = graph.bloom_data orelse return error.CorruptCommitGraph;
         const index = Rows.exactly(chunk, graph.local_count, 4) orelse return error.CorruptCommitGraph;
         if (data.len < 12) return error.CorruptCommitGraph;
+        const filters = data[12..];
         const local = position - graph.base_count;
         const start = if (local == 0) 0 else std.mem.readInt(u32, (index.at(local - 1) orelse return error.CorruptCommitGraph)[0..4], .big);
         const end = std.mem.readInt(u32, (index.at(local) orelse return error.CorruptCommitGraph)[0..4], .big);
-        if (start > end or end > data.len - 12) return error.CorruptCommitGraph;
-        return .{ .bytes = data[12 + start .. 12 + end], .settings = .{
+        if (start > end or end > filters.len) return error.CorruptCommitGraph;
+        return .{ .bytes = filters[start..end], .settings = .{
             .version = std.mem.readInt(u32, data[0..4], .big),
             .hashes = std.mem.readInt(u32, data[4..8], .big),
             .bits_per_entry = std.mem.readInt(u32, data[8..12], .big),
@@ -271,15 +272,17 @@ pub const Graph = struct {
 
     /// Verify parents, generation offsets and changed-path indexes.
     pub fn verify(graph: *const Graph) Self.Error!void {
-        for (0..graph.count) |i| {
-            const commit_value = try graph.commitAt(@intCast(i));
-            const parents = try graph.parentsOf(graph.gpa, @intCast(i));
+        if (graph.base) |base| try base.verify();
+        for (0..graph.data.count()) |local| {
+            const i = std.math.add(u32, graph.base_count, std.math.cast(u32, local) orelse return error.CorruptCommitGraph) catch return error.CorruptCommitGraph;
+            const commit_value = try graph.commitAt(i);
+            const parents = try graph.parentsOf(graph.gpa, i);
             defer graph.gpa.free(parents);
             for (parents) |oid| {
                 const parent = (try graph.commit(oid)).?;
                 if (commit_value.generation) |generation| if (parent.generation) |p| if (generation <= p) return error.CorruptCommitGraph;
             }
-            _ = try graph.changedPaths(@intCast(i));
+            _ = try graph.changedPaths(i);
         }
     }
 
@@ -310,18 +313,18 @@ pub const Graph = struct {
     pub fn find(graph: *const Graph, oid: Oid) Self.PositionError!?u32 {
         if (oid.kind != graph.kind) return null;
         const raw = oid.raw();
-        var lo: u32 = if (raw[0] == 0) 0 else std.mem.readInt(u32, &graph.fanout_table[raw[0] - 1], .big);
-        var hi: u32 = std.mem.readInt(u32, &graph.fanout_table[raw[0]], .big);
-        while (lo < hi) {
-            const mid = lo + (hi - lo) / 2;
-            const name = try graph.nameAt(mid + graph.base_count);
-            switch (std.mem.order(u8, name.raw(), raw)) {
-                .lt => lo = mid + 1,
-                .gt => hi = mid,
-                .eq => return mid + graph.base_count,
-            }
-        }
+        const from = if (raw[0] == 0) 0 else graph.fanout(raw[0] - 1);
+        const at = graph.names.lowerBound(from, graph.fanout(raw[0]), raw) orelse return error.CorruptCommitGraph;
+        if (graph.names.at(at)) |row| if (std.mem.eql(u8, row, raw)) {
+            const local = std.math.cast(u32, at) orelse return error.CorruptCommitGraph;
+            return std.math.add(u32, local, graph.base_count) catch return error.CorruptCommitGraph;
+        };
         return if (graph.base) |base| base.find(oid) else null;
+    }
+
+    /// How many of its names begin with a byte up to `bucket`.
+    fn fanout(graph: *const Graph, bucket: u8) u32 {
+        return std.mem.readInt(u32, &graph.fanout_table[bucket], .big);
     }
 
     /// The commit at `position`.
@@ -339,7 +342,8 @@ pub const Graph = struct {
 
         // The low 34 bits are the committer time; the 30 above them are the
         // version one generation, which this deliberately does not read.
-        const time: i64 = @intCast(packed_time & ((@as(u64, 1) << 34) - 1));
+        const time_bits: u34 = @truncate(packed_time);
+        const time: i64 = time_bits;
 
         // `0x70000000` is the format's "no parent", not `0x7fffffff`; the
         // latter is the mask an edge index is taken under.
@@ -365,10 +369,10 @@ pub const Graph = struct {
         if (graph.generation) |table| {
             const offset = std.mem.readInt(u32, (table.at(local) orelse return error.CorruptCommitGraph)[0..4], .big);
             if (offset & 0x8000_0000 == 0) {
-                generation = @as(u64, @intCast(time)) + offset;
+                generation = std.math.add(u64, time_bits, offset) catch return error.CorruptCommitGraph;
             } else {
                 const wide = graph.generation_overflow.at(offset & 0x7fff_ffff) orelse return error.CorruptCommitGraph;
-                generation = std.math.add(u64, @intCast(time), std.mem.readInt(u64, wide[0..8], .big)) catch return error.CorruptCommitGraph;
+                generation = std.math.add(u64, time_bits, std.mem.readInt(u64, wide[0..8], .big)) catch return error.CorruptCommitGraph;
             }
         }
 
@@ -410,13 +414,14 @@ pub const Graph = struct {
             return out.toOwnedSlice(gpa);
         }
         var edge: usize = found.parents[1].?;
-        while (true) : (edge += 1) {
+        while (true) {
             const row = graph.edges.at(edge) orelse return error.CorruptCommitGraph;
             const value = std.mem.readInt(u32, row[0..4], .big);
             const at = value & 0x7fff_ffff;
             if (at >= graph.count) return error.CorruptCommitGraph;
             try out.append(gpa, try graph.nameAt(at));
             if (value & 0x8000_0000 != 0) break;
+            edge = std.math.add(usize, edge, 1) catch return error.CorruptCommitGraph;
         }
         return out.toOwnedSlice(gpa);
     }
@@ -577,7 +582,7 @@ pub fn encode(gpa: Allocator, kind: hash.Kind, commits: []const WriteCommit, opt
             const masked_time = commit_value.time & 0x3_ffff_ffff;
             if (commit_value.generation < masked_time) return error.InvalidGraphInput;
             const offset = commit_value.generation - masked_time;
-            try buffers[3].int(u32, if (offset > 0x7fff_ffff) 0x8000_0000 | overflow_index else @intCast(offset));
+            try buffers[3].int(u32, if (offset > 0x7fff_ffff) 0x8000_0000 | overflow_index else std.math.cast(u32, offset) orelse return error.InvalidGraphInput);
             if (offset > 0x7fff_ffff) {
                 try buffers[4].int(u64, offset);
                 overflow_index += 1;
