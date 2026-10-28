@@ -547,7 +547,7 @@ pub const Vm = struct {
         var at: usize = 0;
         while (true) : (at += 1) {
             // a new thread from here, unless a match already started earlier
-            if (best == null and (vm.nullable or (at < line.len and vm.first_bytes[line[at] >> 6] & (@as(u64, 1) << @intCast(line[at] & 63)) != 0))) vm.add(&vm.cur, gen, prog, 0, at, line, at, not_bol);
+            if (best == null and (vm.nullable or (at < line.len and vm.first_bytes[line[at] >> 6] & (@as(u64, 1) << @as(u6, @truncate(line[at]))) != 0))) vm.add(&vm.cur, gen, prog, 0, at, line, at, not_bol);
             if (vm.cur.len == 0 and (best != null or at >= line.len)) break;
             gen += 1;
             vm.next.len = 0;

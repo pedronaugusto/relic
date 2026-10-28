@@ -268,6 +268,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - conduit 0.10.5 (from 0.9.3), for `hostName` and `Child.exchangeInto`.
 - reactor 0.8.5 (0.8.3 the Lanes deadlock and io_uring's file table, 0.8.4 and 0.8.5 socket options through the Io's own connect), a direct dependency now, with conduit 0.10.4 and uplink 0.9.3 on it: the credential cache and fsmonitor connect to their daemons' Unix sockets through its `net.connectUnix`, which connects through Winsock on Windows as git for Windows does and names a refused connect and a missing socket there as on POSIX (Winsock's ENETDOWN for a missing directory is `FileNotFound`, so the cache passes no daemon over without a Windows case of its own), where std's Windows connect took either for `Unexpected` and a cache with no daemon was an error rather than nothing cached.
 - `text.encoding` decodes a UTF-16 surrogate pair with `std.unicode.utf16DecodeSurrogatePair` and writes UTF-8 through one function whose bytes are held to its buffer; a UTF-8 sequence length past four, which `utf8ByteSequenceLength` never gives, is refused where it was `unreachable`.
+- `text.ere`'s first-byte filter shifts by the byte's low six bits, typed `u6`, where it cast the masked byte.
 
 ### Fixed
 
