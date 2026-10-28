@@ -982,6 +982,8 @@ fn matchFragment(
     match_end: bool,
 ) Allocator.Error!bool {
     const gpa = st.gpa;
+    // `findPos` tries the lines from the first to one past the last.
+    aegis.assert.invariant(current_lno <= img.lines.items.len, "current_lno <= img.lines.items.len");
     var preimage_limit: usize = undefined;
     if (preimage.lines.items.len + current_lno <= img.lines.items.len) {
         preimage_limit = preimage.lines.items.len;
@@ -1059,15 +1061,14 @@ fn findPos(
     var match_beginning = match_beginning_in;
     const img_lines = img.lines.items.len;
     if (st.options.allow_overlap and match_beginning and match_end and img_lines != preimage.lines.items.len) match_beginning = false;
-    var line: isize = line_in;
-    if (match_beginning) {
-        line = 0;
-    } else if (match_end) {
-        line = @as(isize, @intCast(img_lines)) - @as(isize, @intCast(preimage.lines.items.len));
-    }
-    // a negative line from the end compares as a huge unsigned one in git
-    var start: usize = if (line < 0) img_lines else @intCast(line);
-    if (start > img_lines) start = img_lines;
+    // A line before the first, from the header or from the end, compares
+    // as a huge unsigned one in git, and is held to the end as one past it.
+    const start: usize = if (match_beginning)
+        0
+    else if (match_end)
+        (if (preimage.lines.items.len <= img_lines) img_lines - preimage.lines.items.len else img_lines)
+    else
+        @min(std.math.cast(usize, line_in) orelse img_lines, img_lines);
 
     var current: usize = 0;
     for (img.lines.items[0..start]) |l| current += l.len;
