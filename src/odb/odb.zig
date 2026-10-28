@@ -898,7 +898,7 @@ pub const Odb = struct {
                 error.EndOfStream => return s.fail(s.short()),
                 error.ReadFailed => return s.fail(s.cause()),
             };
-            s.remaining -= n;
+            s.remaining = std.math.sub(u64, s.remaining, n) catch return s.fail(s.short());
             if (s.remaining == 0) s.finish() catch |e| return s.fail(e);
             return n;
         }
@@ -1052,8 +1052,7 @@ pub const Odb = struct {
                         const e = &s.source.entry;
                         e.mapped = p.memory != null;
                         const input: *Io.Reader = if (p.memory) |mem| blk: {
-                            if (entry.data_at > mem.len) return error.TruncatedPack;
-                            e.fixed = .fixed(mem[@intCast(entry.data_at)..]);
+                            e.fixed = .fixed(pack.mappedFrom(mem, entry.data_at) orelse return error.TruncatedPack);
                             break :blk &e.fixed;
                         } else blk: {
                             e.file_reader = p.file.lend().get().reader(io, &e.input);
@@ -1277,7 +1276,7 @@ pub const Odb = struct {
             var base: ?Oid = null;
             const base_offset: ?u64 = switch (entry.kind) {
                 .object => null,
-                .ofs_delta => |back| located.offset - back,
+                .ofs_delta => |back| std.math.sub(u64, located.offset, back) catch return error.BadDeltaOffset,
                 .ref_delta => |name| blk: {
                     base = name;
                     break :blk null;
@@ -1291,7 +1290,7 @@ pub const Odb = struct {
                     base = try p.index.nameAt(i);
                 };
             }
-            return .{ .disk_size = end - located.offset, .delta_base = base };
+            return .{ .disk_size = std.math.sub(u64, end, located.offset) catch return error.TruncatedPack, .delta_base = base };
         }
         var path_buf: [hash.max_hex_len + 2]u8 = undefined;
         const path = odb.loosePath(oid, &path_buf);
@@ -1940,13 +1939,13 @@ pub const Odb = struct {
                                 error.EndOfStream => error.CorruptLooseObject,
                             };
                             hasher.update(chunk[0..n]);
-                            left -= n;
+                            left = std.math.sub(u64, left, n) catch return error.CorruptLooseObject;
                         }
                         const named = hasher.final();
                         if (hasher.collisionAttack()) return error.CollisionAttack;
                         if (!named.eql(oid)) return error.ObjectNameMismatch;
                         report.loose += 1;
-                        report.bytes += s.size;
+                        report.bytes +|= s.size;
                         continue;
                     }
                     const found = (try odb.readLoose(io, oid)) orelse continue;
@@ -1955,7 +1954,7 @@ pub const Odb = struct {
                     if (named.collision_attack) return error.CollisionAttack;
                     if (!named.oid.eql(oid)) return error.ObjectNameMismatch;
                     report.loose += 1;
-                    report.bytes += found.bytes.len;
+                    report.bytes +|= found.bytes.len;
                 }
             }
         }
@@ -1964,8 +1963,8 @@ pub const Odb = struct {
             for (source.packs.items) |named| {
                 const pack_report = try odb.verifyPack(io, &named.pack, named.id);
                 report.packs += 1;
-                report.packed_objects += pack_report.objects;
-                report.bytes += pack_report.bytes;
+                report.packed_objects +|= pack_report.objects;
+                report.bytes +|= pack_report.bytes;
             }
         }
         return report;
@@ -2017,12 +2016,12 @@ pub const Odb = struct {
                 const header = try p.entryHeaderAt(io, item.offset);
                 if (header.kind == .object) {
                     if (!(try p.nameStreamed(io, item.offset)).eql(try p.index.nameAt(item.position))) return error.ObjectNameMismatch;
-                    report.bytes += header.size;
+                    report.bytes +|= header.size;
                 } else {
                     const obj = try p.readAt(io, item.offset, .{ .cache = &odb.backendData().cache, .pack_id = pack_id });
                     defer gpa.free(obj.bytes);
                     if (!hash.Hasher.object(p.kind, obj.type.name(), obj.bytes).eql(try p.index.nameAt(item.position))) return error.ObjectNameMismatch;
-                    report.bytes += obj.bytes.len;
+                    report.bytes +|= obj.bytes.len;
                 }
                 report.objects += 1;
                 start += 1;
@@ -2042,15 +2041,17 @@ pub const Odb = struct {
             }
             const batch = items[start..end];
             const span_at = batch[0].offset;
-            try span.resize(gpa, @intCast(batch[batch.len - 1].end - span_at));
+            const span_len = std.math.cast(usize, std.math.sub(u64, batch[batch.len - 1].end, span_at) catch return error.TruncatedPack) orelse return error.StreamTooLong;
+            try span.resize(gpa, span_len);
             try p.readStored(io, span_at, span.items);
             defer for (batch) |*item| if (item.body.len != 0) {
                 gpa.free(item.body);
                 item.body = &.{};
             };
             for (batch) |*item| {
-                const stored = span.items[@intCast(item.offset - span_at)..@intCast(item.end - span_at)];
-                item.header = (try p.parseEntryHeader(item.offset, stored)) orelse return error.TruncatedPack;
+                item.stored = within(span.items, span_at, item.offset, item.end) orelse return error.TruncatedPack;
+                item.header = (try p.parseEntryHeader(item.offset, item.stored)) orelse return error.TruncatedPack;
+                item.data = within(item.stored, item.offset, item.header.data_at, item.end) orelse return error.TruncatedPack;
                 if (item.header.kind != .object) continue;
                 // Small stored, large inflated: named as it is read, after.
                 if (item.header.size > big) {
@@ -2060,6 +2061,7 @@ pub const Odb = struct {
                 const len = std.math.cast(usize, item.header.size) orelse return error.StreamTooLong;
                 if (len > delta.max_result_bytes) return error.StreamTooLong;
                 item.body = try gpa.alloc(u8, len +| pack.Pack.inflate_slack);
+                item.len = len;
             }
             // The batch's entries, and the checksum as the last item.
             try failures.resize(gpa, batch.len + 1);
@@ -2067,20 +2069,19 @@ pub const Odb = struct {
                 .p = p,
                 .items = batch,
                 .span = span.items,
-                .span_at = span_at,
                 .checksum = &checksum,
                 .readers = readers,
             });
             for (batch) |*item| {
                 if (item.body.len != 0) {
                     report.objects += 1;
-                    report.bytes += item.header.size;
+                    report.bytes +|= item.header.size;
                     continue;
                 }
                 if (item.streamed) {
                     if (!(try p.nameStreamed(io, item.offset)).eql(try p.index.nameAt(item.position))) return error.ObjectNameMismatch;
                     report.objects += 1;
-                    report.bytes += item.header.size;
+                    report.bytes +|= item.header.size;
                     continue;
                 }
                 const obj = try p.readAt(io, item.offset, .{ .cache = &odb.backendData().cache, .pack_id = pack_id });
@@ -2088,12 +2089,23 @@ pub const Odb = struct {
                 const name = hash.Hasher.object(p.kind, obj.type.name(), obj.bytes);
                 if (!name.eql(try p.index.nameAt(item.position))) return error.ObjectNameMismatch;
                 report.objects += 1;
-                report.bytes += obj.bytes.len;
+                report.bytes +|= obj.bytes.len;
             }
             start = end;
         }
         try verifyTrailer(io, p, &checksum);
         return report;
+    }
+
+    /// The bytes `from..to` of a file, out of `bytes`, which hold the file
+    /// from `at`: `null` where they are not all there.
+    fn within(bytes: []const u8, at: u64, from: u64, to: u64) ?[]const u8 {
+        const start: usize = std.math.cast(usize, std.math.sub(u64, from, at) catch return null) orelse return null;
+        const end: usize = std.math.cast(usize, std.math.sub(u64, to, at) catch return null) orelse return null;
+        if (end > bytes.len) return null;
+        const through = bytes[0..end];
+        if (start > through.len) return null;
+        return through[start..];
     }
 
     /// One entry of a pack `verifyPack` checks: where its bytes lie, and
@@ -2103,7 +2115,13 @@ pub const Odb = struct {
         offset: u64,
         end: u64,
         header: pack.EntryHeader = undefined,
+        /// Its stored bytes in the batch's span, and their compressed data
+        /// after the header.
+        stored: []const u8 = &.{},
+        data: []const u8 = &.{},
         body: []u8 = &.{},
+        /// The whole object's length at the front of `body`.
+        len: usize = 0,
         /// Whether the whole object is past the threshold, and so named as
         /// it is read rather than inflated into `body`.
         streamed: bool = false,
@@ -2115,23 +2133,21 @@ pub const Odb = struct {
         p: *pack.Pack,
         items: []VerifyItem,
         span: []const u8,
-        span_at: u64,
         checksum: *hash.Hasher,
         readers: []pack.Pack.EntryReader,
 
         fn work(_: Io, c: VerifyBatch, worker: usize, i: usize) ErrorNamespace.Error!void {
             if (i == c.items.len) return c.checksum.update(c.span);
             const item = &c.items[i];
-            const stored = c.span[@intCast(item.offset - c.span_at)..@intCast(item.end - c.span_at)];
             // A version 1 index has no CRC; the inflate and the name below
             // check the entry there, as git's verify does.
-            if (try c.p.index.crcAt(item.position)) |crc| if (warp.Crc32.hash(stored) != crc) return error.ChecksumMismatch;
+            if (try c.p.index.crcAt(item.position)) |crc| if (warp.Crc32.hash(item.stored) != crc) return error.ChecksumMismatch;
             if (item.body.len == 0) return;
-            const len: usize = @intCast(item.header.size);
-            var entry_data: Io.Reader = .fixed(stored[@intCast(item.header.data_at - item.offset)..]);
+            var entry_data: Io.Reader = .fixed(item.data);
             const got = c.readers[worker].decoder.inflateReader(&entry_data, item.body, .{}) catch return error.CorruptPackEntry;
-            if (got.out_len != len) return error.CorruptPackEntry;
-            const name = hash.Hasher.object(c.p.kind, item.header.kind.object.name(), item.body[0..len]);
+            if (got.out_len != item.len) return error.CorruptPackEntry;
+            if (item.len > item.body.len) return error.CorruptPackEntry;
+            const name = hash.Hasher.object(c.p.kind, item.header.kind.object.name(), item.body[0..item.len]);
             if (!name.eql(try c.p.index.nameAt(item.position))) return error.ObjectNameMismatch;
         }
     };
@@ -2723,7 +2739,7 @@ pub const Odb = struct {
         for (entries, sizes) |entry, *size| {
             if (try odb.locatePacked(entry.oid)) |at| {
                 const order = try orderOf(gpa, &orders, at.pack);
-                size.* = order.endOf(at.pack, at.offset) - at.offset;
+                size.* = std.math.sub(u64, order.endOf(at.pack, at.offset), at.offset) catch return error.TruncatedPack;
                 continue;
             }
             var path_buf: [hash.max_hex_len + 2]u8 = undefined;
@@ -2947,8 +2963,8 @@ pub const Odb = struct {
             const stored: Stored = .{
                 .pack = at.pack,
                 .entry_at = at.offset,
-                .len = std.math.cast(usize, order.endOf(at.pack, at.offset) - at.offset) orelse continue,
-                .data_from = @intCast(entry.data_at - at.offset),
+                .len = std.math.cast(usize, std.math.sub(u64, order.endOf(at.pack, at.offset), at.offset) catch continue) orelse continue,
+                .data_from = std.math.cast(u8, std.math.sub(u64, entry.data_at, at.offset) catch continue) orelse continue,
                 .size = entry.size,
                 .crc = crc,
             };
@@ -5297,8 +5313,9 @@ const Stored = struct {
     /// Where the entry begins, and how long it is, header and all.
     entry_at: u64,
     len: usize,
-    /// Where in the entry its zlib stream begins.
-    data_from: usize,
+    /// Where in the entry its zlib stream begins: after a header of a few
+    /// bytes, and a base's name for a reference delta.
+    data_from: u8,
     /// How long what the entry holds is inflated: the object, or the delta.
     size: u64,
     /// The entry's CRC, from the pack's index.
@@ -5324,7 +5341,7 @@ const Stored = struct {
             error.ReadFailed => at.err() orelse error.ReadFailed,
             error.EndOfStream => error.TruncatedPack,
         };
-        const offset = w.addDeflatedFrom(&summed.reader, .{ .oid = oid, .payload = payload, .payload_len = st.size, .deflated_len = st.len - st.data_from }) catch |err| return switch (err) {
+        const offset = w.addDeflatedFrom(&summed.reader, .{ .oid = oid, .payload = payload, .payload_len = st.size, .deflated_len = std.math.sub(usize, st.len, st.data_from) catch return error.TruncatedPack }) catch |err| return switch (err) {
             error.ReadFailed => at.err() orelse error.ReadFailed,
             error.ShortRead => error.TruncatedPack,
             else => |e| e,
@@ -5587,7 +5604,7 @@ fn hexPair(name: []const u8) ?u8 {
             'a'...'f' => c - 'a' + 10,
             else => return null,
         };
-        value = value * 16 + digit;
+        value = (value << 4) | digit;
     }
     return value;
 }
@@ -6525,6 +6542,7 @@ fn sameObjectFile(io: Io, dir: Io.Dir, a: []const u8, b: []const u8) Error!enum 
     while (true) {
         // A read's failure is the file reader's to name: a directory in
         // the object's place is `error.IsDir`.
+        try io.checkCancel();
         const n_a = reader_a.interface.readSliceShort(&buf_a) catch return reader_a.err orelse error.ReadFailed;
         const n_b = reader_b.interface.readSliceShort(&buf_b) catch return reader_b.err orelse error.ReadFailed;
         if (n_a != n_b or !std.mem.eql(u8, buf_a[0..n_a], buf_b[0..n_b])) return .differs;

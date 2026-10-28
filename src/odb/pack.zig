@@ -88,7 +88,7 @@ const Slot = struct {
 };
 
 /// The mapped pack's bytes from `at` on, or `null` past their end.
-fn mappedFrom(mem: []const u8, at: u64) ?[]const u8 {
+pub fn mappedFrom(mem: []const u8, at: u64) ?[]const u8 {
     const start: usize = std.math.cast(usize, at) orelse return null;
     if (start > mem.len) return null;
     return mem[start..];
