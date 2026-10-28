@@ -11,6 +11,7 @@
 const ErrorNamespace = @This();
 const std = @import("std");
 const shakedown = @import("shakedown");
+const Rows = @import("rows.zig").Rows;
 const Allocator = std.mem.Allocator;
 
 /// Errors from reading a bitmap.
@@ -77,38 +78,38 @@ pub const ReadWordsError = Error || Allocator.Error;
 /// Decode into words, bounded by the number of bits the caller's index holds.
 /// Clean runs are expanded into the output, never into an unbounded list of positions.
 pub fn readWords(gpa: Allocator, bytes: []const u8, max_bits: u64) ReadWordsError!struct { words: []u64, bit_count: u32, len: usize } {
-    if (bytes.len < 8) return error.TruncatedBitmap;
-    const bit_count = std.mem.readInt(u32, bytes[0..4], .big);
-    const word_count = std.mem.readInt(u32, bytes[4..8], .big);
+    var r: std.Io.Reader = .fixed(bytes);
+    const bit_count = r.takeInt(u32, .big) catch return error.TruncatedBitmap;
+    const word_count = r.takeInt(u32, .big) catch return error.TruncatedBitmap;
     if (bit_count > max_bits) return error.BitmapTooLarge;
-    const end = 8 + @as(usize, word_count) * 8;
-    if (bytes.len < end + 4) return error.TruncatedBitmap;
+    const table = Rows.cut(bytes, 8, word_count, 8) orelse return error.TruncatedBitmap;
+    r.discardAll(table.bytes.len) catch return error.TruncatedBitmap;
+    const last_rlw = r.takeInt(u32, .big) catch return error.TruncatedBitmap;
     if (word_count == 0) return error.CorruptBitmap;
-    const last_rlw = std.mem.readInt(u32, bytes[end..][0..4], .big);
-    const words = try gpa.alloc(u64, (@as(usize, bit_count) + 63) / 64);
+    const word_total = wordsFor(bit_count);
+    if (word_total > max_words) return error.BitmapTooLarge;
+    const words = try gpa.alloc(u64, word_total);
     errdefer gpa.free(words);
     @memset(words, 0);
-    var at: usize = 0;
-    var out: usize = 0;
+    // What is left to fill, and the stored words still to read.
+    var rest = words;
+    var stored: std.Io.Reader = .fixed(table.bytes);
     var last_header: usize = 0;
-    while (at < word_count) {
-        last_header = at;
-        const header = std.mem.readInt(u64, bytes[8 + at * 8 ..][0..8], .big);
-        at += 1;
-        const run: usize = @intCast((header >> 1) & 0xffff_ffff);
-        const literals: usize = @intCast(header >> 33);
-        if (run > words.len - out or literals > words.len - out - run or literals > word_count - at) return error.CorruptBitmap;
-        @memset(words[out .. out + run], if (header & 1 != 0) std.math.maxInt(u64) else 0);
-        out += run;
-        for (0..literals) |_| {
-            words[out] = std.mem.readInt(u64, bytes[8 + at * 8 ..][0..8], .big);
-            out += 1;
-            at += 1;
-        }
+    while (stored.seek < table.bytes.len) {
+        last_header = stored.seek / 8;
+        const header = stored.takeInt(u64, .big) catch return error.CorruptBitmap;
+        const run: u32 = @truncate(header >> 1);
+        const literals: u31 = @truncate(header >> 33);
+        if (run > rest.len) return error.CorruptBitmap;
+        @memset(rest[0..run], if (header & 1 != 0) std.math.maxInt(u64) else 0);
+        rest = rest[run..];
+        if (literals > rest.len) return error.CorruptBitmap;
+        for (rest[0..literals]) |*word| word.* = stored.takeInt(u64, .big) catch return error.CorruptBitmap;
+        rest = rest[literals..];
     }
     if (last_rlw != last_header) return error.CorruptBitmap;
-    if (words.len > 0 and bit_count % 64 != 0) words[words.len - 1] &= (@as(u64, 1) << @as(u6, @intCast(bit_count % 64))) - 1;
-    return .{ .words = words, .bit_count = bit_count, .len = end + 4 };
+    if (words.len > 0 and bit_count % 64 != 0) words[words.len - 1] &= (@as(u64, 1) << @as(u6, @truncate(bit_count))) - 1;
+    return .{ .words = words, .bit_count = bit_count, .len = r.seek };
 }
 
 test "an empty bitmap reads as no bits" {
@@ -204,32 +205,40 @@ test "a compressed clean run may describe more bits than its encoded words" {
     try std.testing.expectEqual(@as(usize, 0), result.bits.positions.len);
 }
 
+/// The most words a bitmap holds: its bit count is 32 bits wide.
+const max_words = 1 << 26;
+
+/// The 64-bit words `bits` bits take.
+fn wordsFor(bits: u32) usize {
+    return (@as(usize, bits) >> 6) + @intFromBool(bits & 63 != 0);
+}
+
 /// Validate an encoded bitmap without expanding it. Reachability indexes use
 /// this at open; only a requested commit's XOR chain needs decoded words.
 pub fn encodedLength(bytes: []const u8, max_bits: u64) Error!usize {
-    if (bytes.len < 8) return error.TruncatedBitmap;
-    const bits = std.mem.readInt(u32, bytes[0..4], .big);
+    var r: std.Io.Reader = .fixed(bytes);
+    const bits = r.takeInt(u32, .big) catch return error.TruncatedBitmap;
+    const count = r.takeInt(u32, .big) catch return error.TruncatedBitmap;
     if (bits > max_bits) return error.BitmapTooLarge;
-    const count = std.mem.readInt(u32, bytes[4..8], .big);
     if (count == 0) return error.CorruptBitmap;
-    const end = 8 + @as(usize, count) * 8;
-    if (bytes.len < end + 4) return error.TruncatedBitmap;
-    const max_words = (@as(u64, bits) + 63) / 64;
-    var words: u64 = 0;
-    var at: usize = 0;
+    const table = Rows.cut(bytes, 8, count, 8) orelse return error.TruncatedBitmap;
+    r.discardAll(table.bytes.len) catch return error.TruncatedBitmap;
+    const last_rlw = r.takeInt(u32, .big) catch return error.TruncatedBitmap;
+    // The words the bits still have room for.
+    var room: u64 = wordsFor(bits);
+    var stored: std.Io.Reader = .fixed(table.bytes);
     var last: usize = 0;
-    while (at < count) {
-        last = at;
-        const header = std.mem.readInt(u64, bytes[8 + at * 8 ..][0..8], .big);
-        at += 1;
-        const run = (header >> 1) & 0xffff_ffff;
-        const literals = header >> 33;
-        if (literals > count - at or words + run + literals > max_words) return error.CorruptBitmap;
-        words += run + literals;
-        at += @intCast(literals);
+    while (stored.seek < table.bytes.len) {
+        last = stored.seek / 8;
+        const header = stored.takeInt(u64, .big) catch return error.CorruptBitmap;
+        const run: u32 = @truncate(header >> 1);
+        const literals: u31 = @truncate(header >> 33);
+        room = std.math.sub(u64, room, run) catch return error.CorruptBitmap;
+        room = std.math.sub(u64, room, literals) catch return error.CorruptBitmap;
+        for (0..literals) |_| _ = stored.takeInt(u64, .big) catch return error.CorruptBitmap;
     }
-    if (std.mem.readInt(u32, bytes[end..][0..4], .big) != last) return error.CorruptBitmap;
-    return end + 4;
+    if (last_rlw != last) return error.CorruptBitmap;
+    return r.seek;
 }
 
 /// Encode the bitmap with `positions` set, which must rise, as git's
@@ -237,7 +246,7 @@ pub fn encodedLength(bytes: []const u8, max_bits: u64) Error!usize {
 pub fn writePositions(gpa: Allocator, positions: []const u32) Allocator.Error![]u8 {
     var bit_count: u32 = 0;
     if (positions.len != 0) bit_count = positions[positions.len - 1] + 1;
-    const words = try gpa.alloc(u64, (@as(usize, bit_count) + 63) / 64);
+    const words = try gpa.alloc(u64, wordsFor(bit_count));
     defer gpa.free(words);
     @memset(words, 0);
     for (positions) |p| words[p / 64] |= @as(u64, 1) << @intCast(p % 64); // safe: below 64
