@@ -1933,6 +1933,7 @@ pub const Odb = struct {
                         var chunk: [16 * 1024]u8 = undefined;
                         var left = s.size;
                         while (left != 0) {
+                            try io.checkCancel();
                             const n: usize = @intCast(@min(@as(u64, chunk.len), left));
                             s.reader().readSliceAll(chunk[0..n]) catch |err| return switch (err) {
                                 error.ReadFailed => s.err() orelse error.ReadFailed,
@@ -3283,11 +3284,11 @@ pub const Odb = struct {
                     continue;
                 };
                 defer odb.backendData().gpa.free(headers);
-                var it = p.index.iterate();
-                while (try it.next()) |found| {
-                    if (skip.contains(found.oid) or seen.contains(found.oid)) continue;
-                    try seen.put(odb.backendData().gpa, found.oid, {});
-                    try entries.append(odb.backendData().gpa, .{ .oid = found.oid, .in_pack = true, .header = headers[found.located.index] });
+                for (headers, 0..) |header, position| {
+                    const oid = try p.index.nameAt(@intCast(position));
+                    if (skip.contains(oid) or seen.contains(oid)) continue;
+                    try seen.put(odb.backendData().gpa, oid, {});
+                    try entries.append(odb.backendData().gpa, .{ .oid = oid, .in_pack = true, .header = header });
                 }
             }
         }
@@ -3336,7 +3337,7 @@ pub const Odb = struct {
                 if (workers == 1 or entries[end].in_pack or odb.tooLarge(head.size)) continue;
                 const len = std.math.cast(usize, head.size) orelse continue;
                 trees.items[trees.items.len - 1].bytes = try gpa.alloc(u8, len);
-                held += len;
+                held +|= len;
             }
             start = end;
             if (workers > 1) {
@@ -4714,13 +4715,13 @@ const Build = struct {
             .reference => .{ .ref_delta = b.ordered[r.base].oid },
             .none => unreachable,
         };
-        b.offsets[pos] = try b.writer.addDeflated(b.ordered[pos].oid, payload, r.size, stored[r.stored.data_from..]);
+        b.offsets[pos] = try b.writer.addDeflated(b.ordered[pos].oid, payload, r.size, try r.stored.data(stored));
     }
 
     /// Write object `pos`, `len` bytes of type `t`, whole, from `stored`,
     /// its entry as its pack has it.
     fn writeStoredWhole(b: *Build, pos: usize, t: object.Type, len: usize, st: Stored, stored: []const u8) Error!void {
-        b.offsets[pos] = try b.writer.addDeflated(b.ordered[pos].oid, .{ .object = t }, len, stored[st.data_from..]);
+        b.offsets[pos] = try b.writer.addDeflated(b.ordered[pos].oid, .{ .object = t }, len, try st.data(stored));
     }
 
     /// Write object `pos` the way `choice` says, deflating it here.
@@ -4934,14 +4935,14 @@ const Build = struct {
                 continue;
             }
             if (item.loose) {
-                p.bytes = try gpa.alloc(u8, @intCast(item.size));
+                p.bytes = try gpa.alloc(u8, std.math.cast(usize, item.size) orelse return error.ObjectTooLarge);
                 batch.opens = true;
                 continue;
             }
             const at = (try b.odb.locateWhole(io, item.oid)) orelse continue;
             // A size other than the header's is read again, whole, after.
             if (at.size != item.size) continue;
-            p.bytes = try gpa.alloc(u8, @as(usize, @intCast(item.size)) + pack.Pack.inflate_slack);
+            p.bytes = try gpa.alloc(u8, (std.math.cast(usize, item.size) orelse return error.ObjectTooLarge) +| pack.Pack.inflate_slack);
             p.packed_at = at;
         }
     }
@@ -4956,7 +4957,7 @@ const Build = struct {
         for (b.ordered[batch.start..batch.end], batch.pending.items) |*item, *p| {
             if (p.stored.len != 0) continue;
             if (p.filled) {
-                if (p.packed_at != null) p.bytes = try gpa.realloc(p.bytes.?, @intCast(item.size));
+                if (p.packed_at != null) p.bytes = try gpa.realloc(p.bytes.?, std.math.cast(usize, item.size) orelse return error.ObjectTooLarge);
                 continue;
             }
             if (p.bytes) |unused| gpa.free(unused);
@@ -5325,6 +5326,12 @@ const Stored = struct {
     fn read(st: Stored, io: Io, out: []u8) Error!void {
         try st.pack.readStored(io, st.entry_at, out);
         if (warp.Crc32.hash(out) != st.crc) return error.CorruptPackEntry;
+    }
+
+    /// The entry's zlib stream, from `entry`, the entry as `read` gives it.
+    fn data(st: Stored, entry: []const u8) Error![]const u8 {
+        if (st.data_from > entry.len) return error.TruncatedPack;
+        return entry[st.data_from..];
     }
 
     /// The entry's zlib stream added to `w` as `payload`, copied in blocks
