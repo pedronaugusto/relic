@@ -9,43 +9,6 @@ const Allocator = std.mem.Allocator;
 const unicode_width = @import("../text.zig").unicode_width;
 const text_encoding = @import("../text.zig").encoding;
 
-/// A calendar date and time of day.
-pub const Civil = struct {
-    year: i64,
-    month: u8,
-    day: u8,
-    hour: u8,
-    minute: u8,
-    second: u8,
-    weekday: u8,
-};
-
-/// The UTC calendar time of `secs` since the epoch.
-pub fn civil(secs: i64) Civil {
-    const days = @divFloor(secs, 86400);
-    const rem: i64 = secs - days * 86400;
-    // Howard Hinnant's days-to-civil
-    const z = days + 719468;
-    const era = @divFloor(z, 146097);
-    const doe = z - era * 146097;
-    const yoe = @divFloor(doe - @divFloor(doe, 1460) + @divFloor(doe, 36524) - @divFloor(doe, 146096), 365);
-    const y = yoe + era * 400;
-    const doy = doe - (365 * yoe + @divFloor(yoe, 4) - @divFloor(yoe, 100));
-    const mp = @divFloor(5 * doy + 2, 153);
-    const d = doy - @divFloor(153 * mp + 2, 5) + 1;
-    const m = if (mp < 10) mp + 3 else mp - 9;
-    const weekday = @mod(days + 4, 7);
-    return .{
-        .year = if (m <= 2) y + 1 else y,
-        .month = @intCast(m),
-        .day = @intCast(d),
-        .hour = @intCast(@divFloor(rem, 3600)),
-        .minute = @intCast(@divFloor(@mod(rem, 3600), 60)),
-        .second = @intCast(@mod(rem, 60)),
-        .weekday = @intCast(weekday),
-    };
-}
-
 /// git's `non_ascii`: a byte with the high bit, or an escape.
 pub fn nonAscii(c: u8) bool {
     return c >= 0x80 or c == 0x1b;

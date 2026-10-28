@@ -242,9 +242,9 @@ fn strtol(s: []const u8, start: usize) struct { value: i64, end: usize } {
     return .{ .value = if (neg) -v else v, .end = i };
 }
 
-/// The calendar a moment falls on, in UTC: C's `struct tm` as `gmtime` fills
-/// it, each field in its range.
-const Calendar = struct {
+/// The calendar a moment falls on: C's `struct tm` as `gmtime` fills it,
+/// each field in its range.
+pub const Calendar = struct {
     /// The year, in full.
     year: i64,
     /// From 0, January, to 11.
@@ -987,10 +987,11 @@ fn plural(w: *std.Io.Writer, n: i64, unit: []const u8, after: []const u8) std.Io
     try w.print("{d} {s}{s}{s}", .{ n, unit, if (n == 1) "" else "s", after });
 }
 
-/// The calendar `secs` falls on in zone `tz`, as git's `time_to_tm`, or
-/// `null` where its `gmtime_r` has none: a time the zone moves past what a
-/// timestamp holds, or a year past what C's `int` holds as `tm_year`.
-fn calendarIn(secs: i64, tz: i32) ?Calendar {
+/// The calendar `secs` falls on in zone `tz` (git's `+0100` as 100), as
+/// git's `time_to_tm`, or `null` where its `gmtime_r` has none: a time the
+/// zone moves past what a timestamp holds, or a year past what C's `int`
+/// holds as `tm_year`. The one calendar relic shows a time on.
+pub fn calendarIn(secs: i64, tz: i32) ?Calendar {
     const shifted = std.math.add(i64, secs, @as(i64, tzMinutes(tz)) * 60) catch return null;
     const cal = calendarOf(shifted);
     if (cal.year - 1900 < std.math.minInt(i32) or cal.year - 1900 > std.math.maxInt(i32)) return null;
@@ -1022,15 +1023,43 @@ pub fn show(w: *std.Io.Writer, secs: i64, tz_in: i32, mode: Mode, clock: Clock) 
         return printTz(w, tz);
     }
     if (mode.kind == .relative) return showRelative(w, secs, clock.now orelse return error.DateNeedsClock);
-    // A time with no calendar date is shown as the epoch in UTC, as git's
-    // `show_date` shows it.
-    const cal = calendarIn(secs, tz) orelse epoch: {
-        tz = 0;
+    const cal = calendarShown(secs, &tz);
+    switch (mode.kind) {
+        .short => try writeFixed(w, cal, tz, .short),
+        .iso8601 => try writeFixed(w, cal, tz, .iso8601),
+        .iso8601_strict => try writeFixed(w, cal, tz, .iso8601_strict),
+        .rfc2822 => try writeFixed(w, cal, tz, .rfc2822),
+        .strftime => try strftime(w, mode.strftime, secs, cal, tz, .{ .zone_name = if (mode.local) zone_name else null, .date_full_year = clock.locale_date_full_year }),
+        else => try showNormal(w, secs, cal, tz, human, mode.local, clock),
+    }
+}
+
+/// The forms `show` writes from the calendar in the date's own zone alone,
+/// which ask nothing of the machine.
+pub const Fixed = enum { short, iso8601, iso8601_strict, rfc2822 };
+
+/// `secs`, in the zone `tz` (git's `+0100` as 100), in `form`: `show` in
+/// that mode, with no clock to ask.
+pub fn showFixed(w: *std.Io.Writer, secs: i64, tz_in: i32, form: Fixed) std.Io.Writer.Error!void {
+    var tz = tz_in;
+    const cal = calendarShown(secs, &tz);
+    return writeFixed(w, cal, tz, form);
+}
+
+/// The calendar `show` writes `secs` on in zone `tz`. A time with no
+/// calendar date is shown as the epoch in UTC, as git's `show_date` shows
+/// it, and `tz` becomes 0.
+fn calendarShown(secs: i64, tz: *i32) Calendar {
+    return calendarIn(secs, tz.*) orelse epoch: {
+        tz.* = 0;
         break :epoch calendarOf(0);
     };
+}
+
+fn writeFixed(w: *std.Io.Writer, cal: Calendar, tz: i32, form: Fixed) std.Io.Writer.Error!void {
     // A year before the first is written as 0.
     const year: u64 = std.math.cast(u64, cal.year) orelse 0;
-    switch (mode.kind) {
+    switch (form) {
         .short => try w.print("{d:0>4}-{d:0>2}-{d:0>2}", .{ year, cal.month + 1, cal.day }),
         .iso8601 => {
             try w.print("{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2} ", .{ year, cal.month + 1, cal.day, cal.hour, cal.minute, cal.second });
@@ -1049,8 +1078,6 @@ pub fn show(w: *std.Io.Writer, secs: i64, tz_in: i32, mode: Mode, clock: Clock) 
             try w.print("{s}, {d} {s} {d} {d:0>2}:{d:0>2}:{d:0>2} ", .{ short_weekdays[cal.weekday], cal.day, short_months[cal.month], cal.year, cal.hour, cal.minute, cal.second });
             try printTz(w, tz);
         },
-        .strftime => try strftime(w, mode.strftime, secs, cal, tz, .{ .zone_name = if (mode.local) zone_name else null, .date_full_year = clock.locale_date_full_year }),
-        else => try showNormal(w, secs, cal, tz, human, mode.local, clock),
     }
 }
 
@@ -1225,6 +1252,32 @@ test "a date before the first year shows its year signed, its century and two di
     out.clearRetainingCapacity();
     try show(&out.writer, secs, 0, .{ .kind = .short }, .{});
     try std.testing.expectEqualStrings("0000-12-31", out.written());
+}
+
+test "a fixed form is shown as show shows it, and asks no clock" {
+    const gpa = std.testing.allocator;
+    var fixed: std.Io.Writer.Allocating = .init(gpa);
+    defer fixed.deinit();
+    var shown: std.Io.Writer.Allocating = .init(gpa);
+    defer shown.deinit();
+    // A date, one before the year 1, and one an hour's zone moves past
+    // what a timestamp holds, shown as the epoch in UTC.
+    const times = [_]struct { i64, i32 }{ .{ 1_700_000_000, -130 }, .{ -62167219201, 0 }, .{ std.math.maxInt(i64), 100 } };
+    for (times) |t| {
+        for ([_]Mode.Kind{ .short, .iso8601, .iso8601_strict, .rfc2822 }, [_]Fixed{ .short, .iso8601, .iso8601_strict, .rfc2822 }) |kind, form| {
+            fixed.clearRetainingCapacity();
+            shown.clearRetainingCapacity();
+            try showFixed(&fixed.writer, t[0], t[1], form);
+            try show(&shown.writer, t[0], t[1], .{ .kind = kind }, .{});
+            try std.testing.expectEqualStrings(shown.written(), fixed.written());
+        }
+    }
+    fixed.clearRetainingCapacity();
+    try showFixed(&fixed.writer, 1_700_000_000, -130, .rfc2822);
+    try std.testing.expectEqualStrings("Tue, 14 Nov 2023 20:43:20 -0130", fixed.written());
+    fixed.clearRetainingCapacity();
+    try showFixed(&fixed.writer, std.math.maxInt(i64), 100, .iso8601);
+    try std.testing.expectEqualStrings("1970-01-01 00:00:00 +0000", fixed.written());
 }
 
 test "an approximate date past what 64 bits of seconds hold is no date" {

@@ -282,6 +282,28 @@ test "a commit dated before 1970 is archived as git archives it: a tar with git'
     try std.testing.expectError(error.TimestampTooLarge, archive_mod.archive(gpa, io, &out.writer, .{ .repo = &repo, .treeish = commit }, .{ .format = .zip }));
 }
 
+test "a zip of a commit whose time, in the zip's zone, is past what a timestamp or C's year holds is refused, not overflowed" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    try git.writeFile(io, "f", "x\n");
+    try git.exec(io, &.{ "add", "f" });
+    const tree = try git.line(io, &.{"write-tree"});
+    defer gpa.free(tree);
+    const body = try gpa.print("tree {s}\nauthor A <a@a> 9223372036854775800 +0000\ncommitter A <a@a> 9223372036854775800 +0000\n\nm\n", .{tree});
+    defer gpa.free(body);
+    const text = try git.runInput(io, &.{ "hash-object", "-t", "commit", "-w", "--literally", "--stdin" }, body);
+    defer gpa.free(text);
+    const commit = try Oid.parse(.sha1, std.mem.trim(u8, text, "\n"));
+    var repo = try Repository.open(gpa, io, git.dir, .{});
+    defer repo.deinit(io);
+    var out: Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    try std.testing.expectError(error.TimestampTooLarge, archive_mod.archive(gpa, io, &out.writer, .{ .repo = &repo, .treeish = commit }, .{ .format = .zip, .zip_offset_minutes = 60 }));
+    try std.testing.expectError(error.TimestampTooLarge, archive_mod.archive(gpa, io, &out.writer, .{ .repo = &repo, .treeish = commit }, .{ .format = .zip }));
+}
+
 test "a tree deeper than sixty-four directories, and a zip of more entries than its end record counts, are git's byte for byte" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;

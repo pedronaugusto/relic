@@ -49,7 +49,6 @@ const pretty = @import("../pretty/pretty.zig");
 const message = @import("../object/message.zig");
 const abbrev = @import("../odb/abbrev.zig");
 const odb_policy = @import("../odb/policy.zig");
-const mailfmt = @import("../mail/format.zig");
 const program = @import("../process.zig").program;
 const fs = @import("../fs/fs.zig");
 const mailmap_mod = @import("../rev_walk/mailmap.zig");
@@ -77,7 +76,8 @@ pub const Error = error{
     InvalidTarUmask,
     /// A zip asked of a commit dated before 1970: git's "timestamp too
     /// large for this system", for git holds a time unsigned. A tar carries
-    /// it, as git's does.
+    /// it, as git's does. So is one whose time, in the zip's zone, is past
+    /// what a timestamp holds, or in a year past what C's `int` holds.
     TimestampTooLarge,
     /// A tar filter no `tar.<name>.command` names.
     UnknownFormat,
@@ -1137,14 +1137,19 @@ pub fn archive(gpa: Allocator, io: Io, w: *Io.Writer, inputs: Inputs, options: O
             // git holds a time unsigned, so one before 1970 is past any
             // date a zip can carry, and git's archive stops there.
             if (time < 0) return error.TimestampTooLarge;
-            const c = mailfmt.civil(time + @as(i64, options.zip_offset_minutes) * 60);
+            // git's `dos_time`: the calendar in the zip's zone, and a time
+            // the zone moves past what a timestamp holds is past it too.
+            const c = date.calendarIn(time, date.tzInt(options.zip_offset_minutes)) orelse return error.TimestampTooLarge;
             const year: i64 = c.year - 1980;
             zip = .{
                 .w = w,
                 .a = a,
                 .gpa = gpa,
-                .dos_date = @truncate(@as(u64, @bitCast(@as(i64, c.day) + @as(i64, c.month) * 32 + year * 512))),
-                .dos_time = @intCast(@as(u32, c.second) / 2 + @as(u32, c.minute) * 32 + @as(u32, c.hour) * 2048),
+                // A year's bits past seven are cut off, as git's `put_le16` cuts them.
+                .dos_date = @truncate(@as(u64, @bitCast(@as(i64, c.day) + (@as(i64, c.month) + 1) * 32 + year * 512))),
+                // Each field held to its bits: 31 + 63 * 32 + 31 * 2048 is the
+                // most a u16 holds.
+                .dos_time = @as(u16, c.second) / 2 + @as(u16, c.minute) * 32 + @as(u16, c.hour) * 2048,
                 .time = @intCast(time),
                 .level = options.level,
             };
