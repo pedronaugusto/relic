@@ -157,8 +157,8 @@ pub fn reencode(a: Allocator, src: []const u8, to: []const u8, from: []const u8)
             .utf8 => {
                 var buf: [4]u8 = undefined;
                 // aegis: no-danger: every decoded code point is a scalar value
-                const n = std.unicode.utf8Encode(cp, &buf) catch unreachable;
-                try out.appendSlice(a, buf[0..n]);
+                const encoded = encodeUtf8(cp, &buf) orelse unreachable;
+                try out.appendSlice(a, encoded);
             },
         }
     }
@@ -273,6 +273,13 @@ fn invalidUtf8At(text: []const u8, from: usize) ?usize {
     return null;
 }
 
+/// `cp` as UTF-8 in `buf`, the bytes written; null where it is no scalar value.
+fn encodeUtf8(cp: u21, buf: *[4]u8) ?[]const u8 {
+    const n = std.unicode.utf8Encode(cp, buf) catch return null;
+    // utf8Encode writes four bytes at most, the array's length.
+    return if (n <= buf.len) buf[0..n] else null;
+}
+
 /// The character at `src[i.*]` in `set`, `i` moved past it; `null` for
 /// bytes that are not one.
 fn decodeOne(set: Charset, src: []const u8, i: *usize) ?u21 {
@@ -292,7 +299,8 @@ fn decodeOne(set: Charset, src: []const u8, i: *usize) ?u21 {
                 2 => std.unicode.utf8Decode2(at[0..2].*),
                 3 => std.unicode.utf8Decode3(at[0..3].*),
                 4 => std.unicode.utf8Decode4(at[0..4].*),
-                else => unreachable, // utf8ByteSequenceLength gives 1 to 4
+                // utf8ByteSequenceLength gives 1 to 4.
+                else => return null,
             } catch return null;
             i.* += len;
             return cp;
@@ -374,11 +382,11 @@ pub fn toUtf8(a: Allocator, e: Encoding, src: []const u8) Self.Error![]const u8 
                     if (i + 4 > body.len) return error.InvalidContent;
                     const lo = std.mem.readInt(u16, body[i + 2 ..][0..2], endian);
                     if (!std.unicode.utf16IsLowSurrogate(lo)) return error.InvalidContent;
-                    cp = 0x10000 + ((@as(u21, hi) - 0xd800) << 10) + (lo - 0xdc00);
+                    cp = std.unicode.utf16DecodeSurrogatePair(&.{ hi, lo }) catch return error.InvalidContent;
                     i += 2;
                 }
-                const n = std.unicode.utf8Encode(cp, &buf) catch return error.InvalidContent;
-                try out.appendSlice(a, buf[0..n]);
+                const encoded = encodeUtf8(cp, &buf) orelse return error.InvalidContent;
+                try out.appendSlice(a, encoded);
             }
         },
         .u32 => {
@@ -388,8 +396,8 @@ pub fn toUtf8(a: Allocator, e: Encoding, src: []const u8) Self.Error![]const u8 
                 const value = std.mem.readInt(u32, body[i..][0..4], endian);
                 if (value > 0x10ffff) return error.InvalidContent;
                 const cp: u21 = @intCast(value); // safe: checked against U+10FFFF above
-                const n = std.unicode.utf8Encode(cp, &buf) catch return error.InvalidContent;
-                try out.appendSlice(a, buf[0..n]);
+                const encoded = encodeUtf8(cp, &buf) orelse return error.InvalidContent;
+                try out.appendSlice(a, encoded);
             }
         },
     }
