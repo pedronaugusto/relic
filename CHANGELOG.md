@@ -327,6 +327,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - receive-pack says git's explanations when `receive.denyCurrentBranch` or `receive.denyDeleteCurrent` is unset (the latter's before its refusal, as git orders them), and an object `receive.fsckObjects` refuses as git's unpacker says it (`object <oid>: <msg-id>: <text>`, `fsck error in packed object`).
 - `Odb.repack` took a replaced pack's `.pack` away before its `.idx`, so a reader could find an index whose pack was gone; it now removes in git's order, through `Odb.removePacks`' path, and reports a removal that fails.
 - `text.decimal.strtol` of 128 bits reads a negative number down to the type's minimum, −2¹²⁷: the bound on its magnitude negated the minimum, which a safe build stops on, and the magnitude was then cast to `i128`, which 2¹²⁷ does not fit. The value is made by checked conversions (`std.math.cast`, `negateCast`, `sub`), each failure the clamped overflow C gives; a digit's value is `std.fmt.charToDigit`'s.
+- `text.whitespace.fixCopy` with a rule whose tab width is zero, which `parse` never makes, expands a tab in the indent to one space, where it divided by zero; the width is read as the rule's six low bits.
 
 ### Security
 

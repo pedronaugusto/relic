@@ -285,7 +285,9 @@ pub fn fixCopy(w: *std.Io.Writer, src_in: []const u8, rule: Rule) std.Io.Writer.
             fixed = true;
         }
     }
-    const tw: isize = @intCast(tabWidth(rule));
+    // The tab width is the rule's six low bits.
+    const width: u6 = @truncate(tabWidth(rule));
+    const tw: isize = width;
     var i: usize = 0;
     while (i < len) : (i += 1) {
         const ch = src[i];
@@ -327,7 +329,8 @@ pub fn fixCopy(w: *std.Io.Writer, src_in: []const u8, rule: Rule) std.Io.Writer.
                 // git's do-while: at least one space, then up to the stop
                 try w.writeByte(' ');
                 column += 1;
-                while (column % @as(usize, @intCast(tw)) != 0) : (column += 1) try w.writeByte(' ');
+                // A rule of width zero, which parse never makes, stops at every column.
+                while ((std.math.rem(usize, column, width) catch 0) != 0) : (column += 1) try w.writeByte(' ');
             } else {
                 try w.writeByte(ch);
                 column += 1;
