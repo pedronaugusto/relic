@@ -16,12 +16,15 @@ pub const Token = struct {
 
     gpa: Allocator,
     dir: fs.OwnedDir,
-    name: [hash.max_hex_len + 10]u8,
-    name_len: usize,
+    /// The token file's name, `pack-<name>.keep`: as long as `kind`'s names
+    /// and the affixes.
+    name: [hash.max_hex_len + affixes.len]u8,
+    kind: hash.Kind,
     id: [24]u8,
     managed: bool,
 
     const header = "relic keep tokens v1\n";
+    const affixes = "pack-.keep";
 
     /// The directory handle is owned by this token, independent of the
     /// receiver's handle. Acquiring precedes publication of the pack index.
@@ -30,11 +33,10 @@ pub const Token = struct {
         defer _ = io.swapCancelProtection(protection);
         const dir = try pack_dir.openDir(io, ".", .{});
         errdefer dir.close(io);
-        var t: Token = .{ .gpa = gpa, .dir = undefined, .name = undefined, .name_len = 0, .id = undefined, .managed = true };
+        var t: Token = .{ .gpa = gpa, .dir = undefined, .name = undefined, .kind = oid.kind, .id = undefined, .managed = true };
         var hex: [hash.max_hex_len]u8 = undefined;
         // unreachable: the buffer holds the maximum hex name and the fixed pack/keep affixes.
         const name = std.mem.print(&t.name, "pack-{s}.keep", .{oid.hex(&hex)}) catch unreachable;
-        t.name_len = name.len;
         var random: [12]u8 = undefined;
         io.random(&random);
         t.id = std.fmt.bytesToHex(random, .lower);
@@ -70,7 +72,7 @@ pub const Token = struct {
     }
 
     fn release(t: *Token, io: Io) ErrorNamespace.Error!void {
-        const name = t.name[0..t.name_len];
+        const name = t.name[0 .. t.kind.hexLen() + affixes.len];
         var buffer: [4096]u8 = undefined;
         var lock = try fs.LockFile.open(t.gpa, io, t.dir.lend().get(), .{ .sub_path = name, .buffer = &buffer }, .{ .sync = .none, .on_contention = .{ .wait = .fromMilliseconds(1000) } });
         defer lock.deinit(io);

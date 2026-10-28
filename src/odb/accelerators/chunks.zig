@@ -4,6 +4,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 const std = @import("std");
 const hash = @import("../../hash/hash.zig");
+const Rows = @import("../../codec.zig").Rows;
 const Allocator = std.mem.Allocator;
 
 pub const Error = error{CorruptAccelerator} || Allocator.Error;
@@ -82,12 +83,18 @@ pub fn validate(kind: hash.Kind, bytes: []const u8, header_len: usize, count: u8
 
 /// Find a chunk after `validate` has accepted its table.
 pub fn get(bytes: []const u8, header_len: usize, count: u8, id: *const [4]u8) ?[]const u8 {
+    // Each row's chunk ends where the next row's begins.
+    const table = Rows.cut(bytes, header_len, @as(usize, count) + 1, 12) orelse return null;
     for (0..count) |i| {
-        const row = bytes[header_len + i * 12 ..][0..12];
+        const row = table.at(i) orelse return null;
         if (!std.mem.eql(u8, row[0..4], id)) continue;
-        const start: usize = @intCast(std.mem.readInt(u64, row[4..12], .big));
-        const end: usize = @intCast(std.mem.readInt(u64, bytes[header_len + (i + 1) * 12 + 4 ..][0..8], .big));
-        return bytes[start..end];
+        const next = table.at(i + 1) orelse return null;
+        const start: usize = std.math.cast(usize, std.mem.readInt(u64, row[4..12], .big)) orelse return null;
+        const end: usize = std.math.cast(usize, std.mem.readInt(u64, next[4..12], .big)) orelse return null;
+        if (end > bytes.len) return null;
+        const through = bytes[0..end];
+        if (start > through.len) return null;
+        return through[start..];
     }
     return null;
 }

@@ -663,7 +663,9 @@ const Tee = struct {
 
     /// Where in the pack the next byte read is.
     fn position(t: *const Tee) u64 {
-        return t.written - t.interface.bufferedLen();
+        const buffered = t.interface.bufferedLen();
+        aegis.assert.invariant(buffered <= t.written, "what is buffered was written");
+        return t.written - buffered;
     }
 
     fn stream(r: *Io.Reader, w: *Io.Writer, limit: Io.Limit) Io.Reader.StreamError!usize {
@@ -742,6 +744,8 @@ const Indexer = struct {
     kind: Kind,
     file: Io.File,
     options: Options,
+    /// `Options.max_object_bytes`, as the most a whole object is held in.
+    object_limit: aegis.bounded.Limit(usize),
     read_buffer: []u8,
     /// How the stream's entries are decoded while it is parsed.
     inflater: Inflater,
@@ -792,6 +796,7 @@ const Indexer = struct {
             .kind = db.objectFormat(),
             .file = file,
             .options = options,
+            .object_limit = .init(std.math.cast(usize, options.max_object_bytes.raw()) orelse std.math.maxInt(usize)),
             .read_buffer = read_buffer,
             .inflater = inflater,
             .reader = file.reader(io, read_buffer),
@@ -812,9 +817,17 @@ const Indexer = struct {
 
     /// Fail with `err`, saying where for the caller that asked. With
     /// several threads the first failure is the one returned and said.
+    /// The entry at `at`, a position the indexer's own tables name for a
+    /// delta's base or child: one past the entries is `BadDeltaOffset`.
+    fn entryOf(x: *Indexer, at: u32) Error!*Entry {
+        if (at >= x.entries.items.len) return error.BadDeltaOffset;
+        return &x.entries.items[at];
+    }
+
     /// Whether an object of `size` bytes is past `Options.max_object_bytes`.
     fn tooLarge(x: *const Indexer, size: u64) bool {
-        return Bytes.fromRaw(size).compare(x.options.max_object_bytes) == .gt;
+        const len = std.math.cast(usize, size) orelse return true;
+        return x.object_limit.exceeds(len);
     }
 
     fn firstFailure(x: *Indexer) ?Error {
@@ -988,8 +1001,9 @@ const Indexer = struct {
             try x.inflate(entry.size, .{ .hash = &hasher }, null);
             entry.oid = hasher.final();
         } else {
-            if (x.tooLarge(entry.size)) return x.fail(error.ObjectTooLarge, .{ .offset = entry.offset });
-            const bytes = try x.gpa.alloc(u8, @intCast(entry.size));
+            const len = std.math.cast(usize, entry.size) orelse return x.fail(error.ObjectTooLarge, .{ .offset = entry.offset });
+            if (x.object_limit.exceeds(len)) return x.fail(error.ObjectTooLarge, .{ .offset = entry.offset });
+            const bytes = try x.gpa.alloc(u8, len);
             defer x.gpa.free(bytes);
             try x.inflate(entry.size, .{ .buffer = bytes }, &hasher);
             entry.oid = hasher.final();
@@ -1081,7 +1095,7 @@ const Indexer = struct {
             while (it.next()) |oid_ptr| {
                 const oid = oid_ptr.*;
                 const finding = if (by_name.get(oid)) |at| blk: {
-                    const entry = x.entries.items[at];
+                    const entry = (try x.entryOf(at)).*;
                     if (entry.type != .blob) break :blk try fsck.checkFoundObject(rules, oid, as, false, x.fsckSink());
                     if (x.tooLarge(entry.size)) break :blk try fsck.checkBlob(x.gpa, rules, .{ .oid = oid, .as = as, .bytes = null }, .{ .sink = x.fsckSink() });
                     const bytes = try x.readBack(&w, at, by_name);
@@ -1156,7 +1170,7 @@ const Indexer = struct {
     /// The whole object entry `at` holds, read back from the pack: a
     /// delta's base first, as far down as its chain goes.
     fn readBack(x: *Indexer, w: *Worker, at: u32, by_name: Oid.Map(u32)) Error![]u8 {
-        const entry = x.entries.items[at];
+        const entry = (try x.entryOf(at)).*;
         const base_at: u32 = switch (entry.kind) {
             .whole => return w.load(at),
             .ofs_delta => x.entryAt(entry.base_offset) orelse return error.BadDeltaOffset,
@@ -1307,7 +1321,7 @@ const Indexer = struct {
                     i += group_items.len;
                     var pending = false;
                     for (group_items) |ref| {
-                        if (!x.entries.items[ref.child].resolved) pending = true;
+                        if (!(try x.entryOf(ref.child)).resolved) pending = true;
                     }
                     if (!pending) continue;
                     if (!try x.db.exists(x.io, base)) continue;
@@ -1330,7 +1344,7 @@ const Indexer = struct {
         }
 
         for (x.ref_bases.items) |ref| {
-            const entry = x.entries.items[ref.child];
+            const entry = (try x.entryOf(ref.child)).*;
             if (!entry.resolved) return x.fail(error.DeltaBaseMissing, .{ .oid = ref.base, .offset = entry.offset });
         }
         for (x.entries.items) |entry| {
@@ -1346,7 +1360,7 @@ const Indexer = struct {
     fn claimRef(x: *Indexer, at: u32) bool {
         var guard = x.shared.acquireUncancelable(x.io);
         defer guard.deinit(x.io);
-        const entry = &x.entries.items[at];
+        const entry = x.entryOf(at) catch return false;
         if (entry.resolved or entry.claimed) return false;
         entry.claimed = true;
         return true;
@@ -1391,7 +1405,8 @@ const Indexer = struct {
         }
 
         var count_bytes: [4]u8 = undefined;
-        std.mem.writeInt(u32, &count_bytes, count + @as(u32, @intCast(x.thin_bases.items.len)), .big);
+        const thin = std.math.cast(u32, x.thin_bases.items.len) orelse return error.PackTooLarge;
+        std.mem.writeInt(u32, &count_bytes, std.math.add(u32, count, thin) catch return error.PackTooLarge, .big);
         try x.file.writePositionalAll(io, &count_bytes, 8);
 
         var hasher: hash.Hasher = .init(x.kind);
@@ -1448,7 +1463,7 @@ const Inflater = struct {
     /// The most bytes such an entry is decoded whole for: `scratch_limit`,
     /// or `core.bigFileThreshold` when lower, past which git's index-pack
     /// streams a blob too (`unpack_entry_data`).
-    whole_limit: u64,
+    whole_limit: aegis.bounded.Limit(usize),
     /// Warp's reader buffer, for an entry too large to hold,
     /// made when one comes.
     window: ?[]u8 = null,
@@ -1461,7 +1476,7 @@ const Inflater = struct {
     fn init(gpa: Allocator, big_file_bytes: u64) Allocator.Error!Inflater {
         const decoder = try gpa.create(warp.Decompressor);
         decoder.* = .{};
-        return .{ .gpa = gpa, .decoder = decoder, .whole_limit = @min(scratch_limit, big_file_bytes) };
+        return .{ .gpa = gpa, .decoder = decoder, .whole_limit = .init(@intCast(@min(scratch_limit, big_file_bytes))) };
     }
 
     fn deinit(f: *Inflater) void {
@@ -1476,10 +1491,12 @@ const Inflater = struct {
     fn run(f: *Inflater, source: Source, size: u64, sink: Sink, hasher: ?*hash.Hasher) Error!void {
         const out: ?[]u8 = switch (sink) {
             .buffer => |b| b,
-            .discard, .hash => if (size <= f.whole_limit) blk: {
-                try f.scratch.resize(f.gpa, @intCast(size));
+            .discard, .hash => blk: {
+                const len = std.math.cast(usize, size) orelse break :blk null;
+                if (f.whole_limit.exceeds(len)) break :blk null;
+                try f.scratch.resize(f.gpa, len);
                 break :blk f.scratch.items;
-            } else null,
+            },
         };
         const whole = out orelse return f.streaming(source, size, sink, hasher);
         const n = f.decoder.inflateReader(source.reader(), whole, .{}) catch |err| return switch (err) {
@@ -1507,8 +1524,8 @@ const Inflater = struct {
         var chunk: [16 * 1024]u8 = undefined;
         var done: u64 = 0;
         while (true) {
-            const remaining = size - done;
-            const want: usize = @intCast(@min(@as(u64, chunk.len), remaining + 1));
+            const remaining = std.math.sub(u64, size, done) catch return error.PackEntrySizeMismatch;
+            const want: usize = @intCast(@min(@as(u64, chunk.len), remaining +| 1));
             const n = d.interface.readSliceShort(chunk[0..want]) catch {
                 if (source.err()) |err| return err;
                 return if (d.err()) |err| switch (err) {
@@ -1568,9 +1585,7 @@ const Worker = struct {
         while (x.failed.load(.acquire) == .running) {
             const next = x.next_root.fetchAddWrapping(Indexer.Roots.fromRaw(1), .monotonic).raw();
             if (next >= x.roots.len) return;
-            const index = x.roots[next];
-            const entry = x.entries.items[index];
-            w.walkFrom(index, entry) catch |err| {
+            w.walkFrom(x.roots[next]) catch |err| {
                 var guard = x.shared.acquireUncancelable(x.io);
                 defer guard.deinit(x.io);
                 if (guard.value().failure == null) guard.value().failure = err;
@@ -1580,7 +1595,8 @@ const Worker = struct {
         }
     }
 
-    fn walkFrom(w: *Worker, index: u32, entry: Entry) Error!void {
+    fn walkFrom(w: *Worker, index: u32) Error!void {
+        const entry = (try w.x.entryOf(index)).*;
         const bytes = try w.load(index);
         try w.walk(.{ .at = index, .oid = entry.oid, .type = entry.type, .bytes = bytes, .depth = 0 });
     }
@@ -1588,9 +1604,10 @@ const Worker = struct {
     /// The bytes of the entry at `at`, inflated. For a delta, the delta.
     fn load(w: *Worker, at: u32) Error![]u8 {
         const x = w.x;
-        const entry = x.entries.items[at];
-        if (x.tooLarge(entry.size)) return x.fail(error.ObjectTooLarge, .{ .offset = entry.offset });
-        const bytes = try x.gpa.alloc(u8, @intCast(entry.size));
+        const entry = (try x.entryOf(at)).*;
+        const len = std.math.cast(usize, entry.size) orelse return x.fail(error.ObjectTooLarge, .{ .offset = entry.offset });
+        if (x.object_limit.exceeds(len)) return x.fail(error.ObjectTooLarge, .{ .offset = entry.offset });
+        const bytes = try x.gpa.alloc(u8, len);
         errdefer x.gpa.free(bytes);
         w.reader.seekTo(entry.data_at) catch |err| switch (err) {
             error.EndOfStream => return error.TruncatedPack,
@@ -1623,7 +1640,7 @@ const Worker = struct {
                     // alone comes to it.
                     const candidate = ofs[top.next_ofs].child;
                     top.next_ofs += 1;
-                    if (!x.entries.items[candidate].resolved) child = candidate;
+                    if (!(try x.entryOf(candidate)).resolved) child = candidate;
                 } else if (top.next_ref < refs.len) {
                     const candidate = refs[top.next_ref].child;
                     top.next_ref += 1;
@@ -1636,7 +1653,7 @@ const Worker = struct {
                 x.gpa.free(done.bytes);
                 continue;
             };
-            const entry = &x.entries.items[at];
+            const entry = try x.entryOf(at);
             if (top.depth + 1 > x.options.max_delta_depth) return x.fail(error.DeltaChainTooDeep, .{ .offset = entry.offset });
             try w.rebuild(stack.items.len - 1);
 
@@ -1708,7 +1725,7 @@ const Worker = struct {
         while (k < index) : (k += 1) {
             const patch = try w.load(frames[k + 1].at.?);
             defer x.gpa.free(patch);
-            const bytes = delta.apply(x.gpa, frames[k].bytes, patch) catch |err| return x.fail(err, .{ .offset = x.entries.items[frames[k + 1].at.?].offset });
+            const bytes = delta.apply(x.gpa, frames[k].bytes, patch) catch |err| return x.fail(err, .{ .offset = (try x.entryOf(frames[k + 1].at.?)).offset });
             frames[k + 1].bytes = bytes;
             frames[k + 1].dropped = false;
             w.held += bytes.len;
