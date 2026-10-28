@@ -650,3 +650,29 @@ test "line endings, the whitespace attribute, intent to add, no-add and include 
     try reset(&p, io);
     try compare(&p, io, no_eol, &.{"--inaccurate-eof"}, .{ .inaccurate_eof = true });
 }
+
+test "under --unsafe-paths a patch's name still reaches the working tree only as a checked path" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var p = try Pair.init(gpa, io);
+    defer p.deinit();
+    try p.ours.writeFile(io, ".git/victim", "kept\n");
+    try p.write(io, "b.txt", "one\n");
+    try p.both(io, &.{ "add", "-A" });
+    try p.both(io, &.{ "commit", "-q", "-m", "base" });
+    // A deletion of a path git's verify_path refuses: read as the old file,
+    // then removed, before the checked path.
+    const patch = "diff --git a/.git/victim b/.git/victim\ndeleted file mode 100644\n--- a/.git/victim\n+++ /dev/null\n@@ -1 +0,0 @@\n-kept\n";
+    var repo = try Repository.open(gpa, io, p.ours.dir, .{});
+    defer repo.deinit(io);
+    if (apply_mod.apply(gpa, io, &repo, patch, .{ .unsafe_paths = true })) |outcome_const| {
+        var outcome = outcome_const;
+        outcome.deinit();
+    } else |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => {},
+    }
+    const kept = try p.ours.readFile(io, ".git/victim");
+    defer gpa.free(kept);
+    try std.testing.expectEqualStrings("kept\n", kept);
+}

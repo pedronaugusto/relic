@@ -287,6 +287,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `patch.apply` reaches the working tree with a patch's name only as a checked path, under `--unsafe-paths` too, as the files it writes already are: the old file of a deletion is read through `checkout.readable`, and removed, with its emptied directories, through a `names.path.Checked` held to git's `verify_path`. Under `--unsafe-paths` a deletion of `.git/...` or a path out of the tree read and removed it.
 - `mail.format.writeWrapped` (`%w(...)`, shortlog's `-w`, `format-patch`'s `From:`) no longer overflows its column count on the most negative first indent or on a line past an `i32` of columns, which stopped a safe build: the count saturates, and an indent is written as its clamped magnitude.
 - A checkout to a tree without an index entry's path removed the file at that path unchecked: an index naming `.git/config` lost the repository its config. The path is now held to git's `verify_path` first, and one it refuses is `error.UnsafePath`.
 - `refs.Store.readLog` and `logExists` refuse a name that is no ref's (`InvalidRefName`), where `worktrees/x/../../..` or an absolute path reached a file outside the ref directories; a transaction refuses a symbolic chain through a target that is no ref's name before it reads the target's file; a worktree id that is not one component of a ref's name is refused before `worktrees/<id>` is opened.

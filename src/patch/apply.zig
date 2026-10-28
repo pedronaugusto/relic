@@ -1361,8 +1361,10 @@ fn readBlobFor(st: *State, oid: Oid, mode: Mode, out: *std.ArrayList(u8)) Error!
 /// Read the working tree's copy of `path` as the repository would store
 /// it: a symlink's target, or a file through the clean filters and line
 /// endings, which `crlf_in_old` keeps.
-fn readOldData(st: *State, path: []const u8, found: fs.Entry, crlf_in_old: bool, out: *std.ArrayList(u8)) Error!void {
+fn readOldData(st: *State, raw_path: []const u8, found: fs.Entry, crlf_in_old: bool, out: *std.ArrayList(u8)) Error!void {
     const wt = st.wt.?;
+    // A patch's name reaches the working tree only as a checked path.
+    const path = (try worktree.readable(raw_path, st.rules.protect)).bytes;
     switch (found.kind) {
         .sym_link => {
             var buf: [4096]u8 = undefined;
@@ -1797,7 +1799,14 @@ fn objectMode(mode: Mode) object.Mode {
 }
 
 fn removeFile(st: *State, entry: *Entry, rmdir_empty: bool) Error!void {
-    const old = entry.p.old_name.?;
+    // A patch's name reaches the working tree only as a checked path, under
+    // `--unsafe-paths` too, as the files apply writes are.
+    const checked = safe_path.checked(entry.p.old_name.?, .{
+        .use = .worktree,
+        .protect = st.rules.protect,
+        .symlink = patchparse.kind(entry.p.old_mode) == patchparse.mode_symlink,
+    }) catch return error.UnsafePath;
+    const old = checked.bytes;
     if (st.update_index and !st.options.intent_to_add) {
         const ix = st.index.?;
         (try ix.cacheTree()).invalidate(old);
@@ -1817,16 +1826,16 @@ fn removeFile(st: *State, entry: *Entry, rmdir_empty: bool) Error!void {
             };
         }
         if (rmdir_empty) {
-            if (std.Io.Dir.path.dirnamePosix(old)) |parent| removeEmptyDirectories(st.io, wt, parent);
+            if (checked.dirname()) |parent| removeEmptyDirectories(st.io, wt, parent);
         }
     }
 }
 
-fn removeEmptyDirectories(io: Io, wt: Io.Dir, path: []const u8) void {
-    var current = path;
-    while (current.len != 0) {
-        wt.deleteDir(io, current) catch return;
-        current = std.Io.Dir.path.dirnamePosix(current) orelse return;
+fn removeEmptyDirectories(io: Io, wt: Io.Dir, path: safe_path.Checked) void {
+    var current: ?safe_path.Checked = path;
+    while (current) |dir| : (current = dir.dirname()) {
+        // As git's remove_path: the first directory that is not empty ends it.
+        wt.deleteDir(io, dir.bytes) catch return;
     }
 }
 
