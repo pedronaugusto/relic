@@ -60,6 +60,12 @@ pub const format_id_sha256: u32 = 0x73323536;
 const max_restarts: usize = (1 << 16) - 1;
 /// A restart point's width in a block's restart table.
 const restart_width = 3;
+/// The most a deflate stream inflates to per byte of it: a 258-byte match
+/// in two one-bit codes (zlib's maximum compression factor, 1032:1).
+const deflate_widest = 1032;
+/// The most one block's read takes: its 24-bit length, and what deflate can
+/// add to a stream of that length (a deflated log block's).
+const max_block_read: usize = std.math.maxInt(u24) + std.math.maxInt(u24) / 256 + 64;
 
 /// The header's length: version 1 has no hash identifier, version 2 does.
 pub fn headerSize(version: u8) usize {
@@ -153,7 +159,8 @@ pub const LogRecord = struct {
 
 /// Where a table's bytes come from.
 pub const Source = union(enum) {
-    /// The whole table in memory, kept alive by the caller.
+    /// The table's blocks in memory, up to its footer, kept alive by the
+    /// caller.
     bytes: []const u8,
     /// An open file, read a block at a time with positional reads, kept
     /// open by the caller. Nothing is read that a lookup does not reach.
@@ -190,7 +197,8 @@ pub const Table = struct {
         const footer_len = footerSize(version);
         if (bytes.len < headerSize(version) + footer_len) return error.NotAReftable;
         const head = bytes[0..@min(bytes.len, headerSize(2) + 1)];
-        return fromParts(.{ .bytes = bytes }, head, bytes[bytes.len - footer_len ..], bytes.len, kind);
+        const blocks = bytes[0 .. bytes.len - footer_len];
+        return fromParts(.{ .bytes = blocks }, head, bytes[blocks.len..], bytes.len, kind);
     }
 
     /// Read a table's header and footer from an open file, which the caller
@@ -359,10 +367,11 @@ pub const Table = struct {
     }
 
     /// `len` bytes from `off` of a file-backed table, or fewer where the
-    /// blocks end first. The caller's.
+    /// blocks end first; never more than a block can take. The caller's.
     fn readAt(t: *const Table, gpa: Allocator, off: usize, len: usize) Error![]u8 {
         const f = t.source.file;
         const n = @min(len, t.size - off);
+        if (n > max_block_read) return error.CorruptBlock;
         const buf = try gpa.alloc(u8, n);
         errdefer gpa.free(buf);
         if (try f.file.readPositionalAll(f.io, buf, off) != n) return error.CorruptBlock;
@@ -388,7 +397,7 @@ pub const Table = struct {
         var raw: ?[]u8 = null;
         defer if (raw) |r| gpa.free(r);
         var data: []const u8 = switch (t.source) {
-            .bytes => |b| b[off..t.size],
+            .bytes => |b| b[off..],
             .file => blk: {
                 // A byte past the block size, to tell padding from the next block.
                 const want = aegis.int.Checked(usize).init(@max(t.block_size, 64)).add(1) catch return error.CorruptBlock;
@@ -427,6 +436,9 @@ pub const Table = struct {
             .full_size = 0,
         };
         if (typ == @backingInt(BlockType.log)) {
+            // The block inflates from the bytes after its header, so to no
+            // more than deflate's widest ratio of the bytes it was read from.
+            if (len > skip + (data.len - skip) *| deflate_widest) return error.CorruptBlock;
             const out = try gpa.alloc(u8, len);
             errdefer gpa.free(out);
             @memcpy(out[0..skip], data[0..skip]);
@@ -1486,6 +1498,38 @@ test "records out of order are refused" {
     try std.testing.expectError(error.UpdateIndexOutOfRange, write(gpa, .sha1, .{ .min_update_index = 2, .max_update_index = 2, .refs = &.{
         .{ .name = "refs/heads/a", .update_index = 1, .value = .deletion },
     }, .logs = &.{} }, .{}));
+}
+
+test "a log block claiming more than its bytes inflate to is refused before its buffer is taken" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    const logs = [_]LogRecord{.{ .name = "HEAD", .update_index = 1, .value = .{ .update = .{
+        .old = oidOf(1),
+        .new = oidOf(2),
+        .name = "A",
+        .email = "a@example.com",
+        .time = 1,
+        .tz_offset = 0,
+        .message = "m\n",
+    } } }};
+    const bytes = try write(gpa, .sha1, .{ .min_update_index = 1, .max_update_index = 1, .refs = &.{}, .logs = &logs }, .{});
+    defer gpa.free(bytes);
+    // The only block is the log block, just after the header; its length
+    // claims the most 24 bits hold.
+    std.mem.writeInt(u24, bytes[headerSize(1) + 1 ..][0..3], std.math.maxInt(u24), .big);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "t.ref", .data = bytes });
+    const file = try tmp.dir.openFile(io, "t.ref", .{});
+    defer file.close(io);
+
+    // Far less than the claimed length: a buffer of it would be refused
+    // as OutOfMemory, not as the corrupt block it is.
+    var buffer: [1 << 16]u8 = undefined;
+    for ([_]Table{ try Table.parse(bytes, .sha1), try Table.open(io, file, .sha1) }) |table| {
+        var limited: std.heap.FixedBufferAllocator = .init(&buffer);
+        try std.testing.expectError(error.CorruptBlock, table.iterate(limited.allocator(), .log));
+    }
 }
 
 test "a damaged footer is a named error" {
