@@ -94,10 +94,13 @@ pub fn readOtherWorktree(gpa: Allocator, io: Io, store: anytype, where: ref_name
 }
 
 /// The stack of the linked worktree `id`, read now, or `null` when there
-/// is no such worktree.
+/// is no such worktree. An id that is no one component of a ref's name,
+/// which `worktrees/<id>` would take out of `worktrees/`, is refused.
 fn loadWorktree(gpa: Allocator, io: Io, store: anytype, id: []const u8) refs.ReadError!?Stack {
+    const component = ref_names.checked(id, .ref) catch return error.InvalidRefName;
+    if (std.mem.findScalar(u8, component.bytes, '/') != null) return error.InvalidRefName;
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const path = std.mem.print(&path_buffer, "worktrees/{s}", .{id}) catch return null;
+    const path = std.mem.print(&path_buffer, "worktrees/{s}", .{component.bytes}) catch return null;
     var admin = store.commonDir().get().openDir(io, path, .{}) catch |err| switch (err) {
         error.FileNotFound, error.NotDir, error.NameTooLong => return null,
         else => |e| return e,

@@ -334,13 +334,13 @@ pub const Store = struct {
 
     /// `read`, saying whether the value came from `packed-refs`.
     fn readFrom(store: *const Store, gpa: Allocator, io: Io, name: []const u8) ReadError!?Found {
-        if (!isRefName(name)) return error.InvalidRefName;
-        return store.readUnchecked(gpa, io, name);
+        const ref = names.checked(name, .ref) catch return error.InvalidRefName;
+        return store.readUnchecked(gpa, io, ref);
     }
 
     /// A ref's own value, symbolic or not, where a symbolic one can be:
     /// the loose file, or the reftable stack.
-    fn readOwnValue(store: *const Store, gpa: Allocator, io: Io, name: []const u8) ReadError!?Ref {
+    fn readOwnValue(store: *const Store, gpa: Allocator, io: Io, name: names.Checked) ReadError!?Ref {
         if (store.refFormat() == .reftable) {
             const found = (try store.readUnchecked(gpa, io, name)) orelse return null;
             return found.value;
@@ -348,12 +348,13 @@ pub const Store = struct {
         return store.readLoose(gpa, io, name);
     }
 
-    fn readLoose(store: *const Store, gpa: Allocator, io: Io, name: []const u8) ReadError!?Ref {
-        return store.readLooseAt(gpa, io, store.dirFor(name).get(), name);
+    fn readLoose(store: *const Store, gpa: Allocator, io: Io, name: names.Checked) ReadError!?Ref {
+        return store.readLooseAt(gpa, io, store.dirFor(name.bytes).get(), name);
     }
 
     /// The loose ref at `path` under `dir`, or `null`.
-    fn readLooseAt(store: *const Store, gpa: Allocator, io: Io, dir: Io.Dir, path: []const u8) ReadError!?Ref {
+    fn readLooseAt(store: *const Store, gpa: Allocator, io: Io, dir: Io.Dir, ref: names.Checked) ReadError!?Ref {
+        const path = ref.bytes;
         // A ref is an object name or `ref: <name>`, and git reads no more of
         // the file than that: `FETCH_HEAD` and a merge's `MERGE_HEAD` carry
         // further lines, of any length, after the first object name. One
@@ -447,7 +448,7 @@ pub const Store = struct {
         const found = (if (store.refFormat() == .reftable)
             try store.read(gpa, io, "HEAD")
         else
-            try store.readLoose(gpa, io, "HEAD")) orelse return null;
+            try store.readLoose(gpa, io, names.head)) orelse return null;
         switch (found) {
             .direct => return null,
             .symbolic => |target| {
@@ -636,7 +637,13 @@ pub const Store = struct {
                 try broken.append(arena, .{ .name = child_path, .why = badName(child_path) });
                 continue;
             }
-            const target = (store.readLooseAt(arena, io, dir, entry.name) catch |err| switch (err) {
+            // The last component of a name `isRefName` takes, which the file
+            // is under `dir`.
+            const file = names.checked(entry.name, .ref) catch {
+                try broken.append(arena, .{ .name = child_path, .why = badName(child_path) });
+                continue;
+            };
+            const target = (store.readLooseAt(arena, io, dir, file) catch |err| switch (err) {
                 error.MalformedRef => {
                     try broken.append(arena, .{ .name = child_path, .why = .bad_content });
                     continue;
@@ -838,23 +845,24 @@ pub const Store = struct {
     /// file's lock, the file goes if it still holds `oid`, and so do the
     /// directories that leaves empty; the packed entry and the log stay.
     fn pruneLoose(store: *const Store, io: Io, name: []const u8, oid: Oid) TransactionError!void {
-        if (try store.removeLooseHolding(io, name, oid)) removeEmptyParents(io, store.dirFor(name).get(), name);
+        const ref = names.checked(name, .ref) catch return error.InvalidRefName;
+        if (try store.removeLooseHolding(io, ref, oid)) removeEmptyParents(io, store.dirFor(name).get(), ref);
     }
 
     /// Remove `name`'s loose file under its lock when it holds `oid`;
     /// whether it went.
-    fn removeLooseHolding(store: *const Store, io: Io, name: []const u8, oid: Oid) TransactionError!bool {
+    fn removeLooseHolding(store: *const Store, io: Io, ref: names.Checked, oid: Oid) TransactionError!bool {
         const data = state_mod.get(store.state);
-        const dir = store.dirFor(name).get();
+        const dir = store.dirFor(ref.bytes).get();
         var buffer: [max_loose_ref]u8 = undefined;
-        var lock = fs.LockFile.open(data.gpa, io, dir, .{ .sub_path = name, .buffer = &buffer }, .{ .shared = store.sharedPermissions(), .sync = store.referenceSync(), .on_contention = data.locks.loose, .write_pid = data.locks.pid_file }) catch |err| switch (err) {
+        var lock = fs.LockFile.open(data.gpa, io, dir, .{ .sub_path = ref.bytes, .buffer = &buffer }, .{ .shared = store.sharedPermissions(), .sync = store.referenceSync(), .on_contention = data.locks.loose, .write_pid = data.locks.pid_file }) catch |err| switch (err) {
             // Another writer has it: the ref is its to change, as git's
             // pruning gives up on it.
             error.LockHeld => return false,
             else => |e| return e,
         };
         defer lock.deinit(io);
-        const own = (try store.readLoose(data.gpa, io, name)) orelse return false;
+        const own = (try store.readLoose(data.gpa, io, ref)) orelse return false;
         switch (own) {
             .symbolic => |target| {
                 data.gpa.free(target);
@@ -862,7 +870,7 @@ pub const Store = struct {
             },
             .direct => |have| if (!have.eql(oid)) return false,
         }
-        dir.deleteFile(io, name) catch |err| switch (err) {
+        dir.deleteFile(io, ref.bytes) catch |err| switch (err) {
             error.FileNotFound => return false,
             else => |e| return e,
         };
@@ -876,10 +884,12 @@ pub const Store = struct {
 
     /// Whether `name` has a log, in whichever format the refs are kept.
     pub fn logExists(store: *const Store, gpa: Allocator, io: Io, name: []const u8) ReadError!bool {
+        // A name that would leave the ref directories reaches no log.
+        const ref = names.checked(name, .ref) catch return error.InvalidRefName;
         if (store.refFormat() == .reftable) return stack_engine.logExists(gpa, io, store, name);
         const where = names.parseWorktreeRef(name);
         if (where.owner == .other) {
-            var admin = (try store.openWorktree(io, name, where)) orelse return false;
+            var admin = (try store.openWorktree(io, ref, where)) orelse return false;
             defer admin.deinit(io);
             return reflog.exists(gpa, io, admin.lend().get(), where.bare);
         }
@@ -894,7 +904,8 @@ pub const Store = struct {
 
     /// The administrative directory of the linked worktree `name` reaches,
     /// `worktrees/<id>`, opened, or `null` when there is no such worktree.
-    fn openWorktree(store: *const Store, io: Io, name: []const u8, where: names.WorktreeRef) Io.Dir.OpenError!?fs.OwnedDir {
+    fn openWorktree(store: *const Store, io: Io, ref: names.Checked, where: names.WorktreeRef) Io.Dir.OpenError!?fs.OwnedDir {
+        const name = ref.bytes;
         return fs.OwnedDir.init(store.commonDir().get().openDir(io, name[0 .. name.len - where.bare.len], .{}) catch |err| switch (err) {
             error.FileNotFound, error.NotDir => return null,
             else => |e| return e,
@@ -927,11 +938,13 @@ pub const Store = struct {
     /// A ref's log, oldest first, from `logs/<ref>` or from the reftable
     /// stack as the format says. An absent log is an empty one.
     pub fn readLog(store: *const Store, gpa: Allocator, io: Io, name: []const u8) ReadLogError!Log {
+        // A name that would leave the ref directories reaches no log.
+        const ref = names.checked(name, .ref) catch return error.InvalidRefName;
         if (store.refFormat() == .reftable) return stack_engine.readLog(gpa, io, store, name);
         const where = names.parseWorktreeRef(name);
         if (where.owner == .other) {
             // A worktree that is not there has no log, which is an empty one.
-            var admin = (try store.openWorktree(io, name, where)) orelse
+            var admin = (try store.openWorktree(io, ref, where)) orelse
                 return .{ .gpa = gpa, .bytes = try gpa.alloc(u8, 0), .entries = try gpa.alloc(reflog.Entry, 0) };
             defer admin.deinit(io);
             return reflog.read(gpa, io, admin.lend().get(), where.bare, store.objectFormat());
@@ -1059,7 +1072,7 @@ pub const Store = struct {
         options: ExpireOptions,
     ) ExpireLogError!void {
         const name = options.name;
-        if (!isRefName(name)) return error.InvalidRefName;
+        const ref = names.checked(name, .ref) catch return error.InvalidRefName;
         try ownWorktree(name);
         if (store.refFormat() == .reftable) return stack_engine.expireLog(gpa, io, store, keeper, options);
         const dir = store.dirFor(name).get();
@@ -1078,7 +1091,7 @@ pub const Store = struct {
         const newest = try reflog.expire(gpa, io, dir, keeper, .{ .ref = name, .kind = store.objectFormat(), .shared = store.sharedPermissions(), .sync = store.referenceSync(), .rewrite = options.rewrite, .pid_file = locks_now.pid_file });
         if (!options.update_ref) return;
         const oid = newest orelse return;
-        if (try store.readLoose(gpa, io, name)) |own| switch (own) {
+        if (try store.readLoose(gpa, io, ref)) |own| switch (own) {
             .direct => {},
             .symbolic => |target| {
                 gpa.free(target);
@@ -1100,14 +1113,12 @@ pub const Store = struct {
     /// `refs_delete_reflog` does, without touching the ref. A ref without a
     /// log is left alone.
     pub fn deleteLog(store: *const Store, gpa: Allocator, io: Io, name: []const u8) TransactionError!void {
-        if (!isRefName(name)) return error.InvalidRefName;
+        const ref = names.checked(name, .ref) catch return error.InvalidRefName;
         try ownWorktree(name);
         if (store.refFormat() == .reftable) return stack_engine.deleteLog(gpa, io, store, name);
         const dir = store.dirFor(name).get();
         try reflog.delete(gpa, io, dir, name);
-        const path = try reflog.pathFor(gpa, name);
-        defer gpa.free(path);
-        removeEmptyParents(io, dir, path);
+        removeEmptyLogParents(io, dir, ref);
     }
 
     /// The root refs of the worktree this store was opened in:
@@ -1171,7 +1182,8 @@ pub const Store = struct {
         defer existing.deinit();
         for (sorted) |ref| {
             if (existing.find(ref.name) != null) return error.RefAlreadyExists;
-            const loose = (try store.readLoose(gpa, io, ref.name)) orelse continue;
+            const checked = names.checked(ref.name, .ref) catch return error.InvalidRefName;
+            const loose = (try store.readLoose(gpa, io, checked)) orelse continue;
             if (loose == .symbolic) gpa.free(loose.symbolic);
             return error.RefAlreadyExists;
         }
@@ -1200,16 +1212,17 @@ pub const Store = struct {
     /// A ref's own value and whether it came from `packed-refs`, with no
     /// check of its name: what a transaction reads of a ref it deletes,
     /// whose name need only be safe.
-    fn readUnchecked(store: *const Store, gpa: Allocator, io: Io, name: []const u8) ReadError!?Found {
+    fn readUnchecked(store: *const Store, gpa: Allocator, io: Io, ref: names.Checked) ReadError!?Found {
+        const name = ref.bytes;
         const where = names.parseWorktreeRef(name);
         const own = switch (where.owner) {
             .current, .shared => if (store.refFormat() == .reftable)
                 if (names.isSpecial(name))
-                    try store.readLoose(gpa, io, name)
+                    try store.readLoose(gpa, io, ref)
                 else
                     try stack_engine.read(gpa, io, store, name)
             else
-                try store.readLoose(gpa, io, name),
+                try store.readLoose(gpa, io, ref),
             // What another worktree keeps for itself, which the files
             // format never packs: its `HEAD` and root refs, its
             // per-worktree refs.
@@ -1220,7 +1233,7 @@ pub const Store = struct {
             else
                 // `worktrees/<id>/<name>` is that worktree's file under the
                 // shared directory, path for path.
-                try store.readLooseAt(gpa, io, store.commonDir().get(), if (where.owner == .main) where.bare else name),
+                try store.readLooseAt(gpa, io, store.commonDir().get(), if (where.owner == .main) names.checked(where.bare, .file) catch return error.InvalidRefName else ref),
         };
         if (own) |value| return .{ .value = value, .from_packed = false };
         if (store.refFormat() == .files and (where.owner == .current or where.owner == .shared)) {
@@ -1298,7 +1311,8 @@ pub const RootRefs = struct {
         while (try it.next(io)) |entry| {
             if (entry.kind != .file or !names.isRootRef(entry.name)) continue;
             const name = try arena.dupe(u8, entry.name);
-            const target = (store.readLoose(arena, io, name) catch |err| switch (err) {
+            const ref = names.checked(name, .ref) catch continue;
+            const target = (store.readLoose(arena, io, ref) catch |err| switch (err) {
                 error.MalformedRef => {
                     try broken.append(arena, .{ .name = name, .why = .bad_content });
                     continue;
@@ -1451,14 +1465,14 @@ pub fn removeOnDisk(gpa: Allocator, io: Io, store: *Store) RemoveError!void {
             defer roots.deinit();
             try dir.deleteTree(io, "refs");
             try dir.deleteTree(io, "logs");
-            for (roots.entries) |entry| try deleteIfPresent(io, dir, entry.name);
-            for (roots.broken) |entry| try deleteIfPresent(io, dir, entry.name);
-            try deleteIfPresent(io, dir, "packed-refs");
+            for (roots.entries) |entry| try deleteIfPresent(io, dir, names.checked(entry.name, .ref) catch continue);
+            for (roots.broken) |entry| try deleteIfPresent(io, dir, names.checked(entry.name, .ref) catch continue);
+            try deleteIfPresent(io, dir, comptime names.checked("packed-refs", .ref) catch unreachable);
         },
         .reftable => {
             try dir.deleteTree(io, "reftable");
-            try deleteIfPresent(io, dir, "HEAD");
-            try deleteIfPresent(io, dir, "refs/heads");
+            try deleteIfPresent(io, dir, names.head);
+            try deleteIfPresent(io, dir, comptime names.checked("refs/heads", .ref) catch unreachable);
             dir.deleteDir(io, "refs") catch |err| switch (err) {
                 error.FileNotFound => {},
                 else => |e| return e,
@@ -1467,8 +1481,8 @@ pub fn removeOnDisk(gpa: Allocator, io: Io, store: *Store) RemoveError!void {
     }
 }
 
-fn deleteIfPresent(io: Io, dir: Io.Dir, name: []const u8) Io.Dir.DeleteFileError!void {
-    dir.deleteFile(io, name) catch |err| switch (err) {
+fn deleteIfPresent(io: Io, dir: Io.Dir, name: names.Checked) Io.Dir.DeleteFileError!void {
+    dir.deleteFile(io, name.bytes) catch |err| switch (err) {
         error.FileNotFound => {},
         else => |e| return e,
     };
@@ -1645,8 +1659,22 @@ pub const Transaction = struct {
         if (options.message) |m| added.message = try tx.gpa.dupe(u8, m);
     }
 
+    /// A copy of `name`, a ref a symbolic chain reached, for an edit of its
+    /// own, and the copy checked.
+    fn ownName(tx: *Transaction, name: []const u8) TransactionError!struct { name: []const u8, ref: names.Checked } {
+        const owned = try tx.gpa.dupe(u8, name);
+        const ref = names.checked(owned, .ref) catch {
+            tx.gpa.free(owned);
+            return error.InvalidRefName;
+        };
+        return .{ .name = owned, .ref = ref };
+    }
+
     fn add(tx: *Transaction, name: []const u8, new: ?Ref, expected: Expected) TransactionError!void {
         if (!isChangeableName(name, new == null)) return error.InvalidRefName;
+        // The name as the store reaches it on the disk: `isChangeableName`
+        // took it under the rule its use asks for.
+        const use: names.Use = if (new == null) .file else .ref;
         try ownWorktree(name);
         for (tx.edits.items) |edit| {
             if (std.mem.eql(u8, edit.name, name)) return error.DuplicateEdit;
@@ -1669,7 +1697,8 @@ pub const Transaction = struct {
             };
         }
         errdefer if (stored_new) |value| if (value == .symbolic) tx.gpa.free(value.symbolic);
-        try tx.edits.append(tx.gpa, .{ .name = owned, .new = stored_new, .expected = expected });
+        const ref = names.checked(owned, use) catch return error.InvalidRefName;
+        try tx.edits.append(tx.gpa, .{ .name = owned, .ref = ref, .new = stored_new, .expected = expected });
     }
 
     /// Take every lock and check every expected value.
@@ -1742,7 +1771,7 @@ pub const Transaction = struct {
 
             // Read without a check of the name, which a deletion need only
             // have safe.
-            const current = if (try tx.store.readUnchecked(tx.gpa, io, edit.name)) |found| found.value else null;
+            const current = if (try tx.store.readUnchecked(tx.gpa, io, edit.ref)) |found| found.value else null;
             var current_oid: ?Oid = null;
             if (current) |value| {
                 switch (value) {
@@ -1803,7 +1832,7 @@ pub const Transaction = struct {
         for (tx.edits.items) |e| {
             const own_new_symbolic = if (e.new) |n| n == .symbolic else false;
             if (e.via == null and (!e.deref or own_new_symbolic)) continue;
-            const own = try tx.store.readOwnValue(tx.gpa, io, e.name);
+            const own = try tx.store.readOwnValue(tx.gpa, io, e.ref);
             const target = if (own) |value| switch (value) {
                 .symbolic => |t| t,
                 .direct => null,
@@ -1928,7 +1957,9 @@ pub const Transaction = struct {
             while (true) {
                 if (chain.items.len > max_symbolic_depth + 1) return error.SymbolicRefLoop;
                 const at = chain.items[chain.items.len - 1];
-                const found = (try tx.store.readOwnValue(tx.gpa, io, at)) orelse break;
+                // A target read from a file, checked before it is followed.
+                const at_ref = names.checked(at, .ref) catch return error.InvalidRefName;
+                const found = (try tx.store.readOwnValue(tx.gpa, io, at_ref)) orelse break;
                 switch (found) {
                     .direct => break,
                     .symbolic => |target| {
@@ -1948,8 +1979,10 @@ pub const Transaction = struct {
                 if (std.mem.eql(u8, other.name, final)) return error.DuplicateEdit;
             }
             const target_at = tx.edits.items.len;
+            const final_name = try tx.ownName(final);
             try tx.edits.append(tx.gpa, .{
-                .name = try tx.gpa.dupe(u8, final),
+                .name = final_name.name,
+                .ref = final_name.ref,
                 .new = e.new,
                 .expected = e.expected,
                 .origin = i,
@@ -1960,8 +1993,10 @@ pub const Transaction = struct {
                 for (tx.edits.items) |other| {
                     if (std.mem.eql(u8, other.name, middle)) return error.DuplicateEdit;
                 }
+                const middle_name = try tx.ownName(middle);
                 try tx.edits.append(tx.gpa, .{
-                    .name = try tx.gpa.dupe(u8, middle),
+                    .name = middle_name.name,
+                    .ref = middle_name.ref,
                     .new = e.new,
                     .expected = .any,
                     .via = target_at,
@@ -1973,7 +2008,7 @@ pub const Transaction = struct {
         for (tx.edits.items) |e| {
             if (std.mem.eql(u8, e.name, "HEAD")) return;
         }
-        const head = (try tx.store.readOwnValue(tx.gpa, io, "HEAD")) orelse return;
+        const head = (try tx.store.readOwnValue(tx.gpa, io, names.head)) orelse return;
         const branch = switch (head) {
             .direct => return,
             .symbolic => |target| target,
@@ -1984,6 +2019,7 @@ pub const Transaction = struct {
             if (e.new) |n| if (n == .symbolic) return;
             try tx.edits.append(tx.gpa, .{
                 .name = try tx.gpa.dupe(u8, "HEAD"),
+                .ref = names.head,
                 .new = e.new,
                 .expected = .any,
                 .via = i,
@@ -2132,10 +2168,8 @@ pub const Transaction = struct {
         for (tx.edits.items) |edit| {
             if (edit.via != null or edit.new != null or edit.rejected) continue;
             const dir = tx.store.dirFor(edit.name).get();
-            removeEmptyParents(io, dir, edit.name);
-            const log_path = try reflog.pathFor(tx.gpa, edit.name);
-            defer tx.gpa.free(log_path);
-            removeEmptyParents(io, dir, log_path);
+            removeEmptyParents(io, dir, edit.ref);
+            removeEmptyLogParents(io, dir, edit.ref);
         }
         // The refs have moved; a hook failing now changes nothing, and its
         // status is not an error of the transaction's.
@@ -2242,16 +2276,23 @@ fn hasFileBelow(gpa: Allocator, io: Io, dir: Io.Dir, name: []const u8) Transacti
     return false;
 }
 
-/// Remove the directories above `path` that are left empty, down to but not
-/// including `refs/<kind>/` — or `logs/refs/<kind>/` — which git keeps.
-fn removeEmptyParents(io: Io, dir: Io.Dir, path: []const u8) void {
-    const keep: usize = if (std.mem.startsWith(u8, path, "logs/")) 3 else 2;
-    var current = path;
+/// Remove the directories above `ref` in `dir` that are left empty, down
+/// to but not including `refs/<kind>/`, which git keeps.
+fn removeEmptyParents(io: Io, dir: Io.Dir, ref: names.Checked) void {
+    var current = ref.bytes;
     while (std.Io.Dir.path.dirnamePosix(current)) |parent| {
-        if (std.mem.count(u8, parent, "/") < keep) return;
+        if (std.mem.count(u8, parent, "/") < 2) return;
         dir.deleteDir(io, parent) catch return;
         current = parent;
     }
+}
+
+/// `removeEmptyParents` for `ref`'s log, under `logs/` in `dir`, down to
+/// but not including `logs/refs/<kind>/`.
+fn removeEmptyLogParents(io: Io, dir: Io.Dir, ref: names.Checked) void {
+    var logs = dir.openDir(io, "logs", .{}) catch return;
+    defer logs.close(io);
+    removeEmptyParents(io, logs, ref);
 }
 
 test "a loose ref is written, read and resolved" {
@@ -2294,6 +2335,22 @@ test "a loose ref is written, read and resolved" {
     var head_log = try reflog.read(gpa, io, tmp.dir, "HEAD", .sha1);
     defer head_log.deinit();
     try std.testing.expectEqual(@as(usize, 1), head_log.entries.len);
+}
+
+test "a log is reached only under a ref's name, never a path out of the ref directories" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+
+    var held_store = fs.OwnedDir.init(try tmp.dir.openDir(io, ".", .{ .iterate = true }));
+    defer held_store.deinit(io);
+    var store: Store = try .init(gpa, .sha1, held_store.lend(), held_store.lend(), .{});
+    defer store.deinit();
+    for ([_][]const u8{ "worktrees/../../HEAD", "worktrees/x/../../../HEAD", "refs/heads/../../config", "/etc/passwd" }) |name| {
+        try std.testing.expectError(error.InvalidRefName, store.readLog(gpa, io, name));
+        try std.testing.expectError(error.InvalidRefName, store.logExists(gpa, io, name));
+    }
 }
 
 test "preparing an existing symbolic ref releases every parsed target" {

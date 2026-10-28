@@ -240,7 +240,8 @@ const Checker = struct {
         while (try it.next(c.io)) |entry| {
             if (entry.name.len == 0 or entry.name[0] == '.' or std.mem.endsWith(u8, entry.name, ".lock")) continue;
             if (!names.isRootRef(entry.name)) continue;
-            const st = c.store.gitDir().get().statFile(c.io, entry.name, .{ .follow_symlinks = true }) catch |err| switch (err) {
+            const root = names.checked(entry.name, .ref) catch continue;
+            const st = c.store.gitDir().get().statFile(c.io, root.bytes, .{ .follow_symlinks = true }) catch |err| switch (err) {
                 error.FileNotFound => continue,
                 else => |e| return e,
             };

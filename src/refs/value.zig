@@ -9,6 +9,7 @@ const object = @import("../object/object.zig");
 const fs = @import("../fs/fs.zig");
 const reftable = @import("reftable/table.zig");
 const reflog = @import("reflog.zig");
+const names = @import("../names.zig").ref;
 const hooks = @import("../hooks/hooks.zig");
 const policy = @import("reftable/stack/policy.zig");
 /// The header `packed-refs` carries, with the space before the newline that
@@ -227,6 +228,9 @@ pub const Listing = struct {
 pub const Edit = struct {
     /// Owned by the transaction.
     name: []const u8,
+    /// `name` as the store reaches it on the disk, checked where the edit
+    /// was added.
+    ref: names.Checked,
     /// `null` deletes the ref.
     new: ?Ref,
     expected: Expected,
