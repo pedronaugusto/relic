@@ -904,27 +904,26 @@ pub const Index = struct {
             if (!computed.eql(stored)) return error.ChecksumMismatch;
         }
 
-        var offset: usize = 12;
+        var r: Io.Reader = .fixed(body[12..]);
         try index.entries.ensureTotalCapacity(gpa, @min(entry_count, 1 << 20));
         var previous_path: []const u8 = "";
-        var i: u32 = 0;
-        while (i < entry_count) : (i += 1) {
-            const read_entry = try parseEntry(gpa, kind, version, body, offset, previous_path);
-            index.entries.append(gpa, read_entry.entry) catch |err| {
-                gpa.free(read_entry.entry.path);
+        for (0..entry_count) |_| {
+            const fixed = r.take(entry_fixed_len + raw_len) catch return error.TruncatedIndex;
+            const entry = try parseEntry(gpa, kind, version, fixed, &r, previous_path);
+            index.entries.append(gpa, entry) catch |err| {
+                gpa.free(entry.path);
                 return err;
             };
-            offset = read_entry.next;
-            previous_path = index.entries.items[index.entries.items.len - 1].path;
+            previous_path = entry.path;
         }
 
-        while (offset + 8 <= body.len) {
-            const signature = body[offset..][0..4].*;
-            const size = std.mem.readInt(u32, body[offset + 4 ..][0..4], .big);
-            offset += 8;
-            if (offset + size > body.len) return error.TruncatedIndex;
-            const data = body[offset..][0..size];
-            offset += size;
+        // What is left past the entries is extensions, each a signature
+        // and a length; fewer bytes than a header are ignored, as git
+        // ignores them.
+        while (r.bufferedLen() >= 8) {
+            const signature = (r.takeArray(4) catch return error.TruncatedIndex).*;
+            const size = r.takeInt(u32, .big) catch return error.TruncatedIndex;
+            const data = r.take(size) catch return error.TruncatedIndex;
             try index.readExtension(gpa, signature, data);
         }
 
@@ -1190,64 +1189,52 @@ pub const Index = struct {
         return Entry.order(a, b) == .lt;
     }
 
-    const ParsedEntry = struct { entry: Entry, next: usize };
+    /// An entry's fixed part, past its object name: its stat data (forty
+    /// bytes, the object name after them) and its flags.
+    const entry_fixed_len = 40 + 2;
 
+    /// The entry whose fixed part is `b`, the rest of it taken from `r`:
+    /// its extended flags, its path and, before version 4, the padding.
     fn parseEntry(
         gpa: Allocator,
         kind: Kind,
         version: u32,
-        body: []const u8,
-        start: usize,
+        b: []const u8,
+        r: *Io.Reader,
         previous_path: []const u8,
-    ) ReadError!ParsedEntry {
+    ) ReadError!Entry {
         const raw_len = kind.rawLen();
-        const fixed = 40 + raw_len + 2;
-        if (start + fixed > body.len) return error.TruncatedIndex;
-        const b = body[start..];
-
         const flags = std.mem.readInt(u16, b[40 + raw_len ..][0..2], .big);
         // git reads the extended flag word whatever the version says, and
         // refuses a bit in it it does not know.
         const extended = flags & 0x4000 != 0;
-        var at = fixed;
         var skip_worktree = false;
         var intent_to_add = false;
         if (extended) {
-            if (start + at + 2 > body.len) return error.TruncatedIndex;
-            const extra = std.mem.readInt(u16, b[at..][0..2], .big);
+            const extra = r.takeInt(u16, .big) catch return error.TruncatedIndex;
             if (extra & ~@as(u16, 0x6000) != 0) return error.UnknownEntryFlags;
-            at += 2;
             skip_worktree = extra & 0x4000 != 0;
             intent_to_add = extra & 0x2000 != 0;
         }
 
         var path: []const u8 = undefined;
-        var next: usize = undefined;
         if (version >= 4) {
-            const strip = try varint.readOffset(b[at..]);
-            at += strip.len;
-            if (strip.value > previous_path.len) return error.TruncatedIndex;
-            const keep = previous_path[0 .. previous_path.len - strip.value];
-            const suffix_end = std.mem.findScalarPos(u8, body, start + at, 0) orelse return error.TruncatedIndex;
-            const suffix = body[start + at .. suffix_end];
+            const strip = try varint.takeOffset(r);
+            if (strip > previous_path.len) return error.TruncatedIndex;
+            const keep = previous_path[0 .. previous_path.len - strip];
+            const suffix = r.takeSentinel(0) catch return error.TruncatedIndex;
             const joined = try gpa.alloc(u8, keep.len + suffix.len);
             @memcpy(joined[0..keep.len], keep);
             @memcpy(joined[keep.len..], suffix);
             path = joined;
-            next = suffix_end + 1;
         } else {
             const stated: usize = flags & 0x0fff;
-            const nul = std.mem.findScalarPos(u8, body, start + at, 0) orelse return error.TruncatedIndex;
-            const found = body[start + at .. nul];
+            const found = r.takeSentinel(0) catch return error.TruncatedIndex;
             if (stated != 0x0fff and found.len != stated) return error.TruncatedIndex;
-            path = try gpa.dupe(u8, found);
             // One to eight NULs pad the entry to a multiple of eight bytes.
-            const unpadded = at + found.len + 1;
-            next = start + ((unpadded + 7) & ~@as(usize, 7));
-            if (next > body.len) {
-                gpa.free(path);
-                return error.TruncatedIndex;
-            }
+            const unpadded = b.len + @as(usize, if (extended) 2 else 0) + found.len + 1;
+            r.discardAll(std.mem.alignForward(usize, unpadded, 8) - unpadded) catch return error.TruncatedIndex;
+            path = try gpa.dupe(u8, found);
         }
         errdefer gpa.free(path);
 
@@ -1262,29 +1249,26 @@ pub const Index = struct {
         const mode = Entry.modeOf(mode_raw);
 
         return .{
-            .entry = .{
-                .path = path,
-                // aegis: no-danger: the slice is cut to the format's raw length
-                .oid = Oid.fromRaw(kind, b[40..][0..raw_len]) catch unreachable,
-                .mode = mode,
-                .raw_mode = if (mode_raw == mode.raw()) null else mode_raw,
-                .stage = @truncate((flags >> 12) & 3),
-                .assume_valid = flags & 0x8000 != 0,
-                .skip_worktree = skip_worktree,
-                .intent_to_add = intent_to_add,
-                .stat = .{
-                    .ctime_sec = std.mem.readInt(u32, b[0..4], .big),
-                    .ctime_nsec = std.mem.readInt(u32, b[4..8], .big),
-                    .mtime_sec = std.mem.readInt(u32, b[8..12], .big),
-                    .mtime_nsec = std.mem.readInt(u32, b[12..16], .big),
-                    .dev = std.mem.readInt(u32, b[16..20], .big),
-                    .ino = std.mem.readInt(u32, b[20..24], .big),
-                    .uid = std.mem.readInt(u32, b[28..32], .big),
-                    .gid = std.mem.readInt(u32, b[32..36], .big),
-                    .size = std.mem.readInt(u32, b[36..40], .big),
-                },
+            .path = path,
+            // aegis: no-danger: the slice is cut to the format's raw length
+            .oid = Oid.fromRaw(kind, b[40..][0..raw_len]) catch unreachable,
+            .mode = mode,
+            .raw_mode = if (mode_raw == mode.raw()) null else mode_raw,
+            .stage = @truncate((flags >> 12) & 3),
+            .assume_valid = flags & 0x8000 != 0,
+            .skip_worktree = skip_worktree,
+            .intent_to_add = intent_to_add,
+            .stat = .{
+                .ctime_sec = std.mem.readInt(u32, b[0..4], .big),
+                .ctime_nsec = std.mem.readInt(u32, b[4..8], .big),
+                .mtime_sec = std.mem.readInt(u32, b[8..12], .big),
+                .mtime_nsec = std.mem.readInt(u32, b[12..16], .big),
+                .dev = std.mem.readInt(u32, b[16..20], .big),
+                .ino = std.mem.readInt(u32, b[20..24], .big),
+                .uid = std.mem.readInt(u32, b[28..32], .big),
+                .gid = std.mem.readInt(u32, b[32..36], .big),
+                .size = std.mem.readInt(u32, b[36..40], .big),
             },
-            .next = next,
         };
     }
 
@@ -2461,6 +2445,32 @@ test "a sparse directory entry reads and writes back, and needs sdir" {
     const bare = try index.toBytes(.{});
     defer gpa.free(bare);
     try std.testing.expectError(error.InvalidSparseDirectory, Index.parse(gpa, .sha1, bare));
+}
+
+test "an index cut short anywhere is refused or read whole, never read past" {
+    const gpa = std.testing.allocator;
+    var index: Index = .initEmpty(gpa, .sha1);
+    defer index.deinit();
+    const oid = try Oid.parse(.sha1, "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391");
+    try index.add(.{ .path = "dir/aaa.txt", .oid = oid, .mode = .file });
+    try index.add(.{ .path = "dir/aab.txt", .oid = oid, .mode = .file, .intent_to_add = true });
+    try index.add(.{ .path = "other", .oid = oid, .mode = .file });
+    for ([_]WriteOptions{ .{ .version = .v3 }, .{ .version = .v4 } }) |options| {
+        const bytes = try index.toBytes(options);
+        defer gpa.free(bytes);
+        const body = bytes[0 .. bytes.len - 20];
+        // A trailer of zeros is one `index.skipHash` wrote, so each cut is
+        // read past the checksum, by the entries and extensions themselves.
+        for (12..body.len) |len| {
+            const cut = try gpa.alloc(u8, len + 20);
+            defer gpa.free(cut);
+            @memcpy(cut[0..len], body[0..len]);
+            @memset(cut[len..], 0);
+            var back = Index.parse(gpa, .sha1, cut) catch continue;
+            defer back.deinit();
+            try std.testing.expectEqual(index.entries.items.len, back.entries.items.len);
+        }
+    }
 }
 
 test "a bad checksum is a named error" {

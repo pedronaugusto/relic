@@ -264,67 +264,42 @@ pub fn parse(gpa: Allocator, kind: hash.Kind, data: []const u8) Allocator.Error!
     return uc;
 }
 
-const Reader = struct {
-    data: []const u8,
-    at: usize = 0,
-
-    fn number(r: *Reader) ?u64 {
-        const read = varint.readOffset(r.data[r.at..]) catch return null;
-        r.at += read.len;
-        return read.value;
-    }
-
-    fn string(r: *Reader) ?[]const u8 {
-        const end = std.mem.findScalarPos(u8, r.data, r.at, 0) orelse return null;
-        const s = r.data[r.at..end];
-        r.at = end + 1;
-        return s;
-    }
-
-    fn take(r: *Reader, n: usize) ?[]const u8 {
-        if (r.data.len - r.at < n) return null;
-        const s = r.data[r.at..][0..n];
-        r.at += n;
-        return s;
-    }
-};
-
 fn parseInto(a: Allocator, kind: hash.Kind, whole: []const u8) Allocator.Error!?UntrackedCache {
     const raw_len = kind.rawLen();
     if (whole.len <= 1 or whole[whole.len - 1] != 0) return null;
-    var r: Reader = .{ .data = whole[0 .. whole.len - 1] };
-    const ident_len = r.number() orelse return null;
-    const ident = r.take(std.math.cast(usize, ident_len) orelse return null) orelse return null;
-    const info_stat = r.take(36) orelse return null;
-    const excludes_stat = r.take(36) orelse return null;
-    const flags = r.take(4) orelse return null;
-    const info_oid = r.take(raw_len) orelse return null;
-    const excludes_oid = r.take(raw_len) orelse return null;
-    const per_dir = r.string() orelse return null;
+    var r: std.Io.Reader = .fixed(whole[0 .. whole.len - 1]);
+    const ident_len = varint.takeOffset(&r) catch return null;
+    const ident = r.take(std.math.cast(usize, ident_len) orelse return null) catch return null;
+    const info_stat = r.take(36) catch return null;
+    const excludes_stat = r.take(36) catch return null;
+    const dir_flags = r.takeInt(u32, .big) catch return null;
+    const info_oid = r.take(raw_len) catch return null;
+    const excludes_oid = r.take(raw_len) catch return null;
+    const per_dir = r.takeSentinel(0) catch return null;
     var uc: UntrackedCache = .{
         .arena = undefined,
         .ident = try a.dupe(u8, ident),
-        .dir_flags = std.mem.readInt(u32, flags[0..4], .big),
+        .dir_flags = dir_flags,
         .exclude_per_dir = try a.dupe(u8, per_dir),
     };
     @memcpy(&uc.info_exclude.stat, info_stat);
     @memcpy(uc.info_exclude.oid[0..raw_len], info_oid);
     @memcpy(&uc.excludes_file.stat, excludes_stat);
     @memcpy(uc.excludes_file.oid[0..raw_len], excludes_oid);
-    if (r.at >= r.data.len) return uc;
+    if (r.bufferedLen() == 0) return uc;
 
-    const count = r.number() orelse return null;
-    if (count == 0) return if (r.at == r.data.len) uc else null;
+    const count = varint.takeOffset(&r) catch return null;
+    if (count == 0) return if (r.bufferedLen() == 0) uc else null;
     var dirs: std.ArrayList(*Dir) = .empty;
     uc.root = (try readDir(a, &r, &dirs)) orelse return null;
     if (dirs.items.len != count) return null;
     var bitmaps: [3]ewah.Bits = undefined;
     for (&bitmaps) |*bits| {
-        const read = ewah.read(a, r.data[r.at..]) catch |err| switch (err) {
+        const read = ewah.read(a, r.buffered()) catch |err| switch (err) {
             error.OutOfMemory => |e| return e,
             else => return null,
         };
-        r.at += read.len;
+        r.toss(read.len);
         bits.* = read.bits;
     }
     for (bitmaps[1].positions) |p| {
@@ -333,30 +308,30 @@ fn parseInto(a: Allocator, kind: hash.Kind, whole: []const u8) Allocator.Error!?
     }
     for (bitmaps[0].positions) |p| {
         if (p >= dirs.items.len) return null;
-        const stat = r.take(36) orelse return null;
+        const stat = r.take(36) catch return null;
         @memcpy(&dirs.items[p].stat, stat);
         dirs.items[p].valid = true;
     }
     for (bitmaps[2].positions) |p| {
         if (p >= dirs.items.len) return null;
-        const oid = r.take(raw_len) orelse return null;
+        const oid = r.take(raw_len) catch return null;
         var raw: [hash.max_raw_len]u8 = @splat(0);
         @memcpy(raw[0..raw_len], oid);
         dirs.items[p].exclude_oid = raw;
     }
-    if (r.at != r.data.len) return null;
+    if (r.bufferedLen() != 0) return null;
     return uc;
 }
 
 /// git's `read_one_dir`: a directory and, after it, each one under it.
-fn readDir(a: Allocator, r: *Reader, all: *std.ArrayList(*Dir)) Allocator.Error!?*Dir {
-    const untracked_count = r.number() orelse return null;
-    const dir_count = r.number() orelse return null;
-    const name = r.string() orelse return null;
+fn readDir(a: Allocator, r: *std.Io.Reader, all: *std.ArrayList(*Dir)) Allocator.Error!?*Dir {
+    const untracked_count = varint.takeOffset(r) catch return null;
+    const dir_count = varint.takeOffset(r) catch return null;
+    const name = r.takeSentinel(0) catch return null;
     const d = try a.create(Dir);
     d.* = .{ .name = try a.dupe(u8, name) };
     for (0..std.math.cast(usize, untracked_count) orelse return null) |_| {
-        const entry = r.string() orelse return null;
+        const entry = r.takeSentinel(0) catch return null;
         try d.untracked.append(a, try a.dupe(u8, entry));
     }
     try all.append(a, d);

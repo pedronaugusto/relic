@@ -18,20 +18,23 @@ pub const Error = error{
 
 /// Read an offset varint — the biased one. Returns the value and its length.
 pub fn readOffset(bytes: []const u8) Error!struct { value: u64, len: usize } {
-    if (bytes.len == 0) return error.Truncated;
-    var i: usize = 0;
-    var c = bytes[i];
-    i += 1;
+    var r: std.Io.Reader = .fixed(bytes);
+    const value = try takeOffset(&r);
+    return .{ .value = value, .len = r.seek };
+}
+
+/// Take an offset varint from `r`, which reads bytes already in memory:
+/// the reader's end in the middle of the number is `error.Truncated`.
+pub fn takeOffset(r: *std.Io.Reader) Error!u64 {
+    var c = r.takeByte() catch return error.Truncated;
     var value: u64 = c & 0x7f;
     while (c & 0x80 != 0) {
-        if (i >= bytes.len) return error.Truncated;
         value = std.math.add(u64, value, 1) catch return error.Overflow;
-        c = bytes[i];
-        i += 1;
+        c = r.takeByte() catch return error.Truncated;
         value = std.math.shlExact(u64, value, 7) catch return error.Overflow;
         value |= c & 0x7f;
     }
-    return .{ .value = value, .len = i };
+    return value;
 }
 
 /// Write an offset varint into `buf`, which must hold at least ten bytes.
@@ -39,13 +42,13 @@ pub fn readOffset(bytes: []const u8) Error!struct { value: u64, len: usize } {
 pub fn writeOffset(buf: []u8, value: u64) []const u8 {
     var scratch: [16]u8 = undefined;
     var pos: usize = scratch.len - 1;
-    var v = value;
-    scratch[pos] = @intCast(v & 0x7f);
-    while (v >> 7 != 0) {
-        v >>= 7;
+    scratch[pos] = @intCast(value & 0x7f);
+    var v = value >> 7;
+    while (v != 0) {
         v -= 1;
         pos -= 1;
         scratch[pos] = @as(u8, 0x80) | @as(u8, @intCast(v & 0x7f));
+        v >>= 7;
     }
     const len = scratch.len - pos;
     @memcpy(buf[0..len], scratch[pos..]);

@@ -331,9 +331,12 @@ fn collapseNode(
     }
 
     const base_len = prefix.items.len;
-    var i: usize = 0;
-    while (i < entries.len) {
-        const entry = entries[i];
+    var left = entries;
+    while (left.len != 0) {
+        const entry = left[0];
+        // `collapse` rebuilt the tree from these entries: each is under
+        // the directory its count puts it in.
+        std.debug.assert(std.mem.startsWith(u8, entry.path, prefix.items));
         const rest = entry.path[base_len..];
         const slash = std.mem.findScalar(u8, rest, '/') orelse rest.len;
         // A file of this directory. A sparse directory below it has a
@@ -347,18 +350,19 @@ fn collapseNode(
                 gpa.free(copy.path);
                 return err;
             };
-            i += 1;
+            left = left[1..];
             continue;
         }
         const name = rest[0..slash];
         const child = findChild(node, name) orelse return false;
         const span = std.math.cast(usize, child.entry_count) orelse return false;
-        if (span == 0 or i + span > entries.len) return false;
-        try prefix.appendSlice(gpa, entry.path[base_len..][0 .. slash + 1]);
-        const ok = try collapseNode(gpa, cone, child, entries[i..][0..span], prefix, out);
+        if (span == 0 or span > left.len) return false;
+        try prefix.appendSlice(gpa, name);
+        try prefix.append(gpa, '/');
+        const ok = try collapseNode(gpa, cone, child, left[0..span], prefix, out);
         prefix.shrinkRetainingCapacity(base_len);
         if (!ok) return false;
-        i += span;
+        left = left[span..];
     }
     return true;
 }
