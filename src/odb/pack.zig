@@ -79,6 +79,21 @@ const block_prefix = 64;
 const block_stride = block_prefix + read_block_bytes + 1;
 const no_block = std.math.maxInt(u64);
 
+/// One slot of a pack's block cache: the block it holds and that block's
+/// length, and its `block_stride` bytes, allocated when it is first filled.
+const Slot = struct {
+    id: u64 = no_block,
+    len: u32 = 0,
+    bytes: ?*[block_stride]u8 = null,
+};
+
+/// The mapped pack's bytes from `at` on, or `null` past their end.
+fn mappedFrom(mem: []const u8, at: u64) ?[]const u8 {
+    const start: usize = std.math.cast(usize, at) orelse return null;
+    if (start > mem.len) return null;
+    return mem[start..];
+}
+
 /// Errors from opening or reading a pack index.
 pub const IndexError = error{
     /// The file was shorter than its own headers say.
@@ -243,7 +258,7 @@ pub const Index = struct {
         }
         const count = previous;
         const stride = 4 + raw_len;
-        if (bytes.len != 1024 + @as(u64, count) * stride + 2 * raw_len) return error.TruncatedIndex;
+        const names = Rows.exactly(bytes[1024 .. bytes.len - 2 * raw_len], count, stride) orelse return error.TruncatedIndex;
 
         var checksum_hasher: hash.Hasher = .init(kind);
         checksum_hasher.update(bytes[0 .. bytes.len - raw_len]);
@@ -251,7 +266,6 @@ pub const Index = struct {
         const stored_checksum = Oid.fromRaw(kind, bytes[bytes.len - raw_len ..][0..raw_len]) catch unreachable;
         if (!checksum_hasher.final().eql(stored_checksum)) return error.ChecksumMismatch;
 
-        const names = Rows.cut(bytes, 1024, count, stride) orelse return error.TruncatedIndex;
         const index: Index = .{
             .gpa = gpa,
             .kind = kind,
@@ -331,21 +345,11 @@ pub const Index = struct {
     pub fn find(index: Index, oid: Oid) Self.IndexError!?Located {
         if (oid.kind != index.kind) return null;
         const raw = oid.raw();
-        var lo: u32 = if (raw[0] == 0) 0 else index.fanout(raw[0] - 1);
-        var hi: u32 = index.fanout(raw[0]);
-        while (lo < hi) {
-            const mid = lo + (hi - lo) / 2;
-            switch (std.mem.order(u8, try index.rawNameAt(mid), raw)) {
-                .lt => lo = mid + 1,
-                .gt => hi = mid,
-                .eq => return .{
-                    .index = mid,
-                    .offset = try index.offsetAt(mid),
-                    .crc = try index.crcAt(mid),
-                },
-            }
-        }
-        return null;
+        const from = if (raw[0] == 0) 0 else index.fanout(raw[0] - 1);
+        const at = index.names.lowerBound(from, index.fanout(raw[0]), index.name_at, raw) orelse return error.PositionOutOfRange;
+        const i = std.math.cast(u32, at) orelse return error.PositionOutOfRange;
+        if (i >= index.count or !std.mem.eql(u8, try index.rawNameAt(i), raw)) return null;
+        return .{ .index = i, .offset = try index.offsetAt(i), .crc = try index.crcAt(i) };
     }
 
     /// Errors from resolving an abbreviated name.
@@ -370,21 +374,20 @@ pub const Index = struct {
         }
         const raw = least[0..index.kind.rawLen()];
         // A whole first byte narrows the search to its fanout bucket.
-        var lo: u32 = 0;
-        var hi: u32 = index.count;
+        var from: u32 = 0;
+        var to: u32 = index.count;
         if (prefix.len >= 2) {
-            lo = if (raw[0] == 0) 0 else index.fanout(raw[0] - 1);
-            hi = index.fanout(raw[0]);
+            from = if (raw[0] == 0) 0 else index.fanout(raw[0] - 1);
+            to = index.fanout(raw[0]);
         }
-        while (lo < hi) {
-            const mid = lo + (hi - lo) / 2;
-            if (std.mem.order(u8, try index.rawNameAt(mid), raw) == .lt) lo = mid + 1 else hi = mid;
-        }
+        const at = index.names.lowerBound(from, to, index.name_at, raw) orelse return error.PositionOutOfRange;
         // Every name that begins with the prefix is in one run from here.
+        const lo = std.math.cast(u32, at) orelse return error.PositionOutOfRange;
         if (lo >= index.count) return null;
         const found = try index.nameAt(lo);
         if (!found.startsWithHex(prefix)) return null;
-        if (lo + 1 < index.count and (try index.nameAt(lo + 1)).startsWithHex(prefix)) return error.AmbiguousPrefix;
+        const next = std.math.add(u32, lo, 1) catch return found;
+        if (next < index.count and (try index.nameAt(next)).startsWithHex(prefix)) return error.AmbiguousPrefix;
         return found;
     }
 
@@ -522,12 +525,10 @@ pub const Pack = struct {
     /// file can only be in slot `b % slots`, and there are never more slots
     /// than the file has blocks. A slot's `block_stride` bytes are allocated
     /// when it is first filled, so a pack holds what of it was read, up to
-    /// `slots` blocks; the slot tables are allocated on the first
+    /// `slots` blocks; the table of slots is allocated on the first
     /// positional read.
     slots: usize,
-    slot_memory: []?[*]u8 = &.{},
-    block_ids: []u64 = &.{},
-    block_lens: []u32 = &.{},
+    blocks: []Slot = &.{},
     /// The reader an entry is inflated through: it walks the blocks.
     block_reader: Io.Reader = undefined,
     /// The Io and block of the read in progress through `block_reader`.
@@ -595,9 +596,9 @@ pub const Pack = struct {
 
         var mapping: ?Io.File.MemoryMap = null;
         var memory: ?[]const u8 = null;
-        if (options.access == .map and stat.size <= std.math.maxInt(usize)) {
+        if (options.access == .map) if (std.math.cast(usize, stat.size)) |len| {
             if (Io.File.MemoryMap.create(io, file, .{
-                .len = @intCast(stat.size),
+                .len = len,
                 .protection = .{ .read = true, .write = false },
                 .populate = false,
             })) |created| {
@@ -609,7 +610,7 @@ pub const Pack = struct {
                     m.destroy(io);
                 }
             } else |_| {}
-        }
+        };
         errdefer if (mapping) |*m| m.destroy(io);
 
         const decoder = try gpa.create(warp.Decompressor);
@@ -639,49 +640,42 @@ pub const Pack = struct {
     /// block is wanted, and a slot only ever changes to the block wanted.
     /// That is what makes the cache monotone: a sequence of reads that is
     /// part of another, block for block, never costs more than it.
-    fn loadBlock(p: *Pack, io: Io, id: u64) ErrorNamespace.Error!usize {
-        if (p.slot_memory.len == 0) {
-            const memory = try p.gpa.alloc(?[*]u8, p.slots);
-            errdefer p.gpa.free(memory);
-            const ids = try p.gpa.alloc(u64, p.slots);
-            errdefer p.gpa.free(ids);
-            const lens = try p.gpa.alloc(u32, p.slots);
-            @memset(memory, null);
-            @memset(ids, no_block);
-            p.slot_memory = memory;
-            p.block_ids = ids;
-            p.block_lens = lens;
+    fn loadBlock(p: *Pack, io: Io, id: u64) ErrorNamespace.Error!*Slot {
+        if (p.blocks.len == 0) {
+            const blocks = try p.gpa.alloc(Slot, p.slots);
+            @memset(blocks, .{});
+            p.blocks = blocks;
         }
-        const slot: usize = @intCast(id % p.slots);
-        if (p.block_ids[slot] == id) return slot;
-        const start = id * read_block_bytes;
+        const rem = std.math.rem(u64, id, p.blocks.len) catch return error.TruncatedPack;
+        const at = std.math.cast(usize, rem) orelse return error.TruncatedPack;
+        if (at >= p.blocks.len) return error.TruncatedPack;
+        const slot = &p.blocks[at];
+        if (slot.id == id) return slot;
+        const start: u64 = std.math.mul(u64, id, read_block_bytes) catch return error.TruncatedPack;
         if (start >= p.size) return error.TruncatedPack;
         const len: usize = @intCast(@min(read_block_bytes, p.size - start));
-        if (p.slot_memory[slot] == null) p.slot_memory[slot] = (try p.gpa.alloc(u8, block_stride)).ptr;
+        if (slot.bytes == null) slot.bytes = try p.gpa.create([block_stride]u8);
         // Claimed only once read whole: a failure leaves the slot empty.
-        p.block_ids[slot] = no_block;
-        const dest = p.slotBytes(slot)[block_prefix..][0..len];
+        slot.id = no_block;
+        const dest = slot.bytes.?[block_prefix..][0..len];
         var done: usize = 0;
         while (done < len) {
-            const n = try p.file.lend().get().readPositional(io, &.{dest[done..]}, start + done);
+            const n = try p.file.lend().get().readPositional(io, &.{dest[done..]}, std.math.add(u64, start, done) catch return error.TruncatedPack);
             if (n == 0) return error.TruncatedPack;
             done += n;
         }
-        p.block_ids[slot] = id;
-        p.block_lens[slot] = @intCast(len);
+        slot.id = id;
+        slot.len = @intCast(len);
         return slot;
-    }
-
-    fn slotBytes(p: *Pack, slot: usize) []u8 {
-        return p.slot_memory[slot].?[0..block_stride];
     }
 
     /// The pack's bytes from `offset` to the end of the block it is in.
     fn blockBytesAt(p: *Pack, io: Io, offset: u64) ErrorNamespace.Error![]const u8 {
-        const id = offset / read_block_bytes;
-        const slot = try p.loadBlock(io, id);
-        const from: usize = @intCast(offset - id * read_block_bytes);
-        return p.slotBytes(slot)[block_prefix..][from..p.block_lens[slot]];
+        const slot = try p.loadBlock(io, offset / read_block_bytes);
+        const block = slot.bytes.?[block_prefix..][0..slot.len];
+        const from: usize = @intCast(offset % read_block_bytes);
+        if (from > block.len) return error.TruncatedPack;
+        return block[from..];
     }
 
     const block_vtable: Io.Reader.VTable = .{
@@ -697,11 +691,12 @@ pub const Pack = struct {
         p.reader_io = io;
         p.reader_block = id;
         p.read_err = null;
+        const within: usize = @intCast(at % read_block_bytes);
         p.block_reader = .{
             .vtable = &block_vtable,
-            .buffer = p.slotBytes(slot),
-            .seek = block_prefix + @as(usize, @intCast(at - id * read_block_bytes)),
-            .end = block_prefix + p.block_lens[slot],
+            .buffer = slot.bytes.?,
+            .seek = block_prefix + within,
+            .end = block_prefix + slot.len,
         };
         return &p.block_reader;
     }
@@ -712,24 +707,26 @@ pub const Pack = struct {
     /// one run; neither block's own bytes move.
     fn nextBlock(r: *Io.Reader) Io.Reader.Error!void {
         const p: *Pack = @alignCast(@fieldParentPtr("block_reader", r)); // aegis: no-danger: installed only on a Pack's block_reader
-        const next = p.reader_block + 1;
-        if (next * read_block_bytes >= p.size) return error.EndOfStream;
-        const kept = r.end - r.seek;
-        if (kept > block_prefix) {
+        const next = std.math.add(u64, p.reader_block, 1) catch return error.EndOfStream;
+        const next_at = std.math.mul(u64, next, read_block_bytes) catch return error.EndOfStream;
+        if (next_at >= p.size) return error.EndOfStream;
+        const kept = r.buffered();
+        if (kept.len > block_prefix) {
             p.read_err = error.CorruptPackEntry;
             return error.ReadFailed;
         }
         var carry: [block_prefix]u8 = undefined;
-        @memcpy(carry[0..kept], r.buffer[r.seek..r.end]);
+        @memcpy(carry[0..kept.len], kept);
         const slot = p.loadBlock(p.reader_io, next) catch |err| {
             p.read_err = err;
             return error.ReadFailed;
         };
-        const bytes = p.slotBytes(slot);
-        @memcpy(bytes[block_prefix - kept .. block_prefix], carry[0..kept]);
-        r.buffer = bytes;
-        r.seek = block_prefix - kept;
-        r.end = block_prefix + p.block_lens[slot];
+        // The bytes not taken end where the block's own begin.
+        const seek = block_prefix - kept.len;
+        @memcpy(slot.bytes.?[seek..block_prefix], carry[0..kept.len]);
+        r.buffer = slot.bytes.?;
+        r.seek = seek;
+        r.end = block_prefix + slot.len;
         p.reader_block = next;
     }
 
@@ -747,7 +744,7 @@ pub const Pack = struct {
     }
 
     fn blockRebase(r: *Io.Reader, capacity: usize) Io.Reader.RebaseError!void {
-        if (r.buffer.len - r.seek >= capacity) return;
+        if (r.seek <= r.buffer.len and r.buffer.len - r.seek >= capacity) return;
         try nextBlock(r);
     }
 
@@ -768,12 +765,8 @@ pub const Pack = struct {
     /// Close the pack and release everything it holds.
     pub fn deinit(p: *Pack, io: Io) void {
         p.gpa.destroy(p.decoder);
-        if (p.slot_memory.len != 0) {
-            for (p.slot_memory) |memory| if (memory) |bytes| p.gpa.free(@as([]u8, bytes[0..block_stride]));
-            p.gpa.free(p.slot_memory);
-            p.gpa.free(p.block_ids);
-            p.gpa.free(p.block_lens);
-        }
+        for (p.blocks) |slot| if (slot.bytes) |bytes| p.gpa.destroy(bytes);
+        if (p.blocks.len != 0) p.gpa.free(p.blocks);
         if (p.stream_buffer.len != 0) p.gpa.free(p.stream_buffer);
         if (p.mapping) |*m| m.destroy(io);
         p.file.deinit(io);
@@ -788,13 +781,14 @@ pub const Pack = struct {
 
     fn readAtExact(p: *Pack, io: Io, offset: u64, out: []u8) ErrorNamespace.Error!void {
         if (p.memory) |mem| {
-            if (offset + out.len > mem.len) return error.TruncatedPack;
-            @memcpy(out, mem[@intCast(offset)..][0..out.len]);
+            const from = mappedFrom(mem, offset) orelse return error.TruncatedPack;
+            if (out.len > from.len) return error.TruncatedPack;
+            @memcpy(out, from[0..out.len]);
             return;
         }
         var done: usize = 0;
         while (done < out.len) {
-            const n = try p.file.lend().get().readPositional(io, &.{out[done..]}, offset + done);
+            const n = try p.file.lend().get().readPositional(io, &.{out[done..]}, std.math.add(u64, offset, done) catch return error.TruncatedPack);
             if (n == 0) return error.TruncatedPack;
             done += n;
         }
@@ -806,12 +800,14 @@ pub const Pack = struct {
     pub fn readStored(p: *Pack, io: Io, offset: u64, out: []u8) Self.Error!void {
         if (offset > p.size or out.len > p.size - offset) return error.TruncatedPack;
         if (p.memory) |mem| {
-            @memcpy(out, mem[@intCast(offset)..][0..out.len]);
+            const from = mappedFrom(mem, offset) orelse return error.TruncatedPack;
+            if (out.len > from.len) return error.TruncatedPack;
+            @memcpy(out, from[0..out.len]);
             return;
         }
         var done: usize = 0;
         while (done < out.len) {
-            const n = try p.file.lend().get().readPositional(io, &.{out[done..]}, offset + done);
+            const n = try p.file.lend().get().readPositional(io, &.{out[done..]}, std.math.add(u64, offset, done) catch return error.TruncatedPack);
             if (n == 0) return error.TruncatedPack;
             done += n;
         }
@@ -821,7 +817,7 @@ pub const Pack = struct {
     /// a pack in memory), for copying a stored entry in blocks.
     pub fn readerAt(p: *Pack, io: Io, offset: u64, buffer: []u8) Self.Error!Positioned {
         if (offset > p.size) return error.TruncatedPack;
-        if (p.memory) |mem| return .{ .memory = .fixed(mem[@intCast(offset)..@intCast(p.size)]) };
+        if (p.memory) |mem| return .{ .memory = .fixed(mappedFrom(mem, offset) orelse return error.TruncatedPack) };
         var file_reader = p.file.lend().get().reader(io, buffer);
         try file_reader.seekTo(offset);
         return .{ .file = file_reader };
@@ -854,13 +850,15 @@ pub const Pack = struct {
         var buf: [32 + hash.max_raw_len]u8 = undefined;
         const available: usize = @intCast(@min(buf.len, p.bodyEnd() - offset));
         if (p.memory) |mem| {
-            return (try p.parseEntryHeader(offset, mem[@intCast(offset)..][0..available])) orelse error.TruncatedPack;
+            const from = mappedFrom(mem, offset) orelse return error.TruncatedPack;
+            if (available > from.len) return error.TruncatedPack;
+            return (try p.parseEntryHeader(offset, from[0..available])) orelse error.TruncatedPack;
         }
         // From the block the entry starts in, and from the next one only
         // when the header runs into it.
         var n: usize = 0;
         while (true) {
-            const chunk = try p.blockBytesAt(io, offset + n);
+            const chunk = try p.blockBytesAt(io, std.math.add(u64, offset, n) catch return error.TruncatedPack);
             const take = @min(chunk.len, available - n);
             @memcpy(buf[n..][0..take], chunk[0..take]);
             n += take;
@@ -922,47 +920,48 @@ pub const Pack = struct {
             else => return error.InvalidPackEntryType,
         };
 
-        return .{ .kind = kind, .size = size, .data_at = offset + i };
+        return .{ .kind = kind, .size = size, .data_at = std.math.add(u64, offset, i) catch return error.TruncatedPack };
     }
 
     /// Inflate `size` bytes of the zlib stream at `at`. The result is the
     /// caller's.
     fn inflateAt(p: *Pack, io: Io, at: u64, size: u64) ErrorNamespace.Error![]u8 {
-        const result_len = try inflatedLen(size);
-        const out = try p.gpa.alloc(u8, result_len +| decode_slack);
-        errdefer p.gpa.free(out);
-        try p.decodeAt(io, at, size, out);
-        return p.gpa.realloc(out, result_len);
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(p.gpa);
+        try p.inflateInto(io, at, size, &out);
+        return out.toOwnedSlice(p.gpa);
     }
 
     /// `inflateAt` into `out`, which is cleared, grows as needed and then
     /// holds exactly the entry.
     fn inflateInto(p: *Pack, io: Io, at: u64, size: u64, out: *std.ArrayList(u8)) ErrorNamespace.Error!void {
         const result_len = try inflatedLen(size);
+        const room = result_len +| decode_slack;
+        if (room > max_room) return error.StreamTooLong;
         out.clearRetainingCapacity();
-        try out.ensureTotalCapacity(p.gpa, result_len +| decode_slack);
-        try p.decodeAt(io, at, size, out.allocatedSlice()[0 .. result_len + decode_slack]);
+        try out.resize(p.gpa, room);
+        try p.decodeAt(io, at, result_len, out.items);
         out.items.len = result_len;
     }
 
     /// Leave one longest match and its word-copy slack after the result, so
     /// the fast decoder can also handle the last bytes of an entry.
     const decode_slack = warp.inflate_margin;
+    /// The most an entry is inflated into: the longest result, and the slack.
+    const max_room = delta.max_result_bytes + decode_slack;
 
     fn inflatedLen(size: u64) ErrorNamespace.Error!usize {
         if (size > delta.max_result_bytes) return error.StreamTooLong;
         return std.math.cast(usize, size) orelse error.StreamTooLong;
     }
 
-    /// Decode the `size`-byte entry at `at` into the front of `out`, which
-    /// has `decode_slack` bytes of room past it.
-    fn decodeAt(p: *Pack, io: Io, at: u64, size: u64, out: []u8) ErrorNamespace.Error!void {
-        const result_len: usize = @intCast(size);
+    /// Decode the entry of `result_len` bytes at `at` into the front of
+    /// `out`, which has `decode_slack` bytes of room past it.
+    fn decodeAt(p: *Pack, io: Io, at: u64, result_len: usize, out: []u8) ErrorNamespace.Error!void {
         var fixed_reader: Io.Reader = undefined;
-        const streamed = p.memory == null and size >= stream_entry_bytes;
+        const streamed = p.memory == null and result_len >= stream_entry_bytes;
         const input: *Io.Reader = if (p.memory) |mem| blk: {
-            if (at > mem.len) return error.TruncatedPack;
-            fixed_reader = .fixed(mem[@intCast(at)..]);
+            fixed_reader = .fixed(mappedFrom(mem, at) orelse return error.TruncatedPack);
             break :blk &fixed_reader;
         } else if (streamed)
             try p.streamReaderAt(io, at)
@@ -1008,12 +1007,12 @@ pub const Pack = struct {
         const at = inputs.at;
         const size = inputs.size;
         const result_len = try inflatedLen(size);
-        if (out.len < result_len +| decode_slack) return error.StreamTooLong;
+        const room = result_len +| decode_slack;
+        if (room > out.len) return error.StreamTooLong;
         var fixed_reader: Io.Reader = undefined;
         var file_reader: Io.File.Reader = undefined;
         const input: *Io.Reader = if (p.memory) |mem| blk: {
-            if (at > mem.len) return error.TruncatedPack;
-            fixed_reader = .fixed(mem[@intCast(at)..]);
+            fixed_reader = .fixed(mappedFrom(mem, at) orelse return error.TruncatedPack);
             break :blk &fixed_reader;
         } else blk: {
             // No more read ahead than the stream can take: a deflated entry
@@ -1027,7 +1026,7 @@ pub const Pack = struct {
             };
             break :blk &file_reader.interface;
         };
-        const n = reader.decoder.inflateReader(input, out[0 .. result_len + decode_slack], .{}) catch |err| switch (err) {
+        const n = reader.decoder.inflateReader(input, out[0..room], .{}) catch |err| switch (err) {
             error.ReadFailed => return if (p.memory == null) file_reader.err orelse error.ReadFailed else error.ReadFailed,
             error.Truncated, error.InvalidStream, error.ChecksumMismatch, error.DictionaryMismatch, error.OutputTooSmall => return error.CorruptPackEntry,
         };
@@ -1117,7 +1116,7 @@ pub const Pack = struct {
                 },
             }
             if (chain.items.len > p.max_depth) return error.DeltaChainTooDeep;
-            chain_bytes += header.size;
+            chain_bytes = std.math.add(u64, chain_bytes, header.size) catch return error.DeltaChainTooDeep;
             if (chain_bytes > p.max_chain_bytes) return error.DeltaChainTooDeep;
             for (visited.items) |seen| {
                 if (seen == current) return error.DeltaCycle;
@@ -1169,17 +1168,15 @@ pub const Pack = struct {
                 return a.offset < b.offset;
             }
         }.less);
-        const out = try gpa.alloc(object.Header, n);
-        errdefer gpa.free(out);
-        const known = try gpa.alloc(bool, n);
-        defer gpa.free(known);
-        @memset(known, false);
+        // Each position's header once it is read, in the file's order.
+        const found = try gpa.alloc(?object.Header, n);
+        defer gpa.free(found);
+        @memset(found, null);
         for (order) |e| {
             const entry = try p.entryHeaderAt(io, e.offset);
             const base: ?u32 = switch (entry.kind) {
                 .object => |t| {
-                    out[e.position] = .{ .type = t, .size = entry.size };
-                    known[e.position] = true;
+                    found[e.position] = .{ .type = t, .size = entry.size };
                     continue;
                 },
                 .ofs_delta => |back| blk: {
@@ -1192,17 +1189,18 @@ pub const Pack = struct {
                     if (at == order.len or order[at].offset != e.offset - back) break :blk null;
                     break :blk order[at].position;
                 },
-                .ref_delta => |oid| if (try p.index.find(oid)) |found| found.index else null,
+                .ref_delta => |oid| if (try p.index.find(oid)) |located| located.index else null,
             };
-            if (base) |b| if (known[b]) {
+            if (base) |b| if (b < found.len) if (found[b]) |base_header| {
                 const head = try p.inflateHead(io, entry.data_at, entry.size);
-                out[e.position] = .{ .type = out[b].type, .size = (try delta.header(&head)).target };
-                known[e.position] = true;
+                found[e.position] = .{ .type = base_header.type, .size = (try delta.header(&head)).target };
                 continue;
             };
-            out[e.position] = try p.headerAt(io, e.offset);
-            known[e.position] = true;
+            found[e.position] = try p.headerAt(io, e.offset);
         }
+        const out = try gpa.alloc(object.Header, n);
+        // `order` holds every position once, so each has its header.
+        for (out, found) |*header, read| header.* = read.?;
         return out;
     }
 
@@ -1252,8 +1250,7 @@ pub const Pack = struct {
         const want: usize = @intCast(@min(size, out.len));
         var fixed_reader: Io.Reader = undefined;
         const input: *Io.Reader = if (p.memory) |mem| blk: {
-            if (at > mem.len) return error.TruncatedPack;
-            fixed_reader = .fixed(mem[@intCast(at)..]);
+            fixed_reader = .fixed(mappedFrom(mem, at) orelse return error.TruncatedPack);
             break :blk &fixed_reader;
         } else try p.blockReaderAt(io, at);
         const result = p.decoder.inflateReader(input, out[0..want], .{ .partial = true }) catch |err| return switch (err) {
@@ -1318,21 +1315,20 @@ pub const Pack = struct {
                 if (crc.final() != try p.index.crcAt(position)) return error.ChecksumMismatch;
                 if (!(try p.nameStreamed(io, offset)).eql(try p.index.nameAt(position))) return error.ObjectNameMismatch;
                 report.objects += 1;
-                report.bytes += entry.size;
+                report.bytes +|= entry.size;
                 continue;
             }
 
-            const span = try p.gpa.alloc(u8, @intCast(end - offset));
-            defer p.gpa.free(span);
-            try p.readAtExact(io, offset, span);
-            if (warp.Crc32.hash(span) != (try p.index.crcAt(position))) return error.ChecksumMismatch;
+            var crc: warp.Crc32 = .init;
+            try p.sumStored(io, offset, end, .{ .crc = &crc });
+            if (crc.final() != try p.index.crcAt(position)) return error.ChecksumMismatch;
 
             const obj = try p.readAt(io, offset, .{ .cache = options.cache, .pack_id = options.pack_id });
             defer p.gpa.free(obj.bytes);
             const name = hash.Hasher.object(p.kind, obj.type.name(), obj.bytes);
             if (!name.eql(try p.index.nameAt(position))) return error.ObjectNameMismatch;
             report.objects += 1;
-            report.bytes += obj.bytes.len;
+            report.bytes +|= obj.bytes.len;
         }
         return report;
     }
@@ -1346,11 +1342,12 @@ pub const Pack = struct {
         var buf: [64 * 1024]u8 = undefined;
         var at = from;
         while (at < to) {
+            try io.checkCancel();
             const want: usize = @intCast(@min(buf.len, to - at));
             try p.readAtExact(io, at, buf[0..want]);
             sums.crc.update(buf[0..want]);
             if (sums.checksum) |h| h.update(buf[0..want]);
-            at += want;
+            at = std.math.add(u64, at, want) catch return error.TruncatedPack;
         }
     }
 
@@ -1368,8 +1365,7 @@ pub const Pack = struct {
         var file_reader: Io.File.Reader = undefined;
         var fixed: Io.Reader = undefined;
         const source: *Io.Reader = if (p.memory) |mem| blk: {
-            if (entry.data_at > mem.len) return error.TruncatedPack;
-            fixed = .fixed(mem[@intCast(entry.data_at)..]);
+            fixed = .fixed(mappedFrom(mem, entry.data_at) orelse return error.TruncatedPack);
             break :blk &fixed;
         } else blk: {
             file_reader = p.file.lend().get().reader(io, &input);
@@ -1382,13 +1378,14 @@ pub const Pack = struct {
         var chunk: [16 * 1024]u8 = undefined;
         var left = entry.size;
         while (left != 0) {
+            try io.checkCancel();
             const n: usize = @intCast(@min(@as(u64, chunk.len), left));
             inflating.interface.readSliceAll(chunk[0..n]) catch |err| return switch (err) {
                 error.ReadFailed => if (p.memory == null) file_reader.err orelse error.CorruptPackEntry else error.CorruptPackEntry,
                 error.EndOfStream => error.PackEntrySizeMismatch,
             };
             hasher.update(chunk[0..n]);
-            left -= n;
+            left = std.math.sub(u64, left, n) catch return error.PackEntrySizeMismatch;
         }
         // Nothing past the stated length.
         _ = inflating.interface.peekByte() catch |err| switch (err) {
@@ -2478,6 +2475,7 @@ pub const Writer = struct {
         var deflating = w.deflater.open(&w.sink.writer, w.options.compression, &deflate_buffer);
         var left = size;
         while (left != 0) {
+            try io.checkCancel();
             const piece = in.peekGreedy(1) catch |err| return switch (err) {
                 error.ReadFailed => error.ReadFailed,
                 error.EndOfStream => error.ShortRead,
@@ -2486,7 +2484,7 @@ pub const Writer = struct {
             hasher.update(taken);
             try deflating.interface.writeAll(taken);
             in.toss(taken.len);
-            left -= taken.len;
+            left = std.math.sub(u64, left, taken.len) catch return error.ShortRead;
         }
         try deflating.finish();
         try w.sink.writer.flush();
@@ -2806,7 +2804,9 @@ pub fn writeIndexFile(
     if (version == 1) {
         for (entries) |e| {
             var bytes: [4]u8 = undefined;
-            std.mem.writeInt(u32, &bytes, @intCast(e.offset), .big);
+            // Version 1 is written only where every offset is below 2^31
+            // (`largest`, above): its low 32 bits are all of it.
+            std.mem.writeInt(u32, &bytes, @truncate(e.offset), .big);
             try Emit.go(out, &hasher, &written, &bytes);
             try Emit.go(out, &hasher, &written, e.oid.raw()[0..raw_len]);
         }
@@ -2825,8 +2825,8 @@ pub fn writeIndexFile(
     defer large.deinit(gpa);
     if (version == 2) for (entries) |e| {
         var bytes: [4]u8 = undefined;
-        if (e.offset <= std.math.maxInt(u31)) {
-            std.mem.writeInt(u32, &bytes, @intCast(e.offset), .big);
+        if (std.math.cast(u31, e.offset)) |small| {
+            std.mem.writeInt(u32, &bytes, small, .big);
         } else {
             std.mem.writeInt(u32, &bytes, 0x8000_0000 | @as(u32, @intCast(large.items.len)), .big);
             try large.append(gpa, e.offset);
@@ -3458,7 +3458,7 @@ test "a pack the default block cache holds is read once in any order, and holds 
     const blocks = std.math.divCeil(u64, p.size, read_block_bytes) catch unreachable;
     try std.testing.expect(blocks * read_block_bytes > 2 * 256 * 1024);
 
-    // One object read: the blocks it spans, and the slot tables.
+    // One object read: the blocks it spans, and the table of slots.
     const opened = live.live;
     faults.reset();
     {
@@ -3468,7 +3468,7 @@ test "a pack the default block cache holds is read once in any order, and holds 
     }
     try std.testing.expect(faults.count(.fileReadPositional) != 0);
     const held = live.live - opened;
-    const tables = blocks * (@sizeOf(?[*]u8) + @sizeOf(u64) + @sizeOf(u32));
+    const tables = blocks * @sizeOf(Slot);
     if (held > faults.count(.fileReadPositional) * block_stride + tables) {
         std.debug.print("one object read in {d} reads holds {d} bytes\n", .{ faults.count(.fileReadPositional), held });
         return error.TestUnexpectedResult;

@@ -268,7 +268,7 @@ pub const Index = struct {
         if (oid.kind != index.kind) return null;
         const raw = oid.raw();
         const from = if (raw[0] == 0) 0 else index.fanout(raw[0] - 1);
-        const at = index.oids.lowerBound(from, index.fanout(raw[0]), raw) orelse return error.CorruptMultiPackIndex;
+        const at = index.oids.lowerBound(from, index.fanout(raw[0]), 0, raw) orelse return error.CorruptMultiPackIndex;
         const row = index.oids.at(at) orelse return null;
         if (!std.mem.eql(u8, row, raw)) return null;
         return try index.locate(std.math.cast(u32, at) orelse return error.CorruptMultiPackIndex);

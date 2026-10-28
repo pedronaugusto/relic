@@ -314,7 +314,7 @@ pub const Graph = struct {
         if (oid.kind != graph.kind) return null;
         const raw = oid.raw();
         const from = if (raw[0] == 0) 0 else graph.fanout(raw[0] - 1);
-        const at = graph.names.lowerBound(from, graph.fanout(raw[0]), raw) orelse return error.CorruptCommitGraph;
+        const at = graph.names.lowerBound(from, graph.fanout(raw[0]), 0, raw) orelse return error.CorruptCommitGraph;
         if (graph.names.at(at)) |row| if (std.mem.eql(u8, row, raw)) {
             const local = std.math.cast(u32, at) orelse return error.CorruptCommitGraph;
             return std.math.add(u32, local, graph.base_count) catch return error.CorruptCommitGraph;

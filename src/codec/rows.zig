@@ -29,8 +29,9 @@ pub const Rows = struct {
     /// format puts after records of their own lengths.
     pub fn last(file: []const u8, rows: usize, width: usize) ?struct { rows: Rows, before: []const u8 } {
         std.debug.assert(width != 0);
-        const len = std.math.mul(usize, rows, width) catch return null;
-        const start = std.math.sub(usize, file.len, len) catch return null;
+        const len: usize = std.math.mul(usize, rows, width) catch return null;
+        if (len > file.len) return null;
+        const start = file.len - len;
         return .{ .rows = .{ .bytes = file[start..], .width = width }, .before = file[0..start] };
     }
 
@@ -56,17 +57,17 @@ pub const Rows = struct {
     /// Row `i`, or `null` past the last.
     pub fn at(rows: Rows, i: usize) ?[]const u8 {
         if (i >= rows.count()) return null;
-        const start = std.math.mul(usize, i, rows.width) catch return null;
-        const left = std.math.sub(usize, rows.bytes.len, start) catch return null;
-        if (left < rows.width) return null;
+        const start: usize = std.math.mul(usize, i, rows.width) catch return null;
+        if (start > rows.bytes.len or rows.bytes.len - start < rows.width) return null;
         return rows.bytes[start..][0..rows.width];
     }
 
-    /// In a table sorted on its rows' first `key.len` bytes, the first row
-    /// from `from` up to `to` that is not before `key`: where `key` is, or
-    /// would go. `null` where `from..to` is not a range of the table.
-    pub fn lowerBound(rows: Rows, from: usize, to: usize, key: []const u8) ?usize {
-        std.debug.assert(key.len <= rows.width);
+    /// In a table sorted on the `key.len` bytes at `column` of its rows, the
+    /// first row from `from` up to `to` that is not before `key`: where `key`
+    /// is, or would go. `null` where `from..to` is not a range of the table.
+    pub fn lowerBound(rows: Rows, from: usize, to: usize, column: usize, key: []const u8) ?usize {
+        std.debug.assert(column <= rows.width);
+        std.debug.assert(key.len <= rows.width - column);
         if (from > to or to > rows.count()) return null;
         var lo = from;
         var hi = to;
@@ -75,7 +76,7 @@ pub const Rows = struct {
             if (lo >= hi) break;
             const mid = std.math.add(usize, lo, (hi - lo) / 2) catch return null;
             const row = rows.at(mid) orelse return null;
-            if (std.mem.order(u8, row[0..key.len], key) == .lt) {
+            if (std.mem.order(u8, row[column..][0..key.len], key) == .lt) {
                 lo = std.math.add(usize, mid, 1) catch return null;
             } else hi = mid;
         }
@@ -106,12 +107,13 @@ test "a table at the end of a file is cut from what comes before it" {
 
 test "a sorted table is bisected within the range it is given" {
     const rows = Rows.whole("AAAACCCCEEEE", 4);
-    try std.testing.expectEqual(@as(?usize, 1), rows.lowerBound(0, 3, "CCCC"));
-    try std.testing.expectEqual(@as(?usize, 2), rows.lowerBound(0, 3, "DDDD"));
-    try std.testing.expectEqual(@as(?usize, 3), rows.lowerBound(0, 3, "FF"));
-    try std.testing.expectEqual(@as(?usize, 2), rows.lowerBound(2, 3, "A"));
-    try std.testing.expectEqual(@as(?usize, null), rows.lowerBound(0, 4, "A"));
-    try std.testing.expectEqual(@as(?usize, null), rows.lowerBound(2, 1, "A"));
+    try std.testing.expectEqual(@as(?usize, 1), rows.lowerBound(0, 3, 0, "CCCC"));
+    try std.testing.expectEqual(@as(?usize, 2), rows.lowerBound(0, 3, 0, "DDDD"));
+    try std.testing.expectEqual(@as(?usize, 3), rows.lowerBound(0, 3, 0, "FF"));
+    try std.testing.expectEqual(@as(?usize, 2), rows.lowerBound(2, 3, 0, "A"));
+    try std.testing.expectEqual(@as(?usize, 1), rows.lowerBound(0, 3, 2, "C"));
+    try std.testing.expectEqual(@as(?usize, null), rows.lowerBound(0, 4, 0, "A"));
+    try std.testing.expectEqual(@as(?usize, null), rows.lowerBound(2, 1, 0, "A"));
 }
 
 test "a chunk is a table of exactly its rows, or of its whole rows" {
