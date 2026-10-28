@@ -94,46 +94,35 @@ pub fn applyTo(
     const start = out.items.len;
     try out.ensureUnusedCapacity(gpa, @min(target, producible(base.len, delta.len - sizes.len)));
 
-    var i: usize = sizes.len;
-    while (i < delta.len) {
-        const op = delta[i];
-        i += 1;
+    var r: std.Io.Reader = .fixed(delta[sizes.len..]);
+    while (r.takeByte()) |op| {
         if (op == 0) return error.InvalidDeltaCommand;
+        // What the target still has room for.
+        const room = sizes.target - (out.items.len - start);
         if (op & 0x80 != 0) {
             // Copy. Each set bit in the low nibble supplies one byte of the
             // offset and each of the next three one byte of the size, in
             // rising significance; a bit that is clear contributes a zero
             // byte and does not shift the ones that follow.
-            var offset: u64 = 0;
-            var size: u64 = 0;
+            var offset: u32 = 0;
+            var size: u32 = 0;
             inline for (0..4) |shift| {
-                if (op & (@as(u8, 1) << shift) != 0) {
-                    if (i >= delta.len) return error.TruncatedDelta;
-                    offset |= @as(u64, delta[i]) << (8 * shift);
-                    i += 1;
-                }
+                if (op & (@as(u8, 1) << shift) != 0) offset |= @as(u32, r.takeByte() catch return error.TruncatedDelta) << (8 * shift);
             }
             inline for (0..3) |shift| {
-                if (op & (@as(u8, 0x10) << shift) != 0) {
-                    if (i >= delta.len) return error.TruncatedDelta;
-                    size |= @as(u64, delta[i]) << (8 * shift);
-                    i += 1;
-                }
+                if (op & (@as(u8, 0x10) << shift) != 0) size |= @as(u32, r.takeByte() catch return error.TruncatedDelta) << (8 * shift);
             }
             if (size == 0) size = 0x10000;
-            const end = std.math.add(u64, offset, size) catch return error.DeltaCopyOutOfRange;
-            if (end > base.len) return error.DeltaCopyOutOfRange;
-            if (out.items.len - start + size > sizes.target) return error.DeltaResultSizeMismatch;
-            out.appendSliceAssumeCapacity(base[@intCast(offset)..@intCast(end)]);
+            if (offset > base.len or size > base.len - offset) return error.DeltaCopyOutOfRange;
+            if (size > room) return error.DeltaResultSizeMismatch;
+            out.appendSliceAssumeCapacity(base[offset..][0..size]);
         } else {
             // Insert: the command byte is the count, one to 127.
-            const n = op;
-            if (i + n > delta.len) return error.TruncatedDelta;
-            if (out.items.len - start + n > sizes.target) return error.DeltaResultSizeMismatch;
-            out.appendSliceAssumeCapacity(delta[i..][0..n]);
-            i += n;
+            const bytes = r.take(op) catch return error.TruncatedDelta;
+            if (bytes.len > room) return error.DeltaResultSizeMismatch;
+            out.appendSliceAssumeCapacity(bytes);
         }
-    }
+    } else |_| {}
     if (out.items.len - start != sizes.target) return error.DeltaResultSizeMismatch;
 }
 
@@ -431,9 +420,13 @@ const Index = struct {
     fn longestAt(index: *const Index, base: []const u8, target: []const u8, at: usize, window_hash: u64) Match {
         const bucket = index.bucketOfHash(window_hash);
         var best: Match = .{ .at = 0, .len = 0 };
+        // A bucket is the hash masked to the table: never past it.
+        if (bucket >= index.head.len) return best;
         var block = index.head[bucket];
         var looked: u32 = 0;
-        while (block != sentinel and looked < max_candidates) : (looked += 1) {
+        while (looked < max_candidates) : (looked += 1) {
+            // `sentinel`, the end of a chain, is past every block.
+            if (block >= index.chain.len) break;
             const candidate = @as(usize, block) * match_len;
             block = index.chain[block];
             var len: usize = 0;
