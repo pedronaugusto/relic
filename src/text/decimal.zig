@@ -23,7 +23,7 @@ pub fn digits(comptime T: type, text: []const u8) ?T {
     for (text) |c| {
         if (c < '0' or c > '9') return null;
         value = std.math.mul(T, value, 10) catch return null;
-        value = std.math.add(T, value, @intCast(c - '0')) catch return null;
+        value = std.math.add(T, value, std.math.cast(T, c - '0') orelse return null) catch return null;
     }
     return value;
 }
@@ -103,26 +103,23 @@ fn read(text: []const u8, base_in: u8, min: i128, max: i128, unsigned: bool) Rea
         }
     }
     if (i == first) return .{ .value = 0, .end = 0, .overflow = false };
-    const limit: u128 = if (unsigned or !negative) @intCast(max) else @intCast(-min);
-    if (overflow or magnitude > limit) {
-        return .{ .value = if (unsigned) max else if (negative) min else max, .end = i, .overflow = true };
-    }
-    if (unsigned and negative) {
-        // C's unsigned negation: the value modulo the type's range.
-        const range: u128 = @as(u128, @intCast(max)) + 1;
-        return .{ .value = @intCast((range - magnitude) % range), .end = i, .overflow = false };
-    }
-    const signed: i128 = @intCast(magnitude);
-    return .{ .value = if (negative) -signed else signed, .end = i, .overflow = false };
+    // What C gives for a value past the type's range.
+    const clamped: Read = .{ .value = if (unsigned) max else if (negative) min else max, .end = i, .overflow = true };
+    const limit: u128 = if (unsigned or !negative) @intCast(max) else @abs(min);
+    if (overflow or magnitude > limit) return clamped;
+    // Within the limit, each conversion below holds: one that did not would be past the range.
+    if (!negative) return .{ .value = std.math.cast(i128, magnitude) orelse return clamped, .end = i, .overflow = false };
+    // A signed type's minimum is the negation of a magnitude one past its maximum.
+    if (!unsigned) return .{ .value = std.math.negateCast(magnitude) catch return clamped, .end = i, .overflow = false };
+    // C's unsigned negation: the value modulo the type's range, `max + 1`.
+    if (magnitude < 1) return .{ .value = 0, .end = i, .overflow = false };
+    const below = std.math.cast(i128, magnitude - 1) orelse return clamped;
+    return .{ .value = std.math.sub(i128, max, below) catch return clamped, .end = i, .overflow = false };
 }
 
+/// A digit's value in base 36, either case; 36 for any other byte.
 fn digitValue(c: u8) u8 {
-    return switch (c) {
-        '0'...'9' => c - '0',
-        'a'...'z' => c - 'a' + 10,
-        'A'...'Z' => c - 'A' + 10,
-        else => 36,
-    };
+    return std.fmt.charToDigit(c, 36) catch 36;
 }
 
 /// `strtol` over all of `text` into `T`: git's `strtol_i` and `strtoul_ui`
@@ -163,6 +160,13 @@ test "strtol reads as C reads: spaces, a sign, a base, and where it stopped" {
     try std.testing.expect(big.overflow);
     try std.testing.expectEqual(@as(i128, std.math.maxInt(i64)), big.value);
     try std.testing.expectEqual(@as(i128, std.math.maxInt(u64)), strtoul("-1", 10, 64).value);
+    try std.testing.expectEqual(@as(i128, 0), strtoul("-0", 10, 64).value);
+    // Each type's minimum is read, 128 bits' too, whose magnitude no i128 holds.
+    for ([_][]const u8{ "-9223372036854775808", "-170141183460469231731687303715884105728" }, [_]i128{ std.math.minInt(i64), std.math.minInt(i128) }, [_]bool{ false, true }) |text, least, wide| {
+        const read_min = if (wide) strtol(text, 10, 128) else strtol(text, 10, 64);
+        try std.testing.expectEqual(least, read_min.value);
+        try std.testing.expect(!read_min.overflow);
+    }
     try std.testing.expectEqual(@as(?u16, null), whole(u16, "1_0", 10));
     try std.testing.expectEqual(@as(?u16, 10), whole(u16, "+10", 10));
     try std.testing.expectEqual(@as(?u16, null), whole(u16, "10 ", 10));
