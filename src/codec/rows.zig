@@ -61,6 +61,26 @@ pub const Rows = struct {
         if (left < rows.width) return null;
         return rows.bytes[start..][0..rows.width];
     }
+
+    /// In a table sorted on its rows' first `key.len` bytes, the first row
+    /// from `from` up to `to` that is not before `key`: where `key` is, or
+    /// would go. `null` where `from..to` is not a range of the table.
+    pub fn lowerBound(rows: Rows, from: usize, to: usize, key: []const u8) ?usize {
+        std.debug.assert(key.len <= rows.width);
+        if (from > to or to > rows.count()) return null;
+        var lo = from;
+        var hi = to;
+        // Each step halves what is left, so a usize's bits of them end it.
+        for (0..@bitSizeOf(usize)) |_| {
+            if (lo >= hi) break;
+            const mid = std.math.add(usize, lo, (hi - lo) / 2) catch return null;
+            const row = rows.at(mid) orelse return null;
+            if (std.mem.order(u8, row[0..key.len], key) == .lt) {
+                lo = std.math.add(usize, mid, 1) catch return null;
+            } else hi = mid;
+        }
+        return lo;
+    }
 };
 
 test "a table is cut to the rows it declares and read only within them" {
@@ -82,6 +102,16 @@ test "a table at the end of a file is cut from what comes before it" {
     try std.testing.expectEqual(@as(usize, 0), Rows.last("head", 0, 4).?.rows.count());
     try std.testing.expect(Rows.last("headAAA", 2, 4) == null);
     try std.testing.expect(Rows.last("head", std.math.maxInt(usize), 4) == null);
+}
+
+test "a sorted table is bisected within the range it is given" {
+    const rows = Rows.whole("AAAACCCCEEEE", 4);
+    try std.testing.expectEqual(@as(?usize, 1), rows.lowerBound(0, 3, "CCCC"));
+    try std.testing.expectEqual(@as(?usize, 2), rows.lowerBound(0, 3, "DDDD"));
+    try std.testing.expectEqual(@as(?usize, 3), rows.lowerBound(0, 3, "FF"));
+    try std.testing.expectEqual(@as(?usize, 2), rows.lowerBound(2, 3, "A"));
+    try std.testing.expectEqual(@as(?usize, null), rows.lowerBound(0, 4, "A"));
+    try std.testing.expectEqual(@as(?usize, null), rows.lowerBound(2, 1, "A"));
 }
 
 test "a chunk is a table of exactly its rows, or of its whole rows" {

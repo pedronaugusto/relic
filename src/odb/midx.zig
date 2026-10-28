@@ -48,6 +48,28 @@ pub const Located = struct {
     offset: u64,
 };
 
+/// The pack names a multi-pack index holds: as many as its header counts,
+/// fewer where its `PNAM` chunk ends first.
+pub const PackNames = struct {
+    split: std.mem.SplitIterator(u8, .scalar),
+    /// How many the header counts.
+    count: u32,
+    /// How many `next` has given.
+    taken: u32 = 0,
+
+    /// The next name, without its extension, or `null` after the last.
+    pub fn next(names: *PackNames) ?[]const u8 {
+        if (names.taken == names.count) return null;
+        var name = names.split.next() orelse return null;
+        // What follows the last NUL is padding, never a name.
+        if (names.split.index == null) return null;
+        names.taken += 1;
+        if (std.mem.endsWith(u8, name, ".idx")) name = name[0 .. name.len - 4];
+        if (std.mem.endsWith(u8, name, ".pack")) name = name[0 .. name.len - 5];
+        return name;
+    }
+};
+
 /// A multi-pack index, held in memory.
 pub const Index = struct {
     pub const Error = ErrorNamespace.Error;
@@ -70,8 +92,9 @@ pub const Index = struct {
     /// One row per object: its pack's position and its 4-byte offset.
     offsets: Rows,
     /// 8-byte offsets, which a 4-byte one with its high bit set names by
-    /// row; none where the index has no `LOFF` chunk.
-    large: Rows,
+    /// row, where the index has a `LOFF` chunk. Without one, a 4-byte
+    /// offset is the offset whatever its high bit, as git reads it.
+    large: ?Rows,
     /// Name-order positions in pseudo-pack order, where the index has a
     /// `RIDX` chunk.
     reverse: ?Rows,
@@ -127,7 +150,7 @@ pub const Index = struct {
         const count = std.mem.readInt(u32, &fanout_table[255], .big);
         const oids = Rows.exactly(format.get(bytes, 12, chunk_count, "OIDL") orelse return error.CorruptMultiPackIndex, count, raw_len) orelse return error.CorruptMultiPackIndex;
         const offsets = Rows.exactly(format.get(bytes, 12, chunk_count, "OOFF") orelse return error.CorruptMultiPackIndex, count, 8) orelse return error.CorruptMultiPackIndex;
-        const large: Rows = if (format.get(bytes, 12, chunk_count, "LOFF")) |chunk| .whole(chunk, 8) else .empty;
+        const large: ?Rows = if (format.get(bytes, 12, chunk_count, "LOFF")) |chunk| .whole(chunk, 8) else null;
         const reverse: ?Rows = if (format.get(bytes, 12, chunk_count, "RIDX")) |chunk|
             Rows.exactly(chunk, count, 4) orelse return error.CorruptMultiPackIndex
         else
@@ -177,7 +200,9 @@ pub const Index = struct {
             }
             if (std.mem.readInt(u32, &index.fanout_table[bucket], .big) != count) return error.CorruptMultiPackIndex;
         }
-        for (0..index.pack_count) |i| if (index.packName(@intCast(i)) == null) return error.CorruptMultiPackIndex;
+        var names = index.packNames();
+        while (names.next()) |_| {}
+        if (names.taken != index.pack_count) return error.CorruptMultiPackIndex;
         var seen: std.AutoHashMapUnmanaged(u32, void) = .empty;
         defer seen.deinit(index.gpa);
         for (0..index.count) |i| if (try index.reverseAt(@intCast(i))) |pos| {
@@ -192,8 +217,8 @@ pub const Index = struct {
     /// refused.
     fn checkNames(index: *const Index, version: u8) Self.Error!void {
         var previous: ?[]const u8 = null;
-        for (0..index.pack_count) |i| {
-            const name = index.packName(@intCast(i)) orelse return error.CorruptMultiPackIndex;
+        var names = index.packNames();
+        while (names.next()) |name| {
             if (name.len == 0 or std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) return error.CorruptMultiPackIndex;
             if (std.mem.findAny(u8, name, "/\\:") != null) return error.CorruptMultiPackIndex;
             if (version == 1) if (previous) |before| {
@@ -201,6 +226,7 @@ pub const Index = struct {
             };
             previous = name;
         }
+        if (names.taken != index.pack_count) return error.CorruptMultiPackIndex;
     }
 
     /// Release the index.
@@ -213,18 +239,16 @@ pub const Index = struct {
     ///
     /// The names are NUL-separated in the order the index uses them.
     pub fn packName(index: *const Index, position: u32) ?[]const u8 {
-        var names = std.mem.splitScalar(u8, index.pack_names, 0);
+        var names = index.packNames();
         var i: u32 = 0;
-        while (names.next()) |entry| : (i += 1) {
-            // What follows the last NUL is padding, never a name.
-            if (names.index == null) return null;
-            if (i != position) continue;
-            var name = entry;
-            if (std.mem.endsWith(u8, name, ".idx")) name = name[0 .. name.len - 4];
-            if (std.mem.endsWith(u8, name, ".pack")) name = name[0 .. name.len - 5];
-            return name;
-        }
+        while (names.next()) |name| : (i += 1) if (i == position) return name;
         return null;
+    }
+
+    /// The names of the packs, in the order positions name them, without
+    /// their extensions.
+    pub fn packNames(index: *const Index) PackNames {
+        return .{ .split = std.mem.splitScalar(u8, index.pack_names, 0), .count = index.pack_count };
     }
 
     /// The name of the object at `position`.
@@ -234,21 +258,20 @@ pub const Index = struct {
         return Oid.fromRaw(index.kind, row) catch unreachable;
     }
 
+    /// How many names begin with a byte up to `bucket`.
+    fn fanout(index: *const Index, bucket: u8) u32 {
+        return std.mem.readInt(u32, &index.fanout_table[bucket], .big);
+    }
+
     /// Where `oid` lives, or `null`.
     pub fn find(index: *const Index, oid: Oid) Self.PositionError!?Located {
         if (oid.kind != index.kind) return null;
         const raw = oid.raw();
-        var lo: u32 = if (raw[0] == 0) 0 else std.mem.readInt(u32, &index.fanout_table[raw[0] - 1], .big);
-        var hi: u32 = std.mem.readInt(u32, &index.fanout_table[raw[0]], .big);
-        while (lo < hi) {
-            const mid = lo + (hi - lo) / 2;
-            switch (std.mem.order(u8, (try index.nameAt(mid)).raw(), raw)) {
-                .lt => lo = mid + 1,
-                .gt => hi = mid,
-                .eq => return try index.locate(mid),
-            }
-        }
-        return null;
+        const from = if (raw[0] == 0) 0 else index.fanout(raw[0] - 1);
+        const at = index.oids.lowerBound(from, index.fanout(raw[0]), raw) orelse return error.CorruptMultiPackIndex;
+        const row = index.oids.at(at) orelse return null;
+        if (!std.mem.eql(u8, row, raw)) return null;
+        return try index.locate(std.math.cast(u32, at) orelse return error.CorruptMultiPackIndex);
     }
 
     pub fn locate(index: *const Index, position: u32) Self.PositionError!Located {
@@ -256,8 +279,9 @@ pub const Index = struct {
         const pack = std.mem.readInt(u32, row[0..4], .big);
         const small = std.mem.readInt(u32, row[4..8], .big);
         if (pack >= index.pack_count) return error.CorruptMultiPackIndex;
+        const table = index.large orelse return .{ .pack = pack, .offset = small };
         if (small & 0x8000_0000 == 0) return .{ .pack = pack, .offset = small };
-        const large = index.large.at(small & 0x7fff_ffff) orelse return error.CorruptMultiPackIndex;
+        const large = table.at(small & 0x7fff_ffff) orelse return error.CorruptMultiPackIndex;
         return .{ .pack = pack, .offset = std.mem.readInt(u64, large[0..8], .big) };
     }
 };
@@ -283,6 +307,19 @@ fn fuzzMidx(_: void, case: *shakedown.Case) anyerror!void {
     // glint-ignore: Z026 -- refusing a malformed input is the expected outcome; only a crash or a leak fails the fuzzer
     _ = index.find(Oid.zero(.sha1)) catch {};
     _ = index.packName(0);
+}
+
+test "without a LOFF chunk a 4-byte offset with its high bit set is that offset, as git reads it" {
+    const gpa = std.testing.allocator;
+    const oid = try Oid.fromRaw(.sha1, &@as([20]u8, @splat(0x42)));
+    // Past 2 GiB, inside 4 GiB: the writer, as git's, leaves LOFF out.
+    const entries = [_]WriteEntry{.{ .oid = oid, .offset = 0x9000_0000 }};
+    const packs = [_]WritePack{.{ .name = "pack-a.idx", .mtime = 0, .entries = &entries }};
+    var index = try Index.parse(gpa, .sha1, try encode(gpa, .sha1, &packs, .{}));
+    defer index.deinit();
+    try std.testing.expectEqual(@as(?Rows, null), index.large);
+    try std.testing.expectEqual(@as(u64, 0x9000_0000), (try index.find(oid)).?.offset);
+    try std.testing.expectEqual(@as(?Located, null), try index.find(Oid.zero(.sha1)));
 }
 
 test "a position past a multi-pack index's tables is refused, not read past" {
@@ -412,7 +449,7 @@ pub fn encode(gpa: Allocator, kind: hash.Kind, packs: []const WritePack, options
     for (entries.items) |entry| {
         try buffers[2].add(entry.oid.raw());
         try buffers[3].int(u32, entry.pack);
-        try buffers[3].int(u32, if (large and entry.offset > 0x7fff_ffff) 0x8000_0000 | large_index else @intCast(entry.offset));
+        try buffers[3].int(u32, if (large and entry.offset > 0x7fff_ffff) 0x8000_0000 | large_index else std.math.cast(u32, entry.offset) orelse return error.InvalidMidxInput);
         if (large and entry.offset > 0x7fff_ffff) {
             try buffers[4].int(u64, entry.offset);
             large_index += 1;

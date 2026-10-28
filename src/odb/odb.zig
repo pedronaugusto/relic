@@ -677,16 +677,13 @@ pub const Odb = struct {
         }) orelse return;
         errdefer index.deinit();
 
-        var position: u32 = 0;
-        while (position < index.pack_count) : (position += 1) {
-            const name = index.packName(position);
+        var names = index.packNames();
+        while (names.next()) |text| {
             var at: ?u32 = null;
-            if (name) |text| {
-                for (source.packs.items, 0..) |named, i| {
-                    if (std.mem.eql(u8, named.name, text)) {
-                        at = @intCast(i);
-                        break;
-                    }
+            for (source.packs.items, 0..) |named, i| {
+                if (std.mem.eql(u8, named.name, text)) {
+                    at = @intCast(i);
+                    break;
                 }
             }
             source.midx_packs.append(odb.backendData().gpa, at) catch return error.OutOfMemory;
@@ -3863,7 +3860,8 @@ pub const Odb = struct {
         const pack_dir = (source.packDirectory() orelse return 0).get();
         var in_midx = false;
         if (source.midx) |*m| for (names) |name| {
-            for (0..m.pack_count) |i| if (m.packName(@intCast(i))) |listed| if (std.mem.eql(u8, listed, name)) {
+            var listed = m.packNames();
+            while (listed.next()) |text| if (std.mem.eql(u8, text, name)) {
                 in_midx = true;
             };
         };

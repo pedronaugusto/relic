@@ -58,8 +58,8 @@ pub const Store = struct {
                     name.* = try index.nameAt(@intCast(i));
                     pos.* = (try index.reverseAt(@intCast(i))) orelse return error.CorruptMultiPackIndex;
                 }
-                for (0..index.pack_count) |i| {
-                    const base = index.packName(@intCast(i)) orelse return error.CorruptMultiPackIndex;
+                var packs = index.packNames();
+                while (packs.next()) |base| {
                     const pack_path = try gpa.print("{s}.pack", .{base});
                     defer gpa.free(pack_path);
                     dir.access(io, pack_path, .{}) catch |err| switch (err) {
