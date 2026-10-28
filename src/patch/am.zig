@@ -488,10 +488,25 @@ fn load(gpa: Allocator, a: Allocator, io: Io, repo: *Repository, options: Option
     return s;
 }
 
+/// Where a session is in its mails: `next` and `last`, as git reads them.
+const Progress = struct { cur: usize, last: usize };
+
+/// git's `strtol(sb.buf, NULL, 10)` into an `int`: the number each file
+/// starts with, which git holds in an `int`. One below zero or past an
+/// `int` is no count git wrote.
+fn parseProgress(_: void, files: [2][]const u8) error{MalformedState}!Progress {
+    const limit = std.math.maxInt(i32);
+    const cur = decimal.strtol(files[0], 10, 64).value;
+    const last = decimal.strtol(files[1], 10, 64).value;
+    if (cur < 0 or cur > limit or last < 0 or last > limit) return error.MalformedState;
+    return .{ .cur = @intCast(cur), .last = @intCast(last) };
+}
+
 fn reload(s: *Session) Error!void {
-    // git's `strtol(sb.buf, NULL, 10)`: the number each starts with.
-    s.cur = std.math.cast(usize, decimal.strtol(try s.readTrim("next"), 10, 64).value) orelse return error.MalformedState;
-    s.last = std.math.cast(usize, decimal.strtol(try s.readTrim("last"), 10, 64).value) orelse return error.MalformedState;
+    const files: [2][]const u8 = .{ try s.readTrim("next"), try s.readTrim("last") };
+    const progress = try aegis.input.Untrusted([2][]const u8).init(files).parse({}, parseProgress);
+    s.cur = progress.cur;
+    s.last = progress.last;
     s.author_name = null;
     s.author_email = null;
     s.author_date = null;
@@ -835,7 +850,8 @@ fn doCommit(s: *Session) Error!void {
     if (!s.options.ignore_date and s.author_date.?.len > 0) {
         const parsed = gitdate.parse(s.author_date.?, .{ .now = gitdate.timestamp(committer.when_secs), .local_offset_minutes = committer.offset_minutes }) orelse return error.InvalidDate;
         author.when_secs = parsed.secs;
-        author.offset_minutes = @intCast(parsed.offset_minutes);
+        // A zone a commit cannot carry is no date git writes in one.
+        author.offset_minutes = std.math.cast(i16, parsed.offset_minutes) orelse return error.InvalidDate;
     }
     var commit_who = committer;
     if (s.options.committer_date_is_author_date) {

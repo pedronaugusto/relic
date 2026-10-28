@@ -350,6 +350,33 @@ test "a session git am started with -p in any of git's spellings is finished by 
     }
 }
 
+test "a session whose next or last is no count git wrote is refused, where it ran to it" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const mbox = try makeMailbox(gpa, io, &.{}, threeCommits);
+    defer gpa.free(mbox);
+    // git holds each in an `int`: one past it, or below zero, git never wrote.
+    const states = [_]struct { next: []const u8, last: []const u8 }{
+        .{ .next = "1", .last = "2147483648" },
+        .{ .next = "1", .last = "99999999999999" },
+        .{ .next = "-1", .last = "3" },
+        .{ .next = "2147483648", .last = "3" },
+    };
+    for (states) |state| {
+        var p = try Pair.init(gpa, io, .files);
+        defer p.deinit();
+        try setupPair(&p, io);
+        try p.write(io, "other.txt", "alpha\nbeta\nGamma-ours\n");
+        try p.both(io, &.{ "commit", "-q", "-a", "-m", "ours" });
+        try std.testing.expect(try gitAm(gpa, io, &p, &.{}, mbox) != 0);
+        try p.write(io, ".git/rebase-apply/next", state.next);
+        try p.write(io, ".git/rebase-apply/last", state.last);
+        var git_side = try Repository.open(gpa, io, p.git.dir, .{});
+        defer git_side.deinit(io);
+        try std.testing.expectError(error.MalformedState, am.skip(gpa, io, &git_side, .{ .committer = committer }));
+    }
+}
+
 test "the three-way fallback leaves git's conflict, and skip and abort put things back as git's do" {
     try testgit.eachRefFormat(struct {
         fn inFormat(format: testgit.RefFormat) !void {
