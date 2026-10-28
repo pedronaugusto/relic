@@ -50,6 +50,14 @@ pub fn murmur(seed_value: u32, path: []const u8, version: u32) u32 {
     return seed;
 }
 
+/// The longest filter: where one ends is a 32-bit offset into `BDAT`.
+const max_filter_bytes = std.math.maxInt(u32);
+
+/// How many bytes hold `bits` bits.
+fn bytesFor(bits: usize) usize {
+    return (bits >> 3) + @intFromBool(bits & 7 != 0);
+}
+
 /// Errors from `build`.
 pub const BuildError = Allocator.Error || error{ UnsupportedBloomVersion, InvalidBloomSettings };
 
@@ -71,8 +79,10 @@ pub fn build(gpa: Allocator, paths: []const []const u8, settings: Settings) Buil
     }
     if (unique.count() == 0) return gpa.dupe(u8, &.{0});
     if (paths.len > settings.max_changed_paths or unique.count() > settings.max_changed_paths) return gpa.dupe(u8, &.{255});
-    const bits = std.math.mul(usize, unique.count(), settings.bits_per_entry) catch return error.OutOfMemory;
-    const out = try gpa.alloc(u8, (bits >> 3) + @intFromBool(bits & 7 != 0));
+    const bits = std.math.mul(usize, unique.count(), settings.bits_per_entry) catch return error.InvalidBloomSettings;
+    const len = bytesFor(bits);
+    if (len > max_filter_bytes) return error.InvalidBloomSettings;
+    const out = try gpa.alloc(u8, len);
     @memset(out, 0);
     var it = unique.keyIterator();
     while (it.next()) |path| {

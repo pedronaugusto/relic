@@ -262,8 +262,10 @@ pub const Graph = struct {
         const local = position - graph.base_count;
         const start = if (local == 0) 0 else std.mem.readInt(u32, (index.at(local - 1) orelse return error.CorruptCommitGraph)[0..4], .big);
         const end = std.mem.readInt(u32, (index.at(local) orelse return error.CorruptCommitGraph)[0..4], .big);
-        if (start > end or end > filters.len) return error.CorruptCommitGraph;
-        return .{ .bytes = filters[start..end], .settings = .{
+        if (end > filters.len) return error.CorruptCommitGraph;
+        const through = filters[0..end];
+        if (start > through.len) return error.CorruptCommitGraph;
+        return .{ .bytes = through[start..], .settings = .{
             .version = std.mem.readInt(u32, data[0..4], .big),
             .hashes = std.mem.readInt(u32, data[4..8], .big),
             .bits_per_entry = std.mem.readInt(u32, data[8..12], .big),
