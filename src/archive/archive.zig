@@ -1136,7 +1136,7 @@ pub fn archive(gpa: Allocator, io: Io, w: *Io.Writer, inputs: Inputs, options: O
             if (options.level) |level| if (level > 9) return error.LevelNotSupported;
             // git holds a time unsigned, so one before 1970 is past any
             // date a zip can carry, and git's archive stops there.
-            if (time < 0) return error.TimestampTooLarge;
+            const unsigned = std.math.cast(u64, time) orelse return error.TimestampTooLarge;
             // git's `dos_time`: the calendar in the zip's zone, and a time
             // the zone moves past what a timestamp holds is past it too.
             const c = date.calendarIn(time, date.tzInt(options.zip_offset_minutes)) orelse return error.TimestampTooLarge;
@@ -1150,7 +1150,7 @@ pub fn archive(gpa: Allocator, io: Io, w: *Io.Writer, inputs: Inputs, options: O
                 // Each field held to its bits: 31 + 63 * 32 + 31 * 2048 is the
                 // most a u16 holds.
                 .dos_time = @as(u16, c.second) / 2 + @as(u16, c.minute) * 32 + @as(u16, c.hour) * 2048,
-                .time = @intCast(time),
+                .time = unsigned,
                 .level = options.level,
             };
             wk.zip = &zip;

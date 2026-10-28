@@ -498,8 +498,11 @@ fn parseProgress(_: void, files: [2][]const u8) error{MalformedState}!Progress {
     const limit = std.math.maxInt(i32);
     const cur = decimal.strtol(files[0], 10, 64).value;
     const last = decimal.strtol(files[1], 10, 64).value;
-    if (cur < 0 or cur > limit or last < 0 or last > limit) return error.MalformedState;
-    return .{ .cur = @intCast(cur), .last = @intCast(last) };
+    if (cur > limit or last > limit) return error.MalformedState;
+    return .{
+        .cur = std.math.cast(usize, cur) orelse return error.MalformedState,
+        .last = std.math.cast(usize, last) orelse return error.MalformedState,
+    };
 }
 
 fn reload(s: *Session) Error!void {

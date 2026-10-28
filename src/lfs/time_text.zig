@@ -78,7 +78,8 @@ pub const GoTime = struct {
         }
         if (rest.len != 0) return null;
         const cal = date.Calendar.fromFields(year, month, day, hour, minute, second) orelse return null;
-        return .{ .unix = cal.moment() - offset, .nanos = nanos, .offset = offset };
+        const unix = std.math.sub(i64, cal.moment() orelse return null, offset) catch return null;
+        return .{ .unix = unix, .nanos = nanos, .offset = offset };
     }
 
     /// Errors from `format`.
@@ -95,7 +96,7 @@ pub const GoTime = struct {
         const cal = date.calendarIn(local, 0) orelse return error.UnwritableTime;
         const year = std.math.cast(u14, cal.year) orelse return error.UnwritableTime;
         if (year > 9999) return error.UnwritableTime;
-        try w.print("{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}", .{ year, cal.month + 1, cal.day, cal.hour, cal.minute, cal.second });
+        try w.print("{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}", .{ year, @as(u8, cal.month) + 1, cal.day, cal.hour, cal.minute, cal.second });
         if (t.nanos != 0) {
             var fraction: [9]u8 = undefined;
             _ = std.fmt.printInt(&fraction, t.nanos, 10, .lower, .{ .width = 9, .fill = '0' });

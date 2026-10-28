@@ -275,28 +275,26 @@ pub const Calendar = struct {
         if (year > 9999 or month < 1 or month > 12 or day < 1 or hour > 23 or minute > 59 or second > 59) return null;
         const lengths = [12]u5{ 31, if (isLeap(year)) 29 else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
         if (day > lengths[month - 1]) return null;
-        var cal: Calendar = .{ .year = year, .month = @intCast(month - 1), .day = @intCast(day), .hour = @intCast(hour), .minute = @intCast(minute), .second = @intCast(second), .weekday = 0 };
-        cal.weekday = @intCast(@mod(cal.days() + 4, 7));
-        return cal;
+        // The weekday is the one `calendarOf` finds for the moment.
+        const date: Calendar = .{ .year = year, .month = @intCast(month - 1), .day = @intCast(day), .hour = @intCast(hour), .minute = @intCast(minute), .second = @intCast(second), .weekday = 0 };
+        return calendarOf(date.moment() orelse return null);
     }
 
-    /// The seconds after the epoch `cal` is, in UTC: `calendarOf`'s inverse,
-    /// for a calendar it or `fromFields` made.
-    pub fn moment(cal: Calendar) i64 {
-        return cal.days() * 86400 + @as(i64, cal.hour) * 3600 + @as(i64, cal.minute) * 60 + cal.second;
-    }
-
-    /// The days after the epoch `cal` is on, counted in eras of 400 years
-    /// from 0000-03-01, as `calendarOf` counts them.
-    fn days(cal: Calendar) i64 {
+    /// The seconds after the epoch `cal` is, in UTC, its weekday not read:
+    /// `calendarOf`'s inverse. `null` for a year past what a timestamp
+    /// holds, which neither it nor `fromFields` makes.
+    pub fn moment(cal: Calendar) ?i64 {
         // The year from March, and the day of that year.
-        const y = cal.year - @intFromBool(cal.month < 2);
+        const y = std.math.sub(i64, cal.year, @intFromBool(cal.month < 2)) catch return null;
         const era = @divFloor(y, 400);
         const yoe = @mod(y, 400);
         const mp: i64 = @mod(@as(i64, cal.month) + 10, 12);
-        const doy = @divFloor(153 * mp + 2, 5) + cal.day - 1;
+        const doy = @divFloor(153 * mp + 2, 5) + @as(i64, cal.day) - 1;
         const doe = yoe * 365 + @divFloor(yoe, 4) - @divFloor(yoe, 100) + doy;
-        return era * 146097 + doe - 719468;
+        const eras = std.math.mul(i64, era, 146097) catch return null;
+        const days = std.math.add(i64, eras, doe - 719468) catch return null;
+        const time = @as(i64, cal.hour) * 3600 + @as(i64, cal.minute) * 60 + @as(i64, cal.second);
+        return std.math.add(i64, std.math.mul(i64, days, 86400) catch return null, time) catch null;
     }
 };
 
@@ -1092,13 +1090,13 @@ fn writeFixed(w: *std.Io.Writer, cal: Calendar, tz: i32, form: Fixed) std.Io.Wri
     // A year before the first is written as 0.
     const year: u64 = std.math.cast(u64, cal.year) orelse 0;
     switch (form) {
-        .short => try w.print("{d:0>4}-{d:0>2}-{d:0>2}", .{ year, cal.month + 1, cal.day }),
+        .short => try w.print("{d:0>4}-{d:0>2}-{d:0>2}", .{ year, @as(u8, cal.month) + 1, cal.day }),
         .iso8601 => {
-            try w.print("{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2} ", .{ year, cal.month + 1, cal.day, cal.hour, cal.minute, cal.second });
+            try w.print("{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2} ", .{ year, @as(u8, cal.month) + 1, cal.day, cal.hour, cal.minute, cal.second });
             try printTz(w, tz);
         },
         .iso8601_strict => {
-            try w.print("{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}", .{ year, cal.month + 1, cal.day, cal.hour, cal.minute, cal.second });
+            try w.print("{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}", .{ year, @as(u8, cal.month) + 1, cal.day, cal.hour, cal.minute, cal.second });
             if (tz == 0) {
                 try w.writeByte('Z');
             } else {
@@ -1291,7 +1289,7 @@ test "a calendar's moment is the time it was made from, and a day that does not 
     const times = [_]i64{ 0, -1, 86399, 86400, 951782400, 951868799, 1_700_000_000, -62167219200, -62167219201, 253402300799, -62135596800, std.math.maxInt(i64), std.math.minInt(i64) + 86400 * 366 };
     for (times) |t| {
         const cal = calendarOf(t);
-        try std.testing.expectEqual(t, cal.moment());
+        try std.testing.expectEqual(t, cal.moment().?);
         if (cal.year >= 0 and cal.year <= 9999) {
             const read = Calendar.fromFields(@intCast(cal.year), @as(u32, cal.month) + 1, cal.day, cal.hour, cal.minute, cal.second).?;
             try std.testing.expectEqual(cal, read);
@@ -1301,7 +1299,7 @@ test "a calendar's moment is the time it was made from, and a day that does not 
     for (0..10_000) |_| {
         const t = prng.random().intRangeAtMost(i64, -62167219200, 253402300799);
         const cal = calendarOf(t);
-        try std.testing.expectEqual(t, cal.moment());
+        try std.testing.expectEqual(t, cal.moment().?);
         try std.testing.expectEqual(cal, Calendar.fromFields(@intCast(cal.year), @as(u32, cal.month) + 1, cal.day, cal.hour, cal.minute, cal.second).?);
     }
     try std.testing.expectEqual(null, Calendar.fromFields(2023, 2, 29, 0, 0, 0));
@@ -1312,6 +1310,12 @@ test "a calendar's moment is the time it was made from, and a day that does not 
     try std.testing.expectEqual(null, Calendar.fromFields(2023, 13, 1, 0, 0, 0));
     try std.testing.expectEqual(null, Calendar.fromFields(2023, 1, 1, 24, 0, 0));
     try std.testing.expectEqual(null, Calendar.fromFields(10000, 1, 1, 0, 0, 0));
+    // A calendar no timestamp holds has no moment.
+    var far = calendarOf(0);
+    far.year = std.math.maxInt(i64);
+    try std.testing.expectEqual(null, far.moment());
+    far.year = std.math.minInt(i64);
+    try std.testing.expectEqual(null, far.moment());
 }
 
 test "a fixed form is shown as show shows it, and asks no clock" {
