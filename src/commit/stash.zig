@@ -377,7 +377,9 @@ const Ctx = struct {
     /// entry whose recorded stat still matches is taken from the index
     /// without reading the file, which is what git's refreshed index lets it
     /// do. With `write`, the blob is stored.
-    fn side(ctx: *Ctx, path: []const u8, entry: ?*const index_mod.Entry, write: bool) Error!?merge.Side {
+    fn side(ctx: *Ctx, raw_path: []const u8, entry: ?*const index_mod.Entry, write: bool) Error!?merge.Side {
+        const checked = try worktree.readable(raw_path, ctx.rules.protect);
+        const path = checked.bytes;
         const found = (try fs.statAt(ctx.io, ctx.wt, path)) orelse return null;
         if (found.kind == .directory) return null;
         const indexed_mode: ?object.Mode = if (entry) |e| e.mode else null;
@@ -407,13 +409,13 @@ const Ctx = struct {
         // Past the threshold with nothing to convert it, read in pieces.
         const conversion: ?worktree.Conversion = if (applied) |each| .{ .session = &ctx.conv, .path = path, .applied = each } else null;
         if (try worktree.streamsIn(ctx.rules.big_file_bytes, found, conversion)) {
-            if (!write) return .{ .mode = mode, .oid = try worktree.hashFile(ctx.io, ctx.wt, ctx.repo.objectFormat(), path) };
+            if (!write) return .{ .mode = mode, .oid = try worktree.hashFile(ctx.io, ctx.wt, ctx.repo.objectFormat(), checked) };
             const db = ctx.repo.objectDatabase();
             const filling = ctx.streamed orelse blk: {
                 ctx.streamed = try db.beginPack(ctx.io, worktree.streamedPackOptions(db));
                 break :blk ctx.streamed.?;
             };
-            return .{ .mode = mode, .oid = try worktree.writeFileInto(ctx.io, ctx.wt, db, filling, path) };
+            return .{ .mode = mode, .oid = try worktree.writeFileInto(ctx.io, ctx.wt, db, filling, checked) };
         }
         const raw = if (found.kind == .sym_link) blk: {
             var buf: [4096]u8 = undefined;

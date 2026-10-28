@@ -270,6 +270,17 @@ pub const Untrusted = aegis.input.Untrusted([]const u8);
 /// function that takes one is handed nothing its rules refuse.
 pub const Checked = struct {
     bytes: []const u8,
+
+    /// The directory the path is in, or null for a path at the top: its
+    /// leading components, each let through with it.
+    pub fn dirname(c: Checked) ?Checked {
+        return .{ .bytes = std.Io.Dir.path.dirnamePosix(c.bytes) orelse return null };
+    }
+
+    /// Path order, git's byte order.
+    pub fn lessThan(_: void, a: Checked, b: Checked) bool {
+        return std.mem.order(u8, a.bytes, b.bytes) == .lt;
+    }
 };
 
 /// What `parse` holds a path to.

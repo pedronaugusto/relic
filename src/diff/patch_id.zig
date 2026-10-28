@@ -107,7 +107,6 @@ fn addPath(h: *hash.Hasher, path: []const u8) void {
 
 fn addMode(h: *hash.Hasher, mode: object.Mode) void {
     var buf: [16]u8 = undefined;
-    // aegis: no-danger: a u32 is at most 11 octal digits
     h.update(std.mem.print(&buf, "{o:0>6}", .{mode.raw()}) catch unreachable);
 }
 

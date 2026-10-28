@@ -86,7 +86,7 @@ pub fn toTree(
     var wanted = try worktree.flatten(arena, io, db, tree);
     // Every path of the tree, before any reaches the working tree: one git
     // refuses would otherwise be deleted below or written through.
-    try worktree.refuseUnsafePaths(&wanted, rules.protect, null);
+    _ = try worktree.refuseUnsafePaths(arena, &wanted, rules.protect, null);
 
     var conflicted: std.StringHashMapUnmanaged(void) = .empty;
     var current: std.array_hash_map.String(?index_mod.Entry) = .empty;
@@ -138,7 +138,7 @@ pub fn toTree(
             .force = mode == .hard,
             .obstructions = options.obstructions,
         });
-        worktree.gitmodulesFirst(rewrite.items);
+        worktree.gitmodulesFirst([]const u8, rewrite.items);
     }
 
     // Git's checkout reads attributes from the index it is installing.

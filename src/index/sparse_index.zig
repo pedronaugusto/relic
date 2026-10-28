@@ -20,6 +20,7 @@
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -336,7 +337,7 @@ fn collapseNode(
         const entry = left[0];
         // `collapse` rebuilt the tree from these entries: each is under
         // the directory its count puts it in.
-        std.debug.assert(std.mem.startsWith(u8, entry.path, prefix.items));
+        aegis.assert.invariant(std.mem.startsWith(u8, entry.path, prefix.items), "a cache tree rebuilt from the entries holds each under its directory");
         const rest = entry.path[base_len..];
         const slash = std.mem.findScalar(u8, rest, '/') orelse rest.len;
         // A file of this directory. A sparse directory below it has a

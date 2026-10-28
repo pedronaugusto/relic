@@ -443,7 +443,7 @@ fn carry(
         try updates.put(arena, path, want);
     }
     std.mem.sort([]const u8, changes.items, {}, lessThanPath);
-    if (rules.submodules != null) worktree.gitmodulesFirst(changes.items);
+    if (rules.submodules != null) worktree.gitmodulesFirst([]const u8, changes.items);
 
     try refuseUnsafeChanges(&desired, rules.protect, options.blocked);
 

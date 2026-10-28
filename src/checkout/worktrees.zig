@@ -207,8 +207,19 @@ const Named = struct {
 /// Read `admin`'s `gitdir` file, a relative path in it taken from `admin`
 /// as git's `worktree.useRelativePaths` writes it. `null` when there is no
 /// such file. Both paths are `arena`'s.
+/// The `gitdir` file of a working tree's administrative directory, or
+/// null where there is none: where the working tree's `.git` file is, as
+/// `worktree add` wrote it.
+fn readGitdir(arena: Allocator, io: Io, admin: Io.Dir, max_bytes: u64) aegis.own.ReadFileError!?[]u8 {
+    // aegis: internal: the gitdir file this program, or git, wrote into the repository's own directory
+    return aegis.own.readFile(io, admin, "gitdir", arena, aegis.units.Bytes(u64).fromRaw(max_bytes)) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir, error.IsDir => return null,
+        else => |e| return e,
+    };
+}
+
 fn namedTree(arena: Allocator, io: Io, admin: Io.Dir) Self.Error!?Named {
-    const text = (try fs.readFileAlloc(arena, io, admin, "gitdir", 4096)) orelse return null;
+    const text = (try readGitdir(arena, io, admin, 4096)) orelse return null;
     const written = std.mem.trim(u8, text, " \t\r\n");
     if (written.len == 0) return null;
     const dot_git = if (std.Io.Dir.path.isAbsolute(written)) written else blk: {
@@ -580,7 +591,7 @@ fn judge(arena: Allocator, io: Io, worktrees_dir: Io.Dir, name: []const u8, expi
         else => |e| return e,
     };
     if (locked) return .locked;
-    const read = fs.readFileAlloc(arena, io, admin, "gitdir", 1 << 20) catch |err| switch (err) {
+    const read = readGitdir(arena, io, admin, 1 << 20) catch |err| switch (err) {
         error.OutOfMemory => |e| return e,
         else => return .{ .prune = .unreadable_gitdir },
     };

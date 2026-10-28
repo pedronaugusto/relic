@@ -629,7 +629,7 @@ const Walker = struct {
             try w.markSeen(path);
             return;
         }
-        _ = safe_path.checked(path, .{ .use = .stored, .protect = w.options.rules.protect }) catch {
+        const checked = safe_path.checked(path, .{ .use = .stored, .protect = w.options.rules.protect }) catch {
             w.outcome.unsafe_paths += 1;
             return;
         };
@@ -649,11 +649,11 @@ const Walker = struct {
             if (racy) w.outcome.racy_checked += 1;
         }
 
-        const read = w.readForAdd(path, found) catch |err| {
+        const read = w.readForAdd(checked, found) catch |err| {
             try w.skipFile(path, err);
             return;
         };
-        const blob = w.store(path, read) catch |err| switch (err) {
+        const blob = w.store(checked, read) catch |err| switch (err) {
             error.CollisionAttack => {
                 try w.skipFile(path, err);
                 return;
@@ -707,7 +707,8 @@ const Walker = struct {
     /// (`streamsIn`), that it is read in pieces as it is stored.
     const Read = union(enum) { bytes: []const u8, streamed };
 
-    fn readForAdd(w: *Walker, path: []const u8, found: fs.Entry) Error!Read {
+    fn readForAdd(w: *Walker, checked: safe_path.Checked, found: fs.Entry) Error!Read {
+        const path = checked.bytes;
         _ = w.scratch.reset(.retain_capacity);
         const a = w.scratch.allocator();
 
@@ -734,7 +735,7 @@ const Walker = struct {
 
     /// Put a blob where this pass puts them: a streamed one into the pack
     /// for those, unless every blob goes into one.
-    fn store(w: *Walker, path: []const u8, read: Read) Error!Oid {
+    fn store(w: *Walker, path: safe_path.Checked, read: Read) Error!Oid {
         const bytes = switch (read) {
             .bytes => |bytes| bytes,
             .streamed => {
@@ -774,8 +775,8 @@ pub fn streamsIn(threshold: aegis.units.Bytes(u64), found: fs.Entry, conversion:
 /// The name the file at `path` has as a blob, hashed as it is read, as
 /// git's `index_fd` names a file it streams: its length the opened file's,
 /// so a file that changes as it is read is named as no blob.
-pub fn hashFile(io: Io, wt: Io.Dir, kind: hash.Kind, path: []const u8) Error!Oid {
-    const file = try wt.openFile(io, path, .{});
+pub fn hashFile(io: Io, wt: Io.Dir, kind: hash.Kind, path: safe_path.Checked) Error!Oid {
+    const file = try wt.openFile(io, path.bytes, .{});
     defer file.close(io);
     const size = (try file.stat(io)).size;
     var buffer: [64 * 1024]u8 = undefined;
@@ -800,8 +801,8 @@ pub fn hashFile(io: Io, wt: Io.Dir, kind: hash.Kind, path: []const u8) Error!Oid
 /// git's add streams a file past `core.bigFileThreshold` into a pack
 /// (`index_blob_bulk_checkin`): its length the opened file's, and taken
 /// back out where the database or the pack holds it already.
-pub fn writeFileInto(io: Io, wt: Io.Dir, db: *Odb, filling: Odb.OpenPack, path: []const u8) Error!Oid {
-    const file = try wt.openFile(io, path, .{});
+pub fn writeFileInto(io: Io, wt: Io.Dir, db: *Odb, filling: Odb.OpenPack, path: safe_path.Checked) Error!Oid {
+    const file = try wt.openFile(io, path.bytes, .{});
     defer file.close(io);
     const size = (try file.stat(io)).size;
     var buffer: [64 * 1024]u8 = undefined;
@@ -830,6 +831,14 @@ pub fn streamedPackOptions(db: *Odb) odb_mod.PackOptions {
 /// A working tree's files beside the index entries that record them: the
 /// objects those name, how a file is converted, and the rules it is read
 /// by.
+/// `path`, the index's or a tree's, as the working tree is read at it:
+/// held to git's `verify_path` for a stored path, so no read leaves the
+/// working tree or reaches a repository's own files. What a checkout
+/// creates is held to the working tree's rules instead.
+pub fn readable(path: []const u8, protect: safe_path.Protect) Error!safe_path.Checked {
+    return safe_path.checked(path, .{ .use = .stored, .protect = protect }) catch error.UnsafePath;
+}
+
 pub const Tracked = struct {
     pub const Error = ErrorNamespace.Error;
 
@@ -844,7 +853,7 @@ pub const Tracked = struct {
     /// `path` is what `entry` records -- of its kind and mode, its stat
     /// matching, and where the stat cannot vouch for it (the racy case) its
     /// content as it would be stored. An intent to add matches nothing.
-    pub fn matches(t: Tracked, a: Allocator, entry: index_mod.Entry, path: []const u8, found: fs.Entry) Self.Error!bool {
+    pub fn matches(t: Tracked, a: Allocator, entry: index_mod.Entry, path: safe_path.Checked, found: fs.Entry) Self.Error!bool {
         if (entry.intent_to_add) return false;
         if (entry.mode != modeOnDisk(found, entry.mode, t.rules)) return false;
         return t.sameContent(a, entry, path, found);
@@ -852,11 +861,11 @@ pub const Tracked = struct {
 
     /// Whether a file of the entry's mode holds what the entry records: its
     /// stat, or where that cannot vouch for it, its content.
-    pub fn sameContent(t: Tracked, a: Allocator, entry: index_mod.Entry, path: []const u8, found: fs.Entry) Self.Error!bool {
+    pub fn sameContent(t: Tracked, a: Allocator, entry: index_mod.Entry, path: safe_path.Checked, found: fs.Entry) Self.Error!bool {
         if (!t.index.isRacy(entry) and entry.stat.matches(found.stat, t.rules.statCompare())) return true;
         // The stat says it may have changed; the content says whether it
         // did. This is the racy rule doing its work.
-        const conversion: ?Conversion = if (t.rules.attrs) |attrs| .{ .session = t.conv, .path = path, .applied = try attrs.lookup(a, path, .file) } else null;
+        const conversion: ?Conversion = if (t.rules.attrs) |attrs| .{ .session = t.conv, .path = path.bytes, .applied = try attrs.lookup(a, path.bytes, .file) } else null;
         if (try streamsIn(t.rules.big_file_bytes, found, conversion)) return (try hashFile(t.io, t.wt, t.db.objectFormat(), path)).eql(entry.oid);
         const content = try t.storedBytes(a, path, found);
         return hash.Hasher.object(t.db.objectFormat(), "blob", content).eql(entry.oid);
@@ -865,17 +874,17 @@ pub const Tracked = struct {
     /// What `path` would be stored as: a symlink's target, a file's bytes
     /// through its clean filter, encoding, line endings and `ident`, as
     /// git's `diff_populate_filespec` reads a working-tree file.
-    pub fn storedBytes(t: Tracked, a: Allocator, path: []const u8, found: fs.Entry) Self.Error![]const u8 {
+    pub fn storedBytes(t: Tracked, a: Allocator, path: safe_path.Checked, found: fs.Entry) Self.Error![]const u8 {
         if (found.kind == .sym_link) {
             var buf: [4096]u8 = undefined;
-            const len = try t.wt.readLink(t.io, path, &buf);
+            const len = try t.wt.readLink(t.io, path.bytes, &buf);
             return a.dupe(u8, buf[0..len]);
         }
         if (t.rules.attrs) |attrs| {
-            const applied = try attrs.lookup(a, path, .file);
-            return (try t.conv.toGitFile(a, .{ .path = path, .size = found.size, .applied = applied }, .{ .storing = .hash_only })).bytes;
+            const applied = try attrs.lookup(a, path.bytes, .file);
+            return (try t.conv.toGitFile(a, .{ .path = path.bytes, .size = found.size, .applied = applied }, .{ .storing = .hash_only })).bytes;
         }
-        return aegis.own.readFile(t.io, t.wt, path, a, aegis.units.Bytes(u64).fromRaw(1 << 31));
+        return aegis.own.readFile(t.io, t.wt, path.bytes, a, aegis.units.Bytes(u64).fromRaw(1 << 31));
     }
 };
 
@@ -1613,8 +1622,9 @@ const StatusScan = struct {
             if (entry_ptr.skip_worktree or entry_ptr.assume_valid) continue;
             if (s.monitored and entry_ptr.fsmonitor_valid) continue;
 
-            const change = try s.compare(entry_ptr, path, found);
-            if (change != .unmodified) try s.recordFound(entry_ptr, path, found, change) else s.vouch(entry_ptr);
+            const checked = try readable(path, s.options.rules.protect);
+            const change = try s.compare(entry_ptr, checked, found);
+            if (change != .unmodified) try s.recordFound(entry_ptr, checked, found, change) else s.vouch(entry_ptr);
         }
     }
 
@@ -1640,7 +1650,8 @@ const StatusScan = struct {
             // Behind a symlink or a file is not in the working tree at all,
             // as the walk finds it.
             if (try s.behindNonDirectory(entry.path, &not_directories)) continue;
-            const found = (try fs.statAt(s.io, s.wt, entry.path)) orelse continue;
+            const checked = try readable(entry.path, s.options.rules.protect);
+            const found = (try fs.statAt(s.io, s.wt, checked.bytes)) orelse continue;
             if (found.kind == .directory) {
                 if (entry.mode != .gitlink) continue;
                 try s.seen.put(s.gpa, entry.path, {});
@@ -1649,8 +1660,8 @@ const StatusScan = struct {
             }
             try s.seen.put(s.gpa, entry.path, {});
             if (s.options.rules.attrs) |attrs| try attrs.enter(s.io, s.wt, entry.path);
-            const change = try s.compare(entry, entry.path, found);
-            if (change != .unmodified) try s.recordFound(entry, entry.path, found, change) else s.vouch(entry);
+            const change = try s.compare(entry, checked, found);
+            if (change != .unmodified) try s.recordFound(entry, checked, found, change) else s.vouch(entry);
         }
     }
 
@@ -1800,7 +1811,7 @@ const StatusScan = struct {
         return out;
     }
 
-    fn compare(s: *StatusScan, entry: *index_mod.Entry, path: []const u8, found: fs.Entry) Error!Change {
+    fn compare(s: *StatusScan, entry: *index_mod.Entry, path: safe_path.Checked, found: fs.Entry) Error!Change {
         // An intent to add is the file added, whatever it holds: git's
         // `run_diff_files` under `ita_invisible_in_index`.
         if (entry.intent_to_add) return .added;
@@ -1831,11 +1842,11 @@ const StatusScan = struct {
 
     /// Record a tracked file's change, and for a file added under an intent
     /// to add, when `StatusOptions.added_content` asks, what it holds.
-    fn recordFound(s: *StatusScan, entry: *const index_mod.Entry, path: []const u8, found: fs.Entry, change: Change) Error!void {
-        try s.record(path, change);
+    fn recordFound(s: *StatusScan, entry: *const index_mod.Entry, path: safe_path.Checked, found: fs.Entry, change: Change) Error!void {
+        try s.record(path.bytes, change);
         if (change != .added or !s.options.added_content) return;
         const bytes = try s.trackedFiles().storedBytes(s.arena, path, found);
-        s.entries.getPtr(path).?.added = .{
+        s.entries.getPtr(path.bytes).?.added = .{
             .mode = modeOnDisk(found, entry.mode, s.options.rules),
             .oid = hash.Hasher.object(s.db.objectFormat(), "blob", bytes),
             .bytes = bytes,
@@ -2124,7 +2135,7 @@ pub fn checkout(
     });
     defer conv.deinit(io);
 
-    try refuseUnsafeTree(arena, &wanted, options);
+    const paths = try refuseUnsafeTree(arena, &wanted, options);
     if (!options.force) {
         try verifyCheckout(gpa, arena, io, wt, index, &wanted, options);
     } else if (options.rules.submodules) |mover| {
@@ -2139,16 +2150,8 @@ pub fn checkout(
     var removed_dirs = try removeUnwanted(arena, io, wt, index, &wanted, options.rules, &outcome);
 
     // Write what the tree has, in path order.
-    var paths = try arena.alloc([]const u8, wanted.count());
-    var n: usize = 0;
-    var key_it = wanted.keyIterator();
-    while (key_it.next()) |key| {
-        paths[n] = key.*;
-        n += 1;
-    }
-    assert(n == paths.len);
-    std.mem.sort([]const u8, paths, {}, lessThanName);
-    if (options.rules.submodules != null) gitmodulesFirst(paths);
+    std.mem.sort(safe_path.Checked, paths, {}, safe_path.Checked.lessThan);
+    if (options.rules.submodules != null) gitmodulesFirst(safe_path.Checked, paths);
     try removeEmptiedDirectories(io, wt, index, paths, &wanted, options.force);
 
     var writing: CheckoutWrite = .{
@@ -2168,7 +2171,7 @@ pub fn checkout(
     outcome.native_fallbacks = conv.fallbackCount();
 
     if (options.remove_empty_directories) {
-        var dir_it = removed_dirs.keyIterator();
+        var dir_it = removed_dirs.valueIterator();
         while (dir_it.next()) |dir_path| {
             removeEmptyDirectories(io, wt, dir_path.*);
         }
@@ -2193,27 +2196,31 @@ fn describeTree(index: *Index, tree_oid: Oid) Allocator.Error!void {
 
 /// Every path out of the tree is checked before it becomes a filesystem
 /// path. A tree is a file format and anyone may write one.
-fn refuseUnsafeTree(arena: Allocator, wanted: *std.StringHashMapUnmanaged(TreeEntry), options: CheckoutOptions) Error!void {
-    try refuseUnsafePaths(wanted, options.rules.protect, options.refusal);
+fn refuseUnsafeTree(arena: Allocator, wanted: *std.StringHashMapUnmanaged(TreeEntry), options: CheckoutOptions) Error![]safe_path.Checked {
+    const paths = try refuseUnsafePaths(arena, wanted, options.rules.protect, options.refusal);
     if (options.rules.ignore_case) {
         try refuseCaseCollisions(arena, wanted);
     }
     try refuseCollidingPaths(arena, wanted, options.rules.ignore_case, options.refusal);
+    return paths;
 }
 
 /// Refuse a tree whose paths git's `verify_path` refuses, before any of
 /// them reaches the working tree, as unpack-trees refuses one: `refusal`
-/// says which path and why.
-pub fn refuseUnsafePaths(wanted: *const std.StringHashMapUnmanaged(TreeEntry), protect: safe_path.Protect, refusal: ?*Refusal) Error!void {
+/// says which path and why. The paths come back as checked, in no order.
+pub fn refuseUnsafePaths(arena: Allocator, wanted: *const std.StringHashMapUnmanaged(TreeEntry), protect: safe_path.Protect, refusal: ?*Refusal) Error![]safe_path.Checked {
+    const paths = try arena.alloc(safe_path.Checked, wanted.count());
     var check_it = wanted.iterator();
-    while (check_it.next()) |entry| {
+    for (paths) |*out| {
+        const entry = check_it.next().?;
         const path = entry.key_ptr.*;
         var refused: safe_path.Refusal = undefined;
-        _ = safe_path.checked(path, .{ .use = .worktree, .protect = protect, .symlink = entry.value_ptr.mode == .symlink, .refusal = &refused }) catch {
-            if (refusal) |out| out.set(refused.reason, path);
+        out.* = safe_path.checked(path, .{ .use = .worktree, .protect = protect, .symlink = entry.value_ptr.mode == .symlink, .refusal = &refused }) catch {
+            if (refusal) |r| r.set(refused.reason, path);
             return error.UnsafePath;
         };
     }
+    return paths;
 }
 
 /// An entry standing where another entry of the tree has its directory --
@@ -2327,8 +2334,8 @@ fn removeUnwanted(
     wanted: *const std.StringHashMapUnmanaged(TreeEntry),
     rules: Rules,
     outcome: *CheckoutOutcome,
-) Error!std.StringHashMapUnmanaged(void) {
-    var removed_dirs: std.StringHashMapUnmanaged(void) = .empty;
+) Error!std.StringHashMapUnmanaged(safe_path.Checked) {
+    var removed_dirs: std.StringHashMapUnmanaged(safe_path.Checked) = .empty;
     var leading: LeadingDirs = .{};
     var i: usize = 0;
     while (i < index.entries.items.len) {
@@ -2342,16 +2349,18 @@ fn removeUnwanted(
             i += 1;
             continue;
         }
-        if (!try leading.real(io, wt, std.Io.Dir.path.dirnamePosix(entry.path) orelse "")) {
+        const path = try readable(entry.path, rules.protect);
+        if (!try leading.real(io, wt, if (path.dirname()) |parent| parent.bytes else "")) {
             // Past a symbolic link: nothing of the working tree's to remove.
         } else if (entry.mode == .gitlink) {
-            try removeGitlink(io, wt, entry.path, rules);
-        } else fs.deleteFile(io, wt, entry.path) catch |err| switch (err) {
+            try removeGitlink(io, wt, path.bytes, rules);
+        } else fs.deleteFile(io, wt, path.bytes) catch |err| switch (err) {
             error.FileNotFound, error.NotDir, error.IsDir => {},
             else => |e| return e,
         };
-        if (std.Io.Dir.path.dirnamePosix(entry.path)) |parent| {
-            try removed_dirs.put(arena, try arena.dupe(u8, parent), {});
+        if (path.dirname()) |parent| {
+            const kept = try arena.dupe(u8, parent.bytes);
+            try removed_dirs.put(arena, kept, .{ .bytes = kept });
         }
         const tree = try index.cacheTree();
         tree.invalidate(entry.path);
@@ -2368,12 +2377,13 @@ fn removeEmptiedDirectories(
     io: Io,
     wt: Io.Dir,
     index: *const Index,
-    paths: []const []const u8,
+    paths: []const safe_path.Checked,
     wanted: *const std.StringHashMapUnmanaged(TreeEntry),
     force: bool,
 ) Error!void {
     var leading: LeadingDirs = .{};
-    for (paths) |path| {
+    for (paths) |checked| {
+        const path = checked.bytes;
         const want = wanted.get(path).?;
         if (want.mode == .gitlink) continue;
         if (keeps(index, path, want, force)) continue;
@@ -2389,11 +2399,13 @@ const gitmodules_path = ".gitmodules";
 /// Put `.gitmodules` first in the sorted `paths`, when it is there: git
 /// checks it out before anything else when it moves submodules
 /// (`load_gitmodules_file`), so every move reads the names the new one
-/// gives.
-pub fn gitmodulesFirst(paths: [][]const u8) void {
+/// gives. `Path` is `[]const u8`, or `names.path.Checked` for paths
+/// already checked.
+pub fn gitmodulesFirst(comptime Path: type, paths: []Path) void {
     for (paths, 0..) |path, i| {
-        if (!std.mem.eql(u8, path, gitmodules_path)) continue;
-        std.mem.rotate([]const u8, paths[0 .. i + 1], i);
+        const bytes: []const u8 = if (Path == safe_path.Checked) path.bytes else path;
+        if (!std.mem.eql(u8, bytes, gitmodules_path)) continue;
+        std.mem.rotate(Path, paths[0 .. i + 1], i);
         return;
     }
 }
@@ -2414,7 +2426,7 @@ const CheckoutWrite = struct {
     /// Write `paths`, sorted. Regular files are written on tasks, a batch
     /// at a time; everything else, and everything a batch needs first,
     /// here and in order.
-    fn all(c: *const CheckoutWrite, paths: []const []const u8) Error!void {
+    fn all(c: *const CheckoutWrite, paths: []const safe_path.Checked) Error!void {
         var batch: WriteBatch = .{ .gpa = c.gpa, .workers = checkoutWorkers(c.options.workers) };
         defer batch.deinit();
         // A path that fails here leaves every path before it written, as a
@@ -2426,17 +2438,18 @@ const CheckoutWrite = struct {
             batch.flush(c.io, c.wt, c.index, c.outcome, c.options.rules) catch {};
         }
         var leading: LeadingDirs = .{ .hide = c.options.rules.hide_dot_files };
-        for (paths) |path| {
+        for (paths) |checked| {
             try c.io.checkCancel();
+            const path = checked.bytes;
             const want = c.wanted.get(path).?;
             if (try c.unchanged(path, want)) {
                 c.outcome.unchanged += 1;
                 continue;
             }
-            if (std.Io.Dir.path.dirnamePosix(path)) |parent| {
+            if (checked.dirname()) |parent| {
                 try leading.make(c.io, c.wt, parent, c.options.force, c.options.refusal);
             }
-            try c.one(&batch, &leading, path, want);
+            try c.one(&batch, &leading, checked, want);
             if (c.options.rules.submodules != null and std.mem.eql(u8, path, gitmodules_path)) try batch.flush(c.io, c.wt, c.index, c.outcome, c.options.rules);
         }
         try batch.flush(c.io, c.wt, c.index, c.outcome, c.options.rules);
@@ -2457,16 +2470,17 @@ const CheckoutWrite = struct {
 
     /// Write one path, or hand a regular file to `batch`, or leave one a
     /// filter delays for `late`.
-    fn one(c: *const CheckoutWrite, batch: *WriteBatch, leading: *LeadingDirs, path: []const u8, want: TreeEntry) Error!void {
+    fn one(c: *const CheckoutWrite, batch: *WriteBatch, leading: *LeadingDirs, checked: safe_path.Checked, want: TreeEntry) Error!void {
+        const path = checked.bytes;
         switch (want.mode) {
             .gitlink => {
-                try writeGitlink(c.gpa, c.io, c.wt, leading, .{ .path = path, .oid = want.oid, .rules = c.options.rules, .force = c.options.force, .refusal = c.options.refusal });
+                try writeGitlink(c.gpa, c.io, c.wt, leading, .{ .path = checked, .oid = want.oid, .rules = c.options.rules, .force = c.options.force, .refusal = c.options.refusal });
                 c.outcome.gitlinks += 1;
             },
             .symlink => {
                 const found = try c.db.read(c.io, want.oid);
                 defer c.db.allocator().free(found.bytes);
-                if (try writeLink(c.io, c.wt, path, found.bytes, c.options.rules.symlinks)) c.outcome.symlinks_as_files += 1;
+                if (try writeLink(c.io, c.wt, checked, found.bytes, c.options.rules.symlinks)) c.outcome.symlinks_as_files += 1;
                 // A link where a proved directory's name folds to it is
                 // looked at again before anything is written under it.
                 leading.forget();
@@ -2482,7 +2496,7 @@ const CheckoutWrite = struct {
                 defer blob.deinit(c.gpa, c.io, c.db);
                 const smudged: native.Content = switch (blob) {
                     .streamed => |*streamed| {
-                        try writeFile(c.io, c.wt, path, .{ .stream = streamed }, executable);
+                        try writeFile(c.io, c.wt, checked, .{ .stream = streamed }, executable);
                         c.outcome.written += 1;
                         return recordWritten(c.io, c.wt, c.index, path, want, c.options.rules);
                     },
@@ -2497,12 +2511,12 @@ const CheckoutWrite = struct {
                     // Its index entry is added when it arrives.
                     .delayed => return,
                     .bytes => |bytes| {
-                        if (try batch.add(path, want, bytes, executable)) {
+                        if (try batch.add(checked, want, bytes, executable)) {
                             try batch.flush(c.io, c.wt, c.index, c.outcome, c.options.rules);
                         }
                         return;
                     },
-                    .file => try writeSmudged(c.io, c.wt, path, smudged, executable),
+                    .file => try writeSmudged(c.io, c.wt, checked, smudged, executable),
                 }
                 c.outcome.written += 1;
             },
@@ -2518,7 +2532,8 @@ const CheckoutWrite = struct {
         while (try c.conv.nextReady(arena.allocator())) |ready| {
             defer _ = arena.reset(.retain_capacity);
             const want = c.wanted.get(ready.path).?;
-            try writeSmudged(c.io, c.wt, ready.path, ready.content, want.mode == .exec and c.options.rules.file_mode);
+            const path = safe_path.checked(ready.path, .{ .use = .worktree, .protect = c.options.rules.protect }) catch return error.UnsafePath;
+            try writeSmudged(c.io, c.wt, path, ready.content, want.mode == .exec and c.options.rules.file_mode);
             c.outcome.written += 1;
             try recordWritten(c.io, c.wt, c.index, ready.path, want, c.options.rules);
         }
@@ -2542,7 +2557,8 @@ const LeadingDirs = struct {
     /// standing as one is replaced when `force`, as git's forced checkout
     /// replaces it; otherwise a link is refused as `.beyond_symlink`, and a
     /// file is `error.NotDir`.
-    fn make(l: *LeadingDirs, io: Io, wt: Io.Dir, dir: []const u8, force: bool, refusal: ?*Refusal) Error!void {
+    fn make(l: *LeadingDirs, io: Io, wt: Io.Dir, checked: safe_path.Checked, force: bool, refusal: ?*Refusal) Error!void {
+        const dir = checked.bytes;
         var start = l.provenUpTo(dir);
         while (start < dir.len) {
             const end = std.mem.findScalarPos(u8, dir, start, '/') orelse dir.len;
@@ -2620,8 +2636,8 @@ pub fn realLeadingPath(io: Io, wt: Io.Dir, path: []const u8) Self.Error!bool {
 
 /// Make the directories above `path` for a write that replaces whatever is
 /// at it, refusing a symbolic link among them.
-fn makeLeadingDirs(io: Io, wt: Io.Dir, path: []const u8, hide: fs.HideDotFiles) Error!void {
-    const parent = std.Io.Dir.path.dirnamePosix(path) orelse return;
+fn makeLeadingDirs(io: Io, wt: Io.Dir, path: safe_path.Checked, hide: fs.HideDotFiles) Error!void {
+    const parent = path.dirname() orelse return;
     var leading: LeadingDirs = .{ .hide = hide };
     try leading.make(io, wt, parent, false, null);
 }
@@ -2629,11 +2645,12 @@ fn makeLeadingDirs(io: Io, wt: Io.Dir, path: []const u8, hide: fs.HideDotFiles) 
 /// Write a symlink to `target` at `path`, replacing whatever is there; or,
 /// where `symlinks` is off or the platform refuses one, an ordinary file
 /// holding the target. `true` when it was written as a file.
-fn writeLink(io: Io, wt: Io.Dir, path: []const u8, target: []const u8, symlinks: bool) Error!bool {
+fn writeLink(io: Io, wt: Io.Dir, path: safe_path.Checked, target: []const u8, symlinks: bool) Error!bool {
     // glint-ignore: Z026 -- whatever is at the path is replaced next; a file that would not go is the error the link or the write reports
-    fs.deleteFile(io, wt, path) catch {};
+    fs.deleteFile(io, wt, path.bytes) catch {};
     if (symlinks) {
-        if (wt.symLink(io, target, path, .{})) |_| return false else |_| {}
+        // aegis: design: a link's target is what the link holds, written as git writes it: nothing is opened through it here
+        if (wt.symLink(io, target, path.bytes, .{})) |_| return false else |_| {}
     }
     try writeFile(io, wt, path, .{ .bytes = target }, false);
     return true;
@@ -2641,7 +2658,7 @@ fn writeLink(io: Io, wt: Io.Dir, path: []const u8, target: []const u8, symlinks:
 
 // Sync existing paths too: a skipped write is not evidence of durability.
 // Symlink bytes live in their directory; gitlinks belong to another store.
-fn syncCheckout(arena: Allocator, io: Io, wt: Io.Dir, wanted: *const std.StringHashMapUnmanaged(TreeEntry), removed: *const std.StringHashMapUnmanaged(void)) Error!void {
+fn syncCheckout(arena: Allocator, io: Io, wt: Io.Dir, wanted: *const std.StringHashMapUnmanaged(TreeEntry), removed: *const std.StringHashMapUnmanaged(safe_path.Checked)) Error!void {
     var dirs: std.StringHashMap(bool) = .init(arena);
     try dirs.put(".", true);
     var files: std.ArrayList(fs.Named) = .empty;
@@ -2727,7 +2744,7 @@ const WriteBatch = struct {
     }
 
     const Job = struct {
-        path: []const u8,
+        path: safe_path.Checked,
         want: TreeEntry,
         bytes: []const u8,
         executable: bool,
@@ -2742,7 +2759,7 @@ const WriteBatch = struct {
     }
 
     /// Take a copy of a file to write; `true` when the batch is full.
-    fn add(b: *WriteBatch, path: []const u8, want: TreeEntry, bytes: []const u8, executable: bool) Allocator.Error!bool {
+    fn add(b: *WriteBatch, path: safe_path.Checked, want: TreeEntry, bytes: []const u8, executable: bool) Allocator.Error!bool {
         var arena = b.arena.promote(b.gpa);
         defer b.arena = arena.state;
         const owned = try arena.allocator().dupe(u8, bytes);
@@ -2783,8 +2800,8 @@ const WriteBatch = struct {
                 if (first == null) first = err;
                 continue;
             };
-            fs.hideIfAsked(io, wt, job.path, rules.hide_dot_files);
-            try recordStat(index, job.path, job.want, stat, rules);
+            fs.hideIfAsked(io, wt, job.path.bytes, rules.hide_dot_files);
+            try recordStat(index, job.path.bytes, job.want, stat, rules);
             outcome.written += 1;
         }
         if (first) |err| return err;
@@ -2806,7 +2823,7 @@ const WriteBatch = struct {
 
     fn write(io: Io, wt: Io.Dir, job: *const Job) Error!?fs.Stat {
         try writeFile(io, wt, job.path, .{ .bytes = job.bytes }, job.executable);
-        const after = try fs.statAt(io, wt, job.path);
+        const after = try fs.statAt(io, wt, job.path.bytes);
         return if (after) |found| found.stat else null;
     }
 };
@@ -2964,7 +2981,7 @@ pub fn addTreeAttributes(
     }
 }
 
-fn writeSmudged(io: Io, wt: Io.Dir, path: []const u8, smudged: native.Content, executable: bool) Error!void {
+fn writeSmudged(io: Io, wt: Io.Dir, path: safe_path.Checked, smudged: native.Content, executable: bool) Error!void {
     var content = smudged;
     switch (content) {
         .bytes => |bytes| try writeFile(io, wt, path, .{ .bytes = bytes }, executable),
@@ -3011,11 +3028,14 @@ pub fn writePaths(
     const writes = inputs.writes;
     var outcome: CheckoutOutcome = .{};
     defer if (options.rules.attrs) |attrs| attrs.leave();
-    for (writes) |w| {
+    // Each path as checked, for everything below to reach it by.
+    const checked = try gpa.alloc(safe_path.Checked, writes.len);
+    defer gpa.free(checked);
+    for (writes, checked) |w, *out| {
         const symlink = if (w.blob) |b| b.mode == .symlink else false;
         var refused: safe_path.Refusal = undefined;
-        _ = safe_path.checked(w.path, .{ .use = .worktree, .protect = options.rules.protect, .symlink = symlink, .refusal = &refused }) catch {
-            if (options.refusal) |out| out.set(refused.reason, w.path);
+        out.* = safe_path.checked(w.path, .{ .use = .worktree, .protect = options.rules.protect, .symlink = symlink, .refusal = &refused }) catch {
+            if (options.refusal) |r| r.set(refused.reason, w.path);
             return error.UnsafePath;
         };
     }
@@ -3031,53 +3051,55 @@ pub fn writePaths(
     });
     defer conv.deinit(io);
 
-    try removePaths(io, wt, index, writes, options.remove_empty_directories, &outcome);
+    try removePaths(io, wt, index, writes, checked, options.remove_empty_directories, &outcome);
 
-    var waiting: std.StringHashMapUnmanaged(PathWrite) = .empty;
+    // What a filter delays, by its path: its place in `writes`.
+    var waiting: std.StringHashMapUnmanaged(usize) = .empty;
     defer waiting.deinit(gpa);
     var leading: LeadingDirs = .{ .hide = options.rules.hide_dot_files };
-    for (writes) |w| {
+    for (writes, checked, 0..) |w, path, i| {
         try io.checkCancel();
         const want = w.blob orelse continue;
-        if (std.Io.Dir.path.dirnamePosix(w.path)) |parent| try leading.make(io, wt, parent, options.force, options.refusal);
-        if (try fs.statAt(io, wt, w.path)) |found| {
+        if (path.dirname()) |parent| try leading.make(io, wt, parent, options.force, options.refusal);
+        if (try fs.statAt(io, wt, path.bytes)) |found| {
             // An empty directory gives way; one with anything in it is
             // someone's work, or a submodule's checkout.
-            if (found.kind == .directory and want.mode != .gitlink) wt.deleteDir(io, w.path) catch return error.UntrackedWouldBeOverwritten;
+            if (found.kind == .directory and want.mode != .gitlink) wt.deleteDir(io, path.bytes) catch return error.UntrackedWouldBeOverwritten;
         }
         switch (want.mode) {
             .gitlink => {
-                try writeGitlink(gpa, io, wt, &leading, .{ .path = w.path, .oid = want.oid, .rules = options.rules, .force = options.force, .refusal = options.refusal });
+                try writeGitlink(gpa, io, wt, &leading, .{ .path = path, .oid = want.oid, .rules = options.rules, .force = options.force, .refusal = options.refusal });
                 outcome.gitlinks += 1;
             },
             .symlink => {
                 const found = try db.read(io, want.oid);
                 defer db.allocator().free(found.bytes);
-                if (try writeLink(io, wt, w.path, found.bytes, options.rules.symlinks)) outcome.symlinks_as_files += 1;
+                if (try writeLink(io, wt, path, found.bytes, options.rules.symlinks)) outcome.symlinks_as_files += 1;
                 leading.forget();
                 outcome.written += 1;
             },
             .file, .exec => {
-                if (!try writePathFile(gpa, io, wt, db, &conv, w.path, want, options.rules)) {
-                    try waiting.put(gpa, w.path, w);
+                if (!try writePathFile(gpa, io, wt, db, &conv, path, want, options.rules)) {
+                    try waiting.put(gpa, w.path, i);
                     continue;
                 }
                 outcome.written += 1;
             },
             .tree => return error.UnsupportedEntry,
         }
-        if (w.index) try recordWritten(io, wt, index, w.path, .{ .mode = want.mode, .oid = want.oid }, options.rules);
+        if (w.index) try recordWritten(io, wt, index, path.bytes, .{ .mode = want.mode, .oid = want.oid }, options.rules);
     }
 
     var late: std.heap.ArenaAllocator = .init(gpa);
     defer late.deinit();
     while (try conv.nextReady(late.allocator())) |ready| {
         defer _ = late.reset(.retain_capacity);
-        const w = waiting.get(ready.path).?;
+        const i = waiting.get(ready.path).?;
+        const w = writes[i];
         const want = w.blob.?;
-        try writeSmudged(io, wt, w.path, ready.content, want.mode == .exec and options.rules.file_mode);
+        try writeSmudged(io, wt, checked[i], ready.content, want.mode == .exec and options.rules.file_mode);
         outcome.written += 1;
-        if (w.index) try recordWritten(io, wt, index, w.path, .{ .mode = want.mode, .oid = want.oid }, options.rules);
+        if (w.index) try recordWritten(io, wt, index, checked[i].bytes, .{ .mode = want.mode, .oid = want.oid }, options.rules);
     }
     outcome.native_fallbacks = conv.fallbackCount();
     return outcome;
@@ -3090,14 +3112,15 @@ fn removePaths(
     wt: Io.Dir,
     index: *Index,
     writes: []const PathWrite,
+    checked: []const safe_path.Checked,
     remove_empty_directories: bool,
     outcome: *CheckoutOutcome,
 ) Error!void {
     var leading: LeadingDirs = .{};
-    for (writes) |w| {
+    for (writes, checked) |w, path| {
         if (w.blob != null) continue;
         // A file past a symbolic link is not the working tree's to remove.
-        if (try leading.real(io, wt, std.Io.Dir.path.dirnamePosix(w.path) orelse "")) fs.deleteFile(io, wt, w.path) catch |err| switch (err) {
+        if (try leading.real(io, wt, if (path.dirname()) |parent| parent.bytes else "")) fs.deleteFile(io, wt, path.bytes) catch |err| switch (err) {
             error.FileNotFound, error.NotDir => {},
             else => |e| return e,
         };
@@ -3108,7 +3131,7 @@ fn removePaths(
         }
         outcome.removed += 1;
         if (remove_empty_directories) {
-            if (std.Io.Dir.path.dirnamePosix(w.path)) |parent| removeEmptyDirectories(io, wt, parent);
+            if (path.dirname()) |parent| removeEmptyDirectories(io, wt, parent);
         }
     }
 }
@@ -3121,10 +3144,11 @@ fn writePathFile(
     wt: Io.Dir,
     db: *Odb,
     conv: *convert.Session,
-    path: []const u8,
+    checked: safe_path.Checked,
     want: PathWrite.Blob,
     rules: Rules,
 ) Error!bool {
+    const path = checked.bytes;
     aegis.assert.invariant(want.mode == .file or want.mode == .exec, "want.mode == .file or want.mode == .exec");
     var scratch: std.heap.ArenaAllocator = .init(gpa);
     defer scratch.deinit();
@@ -3138,7 +3162,7 @@ fn writePathFile(
     defer blob.deinit(gpa, io, db);
     const smudged: native.Content = switch (blob) {
         .streamed => |*streamed| {
-            try writeFile(io, wt, path, .{ .stream = streamed }, executable);
+            try writeFile(io, wt, checked, .{ .stream = streamed }, executable);
             if (rules.attrs) |attrs| attrs.written(path);
             return true;
         },
@@ -3149,7 +3173,7 @@ fn writePathFile(
         }) else .{ .bytes = bytes },
     };
     if (smudged == .delayed) return false;
-    try writeSmudged(io, wt, path, smudged, executable);
+    try writeSmudged(io, wt, checked, smudged, executable);
     if (rules.attrs) |attrs| attrs.written(path);
     return true;
 }
@@ -3176,21 +3200,22 @@ pub fn writeEntry(gpa: Allocator, io: Io, wt: Io.Dir, options: WriteEntryOptions
     const db = options.db;
     const conv = options.conv;
     const mode = options.mode;
-    const path = (safe_path.checked(options.path, .{ .use = .worktree, .protect = options.rules.protect, .symlink = mode == .symlink }) catch return error.UnsafePath).bytes;
+    const checked = safe_path.checked(options.path, .{ .use = .worktree, .protect = options.rules.protect, .symlink = mode == .symlink }) catch return error.UnsafePath;
+    const path = checked.bytes;
     const oid = options.oid;
     const rules = options.rules;
-    try makeLeadingDirs(io, wt, path, rules.hide_dot_files);
+    try makeLeadingDirs(io, wt, checked, rules.hide_dot_files);
     defer fs.hideIfAsked(io, wt, path, rules.hide_dot_files);
     var written: Written = .{ .stat = .none };
     switch (mode) {
         .gitlink => {
             var leading: LeadingDirs = .{ .hide = rules.hide_dot_files };
-            try writeGitlink(gpa, io, wt, &leading, .{ .path = path, .oid = oid, .rules = rules });
+            try writeGitlink(gpa, io, wt, &leading, .{ .path = checked, .oid = oid, .rules = rules });
         },
         .symlink => {
             const found = try db.read(io, oid);
             defer db.allocator().free(found.bytes);
-            written.symlink_as_file = try writeLink(io, wt, path, found.bytes, rules.symlinks);
+            written.symlink_as_file = try writeLink(io, wt, checked, found.bytes, rules.symlinks);
         },
         .file, .exec => {
             var scratch: std.heap.ArenaAllocator = .init(gpa);
@@ -3203,10 +3228,10 @@ pub fn writeEntry(gpa: Allocator, io: Io, wt: Io.Dir, options: WriteEntryOptions
             switch (blob) {
                 .whole => |bytes| {
                     const smudged = try conv.toWorktree(a, .{ .path = path, .blob = bytes, .applied = applied }, .{ .blob = oid });
-                    try writeSmudged(io, wt, path, smudged, executable);
+                    try writeSmudged(io, wt, checked, smudged, executable);
                 },
-                .filtered => |bytes| try writeFile(io, wt, path, .{ .bytes = bytes }, executable),
-                .streamed => |*streamed| try writeFile(io, wt, path, .{ .stream = streamed }, executable),
+                .filtered => |bytes| try writeFile(io, wt, checked, .{ .bytes = bytes }, executable),
+                .streamed => |*streamed| try writeFile(io, wt, checked, .{ .stream = streamed }, executable),
             }
         },
         .tree => return error.UnsupportedEntry,
@@ -3224,10 +3249,11 @@ pub const WriteBytesOptions = struct { conv: *convert.Session, path: []const u8,
 pub fn writeBytes(gpa: Allocator, io: Io, wt: Io.Dir, options: WriteBytesOptions) Self.Error!Written {
     const conv = options.conv;
     const mode = options.mode;
-    const path = (safe_path.checked(options.path, .{ .use = .worktree, .protect = options.rules.protect, .symlink = mode == .symlink }) catch return error.UnsafePath).bytes;
+    const checked = safe_path.checked(options.path, .{ .use = .worktree, .protect = options.rules.protect, .symlink = mode == .symlink }) catch return error.UnsafePath;
+    const path = checked.bytes;
     const bytes = options.bytes;
     const rules = options.rules;
-    try makeLeadingDirs(io, wt, path, rules.hide_dot_files);
+    try makeLeadingDirs(io, wt, checked, rules.hide_dot_files);
     defer fs.hideIfAsked(io, wt, path, rules.hide_dot_files);
     if (try fs.statAt(io, wt, path)) |found| {
         if (found.kind == .directory and mode != .gitlink) wt.deleteDir(io, path) catch return error.UntrackedWouldBeOverwritten;
@@ -3236,10 +3262,10 @@ pub fn writeBytes(gpa: Allocator, io: Io, wt: Io.Dir, options: WriteBytesOptions
     switch (mode) {
         .gitlink => {
             var leading: LeadingDirs = .{ .hide = rules.hide_dot_files };
-            try leading.make(io, wt, path, false, null);
+            try leading.make(io, wt, checked, false, null);
         },
         .symlink => {
-            written.symlink_as_file = try writeLink(io, wt, path, bytes, rules.symlinks);
+            written.symlink_as_file = try writeLink(io, wt, checked, bytes, rules.symlinks);
         },
         .file, .exec => {
             var scratch: std.heap.ArenaAllocator = .init(gpa);
@@ -3250,7 +3276,7 @@ pub fn writeBytes(gpa: Allocator, io: Io, wt: Io.Dir, options: WriteBytesOptions
                 break :blk try attrs.lookup(a, path, .file);
             } else .{ .items = &.{} };
             const smudged = try conv.toWorktree(a, .{ .path = path, .blob = bytes, .applied = applied }, .{});
-            try writeSmudged(io, wt, path, smudged, mode == .exec and rules.file_mode);
+            try writeSmudged(io, wt, checked, smudged, mode == .exec and rules.file_mode);
             if (rules.attrs) |attrs| attrs.written(path);
         },
         .tree => return error.UnsupportedEntry,
@@ -3270,19 +3296,19 @@ pub fn writeBytes(gpa: Allocator, io: Io, wt: Io.Dir, options: WriteBytesOptions
 fn writeGitlink(gpa: Allocator, io: Io, wt: Io.Dir, leading: *LeadingDirs, link: GitlinkWrite) Error!void {
     const mover = link.rules.submodules orelse return leading.make(io, wt, link.path, link.force, link.refusal);
     var force = true;
-    if (try fs.statAt(io, wt, link.path)) |found| {
-        if (found.kind == .directory and try gitlink.isRepository(gpa, io, wt, link.path)) {
-            return mover.move(io, .{ .path = link.path, .from = .head, .to = link.oid, .force = true });
+    if (try fs.statAt(io, wt, link.path.bytes)) |found| {
+        if (found.kind == .directory and try gitlink.isRepository(gpa, io, wt, link.path.bytes)) {
+            return mover.move(io, .{ .path = link.path.bytes, .from = .head, .to = link.oid, .force = true });
         }
-        if (found.kind != .directory) try fs.deleteFile(io, wt, link.path);
+        if (found.kind != .directory) try fs.deleteFile(io, wt, link.path.bytes);
         force = false;
     }
     try leading.make(io, wt, link.path, link.force, link.refusal);
-    try mover.move(io, .{ .path = link.path, .from = .none, .to = link.oid, .force = force });
+    try mover.move(io, .{ .path = link.path.bytes, .from = .none, .to = link.oid, .force = force });
 }
 
 /// `force` is the checkout's, for the directories made on the way.
-const GitlinkWrite = struct { path: []const u8, oid: Oid, rules: Rules, force: bool = false, refusal: ?*Refusal = null };
+const GitlinkWrite = struct { path: safe_path.Checked, oid: Oid, rules: Rules, force: bool = false, refusal: ?*Refusal = null };
 
 /// Take the submodule at `path` away, as git's `unlink_entry` does: with
 /// `rules.submodules`, the mover takes its working tree away, forced, and
@@ -3310,7 +3336,8 @@ pub fn removeGitlink(io: Io, wt: Io.Dir, raw_path: []const u8, rules: Rules) Sel
 /// Remove one file from the working tree, and every directory above it that
 /// it leaves empty. A file that is already gone is not an error.
 pub fn removeEntry(io: Io, wt: Io.Dir, raw_path: []const u8, protect: safe_path.Protect) Self.Error!void {
-    const path = (safe_path.checked(raw_path, .{ .use = .worktree, .protect = protect }) catch return error.UnsafePath).bytes;
+    const checked = safe_path.checked(raw_path, .{ .use = .worktree, .protect = protect }) catch return error.UnsafePath;
+    const path = checked.bytes;
     // A file past a symbolic link is not the working tree's: git's
     // `unlink_entry` leaves it.
     if (!try realLeadingPath(io, wt, path)) return;
@@ -3320,7 +3347,7 @@ pub fn removeEntry(io: Io, wt: Io.Dir, raw_path: []const u8, protect: safe_path.
         error.IsDir => wt.deleteDir(io, path) catch {},
         else => |e| return e,
     };
-    if (std.Io.Dir.path.dirnamePosix(path)) |parent| removeEmptyDirectories(io, wt, parent);
+    if (checked.dirname()) |parent| removeEmptyDirectories(io, wt, parent);
 }
 
 /// The paths an update would lose work at, as git lists them.
@@ -3604,7 +3631,8 @@ pub fn differsFromIndex(
     const index = inputs.index;
     const entry = inputs.entry;
     if (entry.mode == .gitlink) return false;
-    const found = (try fs.statAt(io, wt, entry.path)) orelse return false;
+    const path = try readable(entry.path, rules.protect);
+    const found = (try fs.statAt(io, wt, path.bytes)) orelse return false;
     if (found.kind == .directory) return true;
     if (modeOnDisk(found, entry.mode, rules) != entry.mode) return true;
     if (!index.isRacy(entry) and entry.stat.matches(found.stat, rules.statCompare())) {
@@ -3615,12 +3643,12 @@ pub fn differsFromIndex(
     const a = scratch.allocator();
     if (found.kind == .sym_link) {
         var buf: [4096]u8 = undefined;
-        const len = try wt.readLink(io, entry.path, &buf);
+        const len = try wt.readLink(io, path.bytes, &buf);
         return !hash.Hasher.object(index.kind, "blob", buf[0..len]).eql(entry.oid);
     }
     const attrs = rules.attrs orelse {
-        if (try streamsIn(rules.big_file_bytes, found, null)) return !try namedAs(io, wt, entry);
-        const bytes = aegis.own.readFile(io, wt, entry.path, a, aegis.units.Bytes(u64).fromRaw(1 << 31)) catch |err| switch (err) {
+        if (try streamsIn(rules.big_file_bytes, found, null)) return !try namedAs(io, wt, path, entry);
+        const bytes = aegis.own.readFile(io, wt, path.bytes, a, aegis.units.Bytes(u64).fromRaw(1 << 31)) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return true,
         };
@@ -3648,8 +3676,8 @@ pub fn differsFromIndex(
     try attrs.enter(io, wt, entry.path);
     defer if (!entered) attrs.leave();
     const applied = try attrs.lookup(a, entry.path, .file);
-    if (try streamsIn(rules.big_file_bytes, found, .{ .session = &conv, .path = entry.path, .applied = applied })) return !try namedAs(io, wt, entry);
-    const bytes = aegis.own.readFile(io, wt, entry.path, a, aegis.units.Bytes(u64).fromRaw(1 << 31)) catch |err| switch (err) {
+    if (try streamsIn(rules.big_file_bytes, found, .{ .session = &conv, .path = entry.path, .applied = applied })) return !try namedAs(io, wt, path, entry);
+    const bytes = aegis.own.readFile(io, wt, path.bytes, a, aegis.units.Bytes(u64).fromRaw(1 << 31)) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return true,
     };
@@ -3659,8 +3687,8 @@ pub fn differsFromIndex(
 
 /// Whether the file at `entry.path`, read in pieces, is the blob `entry`
 /// names; one that cannot be read is not.
-fn namedAs(io: Io, wt: Io.Dir, entry: index_mod.Entry) Error!bool {
-    const oid = hashFile(io, wt, entry.oid.kind, entry.path) catch |err| switch (err) {
+fn namedAs(io: Io, wt: Io.Dir, path: safe_path.Checked, entry: index_mod.Entry) Error!bool {
+    const oid = hashFile(io, wt, entry.oid.kind, path) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return false,
     };
@@ -3768,12 +3796,12 @@ const FileBlob = union(enum) {
     }
 };
 
-fn writeFile(io: Io, wt: Io.Dir, path: []const u8, source: Source, executable: bool) Error!void {
+fn writeFile(io: Io, wt: Io.Dir, path: safe_path.Checked, source: Source, executable: bool) Error!void {
     // A file that is there is replaced rather than opened for writing, so a
     // reader sees the old bytes or the new ones.
     var name_buf: [256]u8 = undefined;
     const temp_name = fs.tempName(io, &name_buf, ".relic-");
-    const dir_path = std.Io.Dir.path.dirnamePosix(path);
+    const dir_path = std.Io.Dir.path.dirnamePosix(path.bytes);
     var temp_path_buf: [4096]u8 = undefined;
     const temp_path = if (dir_path) |parent|
         std.mem.print(&temp_path_buf, "{s}/{s}", .{ parent, temp_name }) catch return error.UnsafePath
@@ -3826,17 +3854,17 @@ fn writeFile(io: Io, wt: Io.Dir, path: []const u8, source: Source, executable: b
         }
         try fw.interface.flush();
     }
-    try fs.rename(io, wt, temp_path, path);
+    try fs.rename(io, wt, temp_path, path.bytes);
     failed = false;
 }
 
-fn removeEmptyDirectories(io: Io, wt: Io.Dir, path: []const u8) void {
+fn removeEmptyDirectories(io: Io, wt: Io.Dir, path: safe_path.Checked) void {
     // Only directories of the working tree's own go: none reached through
     // a symbolic link.
     var leading: LeadingDirs = .{};
-    const real = leading.real(io, wt, path) catch false;
+    const real = leading.real(io, wt, path.bytes) catch false;
     if (!real) return;
-    var current = path;
+    var current = path.bytes;
     while (current.len != 0) {
         wt.deleteDir(io, current) catch return;
         current = std.Io.Dir.path.dirnamePosix(current) orelse return;
@@ -3905,7 +3933,8 @@ pub fn applySparse(
         if (entry.stage != 0 or entry.isSparseDirectory()) continue;
         const included = patterns.includes(entry.path, .file);
         if (!included and !entry.skip_worktree) {
-            if (try fs.statAt(io, wt, entry.path)) |found| {
+            const path = try readable(entry.path, options.rules.protect);
+            if (try fs.statAt(io, wt, path.bytes)) |found| {
                 // git's `verify_uptodate`: a stat that does not match is a
                 // change, without reading the file, and only a racy entry
                 // whose stat does match has its content compared.
@@ -3923,13 +3952,13 @@ pub fn applySparse(
                     };
                     const conversion: ?Conversion = if (applied) |each| .{ .session = &conv, .path = entry.path, .applied = each } else null;
                     const oid = if (try streamsIn(options.rules.big_file_bytes, found, conversion))
-                        try hashFile(io, wt, db.objectFormat(), entry.path)
+                        try hashFile(io, wt, db.objectFormat(), path)
                     else blk: {
                         const raw = if (found.kind == .sym_link) link: {
                             var buf: [4096]u8 = undefined;
-                            const len = try wt.readLink(io, entry.path, &buf);
+                            const len = try wt.readLink(io, path.bytes, &buf);
                             break :link try a.dupe(u8, buf[0..len]);
-                        } else try fs.readFileSized(a, io, wt, entry.path, .{ .size = found.size, .max_bytes = 1 << 31 });
+                        } else try fs.readFileSized(a, io, wt, path.bytes, .{ .size = found.size, .max_bytes = 1 << 31 });
                         const content = if (applied) |each| (try conv.toGit(a, .{ .path = entry.path, .bytes = raw, .applied = each }, .{ .storing = .hash_only })).bytes else raw;
                         break :blk hash.Hasher.object(db.objectFormat(), "blob", content);
                     };
@@ -3938,12 +3967,12 @@ pub fn applySparse(
                         continue;
                     }
                 }
-                if (try realLeadingPath(io, wt, entry.path)) fs.deleteFile(io, wt, entry.path) catch |err| switch (err) {
+                if (try realLeadingPath(io, wt, path.bytes)) fs.deleteFile(io, wt, path.bytes) catch |err| switch (err) {
                     error.FileNotFound, error.NotDir, error.IsDir => {},
                     else => |e| return e,
                 };
                 if (options.remove_empty_directories) {
-                    if (std.Io.Dir.path.dirnamePosix(entry.path)) |parent| {
+                    if (path.dirname()) |parent| {
                         removeEmptyDirectories(io, wt, parent);
                     }
                 }
@@ -3954,18 +3983,18 @@ pub fn applySparse(
         }
         if (included and entry.skip_worktree) {
             var refused: safe_path.Refusal = undefined;
-            _ = safe_path.checked(entry.path, .{ .use = .worktree, .protect = options.rules.protect, .symlink = entry.mode == .symlink, .refusal = &refused }) catch {
+            const path = safe_path.checked(entry.path, .{ .use = .worktree, .protect = options.rules.protect, .symlink = entry.mode == .symlink, .refusal = &refused }) catch {
                 if (options.refusal) |out| out.set(refused.reason, entry.path);
                 return error.UnsafePath;
             };
-            if (try fs.statAt(io, wt, entry.path)) |_| {
+            if (try fs.statAt(io, wt, path.bytes)) |_| {
                 entry.skip_worktree = false;
                 outcome.already_present += 1;
                 continue;
             }
             _ = scratch.reset(.retain_capacity);
-            try restoreSparse(scratch.allocator(), io, wt, db, &conv, entry, options);
-            if (try fs.statAt(io, wt, entry.path)) |after| options.rules.fillStat(entry, after.stat);
+            try restoreSparse(scratch.allocator(), io, wt, db, &conv, entry, path, options);
+            if (try fs.statAt(io, wt, path.bytes)) |after| options.rules.fillStat(entry, after.stat);
             entry.skip_worktree = false;
             outcome.restored += 1;
         }
@@ -3983,36 +4012,38 @@ fn restoreSparse(
     db: *Odb,
     conv: *convert.Session,
     entry: *const index_mod.Entry,
+    checked: safe_path.Checked,
     options: CheckoutOptions,
 ) Error!void {
     var leading: LeadingDirs = .{ .hide = options.rules.hide_dot_files };
-    if (std.Io.Dir.path.dirnamePosix(entry.path)) |parent| try leading.make(io, wt, parent, false, options.refusal);
-    defer fs.hideIfAsked(io, wt, entry.path, options.rules.hide_dot_files);
+    const path = checked.bytes;
+    if (checked.dirname()) |parent| try leading.make(io, wt, parent, false, options.refusal);
+    defer fs.hideIfAsked(io, wt, path, options.rules.hide_dot_files);
     switch (entry.mode) {
         // The submodule's commit is in its own repository, not this one.
-        .gitlink => return leading.make(io, wt, entry.path, false, options.refusal),
+        .gitlink => return leading.make(io, wt, checked, false, options.refusal),
         .symlink => {
             const found = try db.read(io, entry.oid);
             defer db.allocator().free(found.bytes);
-            _ = try writeLink(io, wt, entry.path, found.bytes, options.rules.symlinks);
+            _ = try writeLink(io, wt, checked, found.bytes, options.rules.symlinks);
         },
         .file, .exec => {
             const executable = entry.mode == .exec and options.rules.file_mode;
             const applied: ?attributes.Attributes = if (options.rules.attrs) |attrs| blk: {
-                try attrs.enter(io, wt, entry.path);
-                break :blk try attrs.lookup(a, entry.path, .file);
+                try attrs.enter(io, wt, path);
+                break :blk try attrs.lookup(a, path, .file);
             } else null;
-            var blob = try FileBlob.open(a, io, db, conv, entry.path, entry.oid, applied);
+            var blob = try FileBlob.open(a, io, db, conv, path, entry.oid, applied);
             defer blob.deinit(a, io, db);
             switch (blob) {
                 .whole => |bytes| if (applied) |found| {
-                    const smudged = try conv.toWorktree(a, .{ .path = entry.path, .blob = bytes, .applied = found }, .{ .blob = entry.oid });
-                    try writeSmudged(io, wt, entry.path, smudged, executable);
+                    const smudged = try conv.toWorktree(a, .{ .path = path, .blob = bytes, .applied = found }, .{ .blob = entry.oid });
+                    try writeSmudged(io, wt, checked, smudged, executable);
                 } else {
-                    try writeFile(io, wt, entry.path, .{ .bytes = bytes }, executable);
+                    try writeFile(io, wt, checked, .{ .bytes = bytes }, executable);
                 },
-                .filtered => |bytes| try writeFile(io, wt, entry.path, .{ .bytes = bytes }, executable),
-                .streamed => |*streamed| try writeFile(io, wt, entry.path, .{ .stream = streamed }, executable),
+                .filtered => |bytes| try writeFile(io, wt, checked, .{ .bytes = bytes }, executable),
+                .streamed => |*streamed| try writeFile(io, wt, checked, .{ .stream = streamed }, executable),
             }
         },
         .tree => return error.UnsupportedEntry,

@@ -182,9 +182,11 @@ fn lends(ext: *const External, a: Allocator, io: Io, s: Side) Self.Error!bool {
     const entry = t.index.find(s.path) orelse return false;
     if (!entry.oid.eql(s.oid) or (entry.mode != .file and entry.mode != .exec)) return false;
     if (entry.assume_valid or entry.skip_worktree) return false;
-    const found = (try fs.statAt(io, t.wt, s.path)) orelse return false;
-    if (t.rules.attrs) |attrs| try attrs.enter(io, t.wt, s.path);
-    return t.matches(a, entry.*, s.path, found);
+    // A path no checkout would write is no working-tree file to lend.
+    const path = checkout.readable(s.path, t.rules.protect) catch return false;
+    const found = (try fs.statAt(io, t.wt, path.bytes)) orelse return false;
+    if (t.rules.attrs) |attrs| try attrs.enter(io, t.wt, path.bytes);
+    return t.matches(a, entry.*, path, found);
 }
 
 /// The side's blob as a checkout writes it (git's `prep_temp_blob`, which

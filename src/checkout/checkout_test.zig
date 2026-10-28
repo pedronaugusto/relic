@@ -1288,6 +1288,28 @@ test "a link and a directory whose names a folding filesystem makes one are refu
     }
 }
 
+test "an index entry no checkout would write is refused, not removed, when the tree goes without it" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var h = try Harness.init(gpa, io, &.{});
+    defer h.deinit(io);
+    try h.repo.writeFile(io, "f", "tracked\n");
+    try h.repo.exec(io, &.{ "add", "-A" });
+    try h.repo.exec(io, &.{ "commit", "-q", "-m", "one" });
+    const tree_text = try h.repo.line(io, &.{ "rev-parse", "HEAD^{tree}" });
+    defer gpa.free(tree_text);
+    const tree = try Oid.parse(.sha1, tree_text);
+    try h.reload(gpa, io);
+
+    // An index another program wrote, naming the repository's own config:
+    // `add` refuses such a path, so it goes in as a hostile file would.
+    const blob = try h.db.write(io, .blob, "x\n");
+    try h.index.entries.insert(gpa, 0, .{ .path = try gpa.dupe(u8, ".git/config"), .oid = blob, .mode = .file });
+
+    try std.testing.expectError(error.UnsafePath, worktree.checkout(gpa, io, h.repo.dir, .{ .index = &h.index, .db = &h.db, .tree = tree }, .{ .rules = h.worktreeRules(), .force = true }));
+    try h.repo.dir.access(io, ".git/config", .{});
+}
+
 test "nothing is written or removed past a symbolic link in the working tree, and a forced checkout replaces the link as git's does" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;

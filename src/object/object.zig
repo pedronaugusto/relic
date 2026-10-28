@@ -106,7 +106,6 @@ pub const Mode = enum(u32) {
     /// The octal text a tree entry carries: no leading zero, so a directory
     /// is `40000` and a file is `100644`.
     pub fn text(m: Mode, buf: *[6]u8) []const u8 {
-        // aegis: no-danger: every mode is at most 0o160000, six octal digits
         return std.mem.print(buf, "{o}", .{m.raw()}) catch unreachable;
     }
 
