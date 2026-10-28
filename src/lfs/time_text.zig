@@ -6,6 +6,7 @@
 const std = @import("std");
 const shakedown = @import("shakedown");
 const Io = std.Io;
+const date = @import("../text.zig").date;
 
 /// A time as Go's `time.Time` holds one that was read from RFC 3339 text:
 /// the instant, and the offset it was written with. Go's zero time,
@@ -76,8 +77,8 @@ pub const GoTime = struct {
             rest = rest[6..];
         }
         if (rest.len != 0) return null;
-        const at = civil(year, month, day, hour, minute, second) orelse return null;
-        return .{ .unix = at - offset, .nanos = nanos, .offset = offset };
+        const cal = date.Calendar.fromFields(year, month, day, hour, minute, second) orelse return null;
+        return .{ .unix = cal.moment() - offset, .nanos = nanos, .offset = offset };
     }
 
     /// Errors from `format`.
@@ -88,12 +89,13 @@ pub const GoTime = struct {
     /// with, `Z` for none. An offset of 24 hours or more is
     /// `error.UnwritableTime`, as Go refuses to write it.
     pub fn format(t: GoTime, w: *Io.Writer) FormatError!void {
-        const local = t.unix + t.offset;
-        const days = @divFloor(local, 86400);
-        const secs: u32 = @intCast(local - days * 86400);
-        const date = civilFromDays(days);
-        if (date.year < 0 or date.year > 9999) return error.UnwritableTime;
-        try w.print("{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}", .{ @as(u32, @intCast(date.year)), date.month, date.day, secs / 3600, secs / 60 % 60, secs % 60 });
+        // A year past four digits, or a time past what a timestamp holds,
+        // has no RFC 3339 text.
+        const local = std.math.add(i64, t.unix, t.offset) catch return error.UnwritableTime;
+        const cal = date.calendarIn(local, 0) orelse return error.UnwritableTime;
+        const year = std.math.cast(u14, cal.year) orelse return error.UnwritableTime;
+        if (year > 9999) return error.UnwritableTime;
+        try w.print("{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}", .{ year, cal.month + 1, cal.day, cal.hour, cal.minute, cal.second });
         if (t.nanos != 0) {
             var fraction: [9]u8 = undefined;
             _ = std.fmt.printInt(&fraction, t.nanos, 10, .lower, .{ .width = 9, .fill = '0' });
@@ -146,20 +148,6 @@ fn literal(rest: *[]const u8, c: u8) bool {
     return true;
 }
 
-/// The civil date of a day counted from the Unix epoch (Howard Hinnant's
-/// civil_from_days).
-fn civilFromDays(days: i64) struct { year: i64, month: u32, day: u32 } {
-    const z = days + 719468;
-    const era = @divFloor(z, 146097);
-    const doe = z - era * 146097;
-    const yoe = @divFloor(doe - @divFloor(doe, 1460) + @divFloor(doe, 36524) - @divFloor(doe, 146096), 365);
-    const doy = doe - (365 * yoe + @divFloor(yoe, 4) - @divFloor(yoe, 100));
-    const mp = @divFloor(5 * doy + 2, 153);
-    const day: u32 = @intCast(doy - @divFloor(153 * mp + 2, 5) + 1);
-    const month: u32 = @intCast(if (mp < 10) mp + 3 else mp - 9);
-    return .{ .year = yoe + era * 400 + @intFromBool(month <= 2), .month = month, .day = day };
-}
-
 /// `Mon, 02 Jan 2006 15:04:05 GMT`: the HTTP date, as Go's `time.RFC1123`
 /// layout reads it, which is how git-lfs reads a `Retry-After` that is not
 /// a number. The zone is a name; an HTTP date's is always GMT, and any
@@ -190,7 +178,8 @@ pub fn parseHttpDate(text: []const u8) ?i64 {
     for (zone) |c| {
         if (!std.ascii.isUpper(c)) return null;
     }
-    return civil(year, month, day, hour, minute, second);
+    const cal = date.Calendar.fromFields(year, month, day, hour, minute, second) orelse return null;
+    return cal.moment();
 }
 
 fn digits(text: []const u8) ?u32 {
@@ -200,24 +189,6 @@ fn digits(text: []const u8) ?u32 {
         n = n * 10 + (c - '0');
     }
     return n;
-}
-
-/// Seconds since the epoch of a UTC date and time, or `null` for one that
-/// does not exist.
-fn civil(year: u32, month: u32, day: u32, hour: u32, minute: u32, second: u32) ?i64 {
-    if (month < 1 or month > 12 or day < 1 or hour > 23 or minute > 59 or second > 59) return null;
-    const leap = (year % 4 == 0 and year % 100 != 0) or year % 400 == 0;
-    const lengths = [_]u32{ 31, if (leap) 29 else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
-    if (day > lengths[month - 1]) return null;
-    // Howard Hinnant's days_from_civil.
-    const y: i64 = @as(i64, year) - @intFromBool(month <= 2);
-    const era = @divFloor(y, 400);
-    const yoe = y - era * 400;
-    const m: i64 = month;
-    const doy = @divFloor(153 * (if (m > 2) m - 3 else m + 9) + 2, 5) + @as(i64, day) - 1;
-    const doe = yoe * 365 + @divFloor(yoe, 4) - @divFloor(yoe, 100) + doy;
-    const days = era * 146097 + doe - 719468;
-    return days * 86400 + @as(i64, hour) * 3600 + @as(i64, minute) * 60 + second;
 }
 
 const testing = std.testing;

@@ -266,6 +266,38 @@ pub const Calendar = struct {
         const leap_day: u9 = @intFromBool(cal.month > 1 and isLeap(cal.year));
         return before[cal.month] + leap_day + cal.day - 1;
     }
+
+    /// A date and time of day as text writes them, in UTC: a year of at
+    /// most four digits, the month from 1. `null` for one that does not
+    /// exist: a month past 12, a day the month lacks, an hour past 23, a
+    /// minute or a second past 59.
+    pub fn fromFields(year: u32, month: u32, day: u32, hour: u32, minute: u32, second: u32) ?Calendar {
+        if (year > 9999 or month < 1 or month > 12 or day < 1 or hour > 23 or minute > 59 or second > 59) return null;
+        const lengths = [12]u5{ 31, if (isLeap(year)) 29 else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+        if (day > lengths[month - 1]) return null;
+        var cal: Calendar = .{ .year = year, .month = @intCast(month - 1), .day = @intCast(day), .hour = @intCast(hour), .minute = @intCast(minute), .second = @intCast(second), .weekday = 0 };
+        cal.weekday = @intCast(@mod(cal.days() + 4, 7));
+        return cal;
+    }
+
+    /// The seconds after the epoch `cal` is, in UTC: `calendarOf`'s inverse,
+    /// for a calendar it or `fromFields` made.
+    pub fn moment(cal: Calendar) i64 {
+        return cal.days() * 86400 + @as(i64, cal.hour) * 3600 + @as(i64, cal.minute) * 60 + cal.second;
+    }
+
+    /// The days after the epoch `cal` is on, counted in eras of 400 years
+    /// from 0000-03-01, as `calendarOf` counts them.
+    fn days(cal: Calendar) i64 {
+        // The year from March, and the day of that year.
+        const y = cal.year - @intFromBool(cal.month < 2);
+        const era = @divFloor(y, 400);
+        const yoe = @mod(y, 400);
+        const mp: i64 = @mod(@as(i64, cal.month) + 10, 12);
+        const doy = @divFloor(153 * mp + 2, 5) + cal.day - 1;
+        const doe = yoe * 365 + @divFloor(yoe, 4) - @divFloor(yoe, 100) + doy;
+        return era * 146097 + doe - 719468;
+    }
 };
 
 /// The calendar `secs` seconds after the epoch falls on, in UTC: C's
@@ -1252,6 +1284,34 @@ test "a date before the first year shows its year signed, its century and two di
     out.clearRetainingCapacity();
     try show(&out.writer, secs, 0, .{ .kind = .short }, .{});
     try std.testing.expectEqualStrings("0000-12-31", out.written());
+}
+
+test "a calendar's moment is the time it was made from, and a day that does not exist has none" {
+    // Each side of the epoch, the eras' edges and the years fromFields takes.
+    const times = [_]i64{ 0, -1, 86399, 86400, 951782400, 951868799, 1_700_000_000, -62167219200, -62167219201, 253402300799, -62135596800, std.math.maxInt(i64), std.math.minInt(i64) + 86400 * 366 };
+    for (times) |t| {
+        const cal = calendarOf(t);
+        try std.testing.expectEqual(t, cal.moment());
+        if (cal.year >= 0 and cal.year <= 9999) {
+            const read = Calendar.fromFields(@intCast(cal.year), @as(u32, cal.month) + 1, cal.day, cal.hour, cal.minute, cal.second).?;
+            try std.testing.expectEqual(cal, read);
+        }
+    }
+    var prng: std.Random.DefaultPrng = .init(0x5eed);
+    for (0..10_000) |_| {
+        const t = prng.random().intRangeAtMost(i64, -62167219200, 253402300799);
+        const cal = calendarOf(t);
+        try std.testing.expectEqual(t, cal.moment());
+        try std.testing.expectEqual(cal, Calendar.fromFields(@intCast(cal.year), @as(u32, cal.month) + 1, cal.day, cal.hour, cal.minute, cal.second).?);
+    }
+    try std.testing.expectEqual(null, Calendar.fromFields(2023, 2, 29, 0, 0, 0));
+    try std.testing.expect(Calendar.fromFields(2024, 2, 29, 0, 0, 0) != null);
+    try std.testing.expectEqual(null, Calendar.fromFields(1900, 2, 29, 0, 0, 0));
+    try std.testing.expect(Calendar.fromFields(2000, 2, 29, 0, 0, 0) != null);
+    try std.testing.expectEqual(null, Calendar.fromFields(2023, 4, 31, 0, 0, 0));
+    try std.testing.expectEqual(null, Calendar.fromFields(2023, 13, 1, 0, 0, 0));
+    try std.testing.expectEqual(null, Calendar.fromFields(2023, 1, 1, 24, 0, 0));
+    try std.testing.expectEqual(null, Calendar.fromFields(10000, 1, 1, 0, 0, 0));
 }
 
 test "a fixed form is shown as show shows it, and asks no clock" {

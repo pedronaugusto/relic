@@ -90,7 +90,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - `text.date.showFixed(w, secs, tz, form)`: a date in one of the forms `show` writes from its own zone alone (`text.date.Fixed`: `short`, `iso8601`, `iso8601_strict`, `rfc2822`), which `show` writes through and which asks no clock, so it cannot fail with `DateNeedsClock`. `format-patch`'s `Date:` and `http-backend`'s headers are written through it.
-- `text.date.Calendar` and `text.date.calendarIn`, git's `time_to_tm`: the calendar a time falls on in a zone, each field in its range, or `null` where git's `gmtime_r` has none.
+- `text.date.Calendar` and `text.date.calendarIn`, git's `time_to_tm`: the calendar a time falls on in a zone, each field in its range, or `null` where git's `gmtime_r` has none. `Calendar.fromFields` reads a date and time of day as text writes them (`null` for one that does not exist) and `Calendar.moment` is the time a calendar is, so relic has one calendar both ways: the LFS API's RFC 3339 and HTTP dates are read and written through it.
 - `names.path.Checked.dirname` (a checked path's directory, itself checked) and `Checked.lessThan`.
 - `odb.midx.Index.packNames` walks a multi-pack index's pack names (`midx.PackNames`), as many as its header counts; `codec.Rows.lowerBound` bisects a sorted table within a range of its rows.
 - `odb.midx.Index.packNames` walks a multi-pack index's pack names (`midx.PackNames`), as many as its header counts; `codec.Rows.lowerBound` bisects a sorted table within a range of its rows, on the bytes at a column of each.
@@ -292,6 +292,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - `patch.apply` reaches the working tree with a patch's name only as a checked path, under `--unsafe-paths` too, as the files it writes already are: the old file of a deletion is read through `checkout.readable`, and removed, with its emptied directories, through a `names.path.Checked` held to git's `verify_path`. Under `--unsafe-paths` a deletion of `.git/...` or a path out of the tree read and removed it.
+- An LFS time (`GoTime.format`) whose offset moves it past what a timestamp holds is `error.UnwritableTime`, where adding the offset overflowed.
 - `am` reads a session's `next` and `last` as git holds them, in an `int`: one below zero or past an `int` is `error.MalformedState`, where `last` past one was a count `am` ran to. An author date whose zone a commit cannot carry is `error.InvalidDate`, where it was cast unchecked.
 - `archive.archive`'s zip no longer overflows adding its zone to a commit's time near the end of a timestamp, which stopped a safe build: a time the zone moves past what a timestamp holds, or in a year past what C's `int` holds, is `error.TimestampTooLarge`, through `text.date.calendarIn`.
 - `mail.format.writeWrapped` (`%w(...)`, shortlog's `-w`, `format-patch`'s `From:`) no longer overflows its column count on the most negative first indent or on a line past an `i32` of columns, which stopped a safe build: the count saturates, and an indent is written as its clamped magnitude.
