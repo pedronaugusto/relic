@@ -24,6 +24,16 @@ pub const Rows = struct {
         return .{ .bytes = file[start..][0..len], .width = width };
     }
 
+    /// `rows` rows of `width` bytes at the end of `file`, and the bytes
+    /// before them, or `null` where the file is shorter than that: a table a
+    /// format puts after records of their own lengths.
+    pub fn last(file: []const u8, rows: usize, width: usize) ?struct { rows: Rows, before: []const u8 } {
+        std.debug.assert(width != 0);
+        const len = std.math.mul(usize, rows, width) catch return null;
+        const start = std.math.sub(usize, file.len, len) catch return null;
+        return .{ .rows = .{ .bytes = file[start..], .width = width }, .before = file[0..start] };
+    }
+
     /// `bytes` as exactly `rows` rows of `width` bytes, or `null` where it
     /// is any other length: a chunk whose rows the format counts elsewhere.
     pub fn exactly(bytes: []const u8, rows: usize, width: usize) ?Rows {
@@ -47,7 +57,8 @@ pub const Rows = struct {
     pub fn at(rows: Rows, i: usize) ?[]const u8 {
         if (i >= rows.count()) return null;
         const start = std.math.mul(usize, i, rows.width) catch return null;
-        if (start > rows.bytes.len or rows.bytes.len - start < rows.width) return null;
+        const left = std.math.sub(usize, rows.bytes.len, start) catch return null;
+        if (left < rows.width) return null;
         return rows.bytes[start..][0..rows.width];
     }
 };
@@ -62,6 +73,15 @@ test "a table is cut to the rows it declares and read only within them" {
     try std.testing.expectEqual(@as(?Rows, null), Rows.cut(file, 30, 0, 4));
     try std.testing.expectEqual(@as(?Rows, null), Rows.cut(file, 0, std.math.maxInt(usize), 4));
     try std.testing.expectEqual(@as(usize, 0), Rows.empty.count());
+}
+
+test "a table at the end of a file is cut from what comes before it" {
+    const cut = Rows.last("headAAAABBBB", 2, 4).?;
+    try std.testing.expectEqualStrings("head", cut.before);
+    try std.testing.expectEqualStrings("BBBB", cut.rows.at(1).?);
+    try std.testing.expectEqual(@as(usize, 0), Rows.last("head", 0, 4).?.rows.count());
+    try std.testing.expect(Rows.last("headAAA", 2, 4) == null);
+    try std.testing.expect(Rows.last("head", std.math.maxInt(usize), 4) == null);
 }
 
 test "a chunk is a table of exactly its rows, or of its whole rows" {

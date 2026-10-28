@@ -58,30 +58,31 @@ pub const Index = struct {
         if (!std.mem.eql(u8, digest.raw(), bytes[data_end..])) return error.BitmapChecksumMismatch;
         const entry_count = std.mem.readInt(u32, bytes[8..12], .big);
         if (entry_count > object_count or @as(u64, entry_count) * 26 > data_end - header_len) return error.CorruptReachabilityBitmap;
-        var end = data_end;
+        // The name-hash cache is last and the lookup table before it; the
+        // records come before both, after the header.
+        var records = bytes[0..data_end];
         var cache: ?Rows = null;
         if (options & 4 != 0) {
-            const size = @as(usize, object_count) * 4;
-            if (size > end - header_len) return error.CorruptReachabilityBitmap;
-            end -= size;
-            cache = Rows.cut(bytes, end, object_count, 4) orelse return error.CorruptReachabilityBitmap;
+            const cut = Rows.last(records, object_count, 4) orelse return error.CorruptReachabilityBitmap;
+            cache = cut.rows;
+            records = cut.before;
         }
         var lookup: ?Rows = null;
         if (options & 16 != 0) {
-            const size = @as(usize, entry_count) * 16;
-            if (size > end - header_len) return error.CorruptReachabilityBitmap;
-            end -= size;
-            lookup = Rows.cut(bytes, end, entry_count, 16) orelse return error.CorruptReachabilityBitmap;
+            const cut = Rows.last(records, entry_count, 16) orelse return error.CorruptReachabilityBitmap;
+            lookup = cut.rows;
+            records = cut.before;
         }
+        var r: std.Io.Reader = .fixed(records);
+        r.discardAll(header_len) catch return error.CorruptReachabilityBitmap;
         var types: [4][]u64 = undefined;
         var loaded: usize = 0;
         errdefer for (types[0..loaded]) |words| gpa.free(words);
-        var at = header_len;
         for (&types) |*words| {
-            const decoded = try ewah.readWords(gpa, bytes[at..end], object_count);
+            const decoded = try ewah.readWords(gpa, r.buffered(), object_count);
             words.* = decoded.words;
             loaded += 1;
-            at += decoded.len;
+            r.discardAll(decoded.len) catch return error.CorruptReachabilityBitmap;
         }
         // Every indexed object has one and only one real type.
         for (0..(@as(usize, object_count) + 63) / 64) |i| {
@@ -97,17 +98,17 @@ pub const Index = struct {
         const entries = try gpa.alloc(Entry, entry_count);
         errdefer gpa.free(entries);
         for (entries, 0..) |*entry, i| {
-            if (at > end or end - at < 6) return error.CorruptReachabilityBitmap;
-            const head = bytes[at..][0..6];
-            const len = try ewah.encodedLength(bytes[at + 6 .. end], @as(u64, object_count) + 63);
-            entry.* = .{ .position = std.mem.readInt(u32, head[0..4], .big), .xor_offset = head[4], .flags = head[5], .offset = at, .words = bytes[at + 6 ..][0..len] };
+            const offset = r.seek;
+            const head = r.takeArray(6) catch return error.CorruptReachabilityBitmap;
+            const len = try ewah.encodedLength(r.buffered(), @as(u64, object_count) + 63);
+            const words = r.take(len) catch return error.CorruptReachabilityBitmap;
+            entry.* = .{ .position = std.mem.readInt(u32, head[0..4], .big), .xor_offset = head[4], .flags = head[5], .offset = offset, .words = words };
             if (entry.position >= object_count or entry.xor_offset > i or entry.xor_offset > 160) return error.CorruptReachabilityBitmap;
-            at += 6 + len;
         }
-        if (at != end) return error.CorruptReachabilityBitmap;
+        if (r.bufferedLen() != 0) return error.CorruptReachabilityBitmap;
         if (lookup) |table| {
             var previous: ?u32 = null;
-            for (0..entry_count) |i| {
+            for (0..table.count()) |i| {
                 const row = table.at(i) orelse return error.CorruptReachabilityBitmap;
                 const pos = std.mem.readInt(u32, row[0..4], .big);
                 const offset = std.mem.readInt(u64, row[4..12], .big);
@@ -124,7 +125,9 @@ pub const Index = struct {
                 } else {
                     if (xor_row == 0xffff_ffff) return error.CorruptReachabilityBitmap;
                     const base = table.at(xor_row) orelse return error.CorruptReachabilityBitmap;
-                    if (std.mem.readInt(u32, base[0..4], .big) != entries[j - entries[j].xor_offset].position) return error.CorruptReachabilityBitmap;
+                    const base_entry = std.math.sub(usize, j, entries[j].xor_offset) catch return error.CorruptReachabilityBitmap;
+                    if (base_entry >= entries.len) return error.CorruptReachabilityBitmap;
+                    if (std.mem.readInt(u32, base[0..4], .big) != entries[base_entry].position) return error.CorruptReachabilityBitmap;
                 }
             }
         }
@@ -155,13 +158,14 @@ pub const Index = struct {
         errdefer gpa.free(out);
         @memset(out, 0);
         while (true) {
+            if (i >= index.entries.len) return error.CorruptReachabilityBitmap;
             const entry = index.entries[i];
             const decoded = try ewah.readWords(gpa, entry.words, @as(u64, index.object_count) + 63);
             defer gpa.free(decoded.words);
             if (decoded.words.len > out.len) return error.CorruptReachabilityBitmap;
             for (decoded.words, 0..) |word, j| out[j] ^= word;
             if (entry.xor_offset == 0) break;
-            i -= entry.xor_offset;
+            i = std.math.sub(usize, i, entry.xor_offset) catch return error.CorruptReachabilityBitmap;
         }
         if (out.len > 0 and index.object_count % 64 != 0) out[out.len - 1] &= (@as(u64, 1) << @as(u6, @intCast(index.object_count % 64))) - 1;
         return out;
