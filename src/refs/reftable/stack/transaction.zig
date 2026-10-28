@@ -1,4 +1,5 @@
 const std = @import("std");
+const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const hash = @import("../../../hash/hash.zig");
@@ -19,7 +20,7 @@ const mergedRefs = cache.internal.mergedRefs;
 const allLogs = cache.internal.allLogs;
 const lessThanRef = cache.internal.lessThanRef;
 const logOrder = cache.internal.logOrder;
-const isTableName = cache.internal.isTableName;
+const checkTableName = cache.internal.checkTableName;
 const tableName = cache.internal.tableName;
 const Stacks = cache.internal.Stacks;
 const loadIn = cache.internal.loadIn;
@@ -334,17 +335,16 @@ pub fn logExists(gpa: Allocator, io: Io, store: anytype, name: []const u8) refs.
 
 /// git's zone number -- `+0130` read as 130 -- as minutes east of UTC.
 pub fn minutesFromZone(zone: i16) i16 {
-    const magnitude: i32 = @intCast(@abs(@as(i32, zone)));
-    const minutes: i32 = @divTrunc(magnitude, 100) * 60 + @mod(magnitude, 100);
-    const signed = if (zone < 0) -minutes else minutes;
-    return std.math.cast(i16, signed) orelse 0;
+    const magnitude: u32 = @abs(zone);
+    const east = aegis.int.cast(i16, magnitude / 100 * 60 + magnitude % 100) catch return 0;
+    return if (zone < 0) -east else east;
 }
 
 /// Minutes east of UTC as git's zone number.
 pub fn zoneFromMinutes(minutes: i16) i16 {
-    const magnitude: i32 = @intCast(@abs(@as(i32, minutes)));
-    const zone: i32 = @divTrunc(magnitude, 60) * 100 + @mod(magnitude, 60);
-    return std.math.cast(i16, if (minutes < 0) -zone else zone) orelse 0;
+    const magnitude: u32 = @abs(minutes);
+    const zone = aegis.int.cast(i16, magnitude / 60 * 100 + magnitude % 60) catch return 0;
+    return if (minutes < 0) -zone else zone;
 }
 
 //=========================================================================
@@ -547,7 +547,7 @@ pub fn appendLog(
     defer stack.deinit();
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
-    const update_index = stack.maxUpdateIndex() + 1;
+    const update_index = try stack.nextUpdateIndex();
     const record: reftable.LogRecord = .{ .name = name, .update_index = update_index, .value = .{ .update = .{
         .old = old,
         .new = new,
@@ -612,7 +612,7 @@ pub fn expireLog(
         if (keeper.keep(entry, newer)) last_kept = i else dest.value = .deletion;
     }
 
-    const update_index = stack.maxUpdateIndex() + 1;
+    const update_index = try stack.nextUpdateIndex();
     var logs: std.ArrayList(reftable.LogRecord) = .empty;
     try logs.appendSlice(arena, rewritten);
     if (last_kept == null) try logs.append(arena, marker(store.objectFormat(), name, update_index));
@@ -647,7 +647,7 @@ pub fn createLog(gpa: Allocator, io: Io, store: anytype, name: []const u8) refs.
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
     if ((try stack.logsFor(gpa, name, .{ .arena = arena_instance.allocator() })).len != 0) return;
-    const update_index = stack.maxUpdateIndex() + 1;
+    const update_index = try stack.nextUpdateIndex();
     const logs = [_]reftable.LogRecord{marker(store.objectFormat(), name, update_index)};
     const bytes = try reftable.write(gpa, store.objectFormat(), .{ .min_update_index = update_index, .max_update_index = update_index, .refs = &.{}, .logs = &logs }, store.reftableOptions().write);
     defer gpa.free(bytes);
@@ -669,7 +669,7 @@ pub fn deleteLog(gpa: Allocator, io: Io, store: anytype, name: []const u8) refs.
     const arena = arena_instance.allocator();
     const records = try stack.logsFor(gpa, name, .{ .arena = arena });
     if (records.len == 0) return;
-    const update_index = stack.maxUpdateIndex() + 1;
+    const update_index = try stack.nextUpdateIndex();
     const logs = try arena.alloc(reftable.LogRecord, records.len);
     for (records, logs) |r, *out| out.* = .{ .name = name, .update_index = r.update_index, .value = .deletion };
     std.mem.sort(reftable.LogRecord, logs, {}, logOrder);
@@ -739,7 +739,7 @@ fn compactAfter(gpa: Allocator, io: Io, parent: Io.Dir, store: anytype) refs.Tra
 /// through the lock the caller holds.
 fn install(gpa: Allocator, io: Io, locked: *Pending.Locked, stack: *const Stack, bytes: []const u8, update_index: u64) refs.TransactionError!void {
     var name_buf: [64]u8 = undefined;
-    const name = tableName(io, &name_buf, update_index, update_index);
+    const name = tableName(io, &name_buf, update_index, update_index).bytes;
     try writeTable(gpa, io, locked.dir.lend().get(), name, bytes, locked.shared, locked.sync);
     const w = locked.lock.writer();
     w.writeAll(stack.list) catch return error.WriteFailed;
@@ -772,7 +772,7 @@ fn addTable(
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
     const arena = arena_instance.allocator();
-    const update_index = stack.maxUpdateIndex() + 1;
+    const update_index = try stack.nextUpdateIndex();
 
     var records: std.ArrayList(reftable.RefRecord) = .empty;
     var logs: std.ArrayList(reftable.LogRecord) = .empty;
@@ -965,7 +965,7 @@ pub fn compactIn(gpa: Allocator, io: Io, parent: Io.Dir, inputs: CompactInputs, 
         const max = tables[tables.len - 1].max_update_index;
         const bytes = try reftable.write(gpa, kind, .{ .min_update_index = min, .max_update_index = max, .refs = merged_refs, .logs = merged_logs }, options.write);
         defer gpa.free(bytes);
-        const name = tableName(io, &name_buf, min, max);
+        const name = tableName(io, &name_buf, min, max).bytes;
         try writeTable(gpa, io, dir, name, bytes, options.shared, options.fsync.sync(.reference));
         new_name = name;
     }
@@ -1050,22 +1050,23 @@ fn clean(gpa: Allocator, io: Io, parent: Io.Dir, kind: Kind, options: Options) r
     defer dir.close(io);
     var iterator = dir.iterate();
     while (try iterator.next(io)) |entry| {
-        if (entry.kind != .file or !isTableName(entry.name)) continue;
+        if (entry.kind != .file) continue;
+        const table = (checkTableName(entry.name) catch continue).bytes;
         const listed = for (stack.names) |name| {
-            if (std.mem.eql(u8, name, entry.name)) break true;
+            if (std.mem.eql(u8, name, table)) break true;
         } else false;
         if (listed) continue;
         // The header: magic, version, a three-byte block size, then the
         // oldest and the newest update index; a file too short for one is
         // no table.
         var header: [24]u8 = undefined;
-        const file = dir.openFile(io, entry.name, .{}) catch continue;
+        const file = dir.openFile(io, table, .{}) catch continue;
         defer file.close(io);
         const got = file.readPositionalAll(io, &header, 0) catch continue;
         if (got < header.len or !std.mem.eql(u8, header[0..4], "REFT")) continue;
         if (std.mem.readInt(u64, header[16..24], .big) > max) continue;
         // glint-ignore: Z026 -- a stale table a platform will not remove is left for the next clean, as git's unlink leaves it
-        dir.deleteFile(io, entry.name) catch {};
+        dir.deleteFile(io, table) catch {};
     }
 }
 
@@ -1177,7 +1178,7 @@ pub fn writeInitial(gpa: Allocator, io: Io, store: anytype, refs_in: anytype) re
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
     const arena = arena_instance.allocator();
-    const update_index = stack.maxUpdateIndex() + 1;
+    const update_index = try stack.nextUpdateIndex();
     const records = try arena.alloc(reftable.RefRecord, refs_in.len);
     for (refs_in, records) |ref, *record| {
         if (try stack.lookup(gpa, ref.name, .{ .out = arena })) |found| if (found.value != .deletion) return error.RefAlreadyExists;

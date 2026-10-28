@@ -33,7 +33,8 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const hash = @import("../../hash/hash.zig");
-const varint = @import("../../codec.zig").varint;
+const codec = @import("../../codec.zig");
+const varint = codec.varint;
 
 const Oid = hash.Oid;
 const Kind = hash.Kind;
@@ -57,6 +58,8 @@ pub const format_id_sha256: u32 = 0x73323536;
 /// A restart table holds at most this many offsets, since its count is
 /// sixteen bits.
 const max_restarts: usize = (1 << 16) - 1;
+/// A restart point's width in a block's restart table.
+const restart_width = 3;
 
 /// The header's length: version 1 has no hash identifier, version 2 does.
 pub fn headerSize(version: u8) usize {
@@ -219,16 +222,14 @@ pub const Table = struct {
         if (bytes.len < header_len) return error.NotAReftable;
         if (!std.mem.eql(u8, footer[0..header_len], bytes[0..header_len])) return error.CorruptFooter;
 
-        var at: usize = 5;
-        const block_size = std.mem.readInt(u24, footer[at..][0..3], .big);
-        at += 3;
-        const min_index = std.mem.readInt(u64, footer[at..][0..8], .big);
-        at += 8;
-        const max_index = std.mem.readInt(u64, footer[at..][0..8], .big);
-        at += 8;
+        // The footer is the header again, then the offsets and its CRC-32,
+        // each field taken from what is left of it.
+        var r: Io.Reader = .fixed(footer[5..]);
+        const block_size = r.takeInt(u24, .big) catch return error.CorruptFooter;
+        const min_index = r.takeInt(u64, .big) catch return error.CorruptFooter;
+        const max_index = r.takeInt(u64, .big) catch return error.CorruptFooter;
         if (version == 2) {
-            const id = std.mem.readInt(u32, footer[at..][0..4], .big);
-            at += 4;
+            const id = r.takeInt(u32, .big) catch return error.CorruptFooter;
             const named: Kind = switch (id) {
                 format_id_sha1 => .sha1,
                 format_id_sha256 => .sha256,
@@ -238,24 +239,20 @@ pub const Table = struct {
         } else if (kind != .sha1) {
             return error.HashMismatch;
         }
-        const ref_index = std.mem.readInt(u64, footer[at..][0..8], .big);
-        at += 8;
-        const obj_field = std.mem.readInt(u64, footer[at..][0..8], .big);
-        at += 8;
-        const obj_index = std.mem.readInt(u64, footer[at..][0..8], .big);
-        at += 8;
-        const log_offset = std.mem.readInt(u64, footer[at..][0..8], .big);
-        at += 8;
-        const log_index = std.mem.readInt(u64, footer[at..][0..8], .big);
-        at += 8;
-        const stored_crc = std.mem.readInt(u32, footer[at..][0..4], .big);
-        if (warp.Crc32.hash(footer[0..at]) != stored_crc) return error.FooterChecksumMismatch;
+        const ref_index = r.takeInt(u64, .big) catch return error.CorruptFooter;
+        const obj_field = r.takeInt(u64, .big) catch return error.CorruptFooter;
+        const obj_index = r.takeInt(u64, .big) catch return error.CorruptFooter;
+        const log_offset = r.takeInt(u64, .big) catch return error.CorruptFooter;
+        const log_index = r.takeInt(u64, .big) catch return error.CorruptFooter;
+        const stored_crc = r.takeInt(u32, .big) catch return error.CorruptFooter;
+        // The CRC-32 is the footer's last four bytes, over all before them.
+        if (warp.Crc32.hash(footer[0 .. footer.len - 4]) != stored_crc) return error.FooterChecksumMismatch;
 
         // The type of the first block, which is what says whether there
         // are refs at all. An empty table's "first block" is its footer.
         const first_type: u8 = if (size > header_len and bytes.len > header_len) bytes[header_len] else 0;
         const obj_offset = obj_field >> 5;
-        const obj_id_len: u8 = @intCast(obj_field & 0x1f);
+        const obj_id_len: u8 = @as(u5, @truncate(obj_field));
         const has_objs = obj_offset > 0;
         if (has_objs and obj_id_len == 0) return error.CorruptFooter;
         return .{
@@ -329,8 +326,7 @@ pub const Table = struct {
                 }
                 var cursor: Iterator = .{ .gpa = gpa, .table = t, .typ = .index };
                 defer cursor.deinit();
-                cursor.block = block;
-                cursor.block_at = at;
+                cursor.hold(block, at);
                 defer cursor.block = null;
                 try cursor.seekInBlock(key);
                 const record = (try cursor.nextInBlock()) orelse return it;
@@ -342,7 +338,7 @@ pub const Table = struct {
             if (it.block == null) return it;
             // The last block whose first key is not past the key holds it.
             while (true) {
-                const next_at = it.block_at + it.block.?.full_size;
+                const next_at = try it.block.?.next(it.block_at);
                 var next = (try t.loadBlock(gpa, next_at)) orelse break;
                 if (next.typ != @backingInt(typ)) {
                     next.deinit(gpa);
@@ -355,10 +351,7 @@ pub const Table = struct {
                     break;
                 }
                 it.block.?.deinit(gpa);
-                it.block = next;
-                it.block_at = next_at;
-                it.pos = next.header_off + 4;
-                it.key.clearRetainingCapacity();
+                it.hold(next, next_at);
             }
         }
         try it.seekInBlock(key);
@@ -376,10 +369,18 @@ pub const Table = struct {
         return buf;
     }
 
+    /// Where a block the table names starts, checked to be within it.
+    const BlockOffset = struct { value: usize };
+
+    fn blockOffset(t: *const Table, at: u64) error{PastEnd}!BlockOffset {
+        const off = aegis.int.cast(usize, at) catch return error.PastEnd;
+        if (off >= t.size) return error.PastEnd;
+        return .{ .value = off };
+    }
+
     /// The block at `at`, or `null` past the last one.
     fn loadBlock(t: *const Table, gpa: Allocator, at: u64) Error!?Block {
-        if (at >= t.size) return null;
-        const off: usize = @intCast(at);
+        const off = (aegis.input.Untrusted(u64).init(at).parse(t, blockOffset) catch return null).value;
         const header_off: usize = if (off == 0) headerSize(t.version) else 0;
         // From a file, the header first, then as much as the block says it
         // is -- a byte more, to tell padding from the next block -- or, for
@@ -389,17 +390,20 @@ pub const Table = struct {
         var data: []const u8 = switch (t.source) {
             .bytes => |b| b[off..t.size],
             .file => blk: {
-                raw = try t.readAt(gpa, off, @max(t.block_size, 64) + 1);
+                // A byte past the block size, to tell padding from the next block.
+                const want = aegis.int.Checked(usize).init(@max(t.block_size, 64)).add(1) catch return error.CorruptBlock;
+                raw = try t.readAt(gpa, off, want.raw());
                 break :blk raw.?;
             },
         };
-        if (data.len < header_off + 4) return error.CorruptBlock;
-        const typ = data[header_off];
+        if (data.len < header_off) return error.CorruptBlock;
+        var header: Io.Reader = .fixed(data[header_off..]);
+        const typ = header.takeByte() catch return error.CorruptBlock;
         switch (typ) {
             'r', 'g', 'o', 'i' => {},
             else => return error.CorruptBlock,
         }
-        const len = std.mem.readInt(u24, data[header_off + 1 ..][0..3], .big);
+        const len: usize = header.takeInt(u24, .big) catch return error.CorruptBlock;
         const skip = header_off + 4;
         if (len < skip + 2) return error.CorruptBlock;
         if (t.source == .file) {
@@ -419,6 +423,7 @@ pub const Table = struct {
             .owned = null,
             .restart_off = 0,
             .restart_count = 0,
+            .restarts = .empty,
             .full_size = 0,
         };
         if (typ == @backingInt(BlockType.log)) {
@@ -427,7 +432,7 @@ pub const Table = struct {
             @memcpy(out[0..skip], data[0..skip]);
             var decoder: warp.Decompressor = .init;
             const inflated = decoder.inflate(data[skip..], out[skip..], .{}) catch return error.CorruptBlock;
-            if (inflated.out_len != len - skip) return error.CorruptBlock;
+            if (inflated.out_len != out.len - skip) return error.CorruptBlock;
             block.data = out;
             block.owned = out;
             block.full_size = skip + inflated.in_len;
@@ -449,11 +454,15 @@ pub const Table = struct {
             }
         }
         errdefer block.deinit(gpa);
-        const count = std.mem.readInt(u16, block.data[len - 2 ..][0..2], .big);
-        const table_len = 2 + 3 * @as(usize, count);
-        if (len < skip + table_len) return error.CorruptBlock;
-        block.restart_off = len - table_len;
-        block.restart_count = count;
+        // The block ends in its restart table, three bytes a point, and the
+        // count of them.
+        const end = block.data.len - 2;
+        var tail: Io.Reader = .fixed(block.data[end..]);
+        const count = tail.takeInt(u16, .big) catch return error.CorruptBlock;
+        const table_len = restart_width * @as(usize, count);
+        block.restart_off = (aegis.int.Checked(usize).init(end).sub(table_len) catch return error.CorruptBlock).raw();
+        if (block.restart_off < skip) return error.CorruptBlock;
+        block.restarts = codec.Rows.exactly(block.data[block.restart_off..end], count, restart_width) orelse return error.CorruptBlock;
         for (0..count) |i| {
             const r = block.restart(i);
             if (r < skip or r >= block.restart_off) return error.CorruptBlock;
@@ -488,9 +497,7 @@ pub const Table = struct {
             if (block.typ != @backingInt(BlockType.index)) return error.CorruptBlock;
             var it: Iterator = .{ .gpa = gpa, .table = t, .typ = .index };
             defer it.deinit();
-            it.block = block;
-            it.block_at = at;
-            it.pos = block.header_off + 4;
+            it.hold(block, at);
             defer it.block = null;
             while (try it.nextInBlock()) |_| {}
         }
@@ -507,42 +514,59 @@ const Block = struct {
     /// Where the records end and the restart table begins.
     restart_off: usize,
     restart_count: u16,
+    /// The restart table: where each restart point's record starts.
+    restarts: codec.Rows,
     /// How far the next block starts from this one.
     full_size: usize,
+
+    /// Where the block after this one, which starts at `at`, starts.
+    fn next(b: *const Block, at: u64) Error!u64 {
+        const after = aegis.int.Checked(u64).init(at).add(b.full_size) catch return error.CorruptBlock;
+        return after.raw();
+    }
 
     fn deinit(b: *Block, gpa: Allocator) void {
         if (b.owned) |bytes| gpa.free(bytes);
         b.* = undefined;
     }
 
+    /// Where restart point `i`, one the table holds, starts.
     fn restart(b: *const Block, i: usize) usize {
-        return std.mem.readInt(u24, b.data[b.restart_off + 3 * i ..][0..3], .big);
+        // aegis: no-danger: `i` is below the count the table was cut to
+        const row = b.restarts.at(i) orelse unreachable;
+        return std.mem.readInt(u24, row[0..restart_width], .big);
     }
 
     /// The first record's key, which is stored whole. The caller's.
     fn firstKey(b: *const Block, gpa: Allocator) Error![]u8 {
         var key: std.ArrayList(u8) = .empty;
         errdefer key.deinit(gpa);
-        _ = try decodeKey(gpa, b.data[0..b.restart_off], b.header_off + 4, &key);
+        var r = b.records();
+        _ = try takeKey(gpa, &r, &key);
         return key.toOwnedSlice(gpa);
+    }
+
+    /// The block's records, from the first to the restart table.
+    fn records(b: *const Block) Io.Reader {
+        var r: Io.Reader = .fixed(b.data[0..b.restart_off]);
+        r.seek = b.header_off + 4;
+        return r;
     }
 };
 
-/// A key's prefix and suffix read at `pos`, applied to `key`, which holds
-/// the key before it. Returns the value type and where the value starts.
-fn decodeKey(gpa: Allocator, data: []const u8, pos: usize, key: *std.ArrayList(u8)) Error!struct { extra: u3, at: usize } {
-    if (pos >= data.len) return error.CorruptRecord;
-    const prefix = varint.readOffset(data[pos..]) catch return error.CorruptRecord;
-    var at = pos + prefix.len;
-    const packed_suffix = varint.readOffset(data[at..]) catch return error.CorruptRecord;
-    at += packed_suffix.len;
-    const suffix_len = packed_suffix.value >> 3;
-    if (prefix.value > key.items.len) return error.CorruptRecord;
-    if (suffix_len > data.len - at) return error.CorruptRecord;
-    const suffix: usize = @intCast(suffix_len);
-    key.shrinkRetainingCapacity(@intCast(prefix.value));
-    try key.appendSlice(gpa, data[at..][0..suffix]);
-    return .{ .extra = @truncate(packed_suffix.value), .at = at + suffix };
+/// A key's prefix and suffix taken from `r`, applied to `key`, which holds
+/// the key before it. Returns the value type; the value is what `r` holds
+/// next.
+fn takeKey(gpa: Allocator, r: *Io.Reader, key: *std.ArrayList(u8)) Error!u3 {
+    const prefix = varint.takeOffset(r) catch return error.CorruptRecord;
+    const packed_suffix = varint.takeOffset(r) catch return error.CorruptRecord;
+    const kept = aegis.int.cast(usize, prefix) catch return error.CorruptRecord;
+    if (kept > key.items.len) return error.CorruptRecord;
+    const suffix_len = aegis.int.cast(usize, packed_suffix >> 3) catch return error.CorruptRecord;
+    const suffix = r.take(suffix_len) catch return error.CorruptRecord;
+    key.shrinkRetainingCapacity(kept);
+    try key.appendSlice(gpa, suffix);
+    return @truncate(packed_suffix);
 }
 
 /// A record's key and value type, with the value's bytes still to read.
@@ -561,16 +585,23 @@ pub const Iterator = struct {
     typ: BlockType,
     block: ?Block = null,
     block_at: u64 = 0,
-    pos: usize = 0,
+    /// The block's records, from the next one to the restart table.
+    records: Io.Reader = .fixed(&.{}),
     key: std.ArrayList(u8) = .empty,
-    /// The last decoded value, for the accessor that wants it.
-    value_at: usize = 0,
 
     /// Release the iterator.
     pub fn deinit(it: *Iterator) void {
         if (it.block) |*b| b.deinit(it.gpa);
         it.key.deinit(it.gpa);
         it.* = undefined;
+    }
+
+    /// Hold `block`, which starts at `at`, its first record next.
+    fn hold(it: *Iterator, block: Block, at: u64) void {
+        it.block = block;
+        it.block_at = at;
+        it.records = block.records();
+        it.key.clearRetainingCapacity();
     }
 
     fn enter(it: *Iterator, at: u64) ErrorNamespace.Error!void {
@@ -581,10 +612,7 @@ pub const Iterator = struct {
             return;
         }
         if (it.block) |*old| old.deinit(it.gpa);
-        it.block = block;
-        it.block_at = at;
-        it.pos = block.header_off + 4;
-        it.key.clearRetainingCapacity();
+        it.hold(block, at);
     }
 
     /// Put the cursor on the first record of this block whose key is at
@@ -599,28 +627,30 @@ pub const Iterator = struct {
         while (lo < hi) {
             const mid = lo + (hi - lo) / 2;
             scratch.clearRetainingCapacity();
-            const start = block.restart(mid);
+            var r = block.records();
+            r.seek = block.restart(mid);
             // A restart's key shares nothing with the one before it.
-            if (start >= block.restart_off or block.data[start] != 0) return error.CorruptBlock;
-            _ = try decodeKey(it.gpa, block.data[0..block.restart_off], start, &scratch);
+            if ((r.peekByte() catch return error.CorruptBlock) != 0) return error.CorruptBlock;
+            _ = try takeKey(it.gpa, &r, &scratch);
             if (std.mem.order(u8, scratch.items, want) == .gt) hi = mid else lo = mid + 1;
         }
-        it.pos = if (lo == 0) block.header_off + 4 else block.restart(lo - 1);
+        it.records = block.records();
+        if (lo != 0) it.records.seek = block.restart(lo - 1);
         it.key.clearRetainingCapacity();
         var previous: std.ArrayList(u8) = .empty;
         defer previous.deinit(it.gpa);
-        while (it.pos < block.restart_off) {
+        while (it.records.bufferedLen() != 0) {
             previous.clearRetainingCapacity();
             try previous.appendSlice(it.gpa, it.key.items);
-            const record_at = it.pos;
-            const decoded = try decodeKey(it.gpa, block.data[0..block.restart_off], it.pos, &it.key);
+            const record_at = it.records.seek;
+            const extra = try takeKey(it.gpa, &it.records, &it.key);
             if (std.mem.order(u8, it.key.items, want) != .lt) {
-                it.pos = record_at;
+                it.records.seek = record_at;
                 it.key.clearRetainingCapacity();
                 try it.key.appendSlice(it.gpa, previous.items);
                 return;
             }
-            it.pos = try skipValue(it.table, block.typ, block.data[0..block.restart_off], decoded.at, decoded.extra, it.key.items);
+            try skipValue(it.table, block.typ, &it.records, extra, it.key.items);
         }
     }
 
@@ -628,26 +658,22 @@ pub const Iterator = struct {
 
     /// The next record of an index block, without moving to another block.
     fn nextInBlock(it: *Iterator) ErrorNamespace.Error!?IndexRecord {
-        const block = if (it.block) |*b| b else return null;
-        if (it.pos >= block.restart_off) return null;
-        const decoded = try decodeKey(it.gpa, block.data[0..block.restart_off], it.pos, &it.key);
-        const value = varint.readOffset(block.data[decoded.at..block.restart_off]) catch return error.CorruptRecord;
-        it.pos = decoded.at + value.len;
-        return .{ .key = it.key.items, .index_offset = value.value };
+        if (it.block == null or it.records.bufferedLen() == 0) return null;
+        _ = try takeKey(it.gpa, &it.records, &it.key);
+        const index_offset = varint.takeOffset(&it.records) catch return error.CorruptRecord;
+        return .{ .key = it.key.items, .index_offset = index_offset };
     }
 
-    /// The next record's key and value type, the value checked and passed
-    /// over; `value` then reads it.
-    pub fn nextRaw(it: *Iterator) Self.Error!?Raw {
+    /// The next record's key and value type, its value still to take, in
+    /// this block or the next ones of the section.
+    fn nextKey(it: *Iterator) Self.Error!?Raw {
         while (true) {
             const block = if (it.block) |*b| b else return null;
-            if (it.pos < block.restart_off) {
-                const decoded = try decodeKey(it.gpa, block.data[0..block.restart_off], it.pos, &it.key);
-                it.value_at = decoded.at;
-                it.pos = try skipValue(it.table, block.typ, block.data[0..block.restart_off], decoded.at, decoded.extra, it.key.items);
-                return .{ .key = it.key.items, .extra = decoded.extra };
+            if (it.records.bufferedLen() != 0) {
+                const extra = try takeKey(it.gpa, &it.records, &it.key);
+                return .{ .key = it.key.items, .extra = extra };
             }
-            const next_at = it.block_at + block.full_size;
+            const next_at = try block.next(it.block_at);
             const had = it.block_at;
             var old = it.block.?;
             it.block = null;
@@ -660,146 +686,116 @@ pub const Iterator = struct {
         }
     }
 
+    /// The next record's key and value type, the value checked and passed
+    /// over.
+    pub fn nextRaw(it: *Iterator) Self.Error!?Raw {
+        const raw = (try it.nextKey()) orelse return null;
+        try skipValue(it.table, it.block.?.typ, &it.records, raw.extra, raw.key);
+        return raw;
+    }
+
     /// The next ref. Only for an iterator over refs.
     pub fn nextRef(it: *Iterator) Self.Error!?RefRecord {
         std.debug.assert(it.typ == .ref);
-        const raw = (try it.nextRaw()) orelse return null;
-        const value = try decodeRef(it.table, it.block.?.data[0..it.block.?.restart_off], it.value_at, raw);
-        return value;
+        const raw = (try it.nextKey()) orelse return null;
+        return try decodeRef(it.table, &it.records, raw);
     }
 
     /// The next log entry. Only for an iterator over logs.
     pub fn nextLog(it: *Iterator) Self.Error!?LogRecord {
         std.debug.assert(it.typ == .log);
-        const raw = (try it.nextRaw()) orelse return null;
-        const value = try decodeLog(it.table, it.block.?.data[0..it.block.?.restart_off], it.value_at, raw);
-        return value;
+        const raw = (try it.nextKey()) orelse return null;
+        return try decodeLog(it.table, &it.records, raw);
     }
 };
 
-/// Where the value that starts at `at` ends, having checked it is one the
-/// record type allows.
-fn skipValue(t: *const Table, typ: u8, data: []const u8, at: usize, extra: u3, key: []const u8) Error!usize {
+/// Takes the value `r` holds next, having checked it is one the record
+/// type allows.
+fn skipValue(t: *const Table, typ: u8, r: *Io.Reader, extra: u3, key: []const u8) Error!void {
     const raw: Raw = .{ .key = key, .extra = extra };
     switch (typ) {
-        'r' => return (try decodeRefValue(t, data, at, raw)).end,
-        'g' => return (try decodeLogValue(t, data, at, raw)).end,
-        'i' => {
-            const value = varint.readOffset(data[@min(at, data.len)..]) catch return error.CorruptRecord;
-            return at + value.len;
-        },
+        'r' => _ = try takeRefValue(t, r, raw),
+        'g' => _ = try takeLogValue(t, r, raw),
+        'i' => _ = varint.takeOffset(r) catch return error.CorruptRecord,
         'o' => {
-            var pos = at;
-            var count: u64 = extra;
-            if (count == 0) {
-                const n = varint.readOffset(data[@min(pos, data.len)..]) catch return error.CorruptRecord;
-                pos += n.len;
-                count = n.value;
-            }
+            const count: u64 = if (extra != 0) extra else varint.takeOffset(r) catch return error.CorruptRecord;
             // Every offset takes a byte at least, which bounds the count by
             // what is left of the block before anything is believed.
-            if (count > data.len - @min(pos, data.len)) return error.CorruptRecord;
-            var i: u64 = 0;
-            while (i < count) : (i += 1) {
-                const n = varint.readOffset(data[@min(pos, data.len)..]) catch return error.CorruptRecord;
-                pos += n.len;
-            }
-            return pos;
+            if (count > r.bufferedLen()) return error.CorruptRecord;
+            const offsets = aegis.int.cast(usize, count) catch return error.CorruptRecord;
+            for (0..offsets) |_| _ = varint.takeOffset(r) catch return error.CorruptRecord;
         },
         else => return error.CorruptBlock,
     }
 }
 
-fn readOid(t: *const Table, data: []const u8, at: usize) Error!Oid {
-    const len = t.kind.rawLen();
-    if (at > data.len or data.len - at < len) return error.CorruptRecord;
+fn takeOid(t: *const Table, r: *Io.Reader) Error!Oid {
+    const bytes = r.take(t.kind.rawLen()) catch return error.CorruptRecord;
     // aegis: no-danger: the slice is cut to the format's raw length
-    return Oid.fromRaw(t.kind, data[at..][0..len]) catch unreachable;
+    return Oid.fromRaw(t.kind, bytes) catch unreachable;
 }
 
-fn readString(data: []const u8, at: usize) Error!struct { text: []const u8, end: usize } {
-    if (at > data.len) return error.CorruptRecord;
-    const len = varint.readOffset(data[at..]) catch return error.CorruptRecord;
-    const start = at + len.len;
-    if (len.value > data.len - start) return error.CorruptRecord;
-    const n: usize = @intCast(len.value);
-    return .{ .text = data[start..][0..n], .end = start + n };
+/// A string stored as its length and its bytes.
+fn takeString(r: *Io.Reader) Error![]const u8 {
+    const len = varint.takeOffset(r) catch return error.CorruptRecord;
+    return r.take(aegis.int.cast(usize, len) catch return error.CorruptRecord) catch return error.CorruptRecord;
 }
 
-fn decodeRefValue(t: *const Table, data: []const u8, at: usize, raw: Raw) Error!struct { value: RefValue, update_index: u64, end: usize } {
-    if (at > data.len) return error.CorruptRecord;
-    const delta = varint.readOffset(data[at..]) catch return error.CorruptRecord;
-    const update_index = std.math.add(u64, t.min_update_index, delta.value) catch return error.CorruptRecord;
-    var pos = at + delta.len;
-    const len = t.kind.rawLen();
+fn takeRefValue(t: *const Table, r: *Io.Reader, raw: Raw) Error!struct { value: RefValue, update_index: u64 } {
+    const delta = varint.takeOffset(r) catch return error.CorruptRecord;
+    const update_index = std.math.add(u64, t.min_update_index, delta) catch return error.CorruptRecord;
     const value: RefValue = switch (raw.extra) {
         0 => .deletion,
-        1 => blk: {
-            const oid = try readOid(t, data, pos);
-            pos += len;
-            break :blk .{ .direct = oid };
-        },
+        1 => .{ .direct = try takeOid(t, r) },
         2 => blk: {
-            const value = try readOid(t, data, pos);
-            const target = try readOid(t, data, pos + len);
-            pos += 2 * len;
+            const value = try takeOid(t, r);
+            const target = try takeOid(t, r);
             break :blk .{ .peeled = .{ .value = value, .target = target } };
         },
-        3 => blk: {
-            const s = try readString(data, pos);
-            pos = s.end;
-            break :blk .{ .symbolic = s.text };
-        },
+        3 => .{ .symbolic = try takeString(r) },
         else => return error.CorruptRecord,
     };
-    return .{ .value = value, .update_index = update_index, .end = pos };
+    return .{ .value = value, .update_index = update_index };
 }
 
-fn decodeRef(t: *const Table, data: []const u8, at: usize, raw: Raw) Error!RefRecord {
-    const decoded = try decodeRefValue(t, data, at, raw);
+fn decodeRef(t: *const Table, r: *Io.Reader, raw: Raw) Error!RefRecord {
+    const decoded = try takeRefValue(t, r, raw);
     return .{ .name = raw.key, .update_index = decoded.update_index, .value = decoded.value };
 }
 
-fn decodeLogValue(t: *const Table, data: []const u8, at: usize, raw: Raw) Error!struct { value: LogValue, end: usize } {
+fn takeLogValue(t: *const Table, r: *Io.Reader, raw: Raw) Error!LogValue {
     // The key is the ref's name, a NUL, and the inverted update index.
     if (raw.key.len <= 9 or raw.key[raw.key.len - 9] != 0) return error.CorruptRecord;
     switch (raw.extra) {
-        0 => return .{ .value = .deletion, .end = at },
+        0 => return .deletion,
         1 => {},
         else => return error.CorruptRecord,
     }
-    const len = t.kind.rawLen();
-    const old = try readOid(t, data, at);
-    const new = try readOid(t, data, at + len);
-    const name = try readString(data, at + 2 * len);
-    const email = try readString(data, name.end);
-    if (email.end > data.len) return error.CorruptRecord;
-    const time = varint.readOffset(data[email.end..]) catch return error.CorruptRecord;
-    const tz_at = email.end + time.len;
-    if (tz_at > data.len or data.len - tz_at < 2) return error.CorruptRecord;
-    const tz: i16 = @bitCast(std.mem.readInt(u16, data[tz_at..][0..2], .big));
-    const message = try readString(data, tz_at + 2);
-    return .{
-        .value = .{ .update = .{
-            .old = old,
-            .new = new,
-            .name = name.text,
-            .email = email.text,
-            .time = time.value,
-            .tz_offset = tz,
-            .message = message.text,
-        } },
-        .end = message.end,
-    };
+    const old = try takeOid(t, r);
+    const new = try takeOid(t, r);
+    const name = try takeString(r);
+    const email = try takeString(r);
+    const time = varint.takeOffset(r) catch return error.CorruptRecord;
+    const tz: i16 = r.takeInt(i16, .big) catch return error.CorruptRecord;
+    const message = try takeString(r);
+    return .{ .update = .{
+        .old = old,
+        .new = new,
+        .name = name,
+        .email = email,
+        .time = time,
+        .tz_offset = tz,
+        .message = message,
+    } };
 }
 
-fn decodeLog(t: *const Table, data: []const u8, at: usize, raw: Raw) Error!LogRecord {
-    const decoded = try decodeLogValue(t, data, at, raw);
+fn decodeLog(t: *const Table, r: *Io.Reader, raw: Raw) Error!LogRecord {
+    const value = try takeLogValue(t, r, raw);
     const inverted = std.mem.readInt(u64, raw.key[raw.key.len - 8 ..][0..8], .big);
     return .{
         .name = raw.key[0 .. raw.key.len - 9],
         .update_index = ~inverted,
-        .value = decoded.value,
+        .value = value,
     };
 }
 
@@ -1158,7 +1154,8 @@ const Writer = struct {
         var value: std.ArrayList(u8) = .empty;
         defer value.deinit(w.gpa);
         var buf: [16]u8 = undefined;
-        try value.appendSlice(w.gpa, varint.writeOffset(&buf, ref.update_index - w.min_update_index));
+        const delta = aegis.int.Checked(u64).init(ref.update_index).sub(w.min_update_index) catch return error.UpdateIndexOutOfRange;
+        try value.appendSlice(w.gpa, varint.writeOffset(&buf, delta.raw()));
         const extra: u8 = switch (ref.value) {
             .deletion => 0,
             .direct => |oid| blk: {
@@ -1746,8 +1743,8 @@ fn expectSameLogBlocks(gpa: Allocator, a: *const Table, b: *const Table) !void {
             break;
         }
         try std.testing.expectEqualSlices(u8, block_a.data, block_b.data);
-        at_a += block_a.full_size;
-        at_b += block_b.full_size;
+        at_a = try block_a.next(at_a);
+        at_b = try block_b.next(at_b);
     }
     try std.testing.expect(blocks > 1);
 }

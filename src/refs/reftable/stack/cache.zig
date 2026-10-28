@@ -125,8 +125,7 @@ pub const Stack = struct {
         var lines = std.mem.splitScalar(u8, text, '\n');
         while (lines.next()) |line| {
             if (line.len == 0) continue;
-            if (!isTableName(line)) return error.MalformedTablesList;
-            try names.append(arena, line);
+            try names.append(arena, (try checkTableName(line)).bytes);
         }
         const tables = try arena.alloc(reftable.Table, names.items.len);
         const files = try arena.alloc(Io.File, names.items.len);
@@ -191,6 +190,13 @@ pub const Stack = struct {
         var max: u64 = 0;
         for (s.tables) |t| max = @max(max, t.max_update_index);
         return max;
+    }
+
+    /// The update index after the stack's newest, which the next table
+    /// written on it takes.
+    pub fn nextUpdateIndex(s: *const Stack) error{UpdateIndexOutOfRange}!u64 {
+        const next = aegis.int.Checked(u64).init(s.maxUpdateIndex()).add(1) catch return error.UpdateIndexOutOfRange;
+        return next.raw();
     }
 
     /// The newest record for `name`, tombstone included, or `null` when no
@@ -332,6 +338,24 @@ fn logOrder(_: void, a: reftable.LogRecord, b: reftable.LogRecord) bool {
     return a.update_index > b.update_index;
 }
 
+/// A table's name as `tables.list` or the directory gives it, before
+/// `checkTableName` has let it through.
+const UntrustedName = aegis.input.Untrusted([]const u8);
+
+/// A name with a table's shape (`isTableName`): a file in the reftable
+/// directory and nothing past it. Only `checkTableName` makes one.
+pub const TableName = struct { bytes: []const u8 };
+
+fn parseTableName(_: void, raw: []const u8) error{MalformedTablesList}!TableName {
+    if (!isTableName(raw)) return error.MalformedTablesList;
+    return .{ .bytes = raw };
+}
+
+/// `raw` as a table's name, or `MalformedTablesList`.
+fn checkTableName(raw: []const u8) error{MalformedTablesList}!TableName {
+    return UntrustedName.init(raw).parse({}, parseTableName);
+}
+
 /// Whether `name` has the shape of a table's name:
 /// `0x<12 hex>-0x<12 hex>-<8 hex>.ref`, which is what git writes, or
 /// anything else ending `.ref` without a slash, which it also reads.
@@ -343,14 +367,15 @@ fn isTableName(name: []const u8) bool {
 }
 
 /// A table's file name, as git forms it.
-fn tableName(io: Io, buf: *[64]u8, min: u64, max: u64) []const u8 {
+fn tableName(io: Io, buf: *[64]u8, min: u64, max: u64) TableName {
     var random: [4]u8 = undefined;
     io.random(&random);
-    return std.mem.print(buf, "0x{x:0>12}-0x{x:0>12}-{x:0>8}.ref", .{
+    const printed = std.mem.print(buf, "0x{x:0>12}-0x{x:0>12}-{x:0>8}.ref", .{
         min,
         max,
         std.mem.readInt(u32, &random, .little),
     }) catch unreachable; // aegis: no-danger: two u64 of at most sixteen hex digits, a u32 of eight and fourteen bytes fit 64
+    return checkTableName(printed) catch unreachable; // aegis: no-danger: hex, dashes and `.ref` are a table's shape
 }
 
 //=========================================================================
@@ -521,7 +546,7 @@ pub const internal = struct {
     pub const lessThanRef = Self.lessThanRef;
     pub const newerFirst = Self.newerFirst;
     pub const logOrder = Self.logOrder;
-    pub const isTableName = Self.isTableName;
+    pub const checkTableName = Self.checkTableName;
     pub const tableName = Self.tableName;
     pub const Validity = Self.Validity;
     pub const Stacks = Self.Stacks;
