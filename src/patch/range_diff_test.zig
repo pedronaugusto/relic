@@ -251,6 +251,31 @@ test "a cost matrix past the limit is refused, as git refuses it" {
     try std.testing.expectError(error.LeftAndRightOnly, range_diff.write(gpa, io, &out.writer, .{ .repo = &repo, .old = old, .new = new }, .{ .left_only = true, .right_only = true }));
 }
 
+test "a malformed log.showroot or log.mailmap is refused, as git dies on it, where the default was taken" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    try buildSeries(io, &git);
+    const old = try range(gpa, io, &git, "base", "old");
+    const new = try range(gpa, io, &git, "base", "new");
+    for ([_][]const u8{ "log.showroot", "log.mailmap" }) |key| {
+        try git.exec(io, &.{ "config", key, "maybe" });
+        var c = try git.capture(io, &.{ "range-diff", "--no-color", "base..old", "base..new" });
+        defer c.deinit(gpa);
+        try std.testing.expect(c.code != 0);
+        var repo = try Repository.open(gpa, io, git.dir, .{});
+        defer repo.deinit(io);
+        var out: Io.Writer.Allocating = .init(gpa);
+        defer out.deinit();
+        std.testing.expectError(error.NotABoolean, range_diff.write(gpa, io, &out.writer, .{ .repo = &repo, .old = old, .new = new }, .{})) catch |err| {
+            std.debug.print("{s} = maybe\n", .{key});
+            return err;
+        };
+        try git.exec(io, &.{ "config", "--unset", key });
+    }
+}
+
 test "a range-diff in colour is git's, in dual colour and without, under color.diff.<slot>" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
