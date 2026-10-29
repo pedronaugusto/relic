@@ -254,7 +254,7 @@ pub const Agent = struct {
             const answer = try a.receive(io);
             if (!std.mem.eql(u8, answer.oid, request.oid)) return error.LfsAdapterProtocolError;
             if (std.mem.eql(u8, answer.event, "progress")) {
-                if (answer.bytesSinceLast > 0) progress.bytes(@intCast(answer.bytesSinceLast)); // safe: positive, checked just above
+                if (answer.bytesSinceLast > 0) progress.bytes(@intCast(answer.bytesSinceLast)); // positive, checked just above
                 continue;
             }
             if (!std.mem.eql(u8, answer.event, "complete")) return error.LfsAdapterProtocolError;

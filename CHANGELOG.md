@@ -8,6 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Breaking
 
+- `lfs.Pointer.encodeBuf` returns `error{PointerTooLong}`: a pointer a caller made with extension names longer than `decode` reads did not fit the buffer and reached an `unreachable`; one `decode` made always fits.
 - `index.WriteError` has `TooManyEntries`: an index of more entries than the format counts (2^32, git's `unsigned int`) is refused when written, where its count was cast unchecked.
 - `index.WriteOptions.racy` is a `*const WriteOptions.Racy`, a node its owner embeds (`Racy.changed` takes the node), and `checkout.native.Observer` likewise (`missing_fn` takes the `*Observer`, `SessionOptions.observer` is a pointer), where each carried an `*anyopaque` context: `worktree.RacyCheck` and `filter.Report` embed theirs and find themselves from it.
 - `pretty.shortlog.Wrap`'s `width`, `indent1` and `indent2` are `i32`, git's `int`, where they were `u32`: a width past an `i32` stopped a safe build where `-w` cast it for the wrap.

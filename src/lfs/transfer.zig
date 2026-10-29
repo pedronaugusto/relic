@@ -1676,7 +1676,7 @@ const Counting = struct {
     }
 
     fn stream(r: *Io.Reader, w: *Io.Writer, limit: Io.Limit) Io.Reader.StreamError!usize {
-        const c: *Counting = @alignCast(@fieldParentPtr("interface", r)); // aegis: no-danger: this function is installed only on a Counting's interface
+        const c: *Counting = @alignCast(@fieldParentPtr("interface", r)); // aegis: boundary: std.Io vtable: this function is installed only on a Counting's interface
         const n = c.inner.stream(w, limit) catch |err| {
             c.flush();
             return err;
@@ -2012,7 +2012,7 @@ const SshData = struct {
     }
 
     fn stream(r: *Io.Reader, w: *Io.Writer, limit: Io.Limit) Io.Reader.StreamError!usize {
-        const d: *SshData = @alignCast(@fieldParentPtr("interface", r)); // aegis: no-danger: this function is installed only on a SshData's interface
+        const d: *SshData = @alignCast(@fieldParentPtr("interface", r)); // aegis: boundary: std.Io vtable: this function is installed only on a SshData's interface
         while (d.pending.len == 0) {
             if (d.done) return error.EndOfStream;
             const next = d.conn.nextData(d.operation.io()) catch |err| {
@@ -2474,7 +2474,8 @@ pub fn checkoutPointers(gpa: Allocator, io: Io, repo: *Repository, store: *const
         defer gpa.free(on_disk);
         if (!std.mem.eql(u8, on_disk, found.bytes)) {
             var canonical_buf: [lfs.Pointer.max_encoded_len]u8 = undefined;
-            if (!std.mem.eql(u8, on_disk, pointer.encodeBuf(&canonical_buf))) continue;
+            const canonical = pointer.encodeBuf(&canonical_buf) catch continue;
+            if (!std.mem.eql(u8, on_disk, canonical)) continue;
         }
         var owned = (try store.open(io, &pointer)) orelse {
             left += 1;

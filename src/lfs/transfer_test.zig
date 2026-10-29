@@ -1211,7 +1211,7 @@ test "an object checkout cannot get fails it, as git-lfs's smudge does, unless d
     try fx.server.putObject(&testlfs.sha256Hex(here), here);
     var pointer_buf: [lfs.Pointer.max_encoded_len]u8 = undefined;
     const gone_pointer: lfs.Pointer = .{ .oid = testlfs.sha256Hex(gone), .size = gone.len };
-    const gone_text = gone_pointer.encodeBuf(&pointer_buf);
+    const gone_text = try gone_pointer.encodeBuf(&pointer_buf);
 
     for ([_]bool{ false, true }) |skip| {
         for ([_][]const u8{ "by-git", "by-relic" }, 0..) |base, i| {

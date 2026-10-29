@@ -192,12 +192,13 @@ pub const Pointer = struct {
         try w.print("oid sha256:{s}\nsize {d}\n", .{ &p.oid, p.size });
     }
 
-    /// `encode` into a buffer of the caller's.
-    pub fn encodeBuf(p: *const Pointer, buf: *[max_encoded_len]u8) []const u8 {
+    /// `encode` into a buffer of the caller's. A pointer `decode` made always
+    /// fits; one a caller made with longer extension names than that can be
+    /// `error.PointerTooLong`.
+    pub fn encodeBuf(p: *const Pointer, buf: *[max_encoded_len]u8) error{PointerTooLong}![]const u8 {
         aegis.assert.invariant(p.extension_count <= max_extensions, "p.extension_count <= max_extensions");
         var w: Io.Writer = .fixed(buf);
-        // aegis: no-danger: extensions come only from `decode`, out of at most 1024 bytes, and their lines encode no longer than they were read; with the version, oid and size lines that is under max_encoded_len
-        p.encode(&w) catch unreachable;
+        p.encode(&w) catch return error.PointerTooLong;
         return w.buffered();
     }
 
@@ -450,10 +451,7 @@ fn copyHashing(source: *Io.Reader, sink: ?*Io.Writer) (Io.Reader.ShortError || I
     }
     var digest: [Sha256.digest_length]u8 = undefined;
     sha.final(&digest);
-    var p: Pointer = .{ .oid = undefined, .size = size };
-    // aegis: no-danger: a SHA-256 digest is 32 bytes, 64 hex digits, the length of oid
-    _ = std.mem.print(&p.oid, "{x}", .{&digest}) catch unreachable;
-    return p;
+    return .{ .oid = std.fmt.bytesToHex(digest, .lower), .size = size };
 }
 
 /// What decides which objects a checkout asks to have fetched, and whether
@@ -733,7 +731,7 @@ test "a pointer decodes and encodes to the same bytes" {
     try testing.expectEqualStrings(hello_oid, &p.oid);
     try testing.expectEqual(@as(u64, 6), p.size);
     var buf: [Pointer.max_encoded_len]u8 = undefined;
-    try testing.expectEqualStrings(text, p.encodeBuf(&buf));
+    try testing.expectEqualStrings(text, try p.encodeBuf(&buf));
 }
 
 test "what git-lfs reads as a pointer is one here, spelled any way it accepts" {
@@ -775,7 +773,7 @@ test "empty content is the pointer of an empty file, which encodes as nothing" {
     try testing.expectEqual(@as(u64, 0), p.size);
     try testing.expectEqualStrings(&empty_oid, &p.oid);
     var buf: [Pointer.max_encoded_len]u8 = undefined;
-    try testing.expectEqualStrings("", p.encodeBuf(&buf));
+    try testing.expectEqualStrings("", try p.encodeBuf(&buf));
 }
 
 test "extensions are read in any order before the size and written by priority" {
@@ -793,7 +791,7 @@ test "extensions are read in any order before the size and written by priority" 
     try testing.expectEqualStrings("version https://git-lfs.github.com/spec/v1\n" ++
         "ext-0-foo sha256:" ++ other ++ "\n" ++
         "ext-1-bar sha256:" ++ other ++ "\n" ++
-        "oid sha256:" ++ oid ++ "\nsize 6\n", p.encodeBuf(&buf));
+        "oid sha256:" ++ oid ++ "\nsize 6\n", try p.encodeBuf(&buf));
 
     const twice = "version https://git-lfs.github.com/spec/v1\n" ++
         "ext-0-foo sha256:" ++ other ++ "\n" ++
@@ -925,7 +923,7 @@ fn fuzzPointer(_: void, case: *shakedown.Case) anyerror!void {
         error.NotAPointer, error.BadPointer => return,
     };
     var buf: [Pointer.max_encoded_len]u8 = undefined;
-    const encoded = p.encodeBuf(&buf);
+    const encoded = try p.encodeBuf(&buf);
     // A pointer to nothing is the empty file whatever else it said.
     if (p.size == 0) return testing.expectEqualStrings("", encoded);
     // The oldest version string is shorter than the one written, so a

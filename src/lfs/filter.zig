@@ -168,7 +168,8 @@ const Session = struct {
 
     fn encodePointer(a: Allocator, pointer: *const lfs.Pointer) Allocator.Error![]const u8 {
         var buf: [lfs.Pointer.max_encoded_len]u8 = undefined;
-        return a.dupe(u8, pointer.encodeBuf(&buf));
+        // aegis: internal: a pointer clean makes carries no extensions, and its version, oid and size lines always fit
+        return a.dupe(u8, pointer.encodeBuf(&buf) catch unreachable);
     }
 
     /// Content that is not a pointer is passed through, and a pointer to
@@ -360,7 +361,7 @@ test "native LFS batches delayed files once and isolates session state" {
     var source: Io.Reader = .fixed("payload");
     const pointer = try lfs.hashOnly(&source);
     var buffer: [lfs.Pointer.max_encoded_len]u8 = undefined;
-    const bytes = pointer.encodeBuf(&buffer);
+    const bytes = try pointer.encodeBuf(&buffer);
     try testing.expect((try session.smudge(gpa, io, .{ .path = "one", .bytes = bytes, .can_delay = true })) == .delayed);
     try testing.expect((try session.smudge(gpa, io, .{ .path = "two", .bytes = bytes, .can_delay = true })) == .delayed);
     for ([_][]const u8{ "one", "two" }) |path| {
@@ -401,7 +402,7 @@ test "native LFS propagates batched cancellation and releases pending state" {
     var source: Io.Reader = .fixed("missing");
     const pointer = try lfs.hashOnly(&source);
     var buffer: [lfs.Pointer.max_encoded_len]u8 = undefined;
-    try testing.expect((try session.smudge(gpa, io, .{ .path = "one", .bytes = pointer.encodeBuf(&buffer), .can_delay = true })) == .delayed);
+    try testing.expect((try session.smudge(gpa, io, .{ .path = "one", .bytes = try pointer.encodeBuf(&buffer), .can_delay = true })) == .delayed);
     try testing.expectError(error.Canceled, session.nextReady(gpa, io));
     try testing.expectEqual(@as(usize, 1), fetch.calls);
     session.deinit(io);
