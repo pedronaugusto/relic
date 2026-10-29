@@ -82,6 +82,11 @@ pub const Options = struct {
     first_parent: bool = false,
     /// `--exclude-first-parent-only`: see `Walk.exclude_first_parent_only`.
     exclude_first_parent_only: bool = false,
+    /// `--since`, `--until` and `--since-as-filter`: see `Walk.max_age`,
+    /// `Walk.min_age` and `Walk.max_age_as_filter`.
+    max_age: ?i64 = null,
+    min_age: ?i64 = null,
+    max_age_as_filter: ?i64 = null,
     /// `--edges`: the hidden parents of the commits walked give their
     /// trees too, ahead of the commits' own.
     edges: bool = false,
@@ -249,6 +254,9 @@ pub const PathWalk = struct {
         w.paths = options.paths;
         w.first_parent = options.first_parent;
         w.exclude_first_parent_only = options.exclude_first_parent_only;
+        w.max_age = options.max_age;
+        w.min_age = options.min_age;
+        w.max_age_as_filter = options.max_age_as_filter;
         w.graph = if (graph) |*g| g else null;
         w.max_tree_depth = repo.settings().max_tree_depth;
         for (inputs.include) |oid| try w.push(oid);
