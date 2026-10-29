@@ -85,7 +85,7 @@ pub const Error = error{
     ObjectFormatMismatch,
     /// Writing to the client failed.
     WriteFailed,
-} || Io.Reader.Error || local.Error || quarantine_mod.Error || hooks.Error || hooks.InitError || Allocator.Error || Io.Cancelable;
+} || Io.Reader.Error || local.Error || quarantine_mod.Error || hooks.Error || hooks.InitError || config_mod.ValueError || Allocator.Error || Io.Cancelable;
 
 /// How the server runs.
 pub const Options = struct {
@@ -111,14 +111,17 @@ pub const Options = struct {
 /// How a `receive.deny*` setting answers.
 const Deny = enum { unconfigured, ignore, warn, refuse, update_instead };
 
-/// git's `parse_deny_action`.
-fn denyAction(config: *const config_mod.Config, key: []const u8) Deny {
-    const raw = config.get(key) orelse return .unconfigured;
+/// git's `parse_deny_action`: one of its four words, else a boolean, which
+/// git dies on when it is neither.
+fn denyAction(config: *const config_mod.Config, key: []const u8) config_mod.ValueError!Deny {
+    const entry = config.find(key) orelse return .unconfigured;
+    // A name with no `=` is true.
+    const raw = entry.value orelse return .refuse;
     if (std.ascii.eqlIgnoreCase(raw, "ignore")) return .ignore;
     if (std.ascii.eqlIgnoreCase(raw, "warn")) return .warn;
     if (std.ascii.eqlIgnoreCase(raw, "refuse")) return .refuse;
     if (std.ascii.eqlIgnoreCase(raw, "updateinstead")) return .update_instead;
-    return if (config_mod.parseBool(raw) catch false) .refuse else .ignore;
+    return if (try config_mod.parseBool(raw)) .refuse else .ignore;
 }
 
 /// The `receive.*` settings, read once.
@@ -153,31 +156,31 @@ const Settings = struct {
     /// a pack of fewer objects is stored loose.
     unpack_limit: u64,
 
-    fn read(config: *const config_mod.Config) Settings {
-        const max = config.getInt(i64, "receive.maxinputsize", 0) catch 0;
+    /// Each setting read as git's receive-pack reads it: a malformed one
+    /// refuses the push, as git dies on it ("bad boolean config value",
+    /// "bad numeric config value"), where taking the default would let
+    /// through what `receive.denyDeletes` or `denyNonFastForwards` refuse.
+    fn read(config: *const config_mod.Config) config_mod.ValueError!Settings {
+        const max = try config.getInt(i64, "receive.maxinputsize", 0);
         return .{
-            .deny_deletes = config.getBool("receive.denydeletes", false) catch false,
-            .deny_non_fast_forwards = config.getBool("receive.denynonfastforwards", false) catch false,
-            .deny_current_branch = denyAction(config, "receive.denycurrentbranch"),
-            .deny_delete_current = denyAction(config, "receive.denydeletecurrent"),
-            .advertise_atomic = config.getBool("receive.advertiseatomic", true) catch true,
-            .advertise_push_options = config.getBool("receive.advertisepushoptions", false) catch false,
-            .ofs_delta = config.getBool("repack.usedeltabaseoffset", true) catch true,
-            .shallow_update = config.getBool("receive.shallowupdate", false) catch false,
+            .deny_deletes = try config.getBool("receive.denydeletes", false),
+            .deny_non_fast_forwards = try config.getBool("receive.denynonfastforwards", false),
+            .deny_current_branch = try denyAction(config, "receive.denycurrentbranch"),
+            .deny_delete_current = try denyAction(config, "receive.denydeletecurrent"),
+            .advertise_atomic = try config.getBool("receive.advertiseatomic", true),
+            .advertise_push_options = try config.getBool("receive.advertisepushoptions", false),
+            .ofs_delta = try config.getBool("repack.usedeltabaseoffset", true),
+            .shallow_update = try config.getBool("receive.shallowupdate", false),
             .max_input_size = if (max > 0) .fromRaw(@intCast(max)) else null,
             .cert_nonce_seed = config.get("receive.certnonceseed"),
-            .cert_nonce_slop = .fromRaw(@intCast(@max(0, config.getInt(c_ulong, "receive.certnonceslop", 0) catch 0))),
-            .keepalive = .fromRaw(config.getInt(c_int, "receive.keepalive", 5) catch 5),
-            .update_server_info = config.getBool("receive.updateserverinfo", false) catch false,
-            .auto_gc = config.getBool("receive.autogc", true) catch true,
-            .advertise_sid = config.getBool("transfer.advertisesid", false) catch false,
-            .unpack_limit = limit: {
-                for ([_][]const u8{ "receive.unpacklimit", "transfer.unpacklimit" }) |key| {
-                    const value = config.getInt(c_int, key, -1) catch -1;
-                    if (value >= 0) break :limit @intCast(value);
-                }
-                break :limit 100;
-            },
+            .cert_nonce_slop = .fromRaw(try config.getInt(c_ulong, "receive.certnonceslop", 0)),
+            .keepalive = .fromRaw(try config.getInt(c_int, "receive.keepalive", 5)),
+            .update_server_info = try config.getBool("receive.updateserverinfo", false),
+            .auto_gc = try config.getBool("receive.autogc", true),
+            .advertise_sid = try config.getBool("transfer.advertisesid", false),
+            // git's `odb_transaction_files_unpack_limit`: `transfer.unpackLimit`,
+            // then `receive.unpackLimit` over it, both unsigned.
+            .unpack_limit = try config.getInt(c_uint, "receive.unpacklimit", try config.getInt(c_uint, "transfer.unpacklimit", 100)),
         };
     }
 };
@@ -289,7 +292,7 @@ pub const Server = struct {
             .remote = remote,
             .version = if (version == .v2) .v0 else version,
             .options = options,
-            .settings = .read(remote.repo.configuration()),
+            .settings = try .read(remote.repo.configuration()),
         };
         if (s.settings.cert_nonce_seed) |seed| s.nonce = try certNonce(gpa, s.kind(), options.service_dir, seed, options.who.when_secs);
         errdefer if (s.nonce) |n| gpa.free(n);

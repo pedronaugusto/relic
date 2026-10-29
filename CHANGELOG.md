@@ -10,6 +10,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - `merge.rerere.enabled` and `odb.rev_index.wanted` return `config.ValueError!bool`: a `rerere.enabled` or `pack.writeReverseIndex` that is no boolean is `error.NotABoolean`, as git dies on it, where it was read as unset.
 - `lfs.Pointer.encodeBuf` returns `error{PointerTooLong}`: a pointer a caller made with extension names longer than `decode` reads did not fit the buffer and reached an `unreachable`; one `decode` made always fits.
+- `transport.receive_pack.Server.Error` carries `config.ValueError`: a malformed `receive.*` setting refuses the push (Security, below).
 - `index.WriteError` has `TooManyEntries`: an index of more entries than the format counts (2^32, git's `unsigned int`) is refused when written, where its count was cast unchecked.
 - `index.WriteOptions.racy` is a `*const WriteOptions.Racy`, a node its owner embeds (`Racy.changed` takes the node), and `checkout.native.Observer` likewise (`missing_fn` takes the `*Observer`, `SessionOptions.observer` is a pointer), where each carried an `*anyopaque` context: `worktree.RacyCheck` and `filter.Report` embed theirs and find themselves from it.
 - `pretty.shortlog.Wrap`'s `width`, `indent1` and `indent2` are `i32`, git's `int`, where they were `u32`: a width past an `i32` stopped a safe build where `-w` cast it for the wrap.
@@ -372,6 +373,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Security
 
+- `transport.receive_pack` refuses a push when a `receive.*` setting it reads is malformed (`error.NotABoolean`, `NotAnInteger`, `OutOfRange`), as git's receive-pack dies on it, where it took the default: a malformed `receive.denyDeletes` or `receive.denyNonFastForwards` let through the deletions and rewinds it was set to refuse. A `receive.denyCurrentBranch` or `denyDeleteCurrent` written with no value is `refuse`, as git reads a bare name as true, where it was `ignore`. `receive.unpackLimit` and `transfer.unpackLimit` are read unsigned, as git reads them.
 - reactor 0.8.7 (from 0.8.5); its 0.8.6 fixes data written into the wrong file. On reactor's io_uring runtime (Linux, a `reactor.Runtime` with the io_uring backend), a file opened or closed outside the Io, as airlock's temporary files and a raw descriptor are, left its descriptor in reactor's fixed-file table, and a later file given the same number was read and written through the stale entry. Every reactor from 0.2.0 through 0.8.5 has it. relic 0.29.x and earlier reach an affected reactor through conduit and uplink; a caller running relic on std's threaded Io is not exposed. There is no 0.29 release with the fix: a caller on 0.29 that runs relic on reactor's io_uring runtime should run it on std's threaded Io until it moves to 0.30.0.
 
 ## [0.29.2] - 2026-10-25
