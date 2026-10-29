@@ -88,6 +88,8 @@ pub const ReadError = error{
 pub const WriteError = error{
     /// A path longer than the format can carry.
     PathTooLong,
+    /// More entries than the format counts: 2^32, git's `unsigned int`.
+    TooManyEntries,
     /// Version 4 was asked for but the entries are not in an order its
     /// prefix compression can express.
     UnsupportedIndexVersion,
@@ -391,8 +393,7 @@ pub const CacheTree = struct {
         if (entry_count >= 0) {
             const raw_len = kind.rawLen();
             if (offset.* + raw_len > data.len) return error.CorruptCacheTree;
-            // aegis: no-danger: the slice is cut to the format's raw length
-            oid = Oid.fromRaw(kind, data[offset.*..][0..raw_len]) catch unreachable;
+            oid = Oid.fromCut(kind, data[offset.*..][0..raw_len]);
             offset.* += raw_len;
         }
 
@@ -631,8 +632,7 @@ pub const ResolveUndo = struct {
             for (modes, 0..) |mode, i| {
                 if (mode == 0) continue;
                 if (offset + raw_len > data.len) return error.CorruptResolveUndo;
-                // aegis: no-danger: the slice is cut to the format's raw length
-                oids[i] = Oid.fromRaw(kind, data[offset..][0..raw_len]) catch unreachable;
+                oids[i] = Oid.fromCut(kind, data[offset..][0..raw_len]);
                 offset += raw_len;
             }
             try result.entries.append(gpa, .{ .path = path, .modes = modes, .oids = oids });
@@ -899,8 +899,7 @@ pub const Index = struct {
             var hasher: hash.Hasher = .init(kind);
             hasher.update(body);
             const computed = hasher.final();
-            // aegis: no-danger: the trailer is cut to the format's raw length
-            const stored = Oid.fromRaw(kind, trailer) catch unreachable;
+            const stored = Oid.fromCut(kind, trailer);
             if (!computed.eql(stored)) return error.ChecksumMismatch;
         }
 
@@ -1059,8 +1058,7 @@ pub const Index = struct {
     fn parseLink(index: *Index, gpa: Allocator, data: []const u8) ReadError!void {
         const raw_len = index.kind.rawLen();
         if (data.len < raw_len) return error.TruncatedIndex;
-        // aegis: no-danger: the slice is cut to the format's raw length
-        const base = Oid.fromRaw(index.kind, data[0..raw_len]) catch unreachable;
+        const base = Oid.fromCut(index.kind, data[0..raw_len]);
         index.was_split = true;
         if (index.split) |*old| old.deinit(gpa);
         index.split = .{ .base = if (base.isZero()) null else base };
@@ -1250,8 +1248,7 @@ pub const Index = struct {
 
         return .{
             .path = path,
-            // aegis: no-danger: the slice is cut to the format's raw length
-            .oid = Oid.fromRaw(kind, b[40..][0..raw_len]) catch unreachable,
+            .oid = Oid.fromCut(kind, b[40..][0..raw_len]),
             .mode = mode,
             .raw_mode = if (mode_raw == mode.raw()) null else mode_raw,
             .stage = @truncate((flags >> 12) & 3),
@@ -1658,8 +1655,7 @@ pub const Index = struct {
         };
         const written = bytes.written();
         const raw_len = index.kind.rawLen();
-        // unreachable: the slice is cut to the format's raw length
-        const checksum = Oid.fromRaw(index.kind, written[written.len - raw_len ..]) catch unreachable;
+        const checksum = Oid.fromCut(index.kind, written[written.len - raw_len ..]);
         var hex: [hash.max_hex_len]u8 = undefined;
         var name_buf: [hash.max_hex_len + 16]u8 = undefined;
         // unreachable: a hex name is at most max_hex_len digits, the prefix twelve bytes
@@ -1680,7 +1676,7 @@ pub const Index = struct {
             var copy = e.*;
             copy.path = try index.gpa.dupe(u8, e.path);
             shared.appendAssumeCapacity(copy);
-            e.shared_at = @intCast(at + 1); // safe: an index holds fewer than 2^32 entries
+            e.shared_at = @intCast(at + 1); // at most the count `writeBody` held to a u32
         }
         if (index.split) |*old| old.deinit(index.gpa);
         index.split = .{ .base = checksum, .shared = shared };
@@ -1750,7 +1746,7 @@ pub const Index = struct {
         // in path order.
         var delete: std.ArrayList(u32) = .empty;
         defer delete.deinit(gpa);
-        for (matched, 0..) |m, at| if (!m) try delete.append(gpa, @intCast(at)); // safe: a shared index holds fewer than 2^32 entries
+        for (matched, 0..) |m, at| if (!m) try delete.append(gpa, @intCast(at)); // below the shared index's count, a u32 in its file
         const nameless = written.items.len;
         try written.appendSlice(gpa, fresh.items);
 
@@ -1857,7 +1853,8 @@ pub const Index = struct {
         var header: [12]u8 = undefined;
         @memcpy(header[0..4], magic);
         std.mem.writeInt(u32, header[4..8], version, .big);
-        std.mem.writeInt(u32, header[8..12], @intCast(entries.len), .big);
+        const entry_count = std.math.cast(u32, entries.len) orelse return error.TooManyEntries;
+        std.mem.writeInt(u32, header[8..12], entry_count, .big);
         try out.writeAll(&header);
 
         // How the entries are divided for `IEOT`, and where each block
@@ -2078,13 +2075,13 @@ pub const Index = struct {
         // git's bitmap ends at its last set bit.
         var bit_count: u32 = 0;
         for (index.entries.items, 0..) |entry, at| {
-            if (!entry.fsmonitor_valid) bit_count = @intCast(at + 1); // safe: an index holds fewer than 2^32 entries
+            if (!entry.fsmonitor_valid) bit_count = @intCast(at + 1); // at most the count `writeBody` held to a u32
         }
         const words = try index.gpa.alloc(u64, (bit_count + 63) / 64);
         defer index.gpa.free(words);
         @memset(words, 0);
         for (index.entries.items[0..bit_count], 0..) |entry, at| {
-            if (!entry.fsmonitor_valid) words[at / 64] |= @as(u64, 1) << @intCast(at % 64); // safe: below 64
+            if (!entry.fsmonitor_valid) words[at / 64] |= @as(u64, 1) << @as(u6, @truncate(at));
         }
         const bitmap = ewah.write(index.gpa, words, bit_count) catch |err| switch (err) {
             error.InvalidBitmapInput => unreachable, // the words hold the bits
@@ -2092,7 +2089,7 @@ pub const Index = struct {
         };
         defer index.gpa.free(bitmap);
         var size: [4]u8 = undefined;
-        std.mem.writeInt(u32, &size, @intCast(bitmap.len), .big); // safe: an index is smaller than 4 GiB
+        std.mem.writeInt(u32, &size, @intCast(bitmap.len), .big); // at most 2^32 bits, compressed
         try w.writeAll(&size);
         try w.writeAll(bitmap);
     }

@@ -330,7 +330,7 @@ const Resolver = struct {
         const at_time: ?i64 = if (!digits)
             (r.approximate(what) orelse return error.BadRevision)
         else if (n >= 100_000_000)
-            @intCast(@min(n, std.math.maxInt(i64))) // safe: clamped to i64's range
+            @intCast(@min(n, std.math.maxInt(i64))) // clamped to i64's range
         else
             null;
         // `@{<n>}` with nothing before it is the current branch's reflog.

@@ -8,6 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Breaking
 
+- `index.WriteError` has `TooManyEntries`: an index of more entries than the format counts (2^32, git's `unsigned int`) is refused when written, where its count was cast unchecked.
 - `index.WriteOptions.racy` is a `*const WriteOptions.Racy`, a node its owner embeds (`Racy.changed` takes the node), and `checkout.native.Observer` likewise (`missing_fn` takes the `*Observer`, `SessionOptions.observer` is a pointer), where each carried an `*anyopaque` context: `worktree.RacyCheck` and `filter.Report` embed theirs and find themselves from it.
 - `pretty.shortlog.Wrap`'s `width`, `indent1` and `indent2` are `i32`, git's `int`, where they were `u32`: a width past an `i32` stopped a safe build where `-w` cast it for the wrap.
 - `mail.format.tzInt` and `mail.format.writeRfc2822` are gone: a mail's `Date:` is `text.date.show` in `rfc2822` mode, the one place git's `DATE_RFC2822` is written, with `text.date.tzInt`.
@@ -90,6 +91,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `hash.Oid.fromCut`: an object name from bytes a parser has already cut to the format's length, the cut checked in every build, for the sites that wrote `fromRaw(...) catch unreachable`.
 - `text.date.showFixed(w, secs, tz, form)`: a date in one of the forms `show` writes from its own zone alone (`text.date.Fixed`: `short`, `iso8601`, `iso8601_strict`, `rfc2822`), which `show` writes through and which asks no clock, so it cannot fail with `DateNeedsClock`. `format-patch`'s `Date:` and `http-backend`'s headers are written through it.
 - `text.date.Calendar` and `text.date.calendarIn`, git's `time_to_tm`: the calendar a time falls on in a zone, each field in its range, or `null` where git's `gmtime_r` has none. `Calendar.fromFields` reads a date and time of day as text writes them (`null` for one that does not exist) and `Calendar.moment` is the time a calendar is, so relic has one calendar both ways: the LFS API's RFC 3339 and HTTP dates are read and written through it.
 - `names.path.Checked.dirname` (a checked path's directory, itself checked) and `Checked.lessThan`.

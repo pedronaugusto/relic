@@ -205,7 +205,7 @@ test "a reflog entry chosen by a date is the one git rev-parse chooses" {
     try r.isolated.?.put("TZ", "UTC");
     for (0..6) |i| {
         var date: [32]u8 = undefined;
-        try r.isolated.?.put("GIT_COMMITTER_DATE", try std.mem.print(&date, "{d} +0000", .{start + @as(i64, @intCast(i)) * 3 * 60 * 60})); // safe: below 6
+        try r.isolated.?.put("GIT_COMMITTER_DATE", try std.mem.print(&date, "{d} +0000", .{start + @as(i64, @intCast(i)) * 3 * 60 * 60})); // i is below 6
         var name: [16]u8 = undefined;
         const file = try std.mem.print(&name, "f{d}", .{i});
         try r.writeFile(io, file, file);

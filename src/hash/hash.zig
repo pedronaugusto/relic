@@ -10,6 +10,7 @@ const sha1 = @import("sha1.zig");
 const sha1dc = @import("sha1dc.zig");
 
 const std = @import("std");
+const aegis = @import("aegis");
 
 /// A repository's hash function.
 ///
@@ -120,6 +121,16 @@ pub const Oid = struct {
     /// `raw` must be exactly `kind.rawLen()` bytes.
     pub fn fromRaw(k: Kind, bytes: []const u8) FromRawError!Oid {
         if (bytes.len != k.rawLen()) return error.InvalidLength;
+        var oid: Oid = .zero(k);
+        @memcpy(oid.bytes[0..bytes.len], bytes);
+        return oid;
+    }
+
+    /// An object name from bytes a parser has already cut to `kind.rawLen()`:
+    /// a table's row, a field taken at the format's length. The cut is
+    /// checked in every build.
+    pub fn fromCut(k: Kind, bytes: []const u8) Oid {
+        aegis.assert.invariant(bytes.len == k.rawLen(), "an object name's bytes are cut to its format's length");
         var oid: Oid = .zero(k);
         @memcpy(oid.bytes[0..bytes.len], bytes);
         return oid;

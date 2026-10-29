@@ -208,7 +208,7 @@ pub fn writeCommitGraph(gpa: Allocator, io: Io, db: *odb.Odb, tips: []const Oid,
     std.mem.reverse(Oid, bases.items);
     const bytes = try graph_mod.encode(gpa, db.objectFormat(), inputs.items, .{ .generations = options.generations and (if (retained) |base| base.hasGenerations() else true), .changed_paths = options.changed_paths, .bases = bases.items });
     defer gpa.free(bytes);
-    const checksum = Oid.fromRaw(db.objectFormat(), bytes[bytes.len - db.objectFormat().rawLen() ..]) catch unreachable; // aegis: no-danger: the slice is the last raw length of bytes the encoder wrote
+    const checksum = Oid.fromCut(db.objectFormat(), bytes[bytes.len - db.objectFormat().rawLen() ..]);
     try fs.makeDirs(io, dir, "info", db.sharedPermissions());
     if (options.split == .none) {
         try publish(gpa, io, db, dir, "info/commit-graph", bytes, options.sync orelse db.settings().fsync.sync(.commit_graph), .read_only);
@@ -459,8 +459,7 @@ pub fn writeMidx(gpa: Allocator, io: Io, db: *odb.Odb, options: MidxOptions) Sel
     }
     const bytes = try midx_mod.encode(gpa, db.objectFormat(), inputs.packs, .{ .preferred_pack = options.preferred_pack, .reverse_index = options.reverse_index });
     defer gpa.free(bytes);
-    // aegis: no-danger: the slice is the last raw length of bytes the encoder wrote
-    const checksum = Oid.fromRaw(db.objectFormat(), bytes[bytes.len - db.objectFormat().rawLen() ..]) catch unreachable;
+    const checksum = Oid.fromCut(db.objectFormat(), bytes[bytes.len - db.objectFormat().rawLen() ..]);
     try publish(gpa, io, db, dir, "multi-pack-index", bytes, options.sync orelse db.settings().fsync.sync(.pack_metadata), .umask);
     if (!options.keep_bitmaps) try clearMidxBitmaps(gpa, io, dir, null);
     try db.refresh(io);
