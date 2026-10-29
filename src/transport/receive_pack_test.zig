@@ -483,6 +483,47 @@ test "git pushes to relic's receive-pack as to its own: refs, refusals, hooks an
     try p.markBoth("decline-pre-receive", false, true);
 }
 
+test "a malformed receive.denyDeletes or denyNonFastForwards refuses the push, as git dies on it, where the default would allow it" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var p = try Pair.init(gpa, io, true, &.{});
+    defer p.deinit();
+    try p.both(&.{ "main:refs/heads/main", "main~1:refs/heads/side" });
+    try testremote.addCommits(gpa, io, &p.source, 3, 1);
+    for ([_][]const u8{ "receive.denyDeletes", "receive.denyNonFastForwards" }) |key| {
+        for ([_][]const u8{ p.theirs, p.ours }) |target| {
+            var dir = try Io.Dir.cwd().openDir(io, target, .{});
+            defer dir.close(io);
+            try p.git(dir, &.{ "config", key, "maybe" });
+        }
+        // A deletion and a rewind: refused by both, the refs as they were.
+        try p.both(&.{ ":refs/heads/side", "+main~3:refs/heads/main" });
+        for ([_][]const u8{ p.theirs, p.ours }) |target| {
+            var dir = try Io.Dir.cwd().openDir(io, target, .{});
+            defer dir.close(io);
+            try p.git(dir, &.{ "config", "--unset", key });
+        }
+    }
+}
+
+test "a receive.denyCurrentBranch written with no value refuses, as git reads a bare name as true" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var p = try Pair.init(gpa, io, false, &.{});
+    defer p.deinit();
+    try p.both(&.{"main~1:refs/heads/main"});
+    for ([_][]const u8{ p.theirs, p.ours }) |target| {
+        var dir = try Io.Dir.cwd().openDir(io, target, .{});
+        defer dir.close(io);
+        const config = try dir.readFileAlloc(io, ".git/config", gpa, .unlimited);
+        defer gpa.free(config);
+        const with = try gpa.print("{s}[receive]\n\tdenyCurrentBranch\n", .{config});
+        defer gpa.free(with);
+        try dir.writeFile(io, .{ .sub_path = ".git/config", .data = with });
+    }
+    try p.both(&.{"main:refs/heads/main"});
+}
+
 test "a push to a checked-out branch is refused as git refuses it, and taken when told to ignore it" {
     const gpa = testing.allocator;
     const io = testing.io;
