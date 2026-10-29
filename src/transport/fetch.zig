@@ -65,6 +65,7 @@ const promisors = @import("../wire.zig").promisors;
 const accelerators = @import("../maintenance/maintenance.zig");
 const maintenance_mod = @import("../maintenance/run.zig");
 const alternate_refs = @import("alternate_refs.zig");
+const Apart = @import("apart.zig").Apart;
 
 const Oid = hash.Oid;
 const Refspec = refspec_mod.Refspec;
@@ -952,48 +953,6 @@ pub const ManyOptions = struct {
     /// How many at once; `null` takes `fetch.parallel`, 0 one per
     /// processor.
     jobs: ?u32 = null,
-};
-
-/// What one of several fetches run beside each other keeps apart from the
-/// rest, and hands to the caller's own once they are done: its warnings
-/// and a refused credential. The progress and the prompt answer on the
-/// caller's task, so the fetch runs without them.
-const Apart = struct {
-    warnings: ?warning.Warnings = null,
-    auth_failure: auth.Failure = .{},
-
-    /// `shared` with this fetch's own lists in place of the caller's.
-    fn options(apart: *Apart, gpa: Allocator, shared: Options) Allocator.Error!Options {
-        var own = shared;
-        if (shared.warnings != null) {
-            if (apart.warnings == null) apart.warnings = .init(gpa);
-            own.warnings = &apart.warnings.?;
-        }
-        if (shared.auth_failure != null) own.auth_failure = &apart.auth_failure;
-        own.progress = null;
-        own.prompt = null;
-        return own;
-    }
-
-    /// Hand what was kept to the caller's lists: every warning, and the
-    /// refusal when the caller has none yet.
-    fn merge(apart: *Apart, shared: Options) Allocator.Error!void {
-        if (apart.warnings) |*own| {
-            for (own.items.items) |item| try warning.note(shared.warnings, item);
-            own.deinit();
-            apart.warnings = null;
-        }
-        if (shared.auth_failure) |failure| if (failure.reason == .none and apart.auth_failure.reason != .none) {
-            failure.* = apart.auth_failure;
-            apart.auth_failure = .{};
-        };
-    }
-
-    fn deinit(apart: *Apart) void {
-        if (apart.warnings) |*own| own.deinit();
-        apart.auth_failure.deinit();
-        apart.* = undefined;
-    }
 };
 
 pub fn fetchMany(gpa: Allocator, io: Io, repo: *Repository, names: []const []const u8, many: ManyOptions) Self.Error!Many {

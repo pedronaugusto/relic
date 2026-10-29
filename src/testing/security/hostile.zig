@@ -128,7 +128,7 @@ pub const GitClone = struct {
         t.clones += 1;
     }
 
-    fn fetch(_: std.mem.Allocator, _: Io, _: *anyopaque, _: *repo_mod.Repository, _: []const u8, _: Oid) submodule.TransportError!void {
+    fn fetch(_: std.mem.Allocator, _: Io, _: *anyopaque, _: *repo_mod.Repository, _: []const u8, _: ?Oid) submodule.TransportError!void {
         return error.TransportFailed;
     }
 };

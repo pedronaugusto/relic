@@ -20,6 +20,7 @@ const credential = @import("../wire.zig").credential;
 const repo_mod = @import("../repo/repo.zig");
 const fetch_mod = @import("fetch.zig");
 const clone_mod = @import("clone.zig");
+const submodule = @import("../submodule/submodule.zig");
 const transport = @import("transport.zig");
 const uplink = @import("uplink");
 const testgit = @import("../testing/git.zig");
@@ -2540,6 +2541,8 @@ test "a clone with --recurse-submodules is git's: the pathspecs active, shallow 
         lender: bool = false,
         config: []const config_mod.Sources.Pair = &.{},
         refused: ?anyerror = null,
+        /// `inner` moved on past what the gitlinks record, first.
+        advanced: bool = false,
     };
     const lender_ref = [_]clone_mod.Reference{.{ .path = "LENDER" }};
     const cases = [_]Case{
@@ -2550,10 +2553,14 @@ test "a clone with --recurse-submodules is git's: the pathspecs active, shallow 
         .{ .git_args = &.{ "-c", "clone.filterSubmodules=true", "--recurse-submodules", "--filter=blob:none" }, .options = .{ .who = test_who, .recurse_submodules = &.{}, .filter = "blob:none" }, .config = &.{.{ .name = "clone.filterSubmodules", .value = "true" }} },
         .{ .git_args = &.{ "--recurse-submodules", "--reference", "LENDER" }, .options = .{ .who = test_who, .recurse_submodules = &.{}, .reference = &lender_ref }, .lender = true },
         .{ .git_args = &.{ "--recurse-submodules", "--also-filter-submodules" }, .options = .{ .who = test_who, .recurse_submodules = &.{}, .filter_submodules = true }, .refused = error.FilterSubmodulesAlone },
+        .{ .git_args = &.{ "--recurse-submodules", "--remote-submodules" }, .options = .{ .who = test_who, .recurse_submodules = &.{}, .remote_submodules = true }, .advanced = true },
+        .{ .git_args = &.{"--remote-submodules"}, .options = .{ .who = test_who, .remote_submodules = true }, .advanced = true },
+        .{ .git_args = &.{ "--recurse-submodules", "--jobs", "2" }, .options = .{ .who = test_who, .recurse_submodules = &.{}, .submodule_jobs = 2 }, .advanced = true },
     };
     for (cases) |case| {
         var world = try SubmoduleWorld.init(gpa, io);
         defer world.deinit(gpa);
+        if (case.advanced) try world.advance(gpa, io, "refs/heads/main", false);
         const super_url = try world.url(gpa, "super");
         defer gpa.free(super_url);
         const lender = try gpa.print("{s}/lender", .{world.root_path});
@@ -2602,6 +2609,151 @@ test "a clone with --recurse-submodules is git's: the pathspecs active, shallow 
         var repo = try made;
         repo.deinit(io);
         try expectSameRecursiveClone(gpa, io, &world);
+    }
+}
+
+test "submodule update --remote is git's: each submodule fetched and checked out at its remote-tracking branch, by its branch setting, the superproject's own, without a fetch, and refused where git dies" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var env = try testremote.environ(gpa);
+    defer env.deinit();
+    const Case = struct {
+        /// Where `inner`'s new commit goes.
+        ref: []const u8 = "refs/heads/main",
+        config: []const [2][]const u8 = &.{},
+        /// Written into each twin's `.gitmodules`.
+        gitmodules: []const [2][]const u8 = &.{},
+        git_args: []const []const u8 = &.{},
+        recursive: bool = false,
+        fetch: bool = true,
+        /// `vendor/inner` fetched once `inner` has moved, and `inner`
+        /// moved again: a remote-tracking branch behind the remote's.
+        prefetch: bool = false,
+        /// The superproject's `HEAD` detached first.
+        detached: bool = false,
+        refused: ?anyerror = null,
+        /// What the refusal names.
+        setting: []const u8 = "",
+    };
+    const cases = [_]Case{
+        .{},
+        .{ .git_args = &.{"--recursive"}, .recursive = true },
+        .{ .ref = "refs/heads/side", .config = &.{.{ "submodule.vendor/inner.branch", "side" }} },
+        .{ .ref = "refs/heads/side", .gitmodules = &.{.{ "submodule.vendor/inner.branch", "side" }} },
+        .{ .config = &.{.{ "submodule.vendor/inner.branch", "." }} },
+        .{ .prefetch = true },
+        .{ .git_args = &.{"--no-fetch"}, .fetch = false, .prefetch = true },
+        .{ .config = &.{.{ "submodule.vendor/inner.branch", "." }}, .detached = true, .refused = error.NoSuperprojectBranch, .setting = "HEAD" },
+        .{ .config = &.{.{ "submodule.vendor/inner.branch", "gone" }}, .refused = error.NoRemoteRevision, .setting = "refs/remotes/origin/gone" },
+    };
+    const twins = [_][]const u8{ "by-git", "by-relic" };
+    var world = try SubmoduleWorld.init(gpa, io);
+    defer world.deinit(gpa);
+    for (cases) |case| {
+        for (twins) |name| try world.work.dir.deleteTree(io, name);
+        try world.twin(gpa, io, "by-git");
+        try world.copy(gpa, io, "by-git", "by-relic");
+        for (twins) |name| {
+            for (case.config) |pair| try world.git(gpa, io, name, &.{ "config", pair[0], pair[1] });
+            for (case.gitmodules) |pair| try world.git(gpa, io, name, &.{ "config", "-f", ".gitmodules", pair[0], pair[1] });
+            if (case.detached) try world.git(gpa, io, name, &.{ "checkout", "-q", "--detach" });
+        }
+        try world.advance(gpa, io, case.ref, false);
+        if (case.prefetch) {
+            for (twins) |name| {
+                const at = try gpa.print("{s}/vendor/inner", .{name});
+                defer gpa.free(at);
+                try world.git(gpa, io, at, &.{ "fetch", "-q" });
+            }
+            try world.advance(gpa, io, case.ref, false);
+        }
+
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(gpa);
+        try argv.appendSlice(gpa, &.{ "submodule", "update", "-q", "--remote" });
+        try argv.appendSlice(gpa, case.git_args);
+        var by_git_dir = try world.work.dir.openDir(io, "by-git", .{});
+        defer by_git_dir.close(io);
+        const by_git = testremote.gitInputEnv(gpa, io, by_git_dir, &env, argv.items, "", false);
+
+        var dir = try world.work.dir.openDir(io, "by-relic", .{});
+        defer dir.close(io);
+        var repo = try repo_mod.Repository.open(gpa, io, dir, .{});
+        defer repo.deinit(io);
+        var t: clone_mod.SubmoduleTransport = .init(.{ .who = test_who, .programs = .{ .environ = &env } });
+        defer t.deinit();
+        var refusal: submodule.Refusal = .{};
+        const updated = submodule.update(gpa, io, &repo, .{
+            .remote = true,
+            .fetch = case.fetch,
+            .recursive = case.recursive,
+            .who = test_who,
+            .transport = t.transport(),
+            .refusal = &refusal,
+        });
+        if (case.refused) |err| {
+            try testing.expectError(error.GitFailed, by_git);
+            try testing.expectError(err, updated);
+            try testing.expectEqualStrings("vendor/inner", refusal.path());
+            try testing.expectEqualStrings(case.setting, refusal.setting());
+            continue;
+        }
+        gpa.free(try by_git);
+        _ = try updated;
+        try expectSameRecursiveClone(gpa, io, &world);
+    }
+}
+
+test "submodules cloned several at once: one that fails is named and nothing is checked out after it, as git's update_submodules stops; a negative submodule.fetchJobs is refused" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var env = try testremote.environ(gpa);
+    defer env.deinit();
+    var world = try SubmoduleWorld.init(gpa, io);
+    defer world.deinit(gpa);
+    const super_url = try world.url(gpa, "super");
+    defer gpa.free(super_url);
+    const missing = try world.url(gpa, "missing");
+    defer gpa.free(missing);
+    try world.git(gpa, io, ".", &.{ "clone", "-q", super_url, "by-git" });
+    try world.git(gpa, io, "by-git", &.{ "submodule", "init" });
+    try world.git(gpa, io, "by-git", &.{ "config", "submodule.vendor/inner.url", missing });
+    try world.copy(gpa, io, "by-git", "by-relic");
+
+    var by_git_dir = try world.work.dir.openDir(io, "by-git", .{});
+    defer by_git_dir.close(io);
+    var dir = try world.work.dir.openDir(io, "by-relic", .{});
+    defer dir.close(io);
+    var t: clone_mod.SubmoduleTransport = .init(.{ .who = test_who, .programs = .{ .environ = &env } });
+    defer t.deinit();
+
+    // git dies on the setting before it clones anything.
+    try world.git(gpa, io, "by-relic", &.{ "config", "submodule.fetchJobs", "-1" });
+    try testing.expectError(error.GitFailed, testremote.gitInputEnv(gpa, io, by_git_dir, &env, &.{ "-c", "submodule.fetchJobs=-1", "submodule", "update", "-q" }, "", false));
+    {
+        var repo = try repo_mod.Repository.open(gpa, io, dir, .{});
+        defer repo.deinit(io);
+        try testing.expectError(error.InvalidFetchJobs, submodule.update(gpa, io, &repo, .{ .transport = t.transport() }));
+    }
+    try world.git(gpa, io, "by-relic", &.{ "config", "--unset", "submodule.fetchJobs" });
+
+    try testing.expectError(error.GitFailed, testremote.gitInputEnv(gpa, io, by_git_dir, &env, &.{ "submodule", "update", "-q", "--jobs", "2" }, "", false));
+    var repo = try repo_mod.Repository.open(gpa, io, dir, .{});
+    defer repo.deinit(io);
+    var refusal: submodule.Refusal = .{};
+    try testing.expectError(error.TransportFailed, submodule.update(gpa, io, &repo, .{ .jobs = 2, .who = test_who, .transport = t.transport(), .refusal = &refusal }));
+    try testing.expectEqualStrings("vendor/inner", refusal.path());
+    try testing.expectEqualStrings(missing, refusal.setting());
+    var kept = t.take(io);
+    defer kept.auth_failure.deinit();
+    try testing.expect(kept.failure != null);
+    try testing.expectEqual(@as(u32, 1), kept.clones);
+    // `lib` cloned and connected, and checked out by neither.
+    for ([_]Io.Dir{ by_git_dir, dir }) |d| {
+        try d.access(io, "lib/.git", .{});
+        try testing.expectError(error.FileNotFound, d.access(io, "lib/README", .{}));
+        try testing.expectError(error.FileNotFound, d.access(io, "vendor/inner/.git", .{}));
+        try testing.expectError(error.FileNotFound, d.access(io, ".git/modules/vendor/inner/HEAD", .{}));
     }
 }
 
