@@ -44,9 +44,14 @@ pub fn remove(io: Io, dir: Io.Dir, sub_path: []const u8) Self.Error!void {
     };
 }
 
-/// Whether the state file or directory `sub_path` under `dir` is there.
+/// Whether the state file or directory `sub_path` under `dir` is there. A
+/// cancel that lands here is put back for the task's next cancelation
+/// point rather than lost.
 pub fn exists(io: Io, dir: Io.Dir, sub_path: []const u8) bool {
-    dir.access(io, sub_path, .{}) catch return false;
+    dir.access(io, sub_path, .{}) catch |err| {
+        if (err == error.Canceled) io.recancel();
+        return false;
+    };
     return true;
 }
 

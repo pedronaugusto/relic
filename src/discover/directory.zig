@@ -18,12 +18,18 @@ pub const Error = error{
 /// git's `validate_headref`: `HEAD` is a link to a name under `refs/`, a
 /// file `ref: refs/...` (spaces allowed after the colon), or a file that
 /// starts with an object name of either hash.
-pub fn validHead(io: Io, dir: Io.Dir) bool {
+pub fn validHead(io: Io, dir: Io.Dir) Io.Cancelable!bool {
     var buf: [256]u8 = undefined;
     if (dir.readLink(io, "HEAD", &buf)) |len| {
         return std.mem.startsWith(u8, buf[0..len], "refs/");
-    } else |_| {}
-    const text = dir.readFile(io, "HEAD", &buf) catch return false;
+    } else |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => {},
+    }
+    const text = dir.readFile(io, "HEAD", &buf) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return false,
+    };
     if (std.mem.startsWith(u8, text, "ref:")) {
         const rest = std.mem.trimStart(u8, text["ref:".len..], " \t\n\r\x0b\x0c");
         if (std.mem.startsWith(u8, rest, "refs/")) return true;
@@ -66,13 +72,18 @@ pub fn openCommon(io: Io, git_dir: Io.Dir) Self.Error!?fs.OwnedDir {
 /// git's `is_git_directory`: a valid `HEAD`, and `objects` and `refs` in
 /// the common directory (`git_dir` itself unless `commondir` names
 /// another). A `commondir` that names nothing is not a git directory.
-pub fn isGitDirectory(io: Io, dir: Io.Dir) bool {
-    if (!validHead(io, dir)) return false;
-    var common = openCommon(io, dir) catch return false;
+pub fn isGitDirectory(io: Io, dir: Io.Dir) Io.Cancelable!bool {
+    if (!try validHead(io, dir)) return false;
+    var common = openCommon(io, dir) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return false,
+    };
     defer if (common) |*c| c.deinit(io);
     const where = if (common) |*c| c.lend().get() else dir;
-    where.access(io, "objects", .{}) catch return false;
-    where.access(io, "refs", .{}) catch return false;
+    inline for (.{ "objects", "refs" }) |name| where.access(io, name, .{}) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return false,
+    };
     return true;
 }
 

@@ -48,10 +48,17 @@ fn realPath(gpa: Allocator, io: Io, path: []const u8) Allocator.Error!?[]u8 {
     if (fs.realPathAlloc(gpa, io, Io.Dir.cwd(), path)) |real| {
         defer gpa.free(real);
         return try gpa.dupe(u8, real);
-    } else |_| {}
+    } else |err| if (err == error.Canceled) {
+        // Put back for the task's next cancelation point, not lost.
+        io.recancel();
+        return null;
+    }
     const parent = std.Io.Dir.path.dirname(path) orelse return null;
     const base = std.Io.Dir.path.basename(path);
-    const real_parent = fs.realPathAlloc(gpa, io, Io.Dir.cwd(), parent) catch return null;
+    const real_parent = fs.realPathAlloc(gpa, io, Io.Dir.cwd(), parent) catch |err| {
+        if (err == error.Canceled) io.recancel();
+        return null;
+    };
     defer gpa.free(real_parent);
     const joined = try std.Io.Dir.path.join(gpa, &.{ real_parent, base });
     defer gpa.free(joined);

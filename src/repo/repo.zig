@@ -749,7 +749,7 @@ pub const Repository = struct {
 
             // The directory may itself be a git directory — a bare
             // repository, or `.git` handed in directly.
-            if (discover_directory.isGitDirectory(io, current)) {
+            if (try discover_directory.isGitDirectory(io, current)) {
                 var git_dir = fs.OwnedDir.init(try current.openDir(io, ".", .{ .iterate = true }));
                 errdefer git_dir.deinit(io);
                 try checkBare(gpa, io, options, git_dir.lend().get());
@@ -764,12 +764,26 @@ pub const Repository = struct {
                 if (@max(up.len, 1) <= stop) break;
                 path = up;
             }
-            const parent = current.openDir(io, "..", .{ .iterate = true }) catch break;
+            const parent = current.openDir(io, "..", .{ .iterate = true }) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => break,
+            };
             // The walk stops when `..` is the same directory, which is the
             // filesystem root, and where it would leave the start's
             // filesystem, as git's does unless told otherwise.
-            const parent_device = if (fs.statAt(io, parent, ".") catch null) |found| found.stat.dev else device;
-            if (sameDir(io, parent, current) or (!options.across_filesystems and parent_device != device)) {
+            const parent_stat = fs.statAt(io, parent, ".") catch |err| switch (err) {
+                error.Canceled => {
+                    parent.close(io);
+                    return error.Canceled;
+                },
+                else => null,
+            };
+            const parent_device = if (parent_stat) |found| found.stat.dev else device;
+            const same = sameDir(io, parent, current) catch |err| {
+                parent.close(io);
+                return err;
+            };
+            if (same or (!options.across_filesystems and parent_device != device)) {
                 parent.close(io);
                 break;
             }
@@ -802,21 +816,39 @@ pub const Repository = struct {
     /// where git dies rather than look further up, as a submodule's damaged
     /// `.git` must never be taken for its superproject.
     fn dotGit(gpa: Allocator, io: Io, dir: Io.Dir) ErrorNamespace.Error!?fs.OwnedDir {
-        const st = dir.statFile(io, ".git", .{}) catch return null;
+        const st = dir.statFile(io, ".git", .{}) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => return null,
+        };
         if (st.kind != .file) {
             if (st.kind != .directory) return null;
-            var git_dir = fs.OwnedDir.init(dir.openDir(io, ".git", .{ .iterate = true }) catch return null);
-            if (discover_directory.isGitDirectory(io, git_dir.lend().get())) return git_dir.move();
+            var git_dir = fs.OwnedDir.init(dir.openDir(io, ".git", .{ .iterate = true }) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => return null,
+            });
+            const is_git = discover_directory.isGitDirectory(io, git_dir.lend().get()) catch |err| {
+                git_dir.deinit(io);
+                return err;
+            };
+            if (is_git) return git_dir.move();
             git_dir.deinit(io);
             return null;
         }
         const target = (gitfile.read(gpa, io, dir, ".git") catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
+            error.Canceled => return error.Canceled,
             else => return error.BrokenGitFile,
         }) orelse return error.BrokenGitFile;
         defer gpa.free(target);
-        var git_dir = gitfile.open(io, dir, target, .{ .iterate = true }) catch return error.BrokenGitFile;
-        if (discover_directory.isGitDirectory(io, git_dir.lend().get())) return git_dir.move();
+        var git_dir = gitfile.open(io, dir, target, .{ .iterate = true }) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => return error.BrokenGitFile,
+        };
+        const is_git = discover_directory.isGitDirectory(io, git_dir.lend().get()) catch |err| {
+            git_dir.deinit(io);
+            return err;
+        };
+        if (is_git) return git_dir.move();
         git_dir.deinit(io);
         return error.BrokenGitFile;
     }
@@ -840,12 +872,16 @@ pub const Repository = struct {
     fn checkOwnership(gpa: Allocator, io: Io, options: OpenOptions, gitfile_in: ?Io.Dir, work: ?Io.Dir, git_dir: Io.Dir) ErrorNamespace.Error!void {
         if (options.explicit or options.ownership == .trust) return;
         if (options.ownership == .check) {
-            const owned = (if (gitfile_in) |d| fs.ownedByCurrentUser(io, d, ".git", options.home) else true) and
-                (if (work) |w| fs.ownedByCurrentUser(io, w, ".", options.home) else true) and
-                fs.ownedByCurrentUser(io, git_dir, ".", options.home);
+            const owned = (if (gitfile_in) |d| try fs.ownedByCurrentUser(io, d, ".git", options.home) else true) and
+                (if (work) |w| try fs.ownedByCurrentUser(io, w, ".", options.home) else true) and
+                try fs.ownedByCurrentUser(io, git_dir, ".", options.home);
             if (owned) return;
         }
-        const path = fs.realPathAlloc(gpa, io, work orelse git_dir, ".") catch return error.DubiousOwnership;
+        const path = fs.realPathAlloc(gpa, io, work orelse git_dir, ".") catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.Canceled => return error.Canceled,
+            else => return error.DubiousOwnership,
+        };
         defer gpa.free(path);
         var protected = try protectedConfig(gpa, io, options);
         defer protected.deinit();
@@ -864,7 +900,11 @@ pub const Repository = struct {
         // A value git does not know refuses, as git dies there.
         const allowed = safe.bareRepositories(&protected) catch .explicit;
         if (allowed == .all) return;
-        const path = fs.realPathAlloc(gpa, io, git_dir, ".") catch return error.ImplicitBareRepository;
+        const path = fs.realPathAlloc(gpa, io, git_dir, ".") catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.Canceled => return error.Canceled,
+            else => return error.ImplicitBareRepository,
+        };
         defer gpa.free(path);
         if (!safe.isImplicitBare(path)) {
             try refuseSetting(options.diagnostic, "safe.bareRepository");
@@ -886,7 +926,7 @@ pub const Repository = struct {
     }
 
     /// Whether two handles are one directory.
-    fn sameDir(io: Io, a: Io.Dir, b: Io.Dir) bool {
+    fn sameDir(io: Io, a: Io.Dir, b: Io.Dir) Io.Cancelable!bool {
         return fs.sameFile(io, a, ".", b, ".");
     }
 
@@ -1303,7 +1343,7 @@ pub const Repository = struct {
             // git for Windows' `mingw_mkdir` hides it, as
             // `core.hideDotFiles` says.
             fs.hideIfAsked(io, dir, ".git", try hideDotFilesOf(&user));
-        } else if (discover_directory.isGitDirectory(io, dir)) {
+        } else if (try discover_directory.isGitDirectory(io, dir)) {
             return error.RepositoryExists;
         }
         var owned = fs.OwnedDir.init(try dir.openDir(io, git_path, .{ .iterate = true }));
@@ -1479,7 +1519,10 @@ pub const Repository = struct {
         var it = from.iterate();
         while (try it.next(io)) |entry| {
             if (entry.name.len == 0 or entry.name[0] == '.') continue;
-            const exists = if (to.statFile(io, entry.name, .{ .follow_symlinks = false })) |_| true else |_| false;
+            const exists = if (to.statFile(io, entry.name, .{ .follow_symlinks = false })) |_| true else |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => false,
+            };
             switch (entry.kind) {
                 .directory => {
                     if (!exists) {
@@ -2486,9 +2529,16 @@ pub const Repository = struct {
 
     fn peelForRefs(io: Io, context: *anyopaque, oid: Oid) ?Oid {
         const repo: *Repository = @ptrCast(@alignCast(context)); // aegis: no-danger: the context handed out with this function is a Repository
-        const header = repo.data().odb.readHeader(io, oid) catch return null;
+        // A cancel is put back for the task's next cancelation point.
+        const header = repo.data().odb.readHeader(io, oid) catch |err| {
+            if (err == error.Canceled) io.recancel();
+            return null;
+        };
         if (header.type != .tag) return null;
-        return repo.peel(io, oid) catch null;
+        return repo.peel(io, oid) catch |err| {
+            if (err == error.Canceled) io.recancel();
+            return null;
+        };
     }
 
     /// Errors from `readLog`.

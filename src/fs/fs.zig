@@ -355,8 +355,8 @@ pub fn probeTimestampResolution(io: Io, dir: Io.Dir) Resolution {
         return .nanosecond;
     defer {
         file.close(io);
-        // glint-ignore: Z026 -- the probe's file is removed best effort; the granularity is already measured
-        dir.deleteFile(io, name) catch {};
+        // The probe's file is removed best effort; the granularity is already measured.
+        removeLeftover(io, dir, name);
     }
 
     var divisor: u64 = 0;
@@ -665,17 +665,19 @@ pub fn realPathAlloc(gpa: Allocator, io: Io, dir: Io.Dir, sub_path: []const u8) 
 
 /// Whether `a_path` in `a` and `b_path` in `b` are one file: the same file
 /// on the same device, by the platform's identity rather than the index's,
-/// which has no inode on Windows. `false` when either cannot be looked at.
-pub fn sameFile(io: Io, a: Io.Dir, a_path: []const u8, b: Io.Dir, b_path: []const u8) bool {
-    const fa = identity(io, a, a_path) orelse return false;
-    const fb = identity(io, b, b_path) orelse return false;
+/// which has no inode on Windows. `false` when either cannot be looked at;
+/// a cancel is returned.
+pub fn sameFile(io: Io, a: Io.Dir, a_path: []const u8, b: Io.Dir, b_path: []const u8) Io.Cancelable!bool {
+    const fa = (try identity(io, a, a_path)) orelse return false;
+    const fb = (try identity(io, b, b_path)) orelse return false;
     return fa.id == fb.id and fa.device == fb.device;
 }
 
-fn identity(io: Io, dir: Io.Dir, sub_path: []const u8) ?struct { id: u64, device: u64 } {
+fn identity(io: Io, dir: Io.Dir, sub_path: []const u8) Io.Cancelable!?struct { id: u64, device: u64 } {
     return switch (platstat.full(io, dir, sub_path)) {
         .found => |f| .{ .id = f.file_id, .device = f.device },
-        .absent, .failed => null,
+        .absent => null,
+        .failed => |err| if (err == error.Canceled) error.Canceled else null,
     };
 }
 
@@ -1308,15 +1310,16 @@ extern "kernel32" fn CreateHardLinkW(new_path: [*:0]const u16, old_path: [*:0]co
 /// cannot be asked about is not owned: where the platform cannot say whose
 /// a file is -- WASI, which has no users, or a POSIX build without libc
 /// beyond Linux -- nothing is, and a caller that trusts its paths there
-/// opens with `OpenOptions.ownership = .trust`.
-pub fn ownedByCurrentUser(io: Io, dir: Io.Dir, sub_path: []const u8, home: ?[]const u8) bool {
+/// opens with `OpenOptions.ownership = .trust`. A cancel is returned.
+pub fn ownedByCurrentUser(io: Io, dir: Io.Dir, sub_path: []const u8, home: ?[]const u8) Io.Cancelable!bool {
     switch (builtin.target.os.tag) {
         .windows => return ownedWindows(io, dir, sub_path, home),
         .wasi => return false,
         else => {
             const found = switch (platstat.full(io, dir, sub_path)) {
                 .found => |f| f,
-                .absent, .failed => return false,
+                .absent => return false,
+                .failed => |err| return if (err == error.Canceled) error.Canceled else false,
             };
             const euid: u32 = switch (builtin.target.os.tag) {
                 .linux => std.os.linux.geteuid(),

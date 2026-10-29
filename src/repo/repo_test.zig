@@ -9,6 +9,7 @@ const shakedown = @import("shakedown");
 const Io = std.Io;
 
 const testgit = @import("../testing/git.zig");
+const testing_io = @import("../testing/io.zig");
 const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
 const odb_mod = @import("../odb/odb.zig");
@@ -1778,7 +1779,7 @@ test "a directory is taken for a git directory exactly where git's rev-parse tak
         var said = try r.capture(io, &.{ "-C", layout.name, "rev-parse", "--git-dir" });
         defer said.deinit(gpa);
         const git_takes_it = said.code == 0;
-        try std.testing.expectEqual(git_takes_it, discover_directory.isGitDirectory(io, git_dir));
+        try std.testing.expectEqual(git_takes_it, try discover_directory.isGitDirectory(io, git_dir));
     }
 }
 
@@ -2346,4 +2347,41 @@ test "core.createObject: what relic writes under either mode git reads, and a mo
     defer repo.deinit();
     try repo.exec(io, &.{ "config", "core.createObject", "copy" });
     try std.testing.expectError(error.MalformedValue, repo_mod.Repository.open(gpa, io, repo.dir, .{}));
+}
+
+test "a cancel that lands in finding a repository is returned, never taken for no repository there" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "main");
+    var main_dir = try tmp.dir.openDir(io, "main", .{ .iterate = true });
+    defer main_dir.close(io);
+    var made = try repo_mod.Repository.create(gpa, io, main_dir, .{ .default_branch = "main" });
+    made.deinit(io);
+    // Found by climbing from below a working tree, and through a `.git`
+    // file naming the git directory, as a linked worktree has.
+    try tmp.dir.createDirPath(io, "main/a/b");
+    try tmp.dir.createDirPath(io, "linked/c");
+    try tmp.dir.writeFile(io, .{ .sub_path = "linked/.git", .data = "gitdir: ../main/.git\n" });
+
+    const Open = struct {
+        root: Io.Dir,
+        from: []const u8,
+        pub fn setUp(_: *@This(), _: *shakedown.FaultIo) !void {}
+        pub fn run(o: *@This(), run_io: Io) !void {
+            var start = try o.root.openDir(run_io, o.from, .{ .iterate = true });
+            defer start.close(run_io);
+            var repo = try repo_mod.Repository.open(std.testing.allocator, run_io, start, .{});
+            repo.deinit(run_io);
+        }
+        pub fn check(_: *@This(), check_io: Io, result: anyerror!void, injected: ?shakedown.Injected) !void {
+            try testing_io.cancelKept(check_io, result, injected);
+        }
+        pub fn tearDown(_: *@This()) void {}
+    };
+    for ([_][]const u8{ "main/a/b", "linked/c" }) |from| {
+        var open: Open = .{ .root = tmp.dir, .from = from };
+        try testing_io.everyCancel(gpa, io, &open);
+    }
 }
