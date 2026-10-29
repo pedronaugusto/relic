@@ -203,10 +203,43 @@ pub fn bisectingBranch(arena: Allocator, io: Io, repo: *Repository, ref: []const
     return null;
 }
 
+/// What an operation in progress in a worktree is on, as git's
+/// `is_worktree_being_rebased` and `is_worktree_being_bisected` read it
+/// for `git branch -m`: full branch names, `arena`'s.
+pub const Busy = struct {
+    /// The branch a rebase there is rebasing: `rebase-merge`'s, or
+    /// `rebase-apply`'s when that is no `am`.
+    rebasing: ?[]const u8 = null,
+    /// The branch a bisection there started from.
+    bisecting: ?[]const u8 = null,
+};
+
+/// `Busy` for the worktree whose administrative directory is `dir`: the
+/// common directory for the main worktree, `worktrees/<id>` for another.
+pub fn busyIn(arena: Allocator, io: Io, repo: *Repository, dir: Io.Dir) CheckedOutError!Busy {
+    var busy: Busy = .{ .bisecting = try bisectedFrom(arena, io, repo, dir) };
+    // `wt_status_check_rebase`: `rebase-apply` with `applying` in it is an
+    // `am`; `rebase-merge` is always a rebase.
+    const not_am = (try state_file.read(arena, io, dir, "rebase-apply/applying")) == null;
+    for ([_][]const u8{ "rebase-apply/head-name", "rebase-merge/head-name" }, [_]bool{ not_am, true }) |sub, counts| {
+        const text = (try state_file.read(arena, io, dir, sub)) orelse continue;
+        if (!counts) break;
+        const name = if (std.mem.endsWith(u8, text, "\n")) text[0 .. text.len - 1] else text;
+        if (std.mem.startsWith(u8, name, "refs/heads/")) busy.rebasing = name;
+        break;
+    }
+    return busy;
+}
+
 /// The branch a bisection in `dir` started from, its full name, or `null`
-/// when none is running or it started from a detached `HEAD`, whose
+/// when none is running (no `BISECT_LOG`) or it started from a detached `HEAD`, whose
 /// `BISECT_START` names a commit.
 fn bisectedFrom(arena: Allocator, io: Io, repo: *Repository, dir: Io.Dir) CheckedOutError!?[]const u8 {
+    // `wt_status_check_bisect`: a bisection is running while its log is there.
+    _ = dir.statFile(io, "BISECT_LOG", .{}) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir => return null,
+        else => |e| return e,
+    };
     const text = (try state_file.read(arena, io, dir, "BISECT_START")) orelse return null;
     const name = std.mem.trim(u8, text, " \t\r\n");
     if (name.len == 0) return null;
