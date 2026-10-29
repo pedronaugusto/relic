@@ -210,6 +210,27 @@ test "a mailbox git format-patch wrote becomes the commits git am makes" {
     }.inFormat);
 }
 
+test "a malformed am.keepcr, am.threeway, am.messageid or mailinfo.scissors is refused, as git dies on it, where the default was taken" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const mbox = try makeMailbox(gpa, io, &.{}, threeCommits);
+    defer gpa.free(mbox);
+    for ([_][]const u8{ "am.keepcr", "am.threeway", "am.messageid", "mailinfo.scissors" }) |key| {
+        var p = try Pair.init(gpa, io, .files);
+        defer p.deinit();
+        try setupPair(&p, io);
+        try p.both(io, &.{ "config", key, "maybe" });
+        std.testing.expect(try gitAm(gpa, io, &p, &.{}, mbox) != 0) catch |err| {
+            std.debug.print("git am took {s} = maybe\n", .{key});
+            return err;
+        };
+        std.testing.expectError(error.NotABoolean, oursAm(gpa, io, &p, mbox, .{ .committer = committer })) catch |err| {
+            std.debug.print("{s} = maybe\n", .{key});
+            return err;
+        };
+    }
+}
+
 test "keep, keep-non-patch, sign-off and message ids shape the commits as git's do" {
     try testgit.eachRefFormat(struct {
         fn inFormat(format: testgit.RefFormat) !void {
