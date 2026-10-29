@@ -168,13 +168,9 @@ pub const Session = struct {
         const driver = s.options.drivers.?.native_driver.?;
         s.native_session = try driver.open(s.gpa, s.io, .{
             .wt = s.options.wt,
-            .observer = if (s.options.report) |r| .{ .context = r, .missing_fn = observeMissing } else null,
+            .observer = if (s.options.report) |r| &r.observer else null,
         });
         return s.native_session.?;
-    }
-    fn observeMissing(context: *anyopaque, path: []const u8, object: native.Object, declined: bool) Allocator.Error!void {
-        const r: *filter.Report = @ptrCast(@alignCast(context)); // aegis: no-danger: the report context is the filter.Report this callback was registered with
-        return r.missing(path, object, declined);
     }
     pub fn fallbackCount(s: *const Session) u32 {
         return if (s.native_session) |implementation| implementation.fallbacks() else 0;

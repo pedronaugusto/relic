@@ -712,12 +712,12 @@ pub const WriteOptions = struct {
     /// is git's rule, and an index read and written back keeps its bytes;
     /// without it every racy entry is smudged, which is safe and costs the
     /// next status a hash of each. `Repository.writeIndex` gives one.
-    racy: ?Racy = null,
+    racy: ?*const Racy = null,
 
     /// See `racy`.
+    /// A node its owner embeds, found again from the node by `changed`.
     pub const Racy = struct {
-        context: *anyopaque,
-        changed: *const fn (context: *anyopaque, index: *const Index, entry: Entry) bool,
+        changed: *const fn (racy: *const Racy, index: *const Index, entry: Entry) bool,
     };
 
     /// The version to write.
@@ -1934,7 +1934,7 @@ pub const Index = struct {
         // unchanged on the strength of a size that was never checked.
         var stat = entry.stat;
         if (index.isRacy(entry)) {
-            const changed = if (options.racy) |r| r.changed(r.context, index, entry) else true;
+            const changed = if (options.racy) |r| r.changed(r, index, entry) else true;
             if (changed) stat.size = 0;
         }
 

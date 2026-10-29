@@ -223,6 +223,8 @@ pub const Missing = struct {
 pub const Report = struct {
     pub const Error = Allocator.Error;
     gpa: Allocator,
+    /// What a native filter reports through, found again from it.
+    observer: native.Observer = .{ .missing_fn = observedMissing },
     /// LFS files left as pointers, in the order they were met.
     native_missing: std.ArrayList(Missing) = .empty,
     /// Files a filter failed on whose content was then used unfiltered,
@@ -276,6 +278,11 @@ pub const Report = struct {
         const id = try r.gpa.dupe(u8, object.id);
         errdefer r.gpa.free(id);
         try r.native_missing.append(r.gpa, .{ .path = owned, .object = .{ .id = id, .size = object.size }, .declined = declined });
+    }
+
+    fn observedMissing(o: *native.Observer, path: []const u8, object: native.Object, declined: bool) Allocator.Error!void {
+        const r: *Report = @alignCast(@fieldParentPtr("observer", o)); // safe: the field belongs to this record
+        return r.missing(path, object, declined);
     }
 };
 

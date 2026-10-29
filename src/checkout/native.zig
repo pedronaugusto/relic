@@ -30,12 +30,13 @@ pub const Ready = struct { path: []const u8, content: Content };
 /// Identity of content a native filter could not make available. The identity
 /// is opaque to checkout; its interpretation belongs to the provider.
 pub const Object = struct { id: []const u8, size: u64 };
+/// What a provider tells of content it could not make available: a node its
+/// owner embeds, found again from the node by `missing_fn`.
 pub const Observer = struct {
-    context: *anyopaque,
-    missing_fn: *const fn (*anyopaque, []const u8, Object, bool) Allocator.Error!void,
+    missing_fn: *const fn (o: *Observer, path: []const u8, object: Object, declined: bool) Allocator.Error!void,
 
-    pub fn missing(o: Observer, path: []const u8, object: Object, declined: bool) Allocator.Error!void {
-        return o.missing_fn(o.context, path, object, declined);
+    pub fn missing(o: *Observer, path: []const u8, object: Object, declined: bool) Allocator.Error!void {
+        return o.missing_fn(o, path, object, declined);
     }
 };
 
@@ -47,7 +48,7 @@ pub const Commands = struct {
     process: ?[]const u8 = null,
 };
 
-pub const SessionOptions = struct { wt: Io.Dir, observer: ?Observer = null };
+pub const SessionOptions = struct { wt: Io.Dir, observer: ?*Observer = null };
 pub const CleanInput = struct { bytes: []const u8, storing: Storing = .store };
 pub const FileInput = struct { path: []const u8, storing: Storing = .store };
 pub const SmudgeInput = struct { path: []const u8, bytes: []const u8, can_delay: bool = false };

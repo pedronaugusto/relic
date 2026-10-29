@@ -3607,13 +3607,14 @@ pub const RacyCheck = struct {
     io: Io,
     wt: Io.Dir,
     rules: Rules,
+    node: index_mod.WriteOptions.Racy = .{ .changed = changed },
 
-    pub fn racy(c: *RacyCheck) index_mod.WriteOptions.Racy {
-        return .{ .context = c, .changed = changed };
+    pub fn racy(c: *const RacyCheck) *const index_mod.WriteOptions.Racy {
+        return &c.node;
     }
 
-    fn changed(context: *anyopaque, index: *const Index, entry: index_mod.Entry) bool {
-        const c: *RacyCheck = @ptrCast(@alignCast(context)); // aegis: no-danger: the context handed out with this function is a RacyCheck
+    fn changed(node: *const index_mod.WriteOptions.Racy, index: *const Index, entry: index_mod.Entry) bool {
+        const c: *const RacyCheck = @alignCast(@fieldParentPtr("node", node)); // safe: the field belongs to this record
         return differsFromIndex(c.gpa, c.io, c.wt, .{ .index = index, .entry = entry }, c.rules) catch true;
     }
 };

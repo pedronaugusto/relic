@@ -8,6 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Breaking
 
+- `index.WriteOptions.racy` is a `*const WriteOptions.Racy`, a node its owner embeds (`Racy.changed` takes the node), and `checkout.native.Observer` likewise (`missing_fn` takes the `*Observer`, `SessionOptions.observer` is a pointer), where each carried an `*anyopaque` context: `worktree.RacyCheck` and `filter.Report` embed theirs and find themselves from it.
 - `pretty.shortlog.Wrap`'s `width`, `indent1` and `indent2` are `i32`, git's `int`, where they were `u32`: a width past an `i32` stopped a safe build where `-w` cast it for the wrap.
 - `mail.format.tzInt` and `mail.format.writeRfc2822` are gone: a mail's `Date:` is `text.date.show` in `rfc2822` mode, the one place git's `DATE_RFC2822` is written, with `text.date.tzInt`.
 - `mail.format.tzInt` and `mail.format.writeRfc2822` are gone: a mail's `Date:` is `text.date.showFixed` in `rfc2822`, the one place git's `DATE_RFC2822` is written, with `text.date.tzInt`.
