@@ -745,7 +745,7 @@ const Approx = struct {
         const end = skipAlpha(date);
         for (month_names, 0..) |name, i| {
             if (matchString(date, name) >= 3) {
-                a.tm.mon = @intCast(i); // safe: a month's index, below 12
+                a.tm.mon = @intCast(i); // a month's index, below 12
                 a.touched = true;
                 return end;
             }
@@ -758,7 +758,7 @@ const Approx = struct {
             const number_names = [_][]const u8{ "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten" };
             for (number_names, 1..) |name, i| {
                 if (matchString(date, name) == name.len) {
-                    a.num = @intCast(i); // safe: one to ten
+                    a.num = @intCast(i); // one to ten
                     a.touched = true;
                     return end;
                 }
@@ -825,7 +825,7 @@ const Approx = struct {
         while (end < date.len and isDigit(date[end])) : (end += 1) number = number *% 10 +% (date[end] - '0');
         switch (at(date, end)) {
             ':', '.', '/', '-' => if (isDigit(at(date, end + 1))) {
-                // safe: git's `timestamp_t` is unsigned and read as a long.
+                // git's `timestamp_t` is unsigned and read as a long.
                 const m = matchMultiNumber(@bitCast(number), date[end], date, end, &a.tm, ctx);
                 if (m != 0) return m;
             },
@@ -833,7 +833,7 @@ const Approx = struct {
         }
         // Zero-padding only for small numbers: "Dec 02", never "Dec 0002".
         // git keeps the number in an `int`.
-        // safe: wrapping into an `int`, as git's assignment does.
+        // wrapping into an `int`, as git's assignment does.
         if (date[0] != '0' or end <= 2) a.num = @as(i32, @truncate(@as(i64, @bitCast(number))));
         return end;
     }

@@ -678,7 +678,7 @@ const RParser = struct {
     }
 
     fn closeGroup(p: *RParser, inner: *const RNode, index: u32) Allocator.Error!*const RNode {
-        if (index <= 9) p.closed |= @as(u16, 1) << @intCast(index); // safe: index is at most nine
+        if (index <= 9) p.closed |= @as(u16, 1) << @intCast(index); // index is at most nine
         return p.node(.{ .group = .{ .node = inner, .index = index } });
     }
 

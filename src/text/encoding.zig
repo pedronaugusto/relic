@@ -395,7 +395,7 @@ pub fn toUtf8(a: Allocator, e: Encoding, src: []const u8) Self.Error![]const u8 
             while (i < body.len) : (i += 4) {
                 const value = std.mem.readInt(u32, body[i..][0..4], endian);
                 if (value > 0x10ffff) return error.InvalidContent;
-                const cp: u21 = @intCast(value); // safe: checked against U+10FFFF above
+                const cp: u21 = @intCast(value); // checked against U+10FFFF above
                 const encoded = encodeUtf8(cp, &buf) orelse return error.InvalidContent;
                 try out.appendSlice(a, encoded);
             }
