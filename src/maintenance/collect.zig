@@ -236,8 +236,8 @@ pub fn collect(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self
         if (options.auto) return .{ .outcome = .running, .holder = holder };
         return error.GcRunning;
     }
-    // glint-ignore: Z026 -- git's pid file is a tempfile its exit removes; one already gone is no failure of the gc
-    defer repo.commonDirectory().get().deleteFile(io, "gc.pid") catch {};
+    // Git's pid file is a tempfile its exit removes; one already gone is no failure of the gc.
+    defer fs.removeLeftover(io, repo.commonDirectory().get(), "gc.pid");
 
     var report: Report = .{ .outcome = .ran };
     if (!options.skip_foreground_tasks) try foreground(gpa, io, repo, options.clock, options.auto);

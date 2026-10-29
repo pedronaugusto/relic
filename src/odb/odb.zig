@@ -1677,8 +1677,8 @@ pub const Odb = struct {
         var failed = true;
         defer if (failed) {
             file.close(io);
-            // glint-ignore: Z026 -- the write's error is the one to report; a temporary object left behind is what git gc prunes
-            source.directory().get().deleteFile(io, temp) catch {};
+            // The write's error is the one to report; a temporary object left behind is what git gc prunes.
+            fs.removeLeftover(io, source.directory().get(), temp);
         };
 
         // The reusable Warp state and both writer buffers belong to the
@@ -1705,8 +1705,8 @@ pub const Odb = struct {
         failed = false;
         // The time before the name, as git's `write_loose_object` sets it.
         if (time) |seconds| fs.setTimestamps(io, source.directory().get(), temp, .{ .modify_timestamp = .{ .new = date.timestamp(seconds) } }) catch |err| {
-            // glint-ignore: Z026 -- the error is the one to report; a temporary object left behind is what `git gc` prunes
-            source.directory().get().deleteFile(io, temp) catch {};
+            // The error is the one to report; a temporary object left behind is what `git gc` prunes.
+            fs.removeLeftover(io, source.directory().get(), temp);
             return err;
         };
 
@@ -1853,8 +1853,8 @@ pub const Odb = struct {
             fs.adjustShared(io, source.directory().get(), temp, odb.backendData().options.shared);
             errdefer {
                 file.close(io);
-                // glint-ignore: Z026 -- the write's error is the one to report; a temporary object left behind is what git gc prunes
-                source.directory().get().deleteFile(io, temp) catch {};
+                // The write's error is the one to report; a temporary object left behind is what git gc prunes.
+                fs.removeLeftover(io, source.directory().get(), temp);
             }
             const window = try odb.allocator().alloc(u8, 4096);
             errdefer odb.allocator().free(window);
@@ -4143,13 +4143,13 @@ pub const ObjectStream = struct {
         const temp = s.temp[0..s.temp_len];
         // The time before the name, as `writeLoose` sets it.
         if (s.time) |seconds| fs.setTimestamps(io, s.dir.get(), temp, .{ .modify_timestamp = .{ .new = date.timestamp(seconds) } }) catch |err| {
-            // glint-ignore: Z026 -- the error is the one to report; a temporary object left behind is what `git gc` prunes
-            s.dir.get().deleteFile(io, temp) catch {};
+            // The error is the one to report; a temporary object left behind is what `git gc` prunes.
+            fs.removeLeftover(io, s.dir.get(), temp);
             return err;
         };
         finalizeLoose(io, s.dir.get(), temp, final_path, s.odb.backendData().options.create_object) catch |err| {
-            // glint-ignore: Z026 -- the error is the one to report; a temporary object left behind is what `git gc` prunes
-            s.dir.get().deleteFile(io, temp) catch {};
+            // The error is the one to report; a temporary object left behind is what `git gc` prunes.
+            fs.removeLeftover(io, s.dir.get(), temp);
             return err;
         };
         s.finished = true;
@@ -4162,8 +4162,8 @@ pub const ObjectStream = struct {
         if (!s.finished) {
             if (s.file) |*file| file.deinit(io);
             s.file = null;
-            // glint-ignore: Z026 -- abandoning cannot fail; a temporary object left behind is what `git gc` prunes
-            s.dir.get().deleteFile(io, s.temp[0..s.temp_len]) catch {};
+            // Abandoning cannot fail; a temporary object left behind is what `git gc` prunes.
+            fs.removeLeftover(io, s.dir.get(), s.temp[0..s.temp_len]);
             s.finished = true;
         }
         s.compress.deinit();
@@ -5908,11 +5908,11 @@ test "a pack and an index that are not a pair are refused, as git refuses them" 
         const idx_name = try gpa.print("{s}.idx", .{base});
         defer gpa.free(idx_name);
         try pack_dir.copyFile(pack_name, pack_dir, "mixed.pack", io, .{});
-        // glint-ignore: Z026 -- the copies are scratch for this test; a leftover goes with the temporary repository
-        defer pack_dir.deleteFile(io, "mixed.pack") catch {};
+        // The copies are scratch for this test; a leftover goes with the temporary repository.
+        defer fs.removeLeftover(io, pack_dir, "mixed.pack");
         try pack_dir.copyFile(idx_name, pack_dir, "mixed.idx", io, .{});
-        // glint-ignore: Z026 -- the copies are scratch for this test; a leftover goes with the temporary repository
-        defer pack_dir.deleteFile(io, "mixed.idx") catch {};
+        // The copies are scratch for this test; a leftover goes with the temporary repository.
+        defer fs.removeLeftover(io, pack_dir, "mixed.idx");
         try std.testing.expectError(error.PackIndexMismatch, pack.Pack.open(gpa, io, pack_dir, .{ .base = "mixed", .kind = .sha1 }, .{}));
     }
 }

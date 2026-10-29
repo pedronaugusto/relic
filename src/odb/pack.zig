@@ -2255,8 +2255,8 @@ pub const Writer = struct {
         const file = try dir.createFile(io, temp, .{ .exclusive = true, .read = true });
         errdefer {
             file.close(io);
-            // glint-ignore: Z026 -- the write's error is the one to report; a temporary pack left behind is what git gc prunes
-            dir.deleteFile(io, temp) catch {};
+            // The write's error is the one to report; a temporary pack left behind is what git gc prunes.
+            fs.removeLeftover(io, dir, temp);
         }
 
         const file_buffer = try gpa.alloc(u8, file_buffer_len);
@@ -2322,8 +2322,8 @@ pub const Writer = struct {
             return;
         }
         w.file.?.deinit(io);
-        // glint-ignore: Z026 -- abandoning cannot fail; a temporary pack left behind is what `git gc` prunes
-        w.dir.deleteFile(io, w.temp[0..w.temp_len]) catch {};
+        // Abandoning cannot fail; a temporary pack left behind is what `git gc` prunes.
+        fs.removeLeftover(io, w.dir, w.temp[0..w.temp_len]);
         w.finished = true;
     }
 
@@ -2632,18 +2632,18 @@ pub const Writer = struct {
         var idx_temp_buf: [64]u8 = undefined;
         const idx_temp = fs.tempName(io, &idx_temp_buf, "tmp_idx_");
         const index_bytes = try w.writeIndex(io, checksum, idx_temp);
-        // glint-ignore: Z026 -- the write's error is the one to report; a temporary index left behind is what git gc prunes
-        errdefer w.dir.deleteFile(io, idx_temp) catch {};
+        // The write's error is the one to report; a temporary index left behind is what git gc prunes.
+        errdefer fs.removeLeftover(io, w.dir, idx_temp);
         var rev_temp_buf: [64]u8 = undefined;
         const rev_temp: ?[]const u8 = if (w.options.reverse_index) fs.tempName(io, &rev_temp_buf, "tmp_rev_") else null;
         if (rev_temp) |t| try rev_index.write(w.gpa, io, w.dir, t, .{ .kind = w.kind, .entries = w.entries.items, .pack_checksum = checksum, .sync = w.options.fsync.sync(.pack_metadata) });
-        // glint-ignore: Z026 -- the write's error is the one to report; a temporary reverse index left behind is what git gc prunes
-        errdefer if (rev_temp) |t| w.dir.deleteFile(io, t) catch {};
+        // The write's error is the one to report; a temporary reverse index left behind is what git gc prunes.
+        errdefer if (rev_temp) |t| fs.removeLeftover(io, w.dir, t);
         var mtimes_temp_buf: [64]u8 = undefined;
         const mtimes_temp: ?[]const u8 = if (w.options.mtimes != null) fs.tempName(io, &mtimes_temp_buf, "tmp_mtimes_") else null;
         if (mtimes_temp) |t| try mtimes.write(io, w.dir, t, .{ .kind = w.kind, .entries = w.entries.items, .times = w.options.mtimes.?, .pack_checksum = checksum, .sync = w.options.fsync.sync(.pack_metadata) });
-        // glint-ignore: Z026 -- the write's error is the one to report; a temporary left behind is what git gc prunes
-        errdefer if (mtimes_temp) |t| w.dir.deleteFile(io, t) catch {};
+        // The write's error is the one to report; a temporary left behind is what git gc prunes.
+        errdefer if (mtimes_temp) |t| fs.removeLeftover(io, w.dir, t);
 
         // read-only, as git leaves a pack and its indexes
         fs.readOnlyObject(io, w.dir, w.temp[0..w.temp_len], w.options.shared);
@@ -2651,10 +2651,10 @@ pub const Writer = struct {
         if (rev_temp) |t| fs.readOnlyObject(io, w.dir, t, w.options.shared);
         if (mtimes_temp) |t| fs.readOnlyObject(io, w.dir, t, w.options.shared);
         fs.rename(io, w.dir, w.temp[0..w.temp_len], pack_name) catch |err| {
-            // glint-ignore: Z026 -- the rename's error is the one to report; temporary files left behind are what `git gc` prunes
-            w.dir.deleteFile(io, w.temp[0..w.temp_len]) catch {};
-            // glint-ignore: Z026 -- the rename's error is the one to report; temporary files left behind are what `git gc` prunes
-            w.dir.deleteFile(io, idx_temp) catch {};
+            // The rename's error is the one to report; temporary files left behind are what `git gc` prunes.
+            fs.removeLeftover(io, w.dir, w.temp[0..w.temp_len]);
+            // The rename's error is the one to report; temporary files left behind are what `git gc` prunes.
+            fs.removeLeftover(io, w.dir, idx_temp);
             return err;
         };
         // The reverse index before the index, as git renames them.
@@ -2669,8 +2669,8 @@ pub const Writer = struct {
             try fs.rename(io, w.dir, t, mtimes_name);
         }
         fs.rename(io, w.dir, idx_temp, idx_name) catch |err| {
-            // glint-ignore: Z026 -- the rename's error is the one to report; a pack without its index is unreachable, and `git gc` prunes it
-            w.dir.deleteFile(io, idx_temp) catch {};
+            // The rename's error is the one to report; a pack without its index is unreachable, and `git gc` prunes it.
+            fs.removeLeftover(io, w.dir, idx_temp);
             return err;
         };
         try syncNames(io, w.dir, w.options.fsync);
@@ -2768,8 +2768,8 @@ pub fn writeIndexFile(
     var failed = true;
     defer if (failed) {
         file.close(io);
-        // glint-ignore: Z026 -- the write's error is the one to report; a temporary left behind is what git gc prunes
-        dir.deleteFile(io, sub_path) catch {};
+        // The write's error is the one to report; a temporary left behind is what git gc prunes.
+        fs.removeLeftover(io, dir, sub_path);
     };
     var fw = file.writer(io, buffer);
     var hasher: hash.Hasher = .init(kind);

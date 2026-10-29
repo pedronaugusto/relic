@@ -2646,8 +2646,13 @@ fn makeLeadingDirs(io: Io, wt: Io.Dir, path: safe_path.Checked, hide: fs.HideDot
 /// where `symlinks` is off or the platform refuses one, an ordinary file
 /// holding the target. `true` when it was written as a file.
 fn writeLink(io: Io, wt: Io.Dir, path: safe_path.Checked, target: []const u8, symlinks: bool) Error!bool {
-    // glint-ignore: Z026 -- whatever is at the path is replaced next; a file that would not go is the error the link or the write reports
-    fs.deleteFile(io, wt, path.bytes) catch {};
+    // Whatever is at the path is replaced next: a file that would not go is
+    // the error the link or the write reports, and only a cancel is this
+    // step's own.
+    fs.deleteFile(io, wt, path.bytes) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => {},
+    };
     if (symlinks) {
         // aegis: design: a link's target is what the link holds, written as git writes it: nothing is opened through it here
         if (wt.symLink(io, target, path.bytes, .{})) |_| return false else |_| {}
@@ -3817,8 +3822,8 @@ fn writeFile(io: Io, wt: Io.Dir, path: safe_path.Checked, source: Source, execut
     });
     var failed = true;
     defer if (failed) {
-        // glint-ignore: Z026 -- the write's error is the one to report; a temporary left behind is what git's own checkout leaves too
-        wt.deleteFile(io, temp_path) catch {};
+        // The write's error is the one to report; a temporary left behind is what git's own checkout leaves too.
+        fs.removeLeftover(io, wt, temp_path);
     };
     {
         defer file.close(io);

@@ -1055,8 +1055,8 @@ fn attemptCustom(state: *Run, worker: usize, r: *Result, action: ?Action, verify
             const file = Io.Dir.cwd().openFile(io, full, .{}) catch return .{ .fail = "the custom transfer's file cannot be read" };
             defer {
                 file.close(io);
-                // glint-ignore: Z026 -- the custom transfer's file was read; removing it is best effort, as git-lfs leaves it otherwise
-                Io.Dir.cwd().deleteFile(io, full) catch {};
+                // The custom transfer's file was read; removing it is best effort, as git-lfs leaves it otherwise.
+                fs.removeLeftover(io, Io.Dir.cwd(), full);
             }
             var buf: [64 * 1024]u8 = undefined;
             var fr = file.reader(io, &buf);
@@ -1349,8 +1349,8 @@ fn attemptDownload(state: *Run, r: *Result, action: Action, authenticated: bool)
                 // glint-ignore: Z026 -- keeping the partial for a resume is best effort; the download's own error is the one to report
                 fs.rename(io, store.base, temp_path, part_path) catch {};
             } else {
-                // glint-ignore: Z026 -- the download's error is the one to report; a temporary left in the store is what git-lfs prune removes
-                store.base.deleteFile(io, temp_path) catch {};
+                // The download's error is the one to report; a temporary left in the store is what git-lfs prune removes.
+                fs.removeLeftover(io, store.base, temp_path);
             }
         }
     }
@@ -2512,8 +2512,8 @@ fn replaceWith(io: Io, wt: Io.Dir, path: []const u8, source: Io.File, executable
         temp_name;
     const out = try wt.createFile(io, temp_path, .{ .exclusive = true, .permissions = fs.permissionsFor(executable) });
     var done = false;
-    // glint-ignore: Z026 -- the smudge's error is the one to report; a temporary left in the tree is what git-lfs leaves too
-    defer if (!done) wt.deleteFile(io, temp_path) catch {};
+    // The smudge's error is the one to report; a temporary left in the tree is what git-lfs leaves too.
+    defer if (!done) fs.removeLeftover(io, wt, temp_path);
     {
         defer out.close(io);
         var write_buf: [64 * 1024]u8 = undefined;

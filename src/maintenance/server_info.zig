@@ -173,16 +173,16 @@ fn update(arena: Allocator, io: Io, dir: Io.Dir, sub_dir: []const u8, name: []co
         var buffer: [4096]u8 = undefined;
         var writer = file.writer(io, &buffer);
         writer.interface.writeAll(bytes) catch |err| {
-            // glint-ignore: Z026 -- the write's error is the one to report; a temporary left behind holds nothing anyone reads
-            dir.deleteFile(io, temp) catch {};
+            // The write's error is the one to report; a temporary left behind holds nothing anyone reads.
+            fs.removeLeftover(io, dir, temp);
             return err;
         };
         try writer.interface.flush();
     }
     fs.adjustShared(io, dir, temp, shared);
     fs.rename(io, dir, temp, path) catch |err| {
-        // glint-ignore: Z026 -- the rename's error is the one to report; a temporary left behind holds nothing anyone reads
-        dir.deleteFile(io, temp) catch {};
+        // The rename's error is the one to report; a temporary left behind holds nothing anyone reads.
+        fs.removeLeftover(io, dir, temp);
         return err;
     };
 }

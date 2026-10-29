@@ -413,8 +413,8 @@ pub fn receive(
     var kept = false;
     defer {
         if (file_open) file.close(io);
-        // glint-ignore: Z026 -- the receive's error is the one to report; a temporary pack left behind is what git gc prunes
-        if (!kept) pack_dir.deleteFile(io, temp) catch {};
+        // The receive's error is the one to report; a temporary pack left behind is what git gc prunes.
+        if (!kept) fs.removeLeftover(io, pack_dir, temp);
     }
 
     var indexer: Indexer = try .init(gpa, io, Database.from(db), file, options);
@@ -520,13 +520,13 @@ fn publish(gpa: Allocator, io: Io, db: anytype, p: Publication, options: Options
     var idx_temp_buf: [64]u8 = undefined;
     const idx_temp = fs.tempName(io, &idx_temp_buf, "tmp_idx_");
     _ = try pack.writeIndexFile(gpa, io, pack_dir, idx_temp, .{ .kind = kind, .entries = p.entries, .pack_checksum = p.name, .sync = p.fsync.sync(.pack_metadata) });
-    // glint-ignore: Z026 -- the receive's error is the one to report; a temporary index left behind is what git gc prunes
-    errdefer pack_dir.deleteFile(io, idx_temp) catch {};
+    // The receive's error is the one to report; a temporary index left behind is what git gc prunes.
+    errdefer fs.removeLeftover(io, pack_dir, idx_temp);
     var rev_temp_buf: [64]u8 = undefined;
     const rev_temp: ?[]const u8 = if (options.reverse_index) fs.tempName(io, &rev_temp_buf, "tmp_rev_") else null;
     if (rev_temp) |t| try rev_index.write(gpa, io, pack_dir, t, .{ .kind = kind, .entries = p.entries, .pack_checksum = p.name, .sync = p.fsync.sync(.pack_metadata) });
-    // glint-ignore: Z026 -- the receive's error is the one to report; a temporary reverse index left behind is what git gc prunes
-    errdefer if (rev_temp) |t| pack_dir.deleteFile(io, t) catch {};
+    // The receive's error is the one to report; a temporary reverse index left behind is what git gc prunes.
+    errdefer if (rev_temp) |t| fs.removeLeftover(io, pack_dir, t);
 
     // read-only, as git leaves a pack and its indexes
     const shared = db.sharedPermissions();
@@ -598,8 +598,8 @@ fn indexEntries(gpa: Allocator, indexer: *const Indexer, options: Options) Error
 /// rename fails the pack goes too: a pack with no index is never read.
 fn renameBesidePack(io: Io, pack_dir: Io.Dir, from: []const u8, to: []const u8, pack_name: []const u8) Io.Dir.RenameError!void {
     fs.rename(io, pack_dir, from, to) catch |err| {
-        // glint-ignore: Z026 -- the rename's error is the one to report; a pack with no index is unreachable, and `git gc` prunes it
-        pack_dir.deleteFile(io, pack_name) catch {};
+        // The rename's error is the one to report; a pack with no index is unreachable, and `git gc` prunes it.
+        fs.removeLeftover(io, pack_dir, pack_name);
         return err;
     };
 }
