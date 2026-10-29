@@ -343,32 +343,44 @@ pub const Resolution = struct {
 ///
 /// A directory nothing can be written into gives `Resolution.nanosecond`
 /// with `measured` false, which is the assumption this replaces and the
-/// lenient answer of the two.
-pub fn probeTimestampResolution(io: Io, dir: Io.Dir) Resolution {
+/// lenient answer of the two. A cancel is returned, never taken for a
+/// sample not taken.
+pub fn probeTimestampResolution(io: Io, dir: Io.Dir) Io.Cancelable!Resolution {
     var name_buf: [64]u8 = undefined;
     const name = tempName(io, &name_buf, "relic_tres_");
     // The handle is opened for reading as well as writing because the stat
     // below is taken through it: Windows grants a write-only handle no right
     // to read the file's attributes, so `stat` there is `AccessDenied` and
     // the measurement never happens.
-    const file = dir.createFile(io, name, .{ .exclusive = true, .read = true }) catch
-        return .nanosecond;
+    const file = dir.createFile(io, name, .{ .exclusive = true, .read = true }) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return .nanosecond,
+    };
     defer {
         file.close(io);
-        // glint-ignore: Z026 -- the probe's file is removed best effort; the granularity is already measured
-        dir.deleteFile(io, name) catch {};
+        // The probe's file is removed best effort; the granularity is already measured.
+        removeLeftover(io, dir, name);
     }
 
     var divisor: u64 = 0;
     var samples: u8 = 0;
     for (0..3) |_| {
-        file.writeStreamingAll(io, "relic") catch break;
+        file.writeStreamingAll(io, "relic") catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => break,
+        };
         // Windows does not put a write's time on the file while the handle
         // that made it is still open: without this every sample would be the
         // time the file was created and the answer would be of nothing.
         // A write whose time cannot be put on the file is a sample not taken.
-        if (builtin.target.os.tag == .windows) syncFile(io, file, .{ .policy = .per_file }) catch break;
-        const s = file.stat(io) catch break;
+        if (builtin.target.os.tag == .windows) syncFile(io, file, .{ .policy = .per_file }) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => break,
+        };
+        const s = file.stat(io) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => break,
+        };
         const nsec: u64 = Stat.splitNsec(s.mtime);
         // A zero is divisible by anything: it narrows nothing, and gcd
         // takes no pair of zeros.
@@ -665,17 +677,19 @@ pub fn realPathAlloc(gpa: Allocator, io: Io, dir: Io.Dir, sub_path: []const u8) 
 
 /// Whether `a_path` in `a` and `b_path` in `b` are one file: the same file
 /// on the same device, by the platform's identity rather than the index's,
-/// which has no inode on Windows. `false` when either cannot be looked at.
-pub fn sameFile(io: Io, a: Io.Dir, a_path: []const u8, b: Io.Dir, b_path: []const u8) bool {
-    const fa = identity(io, a, a_path) orelse return false;
-    const fb = identity(io, b, b_path) orelse return false;
+/// which has no inode on Windows. `false` when either cannot be looked at;
+/// a cancel is returned.
+pub fn sameFile(io: Io, a: Io.Dir, a_path: []const u8, b: Io.Dir, b_path: []const u8) Io.Cancelable!bool {
+    const fa = (try identity(io, a, a_path)) orelse return false;
+    const fb = (try identity(io, b, b_path)) orelse return false;
     return fa.id == fb.id and fa.device == fb.device;
 }
 
-fn identity(io: Io, dir: Io.Dir, sub_path: []const u8) ?struct { id: u64, device: u64 } {
+fn identity(io: Io, dir: Io.Dir, sub_path: []const u8) Io.Cancelable!?struct { id: u64, device: u64 } {
     return switch (platstat.full(io, dir, sub_path)) {
         .found => |f| .{ .id = f.file_id, .device = f.device },
-        .absent, .failed => null,
+        .absent => null,
+        .failed => |err| if (err == error.Canceled) error.Canceled else null,
     };
 }
 
@@ -1308,15 +1322,16 @@ extern "kernel32" fn CreateHardLinkW(new_path: [*:0]const u16, old_path: [*:0]co
 /// cannot be asked about is not owned: where the platform cannot say whose
 /// a file is -- WASI, which has no users, or a POSIX build without libc
 /// beyond Linux -- nothing is, and a caller that trusts its paths there
-/// opens with `OpenOptions.ownership = .trust`.
-pub fn ownedByCurrentUser(io: Io, dir: Io.Dir, sub_path: []const u8, home: ?[]const u8) bool {
+/// opens with `OpenOptions.ownership = .trust`. A cancel is returned.
+pub fn ownedByCurrentUser(io: Io, dir: Io.Dir, sub_path: []const u8, home: ?[]const u8) Io.Cancelable!bool {
     switch (builtin.target.os.tag) {
         .windows => return ownedWindows(io, dir, sub_path, home),
         .wasi => return false,
         else => {
             const found = switch (platstat.full(io, dir, sub_path)) {
                 .found => |f| f,
-                .absent, .failed => return false,
+                .absent => return false,
+                .failed => |err| return if (err == error.Canceled) error.Canceled else false,
             };
             const euid: u32 = switch (builtin.target.os.tag) {
                 .linux => std.os.linux.geteuid(),
@@ -1840,7 +1855,7 @@ test "the filesystem's timestamp resolution is measured, not assumed" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const measured = probeTimestampResolution(io, tmp.dir);
+    const measured = try probeTimestampResolution(io, tmp.dir);
     try std.testing.expect(measured.measured);
     // A round unit, no finer than a nanosecond and no coarser than a second.
     try std.testing.expect(measured.ns >= 1);

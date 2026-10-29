@@ -73,7 +73,11 @@ pub const Sequenced = enum { pick, revert };
 /// ran, as git's `sequencer_get_last_command` reads it. `null` with no
 /// such line.
 pub fn lastSequenced(gpa: Allocator, io: Io, repo: *Repository) ?Sequenced {
-    const text = (state.read(gpa, io, repo.gitDirectory().get(), "sequencer/todo") catch return null) orelse return null;
+    const text = (state.read(gpa, io, repo.gitDirectory().get(), "sequencer/todo") catch |err| {
+        // A cancel is put back for the task's next cancelation point.
+        if (err == error.Canceled) io.recancel();
+        return null;
+    }) orelse return null;
     defer gpa.free(text);
     const rest = std.mem.trimStart(u8, text, " \t\r\n");
     const words = [_]struct { Sequenced, []const u8, ?u8 }{ .{ .pick, "pick", 'p' }, .{ .revert, "revert", null } };

@@ -409,7 +409,7 @@ pub const Odb = struct {
         var objects = fs.OwnedDir.init(try git_dir.openDir(io, "objects", .{ .iterate = true }));
         try odb.addSource(io, &objects, true, 0);
         if (options.probe_timestamp_resolution) {
-            odb.timestamp_resolution = fs.probeTimestampResolution(io, odb.objectsDirectory().get());
+            odb.timestamp_resolution = try fs.probeTimestampResolution(io, odb.objectsDirectory().get());
         }
         return odb;
     }
@@ -429,7 +429,7 @@ pub const Odb = struct {
         var owned = fs.OwnedDir.init(try objects_dir.openDir(io, ".", .{ .iterate = true }));
         try odb.addSource(io, &owned, true, 0);
         if (options.probe_timestamp_resolution) {
-            odb.timestamp_resolution = fs.probeTimestampResolution(io, odb.objectsDirectory().get());
+            odb.timestamp_resolution = try fs.probeTimestampResolution(io, odb.objectsDirectory().get());
         }
         return odb;
     }

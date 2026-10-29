@@ -858,12 +858,12 @@ pub const Index = struct {
             const s = fs.Stat.fromIo(stat, .{});
             index.racy_cutoff_sec = s.mtime_sec;
             index.racy_cutoff_nsec = s.mtime_nsec;
-        } else |_| {}
+        } else |err| if (err == error.Canceled) return error.Canceled;
         // How much of that cutoff's nanoseconds means anything is a property
         // of the filesystem, and it is measured rather than assumed. It is
         // measured here because this is where the cutoff is taken and
         // because it is the filesystem the cutoff came from.
-        index.timestamp_resolution = timestamp_resolution orelse fs.probeTimestampResolution(io, dir);
+        index.timestamp_resolution = timestamp_resolution orelse try fs.probeTimestampResolution(io, dir);
 
         if (index.split) |split| if (split.base) |base| {
             try index.mergeShared(gpa, io, git_dir, base);
@@ -1795,7 +1795,7 @@ pub const Index = struct {
             const s = fs.Stat.fromIo(stat, .{});
             index.racy_cutoff_sec = s.mtime_sec;
             index.racy_cutoff_nsec = s.mtime_nsec;
-        } else |_| {}
+        } else |err| if (err == error.Canceled) return error.Canceled;
     }
 
     /// Errors from `writeTo`.

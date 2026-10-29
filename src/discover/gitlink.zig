@@ -80,26 +80,41 @@ pub const GitDir = struct {
 /// is in, which is how git writes it for a submodule, or as an absolute path,
 /// which is how it writes it for a linked worktree.
 pub fn open(gpa: Allocator, io: Io, wt: Io.Dir, path: []const u8) Self.Error!?GitDir {
-    var work = (if (path.len == 0) wt.openDir(io, ".", .{}) else wt.openDir(io, path, .{})) catch return null;
+    var work = (if (path.len == 0) wt.openDir(io, ".", .{}) else wt.openDir(io, path, .{})) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return null,
+    };
     defer work.close(io);
 
     var via_file = false;
-    var git_dir: fs.OwnedDir = if (work.openDir(io, ".git", .{ .iterate = true })) |dir| fs.OwnedDir.init(dir) else |_| blk: {
+    var git_dir: fs.OwnedDir = if (work.openDir(io, ".git", .{ .iterate = true })) |dir| fs.OwnedDir.init(dir) else |open_err| blk: {
+        if (open_err == error.Canceled) return error.Canceled;
         const target = (gitfile.read(gpa, io, work, ".git") catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
+            error.Canceled => return error.Canceled,
             else => return null,
         }) orelse return null;
         defer gpa.free(target);
         via_file = true;
-        break :blk gitfile.open(io, work, target, .{ .iterate = true }) catch return null;
+        break :blk gitfile.open(io, work, target, .{ .iterate = true }) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => return null,
+        };
     };
-    if (!directory.isGitDirectory(io, git_dir.lend().get())) {
+    const is_git = directory.isGitDirectory(io, git_dir.lend().get()) catch |err| {
+        git_dir.deinit(io);
+        return err;
+    };
+    if (!is_git) {
         git_dir.deinit(io);
         return null;
     }
     // `isGitDirectory` opened it already: one that does not open is not a
     // git directory, and was refused there.
-    const common = directory.openCommon(io, git_dir.lend().get()) catch null;
+    const common = directory.openCommon(io, git_dir.lend().get()) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => null,
+    };
     return .{ .git_dir = git_dir.move(), .common_dir = common, .via_file = via_file };
 }
 
@@ -112,17 +127,29 @@ pub fn isRepository(gpa: Allocator, io: Io, wt: Io.Dir, path: []const u8) Self.E
     // without opening anything.
     var buf: [4096]u8 = undefined;
     const dot_git = std.mem.print(&buf, "{s}/.git", .{path}) catch return false;
-    wt.access(io, dot_git, .{}) catch return false;
+    wt.access(io, dot_git, .{}) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return false,
+    };
     var found = (try open(gpa, io, wt, path)) orelse {
         // git's `is_nonbare_repository_dir`: a `.git` file that is there and
         // cannot be opened or read is taken for a repository all the same,
         // so `clean` and the walks leave what is beside it alone.
-        const st = wt.statFile(io, dot_git, .{}) catch return false;
+        const st = wt.statFile(io, dot_git, .{}) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => return false,
+        };
         if (st.kind != .file) return false;
-        const file = wt.openFile(io, dot_git, .{}) catch return true;
+        const file = wt.openFile(io, dot_git, .{}) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => return true,
+        };
         defer file.close(io);
         var probe: [1]u8 = undefined;
-        _ = file.readPositional(io, &.{&probe}, 0) catch return true;
+        _ = file.readPositional(io, &.{&probe}, 0) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => return true,
+        };
         return false;
     };
     found.deinit(io);
