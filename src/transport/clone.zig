@@ -66,6 +66,8 @@ const fetch_mod = @import("fetch.zig");
 const reference = @import("clone/reference.zig");
 const alternate_refs = @import("alternate_refs.zig");
 const submodule = @import("../submodule/submodule.zig");
+const Apart = @import("apart.zig").Apart;
+const aegis = @import("aegis");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -148,6 +150,14 @@ pub const Options = struct {
     /// `--[no-]also-filter-submodules`: the submodules cloned with `filter`
     /// too; `null` takes `clone.filterSubmodules`.
     filter_submodules: ?bool = null,
+    /// `--remote-submodules`: each submodule checked out at its
+    /// remote-tracking branch as its clone left it, not at the commit the
+    /// superproject records: git's `submodule update --remote --no-fetch`.
+    /// Only with `recurse_submodules`; alone it does nothing, as git's.
+    remote_submodules: bool = false,
+    /// `--jobs`: how many submodules are cloned at once, as
+    /// `submodule.UpdateOptions.jobs`; `null` takes `submodule.fetchJobs`.
+    submodule_jobs: ?u32 = null,
     /// Optional native filters supplied by the operation owner.
     native_filters: ?FilterLoader = null,
     /// The remote's name in the new configuration: git's `--origin`.
@@ -304,7 +314,8 @@ fn configureSubmodules(arena: Allocator, io: Io, repo: *Repository, settings: ?*
     _ = try repo.writeConfig(io, .local, edits.items, .{});
 }
 
-/// git's `submodule update --require-init --recursive` after its clone:
+/// git's `submodule update --require-init --recursive` after its clone,
+/// with `--remote --no-fetch` under `remote_submodules` and `--jobs`:
 /// each active submodule cloned as this clone was, one commit deep under
 /// `shallow_submodules`, with the filter under `filter_submodules`, with
 /// `ref_format` as given, and one branch or every one as this clone
@@ -325,8 +336,21 @@ fn updateSubmodules(gpa: Allocator, io: Io, repo: *Repository, settings: ?*const
         .ref_format = options.ref_format,
     });
     defer t.deinit();
-    _ = submodule.update(gpa, io, repo, .{ .init = true, .recursive = true, .who = options.who, .transport = t.transport(), .programs = options.programs }) catch |err| switch (err) {
-        error.TransportFailed => return t.failure orelse err,
+    _ = submodule.update(gpa, io, repo, .{
+        .init = true,
+        .recursive = true,
+        .who = options.who,
+        .transport = t.transport(),
+        .programs = options.programs,
+        .remote = options.remote_submodules,
+        .fetch = !options.remote_submodules,
+        .jobs = options.submodule_jobs,
+    }) catch |err| switch (err) {
+        error.TransportFailed => {
+            var kept = t.take(io);
+            kept.auth_failure.deinit();
+            return kept.failure orelse err;
+        },
         else => |e| return e,
     };
 }
@@ -1164,29 +1188,62 @@ pub const SubmoduleOptions = struct {
 /// for by name. A relative URL has been resolved against the
 /// superproject's remote by the time it arrives here.
 ///
-/// `submodule.Transport` says only that it failed; the error behind it is
-/// kept in `failure`, and a refused credential is described in
-/// `auth_failure`, for the caller's message.
+/// `submodule.Transport` says only that it failed; the error behind it,
+/// and a refused credential described for the caller's message, are
+/// `Kept`, which `take` hands over. Each clone and fetch keeps what it
+/// leaves apart while it runs, beside others or not, and hands it to
+/// `kept` under its lock.
 pub const SubmoduleTransport = struct {
     pub const Error = ErrorNamespace.Error || fetch_mod.Error || odb_mod.Error || partial.Error;
     options: SubmoduleOptions,
-    /// The error behind the last `error.TransportFailed`.
-    failure: ?SubmoduleTransport.Error = null,
-    /// The last refusal of a credential, described.
-    auth_failure: auth.Failure = .{},
-    /// How many repositories were cloned and how many fetches made.
-    clones: u32 = 0,
-    fetches: u32 = 0,
+    kept: aegis.BlockingGuarded(Kept) = .init(.{}),
+
+    /// What the clones and fetches left.
+    pub const Kept = struct {
+        /// The error behind the last `error.TransportFailed`; of clones
+        /// beside each other, the last to fail.
+        failure: ?SubmoduleTransport.Error = null,
+        /// The first refusal of a credential, described.
+        auth_failure: auth.Failure = .{},
+        /// How many repositories were cloned and how many fetches made.
+        clones: u32 = 0,
+        fetches: u32 = 0,
+    };
 
     /// A transport making every clone and fetch with `options`.
     pub fn init(options: SubmoduleOptions) SubmoduleTransport {
         return .{ .options = options };
     }
 
-    /// Release the failure's description.
+    /// Release the failure's description, unless it was taken.
     pub fn deinit(t: *SubmoduleTransport) void {
-        t.auth_failure.deinit();
+        t.kept.teardown().auth_failure.deinit();
         t.* = undefined;
+    }
+
+    /// What was kept so far, its `auth_failure` the caller's to deinit and
+    /// gone from the transport.
+    pub fn take(t: *SubmoduleTransport, io: Io) Kept {
+        var guard = t.kept.acquireUncancelable(io);
+        defer guard.deinit(io);
+        const kept = guard.value().*;
+        guard.value().auth_failure = .{};
+        return kept;
+    }
+
+    /// Hand what a clone or fetch kept apart to `kept`: its warnings to the
+    /// caller's, its refusal of a credential when none is kept yet, and one
+    /// more clone or fetch counted.
+    fn settle(t: *SubmoduleTransport, io: Io, apart: *Apart, count: enum { clone, fetch, neither }) Allocator.Error!void {
+        var guard = t.kept.acquireUncancelable(io);
+        defer guard.deinit(io);
+        const kept = guard.value();
+        try apart.merge(.{ .warnings = t.options.warnings, .auth_failure = @as(?*auth.Failure, &kept.auth_failure) });
+        switch (count) {
+            .clone => kept.clones += 1,
+            .fetch => kept.fetches += 1,
+            .neither => {},
+        }
     }
 
     /// The seam `submodule.UpdateOptions.transport` takes. `t` must
@@ -1195,12 +1252,14 @@ pub const SubmoduleTransport = struct {
         return .{ .context = t, .cloneFn = cloneFn, .fetchFn = fetchFn, .fetchPromisedFn = fetchPromisedFn };
     }
 
-    fn failed(t: *SubmoduleTransport, err: SubmoduleTransport.Error) submodule.TransportError {
+    fn failed(t: *SubmoduleTransport, io: Io, err: SubmoduleTransport.Error) submodule.TransportError {
         return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             error.Canceled => error.Canceled,
             else => {
-                t.failure = err;
+                var guard = t.kept.acquireUncancelable(io);
+                defer guard.deinit(io);
+                guard.value().failure = err;
                 return error.TransportFailed;
             },
         };
@@ -1208,8 +1267,7 @@ pub const SubmoduleTransport = struct {
 
     fn cloneFn(gpa: Allocator, io: Io, context: *anyopaque, request: submodule.CloneRequest) submodule.TransportError!void {
         const t: *SubmoduleTransport = @ptrCast(@alignCast(context)); // aegis: no-danger: the context handed out with this function is a SubmoduleTransport
-        t.cloneInto(gpa, io, request) catch |err| return t.failed(err);
-        t.clones += 1;
+        t.cloneInto(gpa, io, request) catch |err| return t.failed(io, err);
     }
 
     /// git's `clone_submodule`: the lenders `submodule.alternateLocation`
@@ -1221,18 +1279,18 @@ pub const SubmoduleTransport = struct {
         var arena_state: std.heap.ArenaAllocator = .init(gpa);
         defer arena_state.deinit();
         const arena = arena_state.allocator();
-        const lenders = if (request.within) |w| try reference.forSubmodule(arena, io, w.superproject, w.name, o.warnings) else &.{};
-        var repo = try clone(gpa, io, request.url, request.git_dir, .{
+        var apart: Apart = .{};
+        defer apart.deinit();
+        const shared: Options = .{
             .separate_git_dir = true,
             .who = o.who,
             .programs = o.programs,
             .config = o.config,
             .prompt = o.prompt,
-            .auth_failure = &t.auth_failure,
+            .auth_failure = &apart.auth_failure,
             .progress = o.progress,
             .warnings = o.warnings,
             .check_objects = o.check_objects,
-            .reference = lenders,
             .depth = o.depth,
             .filter = o.filter,
             .single_branch = o.single_branch,
@@ -1240,8 +1298,15 @@ pub const SubmoduleTransport = struct {
             // A `.gitmodules` names this URL, not the person, as git's
             // `GIT_PROTOCOL_FROM_USER=0` says for a submodule.
             .from_user = false,
-        });
-        defer repo.deinit(io);
+        };
+        var own = if (request.beside) try apart.options(gpa, shared) else shared;
+        var made = made: {
+            if (request.within) |w| own.reference = reference.forSubmodule(arena, io, w.superproject, w.name, own.warnings) catch |err| break :made err;
+            break :made clone(gpa, io, request.url, request.git_dir, own);
+        };
+        defer if (made) |*repo| repo.deinit(io) else |_| {};
+        try t.settle(io, &apart, if (made) |_| .clone else |_| .neither);
+        const repo = if (made) |*r| r else |err| return err;
         const w = request.within orelse return;
         var edits: std.ArrayList(Repository.ConfigEdit) = .empty;
         for ([_][]const u8{ "submodule.alternateLocation", "submodule.alternateErrorStrategy" }) |name| {
@@ -1251,15 +1316,16 @@ pub const SubmoduleTransport = struct {
         if (edits.items.len != 0) _ = try repo.writeConfig(io, .local, edits.items, .{});
     }
 
-    fn fetchFn(gpa: Allocator, io: Io, context: *anyopaque, repo: *Repository, remote: []const u8, want: Oid) submodule.TransportError!void {
+    fn fetchFn(gpa: Allocator, io: Io, context: *anyopaque, repo: *Repository, remote: []const u8, want: ?Oid) submodule.TransportError!void {
         const t: *SubmoduleTransport = @ptrCast(@alignCast(context)); // aegis: no-danger: the context handed out with this function is a SubmoduleTransport
-        t.fetchOnce(gpa, io, repo, remote, &.{}) catch |err| return t.failed(err);
-        repo.objectDatabase().refresh(io) catch |err| return t.failed(err);
-        if (repo.objectDatabase().exists(io, want) catch |err| return t.failed(err)) return;
+        t.fetchOnce(gpa, io, repo, remote, &.{}) catch |err| return t.failed(io, err);
+        const oid = want orelse return;
+        repo.objectDatabase().refresh(io) catch |err| return t.failed(io, err);
+        if (repo.objectDatabase().exists(io, oid) catch |err| return t.failed(io, err)) return;
         // Not on any branch the remote advertises: asked for by name, as
         // git's `fetch <remote> <commit>` asks.
         var hex: [hash.max_hex_len]u8 = undefined;
-        t.fetchOnce(gpa, io, repo, remote, &.{want.hex(&hex)}) catch |err| return t.failed(err);
+        t.fetchOnce(gpa, io, repo, remote, &.{oid.hex(&hex)}) catch |err| return t.failed(io, err);
     }
 
     fn fetchPromisedFn(gpa: Allocator, io: Io, context: *anyopaque, repo: *Repository, oids: []const Oid) submodule.TransportError!void {
@@ -1267,25 +1333,28 @@ pub const SubmoduleTransport = struct {
         const o = t.options;
         var lazy: partial.Lazy = .init(gpa, repo, .{ .programs = o.programs, .prompt = o.prompt, .check_objects = o.check_objects });
         defer lazy.deinit();
-        lazy.fetch(io, oids) catch |err| return t.failed(err);
+        lazy.fetch(io, oids) catch |err| return t.failed(io, err);
     }
 
     fn fetchOnce(t: *SubmoduleTransport, gpa: Allocator, io: Io, repo: *Repository, remote: []const u8, refspecs: []const []const u8) SubmoduleTransport.Error!void {
         const o = t.options;
-        var outcome = try fetch_mod.fetch(gpa, io, repo, remote, .{
+        var apart: Apart = .{};
+        defer apart.deinit();
+        var made = fetch_mod.fetch(gpa, io, repo, remote, .{
             .refspecs = refspecs,
             .who = o.who,
             .programs = o.programs,
             .prompt = o.prompt,
-            .auth_failure = &t.auth_failure,
+            .auth_failure = &apart.auth_failure,
             .progress = o.progress,
             .check_objects = o.check_objects,
             .warnings = o.warnings,
             .depth = o.depth,
             .from_user = false,
         });
-        outcome.deinit();
-        t.fetches += 1;
+        defer if (made) |*outcome| outcome.deinit() else |_| {};
+        try t.settle(io, &apart, if (made) |_| .fetch else |_| .neither);
+        _ = try made;
     }
 };
 
@@ -1867,7 +1936,7 @@ test "submodules cloned and fetched from a remote are what git submodule update 
         defer repo.deinit(io);
         _ = try submodule.update(gpa, io, &repo, .{ .init = true, .recursive = true, .transport = t.transport(), .who = test_who });
     }
-    try testing.expectEqual(@as(u32, 2), t.clones);
+    try testing.expectEqual(@as(u32, 2), t.take(io).clones);
     try expectSameSubmodules(gpa, io, by_git, by_relic);
 
     // New commits below: `inner` moves on, once on its branch and once to a
@@ -1910,7 +1979,7 @@ test "submodules cloned and fetched from a remote are what git submodule update 
     }
     // `lib`'s fetch goes on into `inner` itself, on demand, as git's
     // `fetch` inside a submodule does.
-    try testing.expect(t.fetches >= 1);
+    try testing.expect(t.take(io).fetches >= 1);
     try expectSameSubmodules(gpa, io, by_git, by_relic);
 }
 
@@ -1936,8 +2005,10 @@ test "a submodule URL naming a repository on this machine is refused unless prot
     var refused: SubmoduleTransport = .init(.{ .who = test_who });
     defer refused.deinit();
     try testing.expectError(error.TransportFailed, SubmoduleTransport.cloneFn(gpa, io, &refused, .{ .url = source_path, .git_dir = refused_dir }));
-    try testing.expectEqual(@as(?SubmoduleTransport.Error, error.TransportNotAllowed), refused.failure);
-    try testing.expectEqual(@as(u32, 0), refused.clones);
+    var kept = refused.take(io);
+    defer kept.auth_failure.deinit();
+    try testing.expectEqual(@as(?SubmoduleTransport.Error, error.TransportNotAllowed), kept.failure);
+    try testing.expectEqual(@as(u32, 0), kept.clones);
 
     var config = try config_mod.Config.parseText(gpa, "[protocol \"file\"]\n\tallow = always\n", .global);
     defer config.deinit();
@@ -1947,7 +2018,7 @@ test "a submodule URL naming a repository on this machine is refused unless prot
     var allowed: SubmoduleTransport = .init(.{ .who = test_who, .config = &config });
     defer allowed.deinit();
     try SubmoduleTransport.cloneFn(gpa, io, &allowed, .{ .url = source_path, .git_dir = allowed_dir });
-    try testing.expectEqual(@as(u32, 1), allowed.clones);
+    try testing.expectEqual(@as(u32, 1), allowed.take(io).clones);
 }
 
 test "a clone borrows from --reference and --reference-if-able as git's does, and --dissociate copies the borrowed objects in" {
