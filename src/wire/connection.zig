@@ -178,15 +178,18 @@ const Tail = struct {
     /// pipe open — an ssh ControlMaster, a credential daemon — and the
     /// reading task would wait for that to end too. So the task stops,
     /// and what it had not reached is read here, without waiting for
-    /// more.
-    fn finish(tail: *Tail, io: Io) void {
+    /// more. A read that fails otherwise ends what is kept there.
+    fn finish(tail: *Tail, io: Io) Io.Cancelable!void {
         if (tail.task) |*task| task.cancel(io);
         tail.task = null;
         const owned = if (tail.file) |*owned| owned else return;
         const file = owned.lend().get();
         var chunk: [1024]u8 = undefined;
         while (true) {
-            const n = program.readAvailable(io, file, &chunk) catch return;
+            const n = program.readAvailable(io, file, &chunk) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => return,
+            };
             if (n == 0) return;
             tail.keep(chunk[0..n]);
         }
@@ -355,13 +358,21 @@ pub const Process = struct {
     fn deinit(io: Io, context: *anyopaque) void {
         const p: *Process = @ptrCast(@alignCast(context)); // aegis: no-danger: this vtable's context, a Process, from start
         p.writer.io = io;
+        // A cancel that lands while the conversation closes is put back for
+        // the caller's next cancelation point once it has closed, where
+        // closing, which returns nothing, would lose it.
+        var put_back = false;
         if (!p.exited) {
             // The end of the conversation: the program's input ends, and so
             // does this side's interest in its output, so a program still
             // writing — after a refusal half way through a pack — stops at
-            // a closed pipe rather than waiting on one nobody reads.
-            // glint-ignore: Z026 -- a program that stopped reading has nothing more to hear; the pipe closes either way
-            p.writer.interface.flush() catch {};
+            // a closed pipe rather than waiting on one nobody reads. A
+            // program that stopped reading has nothing more to hear.
+            p.writer.interface.flush() catch {
+                if (p.writer.err) |err| if (err == error.Canceled) {
+                    put_back = true;
+                };
+            };
             if (p.running.child.takeStdout()) |stdout| stdout.close(io);
             p.exited = true;
             if (canceled(p)) {
@@ -370,12 +381,21 @@ pub const Process = struct {
                 // would hold whoever cancelled until it did
                 p.running.kill(io);
             } else {
-                // glint-ignore: Z026 -- closing has no one to tell how the program ended; finish is where that is asked
-                _ = p.running.wait(io) catch {};
+                // Closing has no one to tell how the program ended;
+                // `finish` is where that is asked.
+                _ = p.running.wait(io) catch |err| switch (err) {
+                    error.Canceled => {
+                        put_back = true;
+                        p.running.kill(io);
+                    },
+                    else => {},
+                };
             }
         }
         if (p.stderr) |tail| {
-            tail.finish(io);
+            tail.finish(io) catch {
+                put_back = true;
+            };
             if (tail.file) |*file| file.deinit(io);
             if (p.said_to) |sink| {
                 const said = std.mem.trim(u8, tail.buffer[0..tail.len], " \t\r\n");
@@ -388,6 +408,7 @@ pub const Process = struct {
         p.gpa.free(p.read_buffer);
         p.gpa.free(p.write_buffer);
         p.gpa.destroy(p);
+        if (put_back) io.recancel();
     }
 
     /// The program behind `c`, or `null` when `c` is another transport's
@@ -422,8 +443,13 @@ pub const Process = struct {
         const p = of(c) orelse return;
         if (p.exited) return;
         p.writer.io = io;
-        // glint-ignore: Z026 -- a program that stopped reading has ended or will; its exit status, waited for next, is the answer
-        p.writer.interface.flush() catch {};
+        // A program that stopped reading has ended or will; its exit
+        // status, waited for next, is the answer. A cancel is returned,
+        // and `deinit` stops the program, where the wait would hold the
+        // caller until it ended.
+        p.writer.interface.flush() catch {
+            if (p.writer.err) |err| if (err == error.Canceled) return error.Canceled;
+        };
         p.exited = true;
         const term = p.running.wait(io) catch |err| switch (err) {
             error.Canceled => {
@@ -464,7 +490,7 @@ pub const Process = struct {
         }
         var said: []const u8 = "";
         if (p.stderr) |tail| {
-            tail.finish(io);
+            try tail.finish(io);
             said = tail.buffer[0..tail.len];
         }
         const code: ?u32 = if (p.term) |term| switch (term) {
@@ -510,4 +536,24 @@ test "a conversation that is not a program's is not read as one" {
     try std.testing.expectEqual(null, ended.code);
     try std.testing.expectEqualStrings("", ended.stderr);
     for (other) |byte| try std.testing.expectEqual(0xaa, byte);
+}
+
+const builtin = @import("builtin");
+const testremote = @import("../testing/remote.zig");
+
+fn closeThenSleep(io: Io, c: *Connection) Io.Cancelable!void {
+    c.deinit(io);
+    try io.sleep(.fromSeconds(2), .awake);
+}
+
+test "a cancel that lands while a conversation closes is put back for the caller, not lost" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest; // `sleep` is the program
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var env = try testremote.environ(gpa);
+    defer env.deinit();
+    // A program that does not end when its input does: closing waits for it.
+    const c = try Process.start(gpa, io, .{ .environ = &env }, .{ .argv = &.{ "sleep", "30" }, .stderr = .ignore });
+    var closing = try io.concurrent(closeThenSleep, .{ io, c });
+    try std.testing.expectError(error.Canceled, closing.cancel(io));
 }
