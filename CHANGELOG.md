@@ -92,6 +92,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `odb.bitmap.Entry` holds its EWAH words (`words`) and where its row begins (`offset`), where it held `start` and `len` in the file, and `bitmap.Index.hash_cache` is a `codec.Rows` of one name hash per object: a reachability bitmap's name-hash cache and lookup table are cut at parse to the rows the file declares, and each read by position is checked against its table.
 - Working-tree reads and writes take a checked path: `worktree.hashFile`, `writeFileInto` and `Tracked.matches`, `sameContent` and `storedBytes` take a `names.path.Checked`, which only `names.path.parse` makes; `worktree.readable(path, protect)` gives one for a path the index or a tree holds, held to git's `verify_path` for a stored path. `worktree.refuseUnsafePaths` takes an allocator and returns the tree's paths as checked, and `worktree.gitmodulesFirst` takes the paths' type (`[]const u8` or `names.path.Checked`). Checkout, status, stash and an external diff reach the working tree only through a checked path.
 - `text.date.strftime` and `text.date.StrftimeContext` are private: a date is written with a `strftime` format through `show` (`Mode.strftime`, git's `format:`), which computes its calendar. `strftime` took a caller's `Tm`, whose month or weekday out of range indexed past a name table.
+- `repo.Repository.WriteConfigError` and `config.write.Error` carry `config.Config.SectionError` (`InvalidSectionName`), for the `rename_section` and `copy_section` edits.
 
 ### Added
 
@@ -253,6 +254,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `commit.branch.guessRemote` (git's `unique_tracking_name`): the remote-tracking ref a branch no local ref has is checked out from -- the one remote whose fetch refspecs map it to a ref that is there, or of several the one `checkout.defaultRemote` names -- and how many remotes had one; `commit.branch.guessing` reads `checkout.guess` (on unless set) and `worktree.guessRemote` (off unless set). Held to `git checkout <name>`.
 - `fast.importer`: a pack of no more objects than `fastimport.unpackLimit` (else `transfer.unpackLimit`, else 100) is written as loose objects and dropped, as git's `end_packfile` unpacks a small one, at the end and at each `checkpoint`. Held to `git count-objects -v` after `git fast-import`.
 - `program.runInto`: a program run with its standard output and standard error written into the caller's writers, over conduit's `Child.exchangeInto`; a credential helper's and askpass's answers go straight into `SecretBytes`.
+- `config.Config.renameSectionIn` and `copySectionIn`, and the `rename_section` and `copy_section` edits of `Repository.writeConfig`: git's `repo_config_rename_section` and `repo_config_copy_section`, as `git branch -m` and `-c` move a branch's section, matched as spelled and written byte for byte as git writes them (a value on the old header's line moves to its own under the new one; a copy follows each section it copies).
 
 ### Changed
 

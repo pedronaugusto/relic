@@ -1540,6 +1540,117 @@ pub const Config = struct {
         return removed;
     }
 
+    /// Errors from renaming or copying a section.
+    pub const SectionError = SetError || ParseError || error{
+        /// The new name is no section git writes: empty, or with a byte
+        /// before its first dot that is neither alphanumeric nor `-`. git's
+        /// "invalid section name: <name>".
+        InvalidSectionName,
+    };
+
+    /// git's `repo_config_rename_section_in_file` over the first writable
+    /// file read at `level`: every header of the section `old` (a full
+    /// name, `branch.topic`), matched as `removeSectionIn` matches one,
+    /// written again as `new`'s, where it stood. Anything after the old
+    /// header on its line moves to a line of its own under the new one,
+    /// indented by a tab. Returns how many headers it found.
+    pub fn renameSectionIn(config: *Config, level: Level, old: []const u8, new: []const u8) SectionError!usize {
+        return config.copyOrRenameSectionIn(level, old, new, .rename);
+    }
+
+    /// git's `repo_config_copy_section_in_file` over the first writable
+    /// file read at `level`: after each section `old`, a copy of its lines
+    /// under `new`'s header. What followed the old header on its own line
+    /// is not copied, as git's copy leaves it. Returns how many sections
+    /// it copied.
+    pub fn copySectionIn(config: *Config, level: Level, old: []const u8, new: []const u8) SectionError!usize {
+        return config.copyOrRenameSectionIn(level, old, new, .copy);
+    }
+
+    /// git's `repo_config_copy_or_rename_section_in_file`, a physical line
+    /// at a time as git reads the file, the result read again.
+    fn copyOrRenameSectionIn(config: *Config, level: Level, old: []const u8, new: []const u8, how: enum { rename, copy }) SectionError!usize {
+        if (!sectionNameIsOk(new)) return error.InvalidSectionName;
+        const file_index = config.writableFileAt(level) orelse return error.NoWritableSource;
+        const gpa = config.gpa;
+        const before = try config.files.items[file_index.raw()].render();
+        defer gpa.free(before);
+        var header: std.Io.Writer.Allocating = .init(gpa);
+        defer header.deinit();
+        const dot = std.mem.findScalar(u8, new, '.');
+        writeSectionHeader(&header.writer, .{
+            .section = new[0 .. dot orelse new.len],
+            .subsection = if (dot) |d| new[d + 1 ..] else null,
+            .name = "",
+        }) catch return error.OutOfMemory;
+
+        var out: std.Io.Writer.Allocating = .init(gpa);
+        defer out.deinit();
+        // The section being copied, written after it when the next header
+        // or the end of the file ends it.
+        var copied: std.Io.Writer.Allocating = .init(gpa);
+        defer copied.deinit();
+        var found: usize = 0;
+        var rest: []const u8 = before;
+        while (rest.len != 0) {
+            const end = if (std.mem.findScalar(u8, rest, '\n')) |nl| nl + 1 else rest.len;
+            var line = rest[0..end];
+            rest = rest[end..];
+            var i: usize = 0;
+            while (i < line.len and ctype.isSpace(line[i])) i += 1;
+            const is_section = i < line.len and line[i] == '[';
+            if (is_section) {
+                out.writer.writeAll(copied.written()) catch return error.OutOfMemory;
+                copied.clearRetainingCapacity();
+                const offset = sectionNameMatch(line[i..], old);
+                if (offset > 0) {
+                    found += 1;
+                    switch (how) {
+                        .rename => {
+                            out.writer.writeAll(header.written()) catch return error.OutOfMemory;
+                            line = line[i + offset ..];
+                            if (line.len != 0) out.writer.writeByte('\t') catch return error.OutOfMemory;
+                        },
+                        .copy => copied.writer.writeAll(header.written()) catch return error.OutOfMemory,
+                    }
+                }
+            }
+            if (!is_section and copied.written().len != 0) copied.writer.writeAll(line) catch return error.OutOfMemory;
+            out.writer.writeAll(line) catch return error.OutOfMemory;
+        }
+        out.writer.writeAll(copied.written()) catch return error.OutOfMemory;
+        if (found != 0) try config.reread(file_index, try out.toOwnedSlice());
+        return found;
+    }
+
+    /// The writable file `file_index` read again from `text`, which it
+    /// takes, every line and entry of it.
+    fn reread(config: *Config, file_index: FileId, text: []const u8) ParseError!void {
+        const gpa = config.gpa;
+        const file = &config.files.items[file_index.raw()];
+        var lines: std.ArrayList(Line) = .empty;
+        var names: std.heap.ArenaAllocator = .init(gpa);
+        {
+            errdefer {
+                lines.deinit(gpa);
+                names.deinit();
+                gpa.free(text);
+            }
+            try parseLines(gpa, names.allocator(), text, &lines);
+        }
+        for (file.lines.items) |line| {
+            if (line.owned) gpa.free(line.text);
+        }
+        file.lines.deinit(gpa);
+        var old_names = file.names.promote(gpa);
+        old_names.deinit();
+        gpa.free(file.text);
+        file.text = text;
+        file.lines = lines;
+        file.names = names.state;
+        try config.reindex();
+    }
+
     fn writableFileAt(config: *const Config, level: Level) ?FileId {
         for (config.files.items, 0..) |f, i| {
             if (f.writable and f.level == level) return FileId.fromRaw(@intCast(i));
@@ -1798,6 +1909,57 @@ pub fn checkKey(full: []const u8) CheckKeyError!FullName {
         if (std.mem.findScalar(u8, sub, '\n') != null) return error.InvalidKey;
     }
     return split;
+}
+
+/// git's `section_name_match`: how far into `line`, a header, the header
+/// of the section `name` runs, with the blanks after it; 0 when it is
+/// another's. As spelled: `[Branch "a"]` is not `branch.a`, and `[a.b]`
+/// is `a.b`.
+fn sectionNameMatch(line: []const u8, name: []const u8) usize {
+    const at = struct {
+        fn byte(bytes: []const u8, k: usize) u8 {
+            return if (k < bytes.len) bytes[k] else 0;
+        }
+    }.byte;
+    if (at(line, 0) != '[') return 0;
+    var i: usize = 1;
+    var j: usize = 0;
+    var dot = false;
+    while (at(line, i) != 0 and at(line, i) != ']') : (i += 1) {
+        if (!dot and ctype.isSpace(at(line, i))) {
+            dot = true;
+            if (at(name, j) != '.') break;
+            j += 1;
+            i += 1;
+            while (ctype.isSpace(at(line, i))) i += 1;
+            if (at(line, i) != '"') break;
+            continue;
+        }
+        if (at(line, i) == '\\' and dot) {
+            i += 1;
+        } else if (at(line, i) == '"' and dot) {
+            i += 1;
+            while (ctype.isSpace(at(line, i))) i += 1;
+            break;
+        }
+        if (at(line, i) != at(name, j)) break;
+        j += 1;
+    }
+    if (at(line, i) != ']' or j < name.len) return 0;
+    i += 1;
+    while (ctype.isSpace(at(line, i))) i += 1;
+    return i;
+}
+
+/// git's `section_name_is_ok`: not empty, and alphanumeric or `-` up to
+/// the first dot; anything after it.
+fn sectionNameIsOk(name: []const u8) bool {
+    if (name.len == 0) return false;
+    for (name) |c| {
+        if (c == '.') return true;
+        if (c != '-' and !std.ascii.isAlphanumeric(c)) return false;
+    }
+    return true;
 }
 
 /// The header git writes for a new section, with its line ending:
@@ -2749,6 +2911,77 @@ test "removing a section takes its header and every line up to the next one, as 
     defer gpa.free(ours);
     try std.testing.expectEqualStrings(theirs, ours);
     try std.testing.expectEqualStrings("../other", config.get("submodule.other.url").?);
+}
+
+test "a section is renamed and copied as git renames and copies it" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    // Headers in each spelling git matches or passes over, a value on a
+    // header's own line, blanks after one, and the section twice.
+    const text = "[core]\n\tbare = false\n" ++
+        "[branch \"topic\"]\n\tremote = origin\n# about topic\n\tmerge = refs/heads/topic\n" ++
+        "  [branch \"topic\"] rebase = true\n" ++
+        "[branch \"topic\"]   \n\tdescription = twice\n" ++
+        "[Branch \"topic\"]\n\tkept = as spelled\n" ++
+        "[branch \"topical\"]\n\tremote = elsewhere\n" ++
+        "[branch \"to\\\"pic\"]\n\tremote = quoted\n" ++
+        "[branch \"topic\"] # last\n\tremote = again";
+    const cases = [_]struct { old: []const u8, new: []const u8 }{
+        .{ .old = "branch.topic", .new = "branch.moved" },
+        .{ .old = "branch.to\"pic", .new = "branch.back\\slash" },
+    };
+    for (cases) |case| {
+        var git = try testgit.Repo.init(gpa, io, &.{});
+        defer git.deinit();
+        try git.writeFile(io, "probe.config", text);
+        try git.exec(io, &.{ "config", "rename-section", "-f", "probe.config", case.old, case.new });
+        const theirs = try git.readFile(io, "probe.config");
+        defer gpa.free(theirs);
+        var config = try Config.parseText(gpa, text, .local);
+        defer config.deinit();
+        config.files.items[0].writable = true;
+        _ = try config.renameSectionIn(.local, case.old, case.new);
+        const ours = try config.renderWritable();
+        defer gpa.free(ours);
+        try std.testing.expectEqualStrings(theirs, ours);
+    }
+    {
+        // git's command dies on a section that is not there; the
+        // rename under it finds none and changes nothing.
+        var config = try Config.parseText(gpa, text, .local);
+        defer config.deinit();
+        config.files.items[0].writable = true;
+        try std.testing.expectEqual(@as(usize, 0), try config.renameSectionIn(.local, "branch.none", "branch.still"));
+        const ours = try config.renderWritable();
+        defer gpa.free(ours);
+        try std.testing.expectEqualStrings(text, ours);
+    }
+
+    // git copies a section only for `git branch -c`, which copies the
+    // branch's.
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    try git.exec(io, &.{ "commit", "-q", "--allow-empty", "-m", "one" });
+    try git.exec(io, &.{ "branch", "topic" });
+    const local = try git.readFile(io, ".git/config");
+    defer gpa.free(local);
+    const before = try std.mem.concat(gpa, u8, &.{ local, text });
+    defer gpa.free(before);
+    try git.writeFile(io, ".git/config", before);
+    try git.exec(io, &.{ "branch", "-c", "topic", "copied" });
+    const theirs = try git.readFile(io, ".git/config");
+    defer gpa.free(theirs);
+    var config = try Config.parseText(gpa, before, .local);
+    defer config.deinit();
+    config.files.items[0].writable = true;
+    try std.testing.expectEqual(@as(usize, 4), try config.copySectionIn(.local, "branch.topic", "branch.copied"));
+    const ours = try config.renderWritable();
+    defer gpa.free(ours);
+    try std.testing.expectEqualStrings(theirs, ours);
+    try std.testing.expectEqualStrings("origin", config.get("branch.copied.remote").?);
+
+    try std.testing.expectError(error.InvalidSectionName, config.renameSectionIn(.local, "branch.copied", "bad name.x"));
+    try std.testing.expectError(error.InvalidSectionName, config.copySectionIn(.local, "branch.copied", ""));
 }
 
 test "a header reads as git reads it, and a header git refuses is refused" {
