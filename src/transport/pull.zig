@@ -19,7 +19,11 @@
 //! line begins with the pull's own words, git's `GIT_REFLOG_ACTION`.
 //!
 //! The fetch goes into the submodules as `fetch.Options.recurse_submodules`
-//! says; the submodules are not updated after the merge.
+//! says. That, else `submodule.recurse`, also has the submodules updated
+//! once the branch is: checked out at what a merge records, rebased onto
+//! what a rebase records, as git's `submodule update --recursive
+//! --checkout` and `--rebase` after its own; a rebase whose own commits
+//! record a submodule is refused first.
 
 const ErrorNamespace = @This();
 const Self = @This();
@@ -41,6 +45,8 @@ const three_way = @import("../merge/three_way.zig");
 const merging = @import("../commit/merging.zig");
 const rebase = @import("../rebase/rebase.zig");
 const fetch_mod = @import("fetch.zig");
+const submodule = @import("../submodule/submodule.zig");
+const sub_changes = @import("../submodule/changes.zig");
 
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
@@ -70,7 +76,11 @@ pub const Error = error{
     /// The branches have diverged and nothing says whether to merge or to
     /// rebase: `pull.rebase`, `pull.ff` or the caller's choice.
     DivergentBranches,
-} || fetch_mod.Error || merging.Error || rebase.Error || fork_point.Error || head_mod.Error;
+    /// A rebase that updates submodules, and the branch's own commits
+    /// record a submodule: git's "cannot rebase with locally recorded
+    /// submodule modifications".
+    LocallyRecordedSubmoduleChanges,
+} || fetch_mod.Error || merging.Error || rebase.Error || fork_point.Error || head_mod.Error || sub_changes.Error;
 
 /// How what was fetched is brought into the branch.
 pub const Mode = enum {
@@ -112,6 +122,9 @@ pub const Options = struct {
     merge: merging.Options,
     /// The rebase's options.
     rebasing: rebase.Options,
+    /// Where a submodule's repository or commit comes from when the pull
+    /// updates the submodules; see `submodule.UpdateOptions.transport`.
+    submodule_transport: ?submodule.Transport = null,
 };
 
 /// What a pull did.
@@ -125,6 +138,8 @@ pub const Outcome = struct {
     /// What was done with the heads; `null` when the fetch refused to
     /// update a ref, where git stops.
     result: ?Result = null,
+    /// What updating the submodules did, when the pull updated them.
+    submodules: ?submodule.UpdateOutcome = null,
 
     pub const Result = union(enum) {
         merged: merging.Outcome,
@@ -154,6 +169,9 @@ const Plan = struct {
     autostash: ?bool,
     reflog_action: []const u8,
     branch: ?remote_mod.Branch,
+    /// The submodules are updated after the branch: `--recurse-submodules`
+    /// on or on demand, else `submodule.recurse`.
+    submodules: bool,
 };
 
 /// Fetch from `remote` -- a configured remote or a URL, or `null` for the
@@ -196,9 +214,36 @@ pub fn pull(gpa: Allocator, io: Io, repo: *Repository, remote: ?[]const u8, opti
 
     const heads = try merging.fetchHead(io, repo, .{ .arena = arena });
     if (heads.len == 0) return noCandidates(plan, remote, options.fetch.refspecs);
-    outcome.result = try reconcile(gpa, io, repo, .{ .plan = plan, .heads = heads, .current = current, .forked = forked }, options);
+    const reconciled = try reconcile(gpa, io, repo, .{ .plan = plan, .heads = heads, .current = current, .forked = forked }, options);
+    outcome.result = reconciled.result;
+    if (plan.submodules and reconciled.finished()) outcome.submodules = try submodule.update(gpa, io, repo, .{
+        .recursive = true,
+        .strategy = if (reconciled.rebasing) .rebase else .checkout,
+        .who = options.merge.who,
+        .transport = options.submodule_transport,
+        .programs = options.fetch.programs,
+        .rebasing = options.rebasing,
+        .reflog_action = plan.reflog_action,
+    });
     return outcome;
 }
+
+/// What `reconcile` did, and whether it was the rebase's way.
+const Reconciled = struct {
+    result: Outcome.Result,
+    rebasing: bool,
+
+    /// Whether git's merge or rebase returned success, after which it
+    /// updates the submodules: not a merge stopped on conflicts, nor a
+    /// stopped rebase, nor the first commit of an unborn branch.
+    fn finished(r: Reconciled) bool {
+        return switch (r.result) {
+            .merged => |m| m.result != .conflicted,
+            .rebased => |b| b.result != .stopped,
+            .initial => false,
+        };
+    }
+};
 
 /// What `reconcile` works with.
 const Reconciling = struct {
@@ -210,11 +255,11 @@ const Reconciling = struct {
 
 /// The second half of `cmd_pull`, once the heads are known: the first
 /// commit of an unborn branch, a fast-forward, a merge or a rebase.
-fn reconcile(gpa: Allocator, io: Io, repo: *Repository, r: Reconciling, options: Options) Self.Error!Outcome.Result {
+fn reconcile(gpa: Allocator, io: Io, repo: *Repository, r: Reconciling, options: Options) Self.Error!Reconciled {
     var plan = r.plan;
     const ours = r.current.oid orelse {
         if (r.heads.len > 1) return error.MultipleHeadsIntoUnborn;
-        return .{ .initial = try intoUnborn(gpa, io, repo, r.current, r.heads[0], options.merge) };
+        return .{ .result = .{ .initial = try intoUnborn(gpa, io, repo, r.current, r.heads[0], options.merge) }, .rebasing = false };
     };
     if (r.heads.len > 1) {
         if (plan.mode != .merge) return error.MultipleHeadsToRebase;
@@ -233,13 +278,8 @@ fn reconcile(gpa: Allocator, io: Io, repo: *Repository, r: Reconciling, options:
     merge_options.fast_forward = plan.fast_forward;
     merge_options.autostash = plan.autostash;
     merge_options.reflog_action = plan.reflog_action;
-    if (plan.mode == .merge) return .{ .merged = try merging.startHeads(gpa, io, repo, r.heads, merge_options) };
+    if (plan.mode == .merge) return .{ .result = .{ .merged = try merging.startHeads(gpa, io, repo, r.heads, merge_options) }, .rebasing = false };
 
-    if (can_ff) {
-        merge_options.fast_forward = .only;
-        return .{ .merged = try merging.startHeads(gpa, io, repo, r.heads, merge_options) };
-    }
-    if (options.merge.verify_signatures == true) try warning.note(options.fetch.warnings, .verify_signatures_ignored_for_rebase);
     // git asks whether the fork point is the octopus merge base of `HEAD`,
     // the head and itself. It is one of `HEAD`'s ancestors, so that is the
     // same as asking whether the head has it: then nothing was rewritten
@@ -249,6 +289,12 @@ fn reconcile(gpa: Allocator, io: Io, repo: *Repository, r: Reconciling, options:
     if (r.forked) |fork| {
         if (!try rev_walk.isAncestor(gpa, io, db, .{ .ancestor = fork, .descendant = head }, .{})) upstream = fork;
     }
+    if (plan.submodules and try touchesSubmodules(gpa, io, repo, upstream, ours)) return error.LocallyRecordedSubmoduleChanges;
+    if (can_ff) {
+        merge_options.fast_forward = .only;
+        return .{ .result = .{ .merged = try merging.startHeads(gpa, io, repo, r.heads, merge_options) }, .rebasing = true };
+    }
+    if (options.merge.verify_signatures == true) try warning.note(options.fetch.warnings, .verify_signatures_ignored_for_rebase);
     var rebase_options = options.rebasing;
     rebase_options.onto = head;
     rebase_options.onto_name = null;
@@ -259,7 +305,16 @@ fn reconcile(gpa: Allocator, io: Io, repo: *Repository, r: Reconciling, options:
     // `rebase.rebaseMerges` itself.
     if (plan.mode == .rebase_merges) rebase_options.rebase_merges = .no_rebase_cousins;
     rebase_options.reflog_action = plan.reflog_action;
-    return .{ .rebased = try rebase.start(gpa, io, repo, upstream, rebase_options) };
+    return .{ .result = .{ .rebased = try rebase.start(gpa, io, repo, upstream, rebase_options) }, .rebasing = true };
+}
+
+/// git's `submodule_touches_in_range`: whether a commit `ours` reaches and
+/// `upstream` does not records a submodule.
+fn touchesSubmodules(gpa: Allocator, io: Io, repo: *Repository, upstream: Oid, ours: Oid) Self.Error!bool {
+    var arena_instance: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_instance.deinit();
+    const changed = try sub_changes.changedSubmodules(arena_instance.allocator(), gpa, io, repo, .{ .tips = &.{ours}, .hidden = &.{upstream} });
+    return changed.len != 0;
 }
 
 /// git's `already_up_to_date`: `HEAD` has every head.
@@ -287,6 +342,9 @@ fn decide(gpa: Allocator, arena: Allocator, io: Io, repo: *Repository, remote: ?
         .autostash = options.autostash orelse configured_autostash,
         .reflog_action = options.reflog_action orelse try defaultAction(arena, remote, options.fetch.refspecs),
         .branch = null,
+        // `git_pull_config` reads `submodule.recurse` with `git_config_bool`;
+        // the command line's `--recurse-submodules` beats it.
+        .submodules = if (options.fetch.recurse_submodules) |r| r != .off else try config.getBool("submodule.recurse", false),
     };
     if (try repo.refStore().currentBranch(gpa, io)) |name| {
         defer gpa.free(name);

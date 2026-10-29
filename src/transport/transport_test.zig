@@ -30,6 +30,7 @@ const object = @import("../object/object.zig");
 const progress_mod = @import("../report.zig").progress;
 const builtin = @import("builtin");
 const push_mod = @import("push.zig");
+const pull_mod = @import("pull.zig");
 const program = @import("../process.zig").program;
 
 const test_who: object.Signature = .{ .name = "F", .email = "f@example.com", .when_secs = 1, .offset_minutes = 0 };
@@ -2754,6 +2755,104 @@ test "submodules cloned several at once: one that fails is named and nothing is 
         try testing.expectError(error.FileNotFound, d.access(io, "lib/README", .{}));
         try testing.expectError(error.FileNotFound, d.access(io, "vendor/inner/.git", .{}));
         try testing.expectError(error.FileNotFound, d.access(io, ".git/modules/vendor/inner/HEAD", .{}));
+    }
+}
+
+test "a pull updates the submodules as git's does: checked out after a merge, rebased after a rebase, by --recurse-submodules or submodule.recurse, and a rebase of commits that record one refused" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var env = try testremote.environ(gpa);
+    defer env.deinit();
+    const Case = struct {
+        git_args: []const []const u8,
+        mode: ?pull_mod.Mode = null,
+        recurse: ?@import("../submodule/changes.zig").Recurse = null,
+        config: []const [2][]const u8 = &.{},
+        /// The pull updates the submodules.
+        updates: bool = true,
+        /// A commit of the twin's own records `vendor/inner` elsewhere.
+        local_record: bool = false,
+        refused: ?anyerror = null,
+    };
+    const cases = [_]Case{
+        .{ .git_args = &.{"--recurse-submodules"}, .recurse = .on },
+        .{ .git_args = &.{ "--rebase", "--recurse-submodules" }, .mode = .rebase, .recurse = .on },
+        .{ .git_args = &.{"--recurse-submodules=on-demand"}, .recurse = .on_demand },
+        .{ .git_args = &.{}, .config = &.{.{ "submodule.recurse", "true" }} },
+        .{ .git_args = &.{"--no-recurse-submodules"}, .recurse = .off, .config = &.{.{ "submodule.recurse", "true" }}, .updates = false },
+        .{ .git_args = &.{"--rebase"}, .mode = .rebase, .updates = false },
+        .{ .git_args = &.{ "--rebase", "--recurse-submodules" }, .mode = .rebase, .recurse = .on, .local_record = true, .refused = error.LocallyRecordedSubmoduleChanges },
+    };
+    const twins = [_][]const u8{ "by-git", "by-relic" };
+    var world = try SubmoduleWorld.init(gpa, io);
+    defer world.deinit(gpa);
+    for (cases, 0..) |case, n| {
+        for (twins) |name| try world.work.dir.deleteTree(io, name);
+        try world.twin(gpa, io, "by-git");
+        for (case.config) |pair| try world.git(gpa, io, "by-git", &.{ "config", pair[0], pair[1] });
+        if (case.local_record) {
+            // `vendor/inner` at a commit of its own, recorded on the
+            // twin's branch, so the branch and its upstream diverge.
+            try world.git(gpa, io, "by-git/vendor/inner", &.{ "commit", "-q", "--allow-empty", "-m", "local" });
+            try world.git(gpa, io, "by-git", &.{ "commit", "-q", "-am", "record inner" });
+        }
+        try world.copy(gpa, io, "by-git", "by-relic");
+        try world.advance(gpa, io, "refs/heads/main", true);
+
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(gpa);
+        try argv.appendSlice(gpa, &.{ "pull", "-q" });
+        try argv.appendSlice(gpa, case.git_args);
+        var by_git_dir = try world.work.dir.openDir(io, "by-git", .{});
+        defer by_git_dir.close(io);
+        const by_git = testremote.gitInputEnv(gpa, io, by_git_dir, &env, argv.items, "", false);
+        // git's `GIT_REFLOG_ACTION`: `pull` and its arguments.
+        const words = try std.mem.join(gpa, " ", argv.items[2..]);
+        defer gpa.free(words);
+        const reflog_action = if (words.len == 0) try gpa.dupe(u8, "pull") else try std.mem.concat(gpa, u8, &.{ "pull ", words });
+        defer gpa.free(reflog_action);
+
+        var dir = try world.work.dir.openDir(io, "by-relic", .{});
+        defer dir.close(io);
+        var repo = try repo_mod.Repository.open(gpa, io, dir, .{});
+        defer repo.deinit(io);
+        var t: clone_mod.SubmoduleTransport = .init(.{ .who = test_who, .programs = .{ .environ = &env } });
+        defer t.deinit();
+        const pulled = pull_mod.pull(gpa, io, &repo, null, .{
+            .mode = case.mode,
+            .reflog_action = reflog_action,
+            .fetch = .{ .who = test_who, .programs = .{ .environ = &env }, .recurse_submodules = case.recurse },
+            .merge = .{ .who = test_who },
+            .rebasing = .{ .who = test_who },
+            .submodule_transport = t.transport(),
+        });
+        if (case.refused) |err| {
+            try testing.expectError(error.GitFailed, by_git);
+            try testing.expectError(err, pulled);
+            continue;
+        }
+        gpa.free(by_git catch |err| {
+            std.debug.print("case {d}: git pull failed\n", .{n});
+            return err;
+        });
+        var outcome = try pulled;
+        defer outcome.deinit();
+        try testing.expectEqual(case.updates, outcome.submodules != null);
+        try expectSameRecursiveClone(gpa, io, &world);
+        // Each submodule's last `HEAD` log line: the pull's words, as git
+        // hands them to its update's checkout.
+        for ([_][]const u8{ "lib", "vendor/inner", "lib/inner" }) |path| {
+            var said: [2][]u8 = undefined;
+            for (twins, &said) |name, *out| {
+                const at = try gpa.print("{s}/{s}", .{ name, path });
+                defer gpa.free(at);
+                var sub = try world.work.dir.openDir(io, at, .{});
+                defer sub.close(io);
+                out.* = try testremote.gitInput(gpa, io, sub, &.{ "reflog", "-1", "--format=%gs" }, "");
+            }
+            defer for (said) |o| gpa.free(o);
+            try testing.expectEqualStrings(said[0], said[1]);
+        }
     }
 }
 
