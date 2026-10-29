@@ -62,7 +62,10 @@ pub const Remote = struct {
         defer identity.deinit();
         const parsed = identity.url;
         if (!parsed.isLocalRepository()) return error.NotARepository;
-        var dir = Io.Dir.cwd().openDir(io, parsed.path, .{ .iterate = true }) catch return error.NotARepository;
+        var dir = Io.Dir.cwd().openDir(io, parsed.path, .{ .iterate = true }) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => return error.NotARepository,
+        };
         defer dir.close(io);
         var open_options = options;
         open_options.discover = false;

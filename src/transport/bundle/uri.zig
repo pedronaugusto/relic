@@ -223,8 +223,9 @@ const Run = struct {
 
     fn removeFiles(run: *Run) void {
         const objects = run.repo.objectDatabase().objectsDirectory().get();
-        // glint-ignore: Z026 -- git's `unlink_or_warn` goes on too; a file left is a stale tmp_uri_ beside git's own
-        for (run.files.items) |file| objects.deleteFile(run.io, file) catch {};
+        // git's `unlink_or_warn` goes on too; a file left is a stale
+        // tmp_uri_ beside git's own.
+        for (run.files.items) |file| fs.removeLeftover(run.io, objects, file);
     }
 
     fn warnings(run: *Run) ?*warning.Warnings {
