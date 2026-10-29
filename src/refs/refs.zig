@@ -32,7 +32,6 @@ const object = @import("../object/object.zig");
 const fs = @import("../fs/fs.zig");
 const hooks = @import("../hooks/hooks.zig");
 const testgit = @import("../testing/git.zig");
-const testing_io = @import("../testing/io.zig");
 
 const Oid = hash.Oid;
 const Kind = hash.Kind;
