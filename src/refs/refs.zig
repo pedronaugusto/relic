@@ -1153,6 +1153,188 @@ pub const Store = struct {
         try tx.commit(io, log);
     }
 
+    /// Errors from `renameRef` and `copyRef`.
+    pub const MoveError = TransactionError || fs.AtomicWriteError || aegis.own.ReadFileError || error{
+        /// The ref to move is not there: git's "refname <name> not found".
+        NoSuchRef,
+        /// The ref to move is symbolic, which git neither renames nor
+        /// copies: "refname <name> is a symbolic ref, renaming it is not
+        /// supported".
+        SymbolicRef,
+        /// The files format's log of the ref is a symbolic link: git's
+        /// "reflog for <name> is a symlink".
+        LogIsSymlink,
+    };
+
+    /// git's `refs_rename_ref`: the ref `old`, which must point at an
+    /// object, moved to `new` with its log, a ref already at `new` replaced.
+    /// The files format moves `logs/<old>` to `logs/<new>`, deletes `old`
+    /// with `log`'s line (and `HEAD`'s, when `HEAD` names it), and writes
+    /// `new` with `log`'s line from the object to itself, putting
+    /// everything back when a step fails. A reftable writes one table: the
+    /// old ref and log deleted, the new ref with the old log's entries and
+    /// two of its own, its deletion under the old name and its creation.
+    /// Both names are ones every worktree shares. `HEAD` is not moved: that
+    /// is the caller's, as it is git's `branch -m`.
+    pub fn renameRef(store: *Store, gpa: Allocator, io: Io, which: MoveNames, log: LogMessage) MoveError!void {
+        return store.moveRef(gpa, io, .{ .old = which.old, .new = which.new, .how = .rename }, log);
+    }
+
+    /// git's `refs_copy_existing_ref`: `renameRef`, `old` and its log left
+    /// as they are.
+    pub fn copyRef(store: *Store, gpa: Allocator, io: Io, which: MoveNames, log: LogMessage) MoveError!void {
+        return store.moveRef(gpa, io, .{ .old = which.old, .new = which.new, .how = .copy }, log);
+    }
+
+    /// The ref `renameRef` or `copyRef` moves, and where to.
+    pub const MoveNames = struct { old: []const u8, new: []const u8 };
+
+    const Move = enum { rename, copy };
+    const Asked = struct { old: []const u8, new: []const u8, how: Move };
+
+    fn moveRef(store: *Store, gpa: Allocator, io: Io, asked: Asked, log: LogMessage) MoveError!void {
+        const old = asked.old;
+        const new = asked.new;
+        const how = asked.how;
+        for ([_][]const u8{ old, new }) |name| {
+            if (!names.checkFormat(name, .{}) or names.parseWorktreeRef(name).owner != .shared) return error.InvalidRefName;
+        }
+        const orig = switch ((try store.read(gpa, io, old)) orelse return error.NoSuchRef) {
+            .direct => |oid| oid,
+            .symbolic => |target| {
+                gpa.free(target);
+                return error.SymbolicRef;
+            },
+        };
+        // A reftable has nothing to do for a ref moved onto itself; the
+        // files format moves it out and back, its log gaining the line.
+        if (store.refFormat() == .reftable and std.mem.eql(u8, old, new)) return;
+        if (try store.nameTaken(gpa, io, new, old)) return error.RefNameConflict;
+        if (store.refFormat() == .reftable) return stack_engine.copyRef(gpa, io, store, .{ .old = old, .new = new, .delete_old = how == .rename }, log);
+        return store.moveLoose(gpa, io, .{ .old = old, .new = new, .oid = orig, .how = how }, log);
+    }
+
+    /// git's `files_copy_or_rename_ref`.
+    fn moveLoose(store: *Store, gpa: Allocator, io: Io, moving: Moving, log: LogMessage) MoveError!void {
+        const old = moving.old;
+        const new = moving.new;
+        const orig = moving.oid;
+        const how = moving.how;
+        const logs = store.commonDir().get();
+        const old_log = try gpa.print("logs/{s}", .{old});
+        defer gpa.free(old_log);
+        const has_log = if (logs.statFile(io, old_log, .{ .follow_symlinks = false })) |st| has: {
+            if (st.kind == .sym_link) return error.LogIsSymlink;
+            break :has true;
+        } else |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            // git's `lstat` failing: no log to move.
+            else => false,
+        };
+        if (has_log) switch (how) {
+            .rename => try fs.rename(io, logs, old_log, renamed_log),
+            .copy => {
+                const bytes = (try fs.readFileAlloc(gpa, io, logs, old_log, std.math.maxInt(usize))) orelse return error.NoSuchRef;
+                defer gpa.free(bytes);
+                try fs.atomicWrite(io, logs, renamed_log, bytes, .{ .prefix = ".tmp-copied-log-" });
+                fs.adjustShared(io, logs, renamed_log, store.sharedPermissions());
+            },
+        };
+        var log_placed = false;
+        store.placeLoose(gpa, io, moving, has_log, log, &log_placed) catch |err| {
+            // git's rollback: the old ref written again, its log put back.
+            var tx = store.begin(gpa);
+            defer tx.deinit(io);
+            putBack(io, tx.update(old, .{ .direct = orig }, .any));
+            putBack(io, tx.commit(io, null));
+            if (has_log) {
+                const new_log = gpa.print("logs/{s}", .{new}) catch return err;
+                defer gpa.free(new_log);
+                putBack(io, fs.rename(io, logs, if (log_placed) new_log else renamed_log, old_log));
+            }
+            return err;
+        };
+    }
+
+    /// Where the files format keeps a log on its way to its new name, as
+    /// git's `TMP_RENAMED_LOG`.
+    const renamed_log = "logs/refs/.tmp-renamed-log";
+
+    /// A ref on its way: from `old` to `new`, the object it points at.
+    const Moving = struct { old: []const u8, new: []const u8, oid: Oid, how: Move };
+
+    /// The steps of `moveLoose` past the log set aside: the old ref gone
+    /// for a rename, any ref at the new name gone, the log in its new
+    /// place, and the new ref written with its line.
+    fn placeLoose(store: *Store, gpa: Allocator, io: Io, p: Moving, has_log: bool, log: LogMessage, log_placed: *bool) MoveError!void {
+        const logs = store.commonDir().get();
+        if (p.how == .rename) {
+            var tx = store.begin(gpa);
+            defer tx.deinit(io);
+            try tx.change(p.old, null, .{ .matches = p.oid }, .{ .no_deref = true });
+            try tx.commit(io, log);
+            try store.deleteRefs(gpa, io, &.{p.new}, null);
+        }
+        if (has_log) {
+            const new_log = try gpa.print("logs/{s}", .{p.new});
+            defer gpa.free(new_log);
+            if (std.Io.Dir.path.dirnamePosix(new_log)) |parent| {
+                fs.makeDirs(io, logs, parent, store.sharedPermissions()) catch |err| switch (err) {
+                    error.PathAlreadyExists => {},
+                    else => |e| return e,
+                };
+            }
+            try fs.rename(io, logs, renamed_log, new_log);
+            log_placed.* = true;
+        }
+        {
+            var tx = store.begin(gpa);
+            defer tx.deinit(io);
+            try tx.change(p.new, .{ .direct = p.oid }, .any, .{ .no_deref = true });
+            try tx.commit(io, null);
+        }
+        // git locks the new ref with the old one's object as its old
+        // value, so its line goes from the object to itself, and `HEAD`'s
+        // too when `HEAD` names the new ref.
+        try store.appendLog(gpa, io, .{ .name = p.new, .old = p.oid, .new = p.oid }, log);
+        const head_ref = (try store.read(gpa, io, "HEAD")) orelse return;
+        switch (head_ref) {
+            .direct => {},
+            .symbolic => |target| {
+                defer gpa.free(target);
+                if (std.mem.eql(u8, target, p.new)) try store.appendLog(gpa, io, .{ .name = "HEAD", .old = p.oid, .new = p.oid }, log);
+            },
+        }
+    }
+
+    /// git's `refs_verify_refname_available` with one name passed over: a
+    /// ref other than `skip` stands where `name` would go, at a leading
+    /// part of it or under it.
+    fn nameTaken(store: *const Store, gpa: Allocator, io: Io, name: []const u8, skip: []const u8) ReadError!bool {
+        var end: usize = 0;
+        while (std.mem.findScalarPos(u8, name, end + 1, '/')) |slash| : (end = slash) {
+            const parent = name[0..slash];
+            if (std.mem.findScalar(u8, parent, '/') == null or std.mem.eql(u8, parent, skip)) continue;
+            const found = (try store.read(gpa, io, parent)) orelse continue;
+            switch (found) {
+                .direct => {},
+                .symbolic => |target| gpa.free(target),
+            }
+            return true;
+        }
+        const folder = try gpa.print("{s}/", .{name});
+        defer gpa.free(folder);
+        var listing = try store.list(gpa, io, folder);
+        defer listing.deinit();
+        for (listing.entries) |entry| {
+            if (!std.mem.eql(u8, entry.name, skip)) return true;
+        }
+        for (listing.broken) |broken| {
+            if (!std.mem.eql(u8, broken.name, skip)) return true;
+        }
+        return false;
+    }
+
     /// One of a new repository's first refs: a full name under `refs/`,
     /// the object, and what it peels to when it is an annotated tag.
     pub const Initial = struct {
@@ -1541,6 +1723,15 @@ fn isRefName(name: []const u8) bool {
 }
 
 /// What a log entry a transaction writes says.
+/// One step of putting back what a failed move did, which git takes as
+/// far as it goes ("unable to restore logfile"): the failure that started
+/// it is the one reported, and a cancel stays the caller's.
+fn putBack(io: Io, result: anytype) void {
+    result catch |err| {
+        if (err == error.Canceled) io.recancel();
+    };
+}
+
 pub const LogMessage = @import("value.zig").LogMessage;
 const config_mod = @import("../config/config.zig");
 
