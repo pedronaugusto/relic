@@ -123,6 +123,19 @@ pub const Walk = struct {
     /// each through the commits walked, are kept. `--ancestry-path` alone
     /// is the commits given hidden. Empty keeps every commit.
     ancestry_path: []const Oid = &.{},
+    /// `--since`, `--after`, `--max-age`: a commit whose committer date is
+    /// before this, in seconds since the epoch, is not shown and the walk
+    /// goes no further along it. A walk that hides commits, or orders
+    /// them topologically, takes it as hidden, so what it reaches is
+    /// hidden too, as git's `limit_list` does; one in date order stops
+    /// there, as git's unlimited walk does.
+    max_age: ?i64 = null,
+    /// `--until`, `--before`, `--min-age`: a commit whose committer date is
+    /// after this is not shown; the walk goes on through it.
+    min_age: ?i64 = null,
+    /// `--since-as-filter`: a commit whose committer date is before this
+    /// is not shown; the walk goes on through it.
+    max_age_as_filter: ?i64 = null,
     /// `core.maxTreeDepth`, how deep `paths` may look into a tree: a caller
     /// with a repository gives `Repository.settings().max_tree_depth`.
     max_tree_depth: u32 = object_depth.max_tree_depth,
@@ -313,6 +326,14 @@ pub const Walk = struct {
         if (if (relevant_parents != 0) !relevant_change else !irrelevant_change) n.treesame = true;
     }
 
+    /// Whether `min_age` or `max_age_as_filter` leaves the commit out: git's
+    /// `get_commit_action` on dates.
+    fn outOfDates(walk: *const Walk, n: *const Node) bool {
+        if (walk.min_age) |age| if (n.time > age) return true;
+        if (walk.max_age_as_filter) |age| if (n.time < age) return true;
+        return false;
+    }
+
     fn everybodyUninteresting(queue: anytype) bool {
         for (queue.items) |q| {
             if (!q.node.uninteresting) return false;
@@ -350,6 +371,9 @@ pub const Walk = struct {
         var list: std.ArrayList(*Node) = .empty;
         defer list.deinit(walk.gpa);
         if (walk.ancestry_path.len != 0) limited = true;
+        // A topological order is git's limited walk where no commit-graph
+        // gives generation numbers, the one walk both have.
+        if (walk.sort != .date) limited = true;
         if (limited) {
             // `limit_list`.
             const slop_start = 5;
@@ -358,6 +382,9 @@ pub const Walk = struct {
             while (queue.pop()) |q| {
                 try io.checkCancel();
                 const n = q.node;
+                if (walk.max_age) |age| if (n.time < age) {
+                    n.uninteresting = true;
+                };
                 try walk.processParents(io, n, &queue, &seq);
                 if (n.uninteresting) {
                     try walk.markParentsUninteresting(n);
@@ -372,14 +399,18 @@ pub const Walk = struct {
                     }
                     continue;
                 }
+                if (walk.outOfDates(n)) continue;
                 date = n.time;
                 try list.append(walk.gpa, n);
             }
         } else {
             while (queue.pop()) |q| {
                 try io.checkCancel();
-                try walk.processParents(io, q.node, &queue, &seq);
-                try list.append(walk.gpa, q.node);
+                const n = q.node;
+                if (walk.max_age) |age| if (n.time < age) continue;
+                try walk.processParents(io, n, &queue, &seq);
+                if (walk.outOfDates(n)) continue;
+                try list.append(walk.gpa, n);
             }
         }
 
@@ -920,6 +951,7 @@ test "ancestry reports a missing commit instead of a negative answer" {
 }
 
 const testgit = @import("../testing/git.zig");
+const decimal = @import("../text.zig").decimal;
 
 test "first-parent walks and merge bases of many are git's" {
     const io = std.testing.io;
@@ -1168,6 +1200,18 @@ fn expectWalkLikeRevList(gpa: Allocator, io: Io, repo: *testgit.Repo, db: *odb_m
             walk.exclude_first_parent_only = true;
             continue;
         }
+        if (std.mem.startsWith(u8, arg, "--max-age=")) {
+            walk.max_age = decimal.digits(i64, arg["--max-age=".len..]).?;
+            continue;
+        }
+        if (std.mem.startsWith(u8, arg, "--min-age=")) {
+            walk.min_age = decimal.digits(i64, arg["--min-age=".len..]).?;
+            continue;
+        }
+        if (std.mem.startsWith(u8, arg, "--since-as-filter=@")) {
+            walk.max_age_as_filter = decimal.digits(i64, arg["--since-as-filter=@".len..]).?;
+            continue;
+        }
         const hidden = arg[0] == '^';
         const name = if (hidden) arg[1..] else arg;
         const text = try repo.line(io, &.{ "rev-parse", name });
@@ -1256,6 +1300,15 @@ fn walkLikeRevList(gpa: Allocator, io: Io, seed: u64) !void {
         &.{ "--exclude-first-parent-only", "b1", "b2", "^b0", "^b3" },
         &.{ "--exclude-first-parent-only", "--topo-order", "b2", "b3", "^b0" },
         &.{ "--exclude-first-parent-only", "--first-parent", "b3", "^b2" },
+        // Dates through the middle of the history, its clock going back
+        // now and then.
+        &.{ "--max-age=1700040000", "b0", "b1", "b2", "b3" },
+        &.{ "--max-age=1700040000", "b1", "^b2" },
+        &.{ "--max-age=1700040000", "--topo-order", "b0", "b1", "b2" },
+        &.{ "--min-age=1700060000", "b0", "b1", "b2", "b3" },
+        &.{ "--min-age=1700060000", "--max-age=1700020000", "b0", "b3", "^b1" },
+        &.{ "--since-as-filter=@1700040000", "b0", "b1", "b2", "b3" },
+        &.{ "--since-as-filter=@1700040000", "--min-age=1700070000", "--date-order", "b2", "b3" },
     };
     // `--exclude-first-parent-only` as git 2.56 walks it.
     const excluding_as_2_56 = try testgit.gitAtLeast(gpa, io, 2, 56);

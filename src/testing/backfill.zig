@@ -35,9 +35,17 @@ const Server = struct {
     }
 };
 
+/// When the fixture's first commit is made; each one after is a minute on.
+const dated_from: i64 = 1_700_000_000;
+
 fn served(gpa: Allocator, io: Io) !Server {
     var src = try testgit.Repo.init(gpa, io, &.{});
     defer src.deinit();
+    // A minute between commits, from `dated_from`, for the date limits.
+    var dated = try testgit.datedEnv(gpa, dated_from);
+    defer dated.deinit();
+    src.environ = &dated;
+    var tick: i64 = dated_from;
     for ([_][]const u8{ "a/b/c", "d/f" }) |dir| try src.dir.createDirPath(io, dir);
     for (1..3) |i| for (1..5) |n| {
         for ([_][]const u8{ "", "a/", "a/b/", "a/b/c/", "d/", "d/f/" }) |dir| {
@@ -60,6 +68,8 @@ fn served(gpa: Allocator, io: Io) !Server {
         }
         const message = try gpa.print("Iteration {d}", .{n});
         defer gpa.free(message);
+        tick += 60;
+        try testgit.setDate(&dated, tick);
         try src.exec(io, &.{ "commit", "-q", "-m", message });
     };
     try src.exec(io, &.{ "checkout", "-q", "-b", "side" });
@@ -73,9 +83,13 @@ fn served(gpa: Allocator, io: Io) !Server {
             try src.writeFile(io, path, text);
         }
         try src.exec(io, &.{ "add", "." });
+        tick += 60;
+        try testgit.setDate(&dated, tick);
         try src.exec(io, &.{ "commit", "-q", "-m", "Side commit" });
     }
     try src.exec(io, &.{ "checkout", "-q", "main" });
+    tick += 60;
+    try testgit.setDate(&dated, tick);
     try src.exec(io, &.{ "merge", "-q", "--no-ff", "-m", "Merge side branch", "side" });
     try src.exec(io, &.{ "checkout", "-q", "-b", "other", "main~1" });
     try src.dir.createDirPath(io, "o");
@@ -83,6 +97,8 @@ fn served(gpa: Allocator, io: Io) !Server {
     try src.writeFile(io, "o/file.2.txt", "Other content 2\n");
     try src.writeFile(io, "cone", "/*\n!/*/\n/a/\n!/a/*/\n/a/b/\n/z/\n");
     try src.exec(io, &.{ "add", "." });
+    tick += 60;
+    try testgit.setDate(&dated, tick);
     try src.exec(io, &.{ "commit", "-q", "-m", "Other commit" });
     try src.exec(io, &.{ "checkout", "-q", "main" });
 
@@ -260,6 +276,12 @@ test "backfill fetches what git's does, in git's batches: HEAD, ranges with and 
                 .{ .args = &.{ "--min-batch-size=3", "main", "origin/side", "origin/other" }, .inputs = .{ .include = &.{ "main", "origin/side", "origin/other" } }, .options = .{ .min_batch_size = 3 } },
                 .{ .args = &.{ "--first-parent", "--min-batch-size=1", "main" }, .inputs = .{ .include = &.{"main"} }, .options = .{ .first_parent = true, .min_batch_size = 1 } },
                 .{ .args = &.{ "--first-parent", "--min-batch-size=1", "main", "^main~4" }, .inputs = .{ .include = &.{"main"}, .exclude = &.{"main~4"} }, .options = .{ .first_parent = true, .min_batch_size = 1 } },
+                // Dates: the fixture's commits are a minute apart from
+                // `dated_from`; the fifth is at +300.
+                .{ .args = &.{ "--min-batch-size=1", "--since=@1700000300", "main" }, .inputs = .{ .include = &.{"main"} }, .options = .{ .min_batch_size = 1, .max_age = dated_from + 300 } },
+                .{ .args = &.{ "--min-batch-size=1", "--until=@1700000300", "main" }, .inputs = .{ .include = &.{"main"} }, .options = .{ .min_batch_size = 1, .min_age = dated_from + 300 } },
+                .{ .args = &.{ "--min-batch-size=1", "--since=@1700000300", "main", "^main~6" }, .inputs = .{ .include = &.{"main"}, .exclude = &.{"main~6"} }, .options = .{ .min_batch_size = 1, .max_age = dated_from + 300 } },
+                .{ .args = &.{ "--min-batch-size=1", "--since-as-filter=@1700000300", "main" }, .inputs = .{ .include = &.{"main"} }, .options = .{ .min_batch_size = 1, .max_age_as_filter = dated_from + 300 } },
             }) |case| try run(gpa, io, &server, format, case);
         }
     }.f);

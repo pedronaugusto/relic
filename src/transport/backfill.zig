@@ -69,6 +69,12 @@ pub const Options = struct {
     first_parent: bool = false,
     /// `--exclude-first-parent-only`.
     exclude_first_parent_only: bool = false,
+    /// `--since`, `--until` and `--since-as-filter`, in seconds since the
+    /// epoch: the commits whose blobs are asked for, as `walk.Walk.max_age`,
+    /// `min_age` and `max_age_as_filter` choose them.
+    max_age: ?i64 = null,
+    min_age: ?i64 = null,
+    max_age_as_filter: ?i64 = null,
     /// `--filter=<spec>`: see `path_walk.Options.filter`.
     filter: ?[]const u8 = null,
     /// What the promisor remote is asked with.
@@ -126,6 +132,9 @@ pub fn backfill(gpa: Allocator, io: Io, repo: *Repository, inputs: Inputs, optio
         .paths = inputs.paths,
         .first_parent = options.first_parent,
         .exclude_first_parent_only = options.exclude_first_parent_only,
+        .max_age = options.max_age,
+        .min_age = options.min_age,
+        .max_age_as_filter = options.max_age_as_filter,
         .edges = options.include_edges,
         .sparse = if (patterns) |*p| p else null,
         .sparse_trees = true,
