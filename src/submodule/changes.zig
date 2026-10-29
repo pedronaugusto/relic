@@ -21,7 +21,6 @@ const Io = std.Io;
 const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
 const repo_mod = @import("../repo/repo.zig");
-const config_mod = @import("../config/config.zig");
 const gitmodules = @import("../config/gitmodules.zig");
 const gitlink = @import("../discover.zig").gitlink;
 const rev_walk = @import("../walk/walk.zig");
@@ -37,8 +36,6 @@ pub const Error = error{
     /// is neither a boolean nor `on-demand`: git's "bad
     /// fetch.recursesubmodules argument".
     InvalidFetchRecurse,
-    /// `submodule.fetchJobs` is not a number, or is below zero.
-    InvalidFetchJobs,
     /// A gitlink names an object the submodule holds that is not a commit:
     /// git's "submodule entry '<path>' (<oid>) is a <type>, not a commit".
     GitlinkNotACommit,
@@ -226,7 +223,7 @@ pub const FetchChoice = struct {
     /// What a submodule that says nothing does: git's
     /// `--recurse-submodules-default`, `on_demand` at the top.
     default: Recurse = .on_demand,
-    /// git's `--jobs`; see `fetchJobs`.
+    /// git's `--jobs`; see `submodule.fetchJobs`.
     jobs: ?u32 = null,
 };
 
@@ -250,7 +247,7 @@ pub const FetchPlan = struct {
     /// `FetchChoice.explicit`, else `.gitmodules`' `fetch.recurseSubmodules`:
     /// what each submodule's own fetch is told, as git passes it on.
     explicit: ?Recurse,
-    /// How many at once: `fetchJobs`.
+    /// How many at once: `submodule.fetchJobs`.
     jobs: u32,
     tasks: []const FetchTask,
     /// Gitlinks of the index whose directory holds something but no
@@ -282,7 +279,7 @@ pub fn planFetch(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, ch
         plan.explicit = try parseRecurse(text);
     };
     if (plan.explicit == .off) return plan;
-    plan.jobs = try fetchJobs(repo, &listing.gitmodules, choice.jobs);
+    plan.jobs = try submodule.fetchJobs(repo, &listing.gitmodules, choice.jobs);
     var chosen = choice;
     chosen.explicit = plan.explicit;
     const changed = try stillWanted(arena, gpa, io, repo, &listing.gitmodules, if (listing.gitmodules.submodules.len != 0 or try hasAbsorbed(io, repo))
@@ -396,23 +393,6 @@ fn isEmptyDir(io: Io, wt: Io.Dir, path: []const u8) Self.Error!bool {
 fn containsName(names: []const []const u8, name: []const u8) bool {
     for (names) |n| if (std.mem.eql(u8, n, name)) return true;
     return false;
-}
-
-/// How many submodules a fetch fetches at once: `explicit` (git's
-/// `--jobs`), else `submodule.fetchJobs` from the configuration, then from
-/// `.gitmodules`, else `fetch.parallel`; 0 is one per processor.
-pub fn fetchJobs(repo: *Repository, modules: *const Gitmodules, explicit: ?u32) Self.Error!u32 {
-    const config = repo.configuration();
-    // git's `parse_submodule_fetchjobs` and `fetch.parallel`: an `int`,
-    // refused below zero.
-    const jobs: c_int = if (explicit) |j| std.math.cast(c_int, j) orelse std.math.maxInt(c_int) else if (config.find("submodule.fetchjobs") != null)
-        config.getInt(c_int, "submodule.fetchjobs", 1) catch return error.InvalidFetchJobs
-    else if (modules.fetch_jobs) |text|
-        config_mod.parseInteger(c_int, text) catch return error.InvalidFetchJobs
-    else
-        config.getInt(c_int, "fetch.parallel", 1) catch return error.InvalidFetchJobs;
-    if (jobs == 0) return std.math.cast(u32, std.Thread.getCpuCount() catch 1) orelse std.math.maxInt(u32);
-    return std.math.cast(u32, jobs) orelse error.InvalidFetchJobs;
 }
 
 //=========================================================================

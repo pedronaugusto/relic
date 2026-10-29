@@ -1045,7 +1045,7 @@ const GitTransport = struct {
         t.clones += 1;
     }
 
-    fn fetch(gpa: Allocator, io: Io, context: *anyopaque, repo: *Repository, remote: []const u8, want: Oid) submodule.TransportError!void {
+    fn fetch(gpa: Allocator, io: Io, context: *anyopaque, repo: *Repository, remote: []const u8, want: ?Oid) submodule.TransportError!void {
         _ = gpa;
         _ = io;
         _ = context;

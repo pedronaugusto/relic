@@ -130,6 +130,20 @@ pub const Error = error{
     DirectoryNotEmpty,
     /// `branch --recurse-submodules` without `submodule.propagateBranches`.
     BranchesNotPropagated,
+    /// `UpdateOptions.remote` with `fetch`, and no `Transport` to fetch
+    /// with: a fetch is what is missing.
+    NotFetched,
+    /// Under `UpdateOptions.remote`, the submodule has no remote-tracking
+    /// branch to take: git's "Unable to find <ref> revision in submodule
+    /// path". `Refusal.setting` names the ref.
+    NoRemoteRevision,
+    /// `submodule.<name>.branch` is `.`, the superproject's own branch,
+    /// and the superproject is on none: git's "branch configured to
+    /// inherit branch from superproject, but the superproject is not on
+    /// any branch".
+    NoSuperprojectBranch,
+    /// `submodule.fetchJobs` is not a number, or is below zero.
+    InvalidFetchJobs,
 } || branch_mod.Error || pathspec_mod.Error || repo_mod.Error || worktree.Error || gitmodules.ParseError || gitmodules.ResolveError ||
     Repository.WriteConfigError || refs_mod.TransactionError || program.Error || gitlink.Error ||
     Io.Dir.RealPathError || Io.Dir.RenameError || Io.Dir.DeleteTreeError;
@@ -1587,9 +1601,11 @@ pub const Transport = struct {
     /// writes the `.git` file and `core.worktree` itself, and checks out
     /// the commit.
     cloneFn: *const fn (gpa: Allocator, io: Io, context: *anyopaque, request: CloneRequest) TransportError!void,
-    /// Bring `want` into `repo`, a submodule's repository, from `remote`,
-    /// its default remote — what git's fetch inside the submodule does.
-    fetchFn: *const fn (gpa: Allocator, io: Io, context: *anyopaque, repo: *Repository, remote: []const u8, want: Oid) TransportError!void,
+    /// Fetch into `repo`, a submodule's repository, from `remote` what its
+    /// configured refspecs name, as git's `fetch` inside the submodule
+    /// does; and then `want`, when one is given and still missing, asked
+    /// for by name.
+    fetchFn: *const fn (gpa: Allocator, io: Io, context: *anyopaque, repo: *Repository, remote: []const u8, want: ?Oid) TransportError!void,
     /// Bring `oids`, which `repo` -- a submodule's repository that is a
     /// partial clone -- was promised, from its promisor remotes: what git's
     /// lazy fetch does when a checkout reads one. `update` has every read
@@ -1637,6 +1653,11 @@ pub const CloneRequest = struct {
     /// `submodule.alternateLocation` and lenders the clone may borrow from;
     /// `null` for a clone that borrows nothing.
     within: ?Within = null,
+    /// Whether other clones run beside this one, on other tasks, as
+    /// `UpdateOptions.jobs` has them: what the transport shares between
+    /// clones it then keeps safe, and a clone runs without progress or a
+    /// prompt, which answer on the caller's task.
+    beside: bool = false,
 
     pub const Within = struct { name: []const u8, superproject: *Repository };
 };
@@ -1666,6 +1687,24 @@ pub const UpdateOptions = struct {
     /// Where a missing repository or commit comes from. Without one they
     /// are `error.NotCloned` and `error.CommitMissing`.
     transport: ?Transport = null,
+    /// `--remote`: each submodule brought to its remote-tracking branch,
+    /// `refs/remotes/<remote>/<branch>`, in place of the commit its
+    /// superproject records: the remote git's `get_default_remote_submodule`
+    /// picks and the branch `submodule.<name>.branch` names from the
+    /// configuration, else from `.gitmodules`, else `HEAD`, where `.` is
+    /// the branch the superproject is on.
+    remote: bool = false,
+    /// `--no-fetch` when false: nothing is fetched into a submodule that
+    /// has a repository. A commit it lacks is `error.CommitMissing`, and
+    /// `remote` takes the remote-tracking branch as it is. A submodule
+    /// with none is still cloned.
+    fetch: bool = true,
+    /// `--jobs`: how many submodules are cloned at once, each on its own
+    /// handle on the superproject, when the `Io` runs tasks beside each
+    /// other; the checkouts follow one at a time, as git's do. `null`
+    /// takes `submodule.fetchJobs`, else one; 0 is one per processor (git
+    /// stops on a `--jobs=0` it was handed as a bug).
+    jobs: ?u32 = null,
     /// The permission to run a `!command` update. Without it one is
     /// `error.UpdateCommandRefused`.
     programs: ?program.Programs = null,
@@ -1691,11 +1730,13 @@ pub const UpdateOutcome = struct {
 };
 
 /// `git submodule update`: bring each active submodule to the commit its
-/// superproject records.
+/// superproject records, or under `remote` to its remote-tracking branch.
 ///
 /// A submodule with no working tree is connected to its repository in
 /// `modules/<name>` when that is on the disk, and cloned through the
-/// transport when it is not. The `checkout` strategy detaches `HEAD` at the
+/// transport when it is not; all of those first, `jobs` at once, and once
+/// one has failed nothing is checked out, as git's `update_submodules`
+/// checks nothing out after a failed clone. The `checkout` strategy detaches `HEAD` at the
 /// commit and checks its tree out; without `force` a submodule with
 /// modified tracked content is refused rather than having it carried over,
 /// which is stricter than git, which carries over what it can. `merge` and
@@ -1731,6 +1772,7 @@ fn updateIn(
     var listing = try list(gpa, io, repo, &index, paths);
     defer listing.deinit();
 
+    var pending: std.ArrayList(Pending) = .empty;
     for (listing.entries) |entry| {
         const display = try join(arena, prefix, entry.path);
         const recorded = entry.recorded orelse {
@@ -1754,37 +1796,46 @@ fn updateIn(
         const url = try resolvedUrl(arena, io, repo, module, display, options.refusal);
         try validatePath(io, wt, entry.path, display, options.refusal, repo.settings().protect);
         try validateGitDir(arena, io, repo.gitDirectory().get(), module.name, display, options.refusal);
+        try pending.append(arena, .{
+            .path = entry.path,
+            .module = module,
+            .recorded = recorded,
+            .url = url,
+            .display = display,
+            .update_key = update_key,
+            .configured = configured,
+            .just_cloned = try fs.statAt(io, wt, try arena.print("{s}/.git", .{entry.path})) == null,
+        });
+    }
+    try populateAll(gpa, io, repo, pending.items, try jobs(repo, &listing.gitmodules, options.jobs, null), options, outcome);
 
-        const dot_git = try arena.print("{s}/.git", .{entry.path});
-        const just_cloned = try fs.statAt(io, wt, dot_git) == null;
-        if (just_cloned) {
-            try populate(arena, gpa, io, repo, module, entry.path, url, display, options, outcome);
-        } else {
-            try correctCoreWorktree(arena, gpa, io, repo, wt, entry.path);
-        }
+    for (pending.items) |item| {
+        if (!item.just_cloned) try correctCoreWorktree(arena, gpa, io, repo, wt, item.path);
+        const display = item.display;
 
-        var sub = try openSubmodule(gpa, io, repo, entry.path, options.open);
+        var sub = try openSubmodule(gpa, io, repo, item.path, options.open);
         defer sub.deinit(io);
         var promised: ?Promised = if (options.transport) |t| .{ .gpa = gpa, .repo = &sub, .transport = t } else null;
         if (promised) |*p| try p.install(arena);
         defer if (promised) |*p| p.uninstall();
 
-        var strategy: gitmodules.Update = options.strategy orelse configured orelse .checkout;
-        if (just_cloned) switch (strategy) {
+        var strategy: gitmodules.Update = options.strategy orelse item.configured orelse .checkout;
+        if (item.just_cloned) switch (strategy) {
             .merge, .rebase, .none => strategy = .checkout,
             else => {},
         };
-        const current: ?Oid = if (just_cloned)
+        const current: ?Oid = if (item.just_cloned)
             null
         else
             (try headOf(gpa, io, &sub)) orelse return refuse(options.refusal, display, "HEAD", error.NoCurrentRevision);
+        const target = if (options.remote) try remoteTip(arena, gpa, io, repo, &sub, &item, options) else item.recorded;
 
-        if (current == null or !current.?.eql(recorded) or options.force) {
-            try ensureCommit(arena, gpa, io, repo, &sub, module, recorded, display, options);
+        if (current == null or !current.?.eql(target) or options.force) {
+            try ensureCommit(arena, gpa, io, repo, &sub, item.module, target, display, options);
             switch (strategy) {
-                .checkout => try checkoutCommit(arena, gpa, io, &sub, recorded, current == null or options.force, display, options),
+                .checkout => try checkoutCommit(arena, gpa, io, &sub, target, current == null or options.force, display, options),
                 .merge, .rebase => return refuse(options.refusal, display, strategy.name(), error.UnsupportedUpdate),
-                .command => |command| try runUpdateCommand(arena, gpa, io, &sub, command, recorded, display, update_key, options),
+                .command => |command| try runUpdateCommand(arena, gpa, io, &sub, command, target, display, item.update_key, options),
                 .none => {
                     outcome.skipped += 1;
                     continue;
@@ -1801,24 +1852,101 @@ fn updateIn(
     }
 }
 
-/// Give a submodule with no working tree its repository: the one already
-/// in `modules/<name>`, with its stale index removed as git removes it, or
-/// one the transport clones there.
-fn populate(
-    arena: Allocator,
-    gpa: Allocator,
-    io: Io,
-    repo: *Repository,
-    module: *const gitmodules.Submodule,
+/// A submodule `update` brings to its commit, as its first pass over the
+/// list finds it.
+const Pending = struct {
     path: []const u8,
+    module: *const gitmodules.Submodule,
+    recorded: Oid,
     url: []const u8,
     display: []const u8,
-    options: UpdateOptions,
-    outcome: *UpdateOutcome,
-) Error!void {
+    update_key: []const u8,
+    configured: ?gitmodules.Update,
+    /// No working tree yet: `populate` gives it one.
+    just_cloned: bool,
+    /// What `populate` did beside the others.
+    beside: Beside = .{},
+
+    const Beside = struct {
+        populated: Populated = .reconnected,
+        failed: ?Error = null,
+        refusal: Refusal = .{},
+    };
+};
+
+/// How a submodule got its repository.
+const Populated = enum { reconnected, cloned };
+
+/// git's `update_clone`: each submodule with no working tree given its
+/// repository, `jobs` at once when there are several and the `Io` runs
+/// tasks beside each other, each on its own handle on the superproject.
+/// The first failure in the order listed is the one returned.
+fn populateAll(gpa: Allocator, io: Io, repo: *Repository, pending: []Pending, count: u32, options: UpdateOptions, outcome: *UpdateOutcome) Error!void {
+    var cloning: usize = 0;
+    for (pending) |item| cloning += @intFromBool(item.just_cloned);
+    if (count > 1 and cloning > 1) {
+        var group: Io.Group = .init;
+        defer group.cancel(io);
+        var started: usize = 0;
+        for (pending) |*item| {
+            if (!item.just_cloned) continue;
+            group.concurrent(io, populateBeside, .{ gpa, io, repo, item, options }) catch populateBeside(gpa, io, repo, item, options);
+            started += 1;
+            if (started == count) {
+                try group.await(io);
+                started = 0;
+            }
+        }
+        try group.await(io);
+        for (pending) |*item| if (item.just_cloned) {
+            if (item.beside.failed) |err| {
+                if (options.refusal) |r| r.* = item.beside.refusal;
+                return err;
+            }
+            tally(outcome, item.beside.populated);
+        };
+        return;
+    }
+    var arena_instance: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_instance.deinit();
+    for (pending) |*item| if (item.just_cloned) tally(outcome, try populate(arena_instance.allocator(), gpa, io, repo, item, options, false));
+}
+
+fn tally(outcome: *UpdateOutcome, populated: Populated) void {
+    switch (populated) {
+        .reconnected => outcome.reconnected += 1,
+        .cloned => outcome.cloned += 1,
+    }
+}
+
+/// `populate` on a task of its own, on a handle of its own on the
+/// superproject, with what it did or why it failed kept in `item`.
+fn populateBeside(gpa: Allocator, io: Io, repo: *Repository, item: *Pending, options: UpdateOptions) void {
+    var arena_instance: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_instance.deinit();
+    var again = repo.openAgain(io) catch |err| {
+        item.beside.failed = err;
+        return;
+    };
+    defer again.deinit(io);
+    var own = options;
+    own.refusal = &item.beside.refusal;
+    item.beside.populated = populate(arena_instance.allocator(), gpa, io, &again, item, own, true) catch |err| {
+        item.beside.failed = err;
+        return;
+    };
+}
+
+/// Give a submodule with no working tree its repository: the one already
+/// in `modules/<name>`, with its stale index removed as git removes it, or
+/// one the transport clones there, `beside` others when it is.
+fn populate(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, item: *const Pending, options: UpdateOptions, beside: bool) Error!Populated {
     const wt = (repo.workDirectory() orelse return error.BareRepository).get();
-    const where = try moduleDir(arena, io, repo, module.name, display, options.refusal);
+    const display = item.display;
+    const url = item.url;
+    const where = try moduleDir(arena, io, repo, item.module.name, display, options.refusal);
     const target = where.path;
+    var populated: Populated = .reconnected;
     var module_dir: Io.Dir = blk: {
         if (where.base.openDir(io, target, .{})) |dir| {
             if (discover.directory.isGitDirectory(io, dir)) {
@@ -1829,7 +1957,6 @@ fn populate(
                         return e;
                     },
                 };
-                outcome.reconnected += 1;
                 break :blk dir;
             }
             dir.close(io);
@@ -1838,24 +1965,80 @@ fn populate(
         if (!try gitmodules.checkUrl(gpa, url)) return refuse(options.refusal, display, url, error.DisallowedUrl);
         // git's `clone_submodule` under `--init`: a path that is there and
         // is not an empty directory is not cloned into.
-        if (options.init and !try emptyOrAbsent(io, wt, path)) return refuse(options.refusal, display, url, error.DirectoryNotEmpty);
+        if (options.init and !try emptyOrAbsent(io, wt, item.path)) return refuse(options.refusal, display, url, error.DirectoryNotEmpty);
         try fs.makeDirs(io, where.base, target, repo.sharedPermissions());
         const dir = try where.base.openDir(io, target, .{ .iterate = true });
         errdefer dir.close(io);
-        transport.cloneFn(gpa, io, transport.context, .{ .url = url, .git_dir = dir, .within = .{ .name = module.name, .superproject = repo } }) catch |err| switch (err) {
+        transport.cloneFn(gpa, io, transport.context, .{ .url = url, .git_dir = dir, .within = .{ .name = item.module.name, .superproject = repo }, .beside = beside }) catch |err| switch (err) {
             error.TransportFailed => return refuse(options.refusal, display, url, error.TransportFailed),
             else => |e| return e,
         };
         if (!discover.directory.isGitDirectory(io, dir)) return refuse(options.refusal, display, url, error.TransportFailed);
-        outcome.cloned += 1;
+        populated = .cloned;
         break :blk dir;
     };
     defer module_dir.close(io);
 
-    try wt.createDirPath(io, path);
-    var work = try wt.openDir(io, path, .{});
+    try wt.createDirPath(io, item.path);
+    var work = try wt.openDir(io, item.path, .{});
     defer work.close(io);
     try connect(arena, io, repo, work, try fs.realPathAlloc(arena, io, work, "."), module_dir, try fs.realPathAlloc(arena, io, module_dir, "."));
+    return populated;
+}
+
+/// git's `update_submodule` under `--remote`: what the submodule's
+/// remote-tracking branch names, once `fetch` has fetched from its
+/// default remote as git's plain `fetch` there does.
+fn remoteTip(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, sub: *Repository, item: *const Pending, options: UpdateOptions) Error!Oid {
+    const remote = try moduleRemote(arena, io, repo, sub, item.module);
+    const branch = try remoteBranch(arena, io, repo, item.module, item.display, options.refusal);
+    const ref = try arena.print("refs/remotes/{s}/{s}", .{ remote, branch });
+    if (options.fetch) {
+        const transport = options.transport orelse return refuse(options.refusal, item.display, ref, error.NotFetched);
+        const from = try defaultRemote(arena, io, sub);
+        transport.fetchFn(gpa, io, transport.context, sub, from, null) catch |err| switch (err) {
+            error.TransportFailed => return refuse(options.refusal, item.display, from, error.TransportFailed),
+            else => |e| return e,
+        };
+        try sub.objectDatabase().refresh(io);
+    }
+    return try sub.refStore().readOid(gpa, io, ref) orelse refuse(options.refusal, item.display, ref, error.NoRemoteRevision);
+}
+
+/// git's `remote_submodule_branch`: `submodule.<name>.branch` from the
+/// configuration, else from `.gitmodules`, else `HEAD`; `.` is the branch
+/// the superproject is on.
+fn remoteBranch(arena: Allocator, io: Io, repo: *Repository, module: *const gitmodules.Submodule, display: []const u8, refusal: ?*Refusal) Error![]const u8 {
+    const branch = try configString(arena, repo.configuration(), try configKey(arena, module.name, "branch")) orelse module.branch orelse return "HEAD";
+    if (!std.mem.eql(u8, branch, ".")) return branch;
+    return try repo.refStore().currentBranch(arena, io) orelse refuse(refusal, display, "HEAD", error.NoSuperprojectBranch);
+}
+
+/// How many submodules a fetch fetches at once: `explicit` (git's
+/// `--jobs`), else `submodule.fetchJobs` from the configuration, then from
+/// `.gitmodules`, else `fetch.parallel`; 0 is one per processor.
+pub fn fetchJobs(repo: *Repository, modules: *const Gitmodules, explicit: ?u32) Self.Error!u32 {
+    return jobs(repo, modules, explicit, "fetch.parallel");
+}
+
+/// How many submodules are worked on at once: `explicit` (git's `--jobs`),
+/// else `submodule.fetchJobs` from the configuration, then from
+/// `.gitmodules`, else the setting `fallback` names when it is given, else
+/// one; 0 is one per processor.
+fn jobs(repo: *Repository, modules: *const Gitmodules, explicit: ?u32, fallback: ?[]const u8) Self.Error!u32 {
+    const config = repo.configuration();
+    // git's `parse_submodule_fetchjobs` and `fetch.parallel`: an `int`,
+    // refused below zero.
+    const count: c_int = if (explicit) |j| std.math.cast(c_int, j) orelse std.math.maxInt(c_int) else if (config.find("submodule.fetchjobs") != null)
+        config.getInt(c_int, "submodule.fetchjobs", 1) catch return error.InvalidFetchJobs
+    else if (modules.fetch_jobs) |text|
+        config_mod.parseInteger(c_int, text) catch return error.InvalidFetchJobs
+    else if (fallback) |key|
+        config.getInt(c_int, key, 1) catch return error.InvalidFetchJobs
+    else
+        1;
+    if (count == 0) return std.math.cast(u32, std.Thread.getCpuCount() catch 1) orelse std.math.maxInt(u32);
+    return std.math.cast(u32, count) orelse error.InvalidFetchJobs;
 }
 
 /// Whether `path` is not there, or is a directory with nothing in it.
@@ -1890,11 +2073,11 @@ fn correctCoreWorktree(arena: Allocator, gpa: Allocator, io: Io, repo: *const Re
 }
 
 /// Make sure the submodule's repository has `commit`, fetching it through
-/// the transport when there is one.
+/// the transport when there is one and `fetch` is on.
 fn ensureCommit(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, sub: *Repository, module: *const gitmodules.Submodule, commit: Oid, display: []const u8, options: UpdateOptions) Error!void {
     if (try sub.objectDatabase().exists(io, commit)) return;
     var hex: [hash.max_hex_len]u8 = undefined;
-    const transport = options.transport orelse return refuse(options.refusal, display, commit.hex(&hex), error.CommitMissing);
+    const transport = (if (options.fetch) options.transport else null) orelse return refuse(options.refusal, display, commit.hex(&hex), error.CommitMissing);
     const remote = try moduleRemote(arena, io, repo, sub, module);
     transport.fetchFn(gpa, io, transport.context, sub, remote, commit) catch |err| switch (err) {
         error.TransportFailed => return refuse(options.refusal, display, remote, error.TransportFailed),
