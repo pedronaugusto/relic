@@ -183,6 +183,54 @@ test "a redirect to another server takes no credential with it, an extraHeader's
     try testing.expectError(error.HttpStatus, transport.Session.open(gpa, io, url, .{ .service = .upload_pack, .kind = .sha1 }, .{ .config = &never }));
 }
 
+test "a cancel that lands in any read of a refused request comes back as Canceled, never as the refusal" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var root = testing.tmpDir(.{ .iterate = true });
+    defer root.cleanup();
+    try servedRepo(gpa, io, &root, 1);
+    // A refusal with a body to read: the forge's explanation, then the rest
+    // read so the connection can carry the next request.
+    // Long enough that its reads are its own, past the headers'.
+    const text = try gpa.alloc(u8, 256 * 1024);
+    defer gpa.free(text);
+    @memset(text, 'x');
+    text[text.len - 1] = '\n';
+    const server = try testremote.HttpServer.start(gpa, io, root.dir, .{ .basic_auth = .{ .user = "ada", .password = "secret" }, .refusal_text = text });
+    defer server.stop();
+    const url = try server.url(gpa, "repo.git");
+    defer gpa.free(url);
+    const inputs: transport.Session.OpenInputs = .{ .service = .upload_pack, .kind = .sha1 };
+    var reads: u32 = 0;
+    {
+        const faults = try shakedown.FaultIo.init(gpa, io, .{ .trace = .all });
+        defer faults.deinit();
+        if (transport.Session.open(gpa, faults.io(), url, inputs, .{})) |opened| {
+            var session = opened;
+            session.deinit(io);
+            return error.TestUnexpectedResult;
+        } else |err| try testing.expect(err != error.Canceled);
+        for (faults.trace().records()) |record| {
+            if (record.event.call == .net_read) reads += 1;
+        }
+    }
+    try testing.expect(reads != 0);
+    var n: u32 = 1;
+    while (n <= reads) : (n += 1) {
+        const plan = [_]shakedown.IoPlan.Entry{.{ .at = .{ .nth = .{ .call = .net_read, .n = n } }, .fault = .cancel, .times = 1 }};
+        const faults = try shakedown.FaultIo.init(gpa, io, .{ .plan = &plan });
+        defer faults.deinit();
+        if (transport.Session.open(gpa, faults.io(), url, inputs, .{})) |opened| {
+            var session = opened;
+            session.deinit(io);
+            return error.TestUnexpectedResult;
+        } else |err| testing.expectEqual(error.Canceled, err) catch |e| {
+            std.debug.print("read {d} of {d} canceled: {t}\n", .{ n, reads, err });
+            return e;
+        };
+    }
+}
+
 test "a redirect whose user decodes to a newline is refused before any helper hears of it" {
     const gpa = testing.allocator;
     const io = testing.io;

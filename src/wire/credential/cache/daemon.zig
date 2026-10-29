@@ -317,10 +317,11 @@ fn nextLine(rest: *[]const u8) []const u8 {
 }
 
 /// The answer written and sent; a client gone before it is git's write to
-/// a closed socket, which the daemon goes on from.
+/// a closed socket, which the daemon goes on from. A cancel is the
+/// daemon's own end, and is returned.
 /// `answer`, built in storage that is wiped when it is let go and sent
 /// whole, so the credential in it is held nowhere else.
-fn sendAnswer(gpa: Allocator, io: Io, stream: Io.net.Stream, e: *const Session, authtype_asked: bool) Allocator.Error!void {
+fn sendAnswer(gpa: Allocator, io: Io, stream: Io.net.Stream, e: *const Session, authtype_asked: bool) (Allocator.Error || Io.Cancelable)!void {
     var text = try aegis.SecretBytes.init(gpa, 256);
     defer text.deinit();
     {
@@ -330,14 +331,15 @@ fn sendAnswer(gpa: Allocator, io: Io, stream: Io.net.Stream, e: *const Session, 
         into.interface.flush() catch return error.OutOfMemory;
     }
     var w = stream.writer(io, &.{});
-    // glint-ignore: Z026 -- the client left; nothing waits for this answer
-    w.interface.writeAll(text.expose()) catch {};
+    // A client that left has nothing waiting for this answer.
+    w.interface.writeAll(text.expose()) catch {
+        if (w.err) |err| if (err == error.Canceled) return error.Canceled;
+    };
 }
 
 /// The socket file removed: one already gone is what was wanted.
 fn removeSocket(io: Io, path: []const u8) void {
-    // glint-ignore: Z026 -- the socket being gone already, or never made, is the end sought
-    Io.Dir.cwd().deleteFile(io, path) catch {};
+    fs.removeLeftover(io, Io.Dir.cwd(), path);
 }
 
 /// git's answer to `get` for a credential it holds: the `authtype`
@@ -421,3 +423,24 @@ pub const InProcess = struct {
         d.run() catch {};
     }
 };
+
+const shakedown = @import("shakedown");
+const url_mod = @import("../../url.zig");
+
+test "a cancel that lands in sending an answer is the daemon's end, not lost with the client" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const address = try Io.net.IpAddress.parse("127.0.0.1", 0);
+    var listener = try address.listen(io, .{ .reuse_address = true });
+    defer listener.deinit(io);
+    const client = try listener.socket.address.connect(io, .{ .mode = .stream });
+    defer client.close(io);
+    const served = try listener.accept(io);
+    defer served.close(io);
+    var e: Session = .{ .gpa = gpa, .url = try url_mod.Url.parse("https://example.com/r") };
+    defer e.deinit();
+    const plan = [_]shakedown.IoPlan.Entry{.{ .at = .{ .nth = .{ .call = .net_write, .n = 1 } }, .fault = .cancel, .times = 1 }};
+    const faults = try shakedown.FaultIo.init(gpa, io, .{ .plan = &plan });
+    defer faults.deinit();
+    try std.testing.expectError(error.Canceled, sendAnswer(gpa, faults.io(), served, &e, false));
+}
