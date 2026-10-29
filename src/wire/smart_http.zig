@@ -559,9 +559,14 @@ const Http = struct {
     /// when git cleans up: every cookie that has not expired, those of the
     /// session included. A file that cannot be written is left, as curl
     /// leaves it.
+    /// The jar written, as curl writes it when its handle is let go, under
+    /// cancel protection: a cancel waits for the caller's next cancelation
+    /// point, where it would have been lost with the write's error.
     fn saveCookies(h: *Http, io: Io) void {
         const path = h.cookie_jar_file orelse return;
         const jar = &(h.cookies orelse return);
+        const protection = io.swapCancelProtection(.blocked);
+        defer _ = io.swapCancelProtection(protection);
         var out: Io.Writer.Allocating = .init(h.gpa);
         defer out.deinit();
         jar.save(io, &out.writer, .{ .session = true }) catch return;
@@ -739,11 +744,15 @@ const Http = struct {
     }
 
     /// Give back the request in flight, reading what is left of its body
-    /// so its connection can carry the next one.
+    /// so its connection can carry the next one. A body left unread costs
+    /// only the connection, which deinit keeps only when the response is
+    /// complete; a cancel that lands in the reading is put back for the
+    /// caller's next cancelation point.
     fn endRequest(h: *Http) void {
         if (h.in_flight) |*res| {
-            // glint-ignore: Z026 -- a body left unread costs only the connection: deinit keeps it only when the response is complete
-            _ = res.reader(h.io).discardRemaining() catch {};
+            _ = res.reader(h.io).discardRemaining() catch {
+                if (res.failure() == error.Canceled) h.io.recancel();
+            };
             res.deinit(h.io);
             h.in_flight = null;
         }
@@ -1020,10 +1029,15 @@ const Http = struct {
         var out: Io.Writer.Allocating = .init(h.arena.allocator());
         _ = reader.stream(&out.writer, .limited(4096)) catch |err| switch (err) {
             error.EndOfStream => {},
+            error.ReadFailed => if (res.failure() == error.Canceled) return error.Canceled else return out.written(),
             else => return out.written(),
         };
-        // glint-ignore: Z026 -- what was read is the text; the rest is read only so the connection can carry the next request
-        _ = reader.streamRemaining(&out.writer) catch {};
+        // What was read is the text; the rest is read only so the
+        // connection can carry the next request.
+        _ = reader.streamRemaining(&out.writer) catch |err| switch (err) {
+            error.ReadFailed => if (res.failure() == error.Canceled) return error.Canceled,
+            else => {},
+        };
         const text = out.written();
         return text[0..@min(text.len, 4096)];
     }
