@@ -128,7 +128,6 @@ test "a pattern takes a ref at it or under it, as for-each-ref's does" {
 
 const shakedown = @import("shakedown");
 const testgit = @import("../testing/git.zig");
-const testing_io = @import("../testing/io.zig");
 
 test "a cancel that lands in finding an alternate's refs is returned, not taken for no repository there" {
     const gpa = std.testing.allocator;
