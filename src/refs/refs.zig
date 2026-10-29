@@ -32,6 +32,7 @@ const object = @import("../object/object.zig");
 const fs = @import("../fs/fs.zig");
 const hooks = @import("../hooks/hooks.zig");
 const testgit = @import("../testing/git.zig");
+const testing_io = @import("../testing/io.zig");
 
 const Oid = hash.Oid;
 const Kind = hash.Kind;
@@ -366,7 +367,11 @@ pub const Store = struct {
         if (builtin.target.os.tag != .wasi) if (dir.readLink(io, path, &buffer)) |len| {
             const target = buffer[0..len];
             if (std.mem.startsWith(u8, target, "refs/") and names.checkFormat(target, .{})) return .{ .symbolic = try gpa.dupe(u8, target) };
-        } else |_| {};
+        } else |err| switch (err) {
+            // A file that is no link is read as one below.
+            error.Canceled => return error.Canceled,
+            else => {},
+        };
         const bytes = dir.readFile(io, path, &buffer) catch |err| switch (err) {
             error.FileNotFound, error.NotDir, error.IsDir => return null,
             else => |e| return e,
@@ -1009,7 +1014,10 @@ pub const Store = struct {
         while (try it.next(io)) |entry| {
             if (entry.kind != .directory) continue;
             if (own) |self| {
-                const other = dir.statFile(io, entry.name, .{}) catch continue;
+                const other = dir.statFile(io, entry.name, .{}) catch |err| switch (err) {
+                    error.Canceled => return error.Canceled,
+                    else => continue,
+                };
                 if (other.inode == self.inode) continue;
             }
             try out.append(arena, try arena.dupe(u8, entry.name));
@@ -2283,12 +2291,17 @@ fn hasFileBelow(gpa: Allocator, io: Io, dir: Io.Dir, name: []const u8) Transacti
 }
 
 /// Remove the directories above `ref` in `dir` that are left empty, down
-/// to but not including `refs/<kind>/`, which git keeps.
+/// to but not including `refs/<kind>/`, which git keeps. The first that
+/// will not go, not empty or not there, ends it; a cancel that lands is put
+/// back for the task's next cancelation point.
 fn removeEmptyParents(io: Io, dir: Io.Dir, ref: names.Checked) void {
     var current = ref.bytes;
     while (std.Io.Dir.path.dirnamePosix(current)) |parent| {
         if (std.mem.count(u8, parent, "/") < 2) return;
-        dir.deleteDir(io, parent) catch return;
+        dir.deleteDir(io, parent) catch |err| switch (err) {
+            error.Canceled => return io.recancel(),
+            else => return,
+        };
         current = parent;
     }
 }
@@ -2296,7 +2309,10 @@ fn removeEmptyParents(io: Io, dir: Io.Dir, ref: names.Checked) void {
 /// `removeEmptyParents` for `ref`'s log, under `logs/` in `dir`, down to
 /// but not including `logs/refs/<kind>/`.
 fn removeEmptyLogParents(io: Io, dir: Io.Dir, ref: names.Checked) void {
-    var logs = dir.openDir(io, "logs", .{}) catch return;
+    var logs = dir.openDir(io, "logs", .{}) catch |err| switch (err) {
+        error.Canceled => return io.recancel(),
+        else => return,
+    };
     defer logs.close(io);
     removeEmptyParents(io, logs, ref);
 }
@@ -2922,6 +2938,75 @@ test "reference-transaction hears from a transaction what git's hears" {
         try tx.commit(io, null);
     }
     try twin.expectSameLog(io);
+}
+
+test "a cancel that lands in reading a loose ref's link is returned, where the ref was read on as a file" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    try git.exec(io, &.{ "commit", "-q", "--allow-empty", "-m", "one" });
+    var git_dir = fs.OwnedDir.init(try git.gitDir(io));
+    defer git_dir.deinit(io);
+    var store: Store = try .init(gpa, .sha1, git_dir.lend(), git_dir.lend(), .{});
+    defer store.deinit();
+    const plan = [_]shakedown.IoPlan.Entry{.{ .at = .{ .nth = .{ .call = .dirReadLink, .n = 1 } }, .fault = .cancel, .times = 1 }};
+    const faults = try shakedown.FaultIo.init(gpa, io, .{ .plan = &plan });
+    defer faults.deinit();
+    try std.testing.expectError(error.Canceled, store.read(gpa, faults.io(), "refs/heads/main"));
+}
+
+test "a cancel that lands in telling another worktree from this one is returned, not taken for a worktree" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    try git.exec(io, &.{ "commit", "-q", "--allow-empty", "-m", "one" });
+    try git.exec(io, &.{ "worktree", "add", "-q", "-b", "side", ".git/linked-tree" });
+    try git.exec(io, &.{ "worktree", "add", "-q", "-b", "other", ".git/other-tree" });
+    var work = try git.dir.openDir(io, ".git/linked-tree", .{});
+    defer work.close(io);
+    var linked = fs.OwnedDir.init(try work.openDir(io, "../worktrees/linked-tree", .{}));
+    defer linked.deinit(io);
+    var common = fs.OwnedDir.init(try git.gitDir(io));
+    defer common.deinit(io);
+    var store: Store = try .init(gpa, .sha1, linked.lend(), common.lend(), .{});
+    defer store.deinit();
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    try std.testing.expectEqual(@as(usize, 1), (try store.otherWorktrees(arena.allocator(), io)).len);
+    const plan = [_]shakedown.IoPlan.Entry{.{ .at = .{ .nth = .{ .call = .dirStatFile, .n = 1, .path = .{ .suffix = "-tree" } } }, .fault = .cancel, .times = 1 }};
+    const faults = try shakedown.FaultIo.init(gpa, io, .{ .plan = &plan });
+    defer faults.deinit();
+    try std.testing.expectError(error.Canceled, store.otherWorktrees(arena.allocator(), faults.io()));
+}
+
+test "a cancel that lands in removing a deleted ref's emptied directories is put back for the task, not lost" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    try git.exec(io, &.{ "commit", "-q", "--allow-empty", "-m", "one" });
+    for ([_][]const u8{ "refs/heads/a/b/c", "logs/refs/heads/a/b/c" }) |left| {
+        try git.exec(io, &.{ "update-ref", "--create-reflog", "refs/heads/a/b/c", "HEAD" });
+        var git_dir = fs.OwnedDir.init(try git.gitDir(io));
+        defer git_dir.deinit(io);
+        var store: Store = try .init(gpa, .sha1, git_dir.lend(), git_dir.lend(), .{});
+        defer store.deinit();
+        // The ref's parents, then its log's.
+        const parent = std.Io.Dir.path.dirnamePosix(left).?;
+        const plan = [_]shakedown.IoPlan.Entry{.{ .at = .{ .nth = .{ .call = .dirDeleteDir, .n = 1, .path = .{ .suffix = parent } } }, .fault = .cancel, .times = 1 }};
+        const faults = try shakedown.FaultIo.init(gpa, io, .{ .plan = &plan });
+        defer faults.deinit();
+        const canceled = faults.io();
+        var tx = store.begin(gpa);
+        defer tx.deinit(canceled);
+        try tx.delete("refs/heads/a/b/c", .any);
+        try tx.commit(canceled, null);
+        // The ref is gone; the cancel is still the task's.
+        try std.testing.expectError(error.Canceled, canceled.checkCancel());
+        try std.testing.expectEqual(@as(?Ref, null), try store.read(gpa, io, "refs/heads/a/b/c"));
+    }
 }
 
 test "a cancel that lands in the hook a committed transaction runs is put back for the task, not lost" {

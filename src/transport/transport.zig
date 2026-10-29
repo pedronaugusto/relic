@@ -535,8 +535,13 @@ pub const Session = struct {
                 // ends with a flush, which it reads as nothing more wanted,
                 // as git's disconnect writes it.
                 if (!smart.conn.stateless and !smart.done) {
-                    // glint-ignore: Z026 -- the farewell is a courtesy; the session closes either way, and a server that has gone cannot read it
-                    sayGoodbye(smart.conn) catch {};
+                    // The farewell is a courtesy: the session closes either
+                    // way, and a server that has gone cannot read it. A
+                    // cancel is put back for the caller.
+                    sayGoodbye(smart.conn) catch |err| switch (err) {
+                        error.WriteFailed => if (smart.conn.failure() == error.Canceled) io.recancel(),
+                        else => {},
+                    };
                 }
                 smart.advertisement.deinit();
                 smart.conn.deinit(io);
@@ -909,7 +914,9 @@ pub const Session = struct {
         const file = try pack_dir.createFile(io, temp, .{ .read = true, .exclusive = true });
         defer {
             file.close(io);
-            pack_dir.deleteFile(io, temp) catch {}; // glint-ignore: Z026 -- the download is indexed into a pack of its own; a temporary file left behind holds nothing the repository uses
+            // The download is indexed into a pack of its own; a temporary
+            // file left behind holds nothing the repository uses.
+            fs.removeLeftover(io, pack_dir, temp);
         }
         var buf: [64 * 1024]u8 = undefined;
         var w = file.writer(io, &buf);

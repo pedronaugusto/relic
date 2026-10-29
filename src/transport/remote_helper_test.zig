@@ -5,6 +5,7 @@
 //! helper's private refs and its marks agree.
 
 const std = @import("std");
+const shakedown = @import("shakedown");
 const suite = @import("../testing/helpers.zig");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
@@ -202,6 +203,19 @@ test "clone, fetch and push through a helper's import and export as git does, it
     defer gpa.free(remote_b);
     try std.testing.expectEqualStrings(remote_a, remote_b);
     try expectSameRefs(gpa, io, &scratch, "theirs", "mine");
+
+    // A cancel that lands in keeping the marks is put back: the push
+    // stands, and the caller's next cancelation point is canceled.
+    try commitIn(gpa, io, &scratch, "mine", testgit.fixture_date + 300, "again.txt");
+    const plan = [_]shakedown.IoPlan.Entry{.{ .at = .{ .nth = .{ .call = .dirRename, .n = 1, .path = .{ .contains = "git.marks" } } }, .fault = .cancel, .times = 1 }};
+    const faults = try shakedown.FaultIo.init(gpa, io, .{ .plan = &plan });
+    defer faults.deinit();
+    const canceled = faults.io();
+    if (push_mod.push(gpa, canceled, &repo, "origin", .{ .who = who, .programs = helpers.programs(), .refspecs = &.{"refs/heads/main:refs/heads/main"} })) |stood| {
+        var again = stood;
+        again.deinit();
+        try std.testing.expectError(error.Canceled, canceled.sleep(.fromMilliseconds(1), .awake));
+    } else |err| try std.testing.expectEqual(error.Canceled, err);
 }
 
 test "clone and push through a helper's fetch and push, and a connect helper's conversation" {

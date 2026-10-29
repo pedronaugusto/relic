@@ -514,11 +514,11 @@ pub fn write(gpa: Allocator, io: Io, w: *Io.Writer, repo: *Repository, request: 
     var pending: std.ArrayList(Pending) = .empty;
     for (request.include) |name| {
         const oid = try rev_parse.resolve(gpa, io, repo.revisionSource(), name);
-        try pending.append(a, .{ .oid = oid, .name = name, .negative = false, .commit = commitOf(io, repo, oid) });
+        try pending.append(a, .{ .oid = oid, .name = name, .negative = false, .commit = try commitOf(io, repo, oid) });
     }
     for (request.exclude) |name| {
         const oid = try rev_parse.resolve(gpa, io, repo.revisionSource(), name);
-        try pending.append(a, .{ .oid = oid, .name = name, .negative = true, .commit = commitOf(io, repo, oid) });
+        try pending.append(a, .{ .oid = oid, .name = name, .negative = true, .commit = try commitOf(io, repo, oid) });
     }
 
     // The walk: what is shown, in order, and the boundary below it.
@@ -637,10 +637,16 @@ fn sparseRules(a: Allocator, io: Io, repo: *Repository, name: []const u8) Create
     return rules;
 }
 
-/// The commit `oid` is or peels to, or `null`.
-fn commitOf(io: Io, repo: *Repository, oid: Oid) ?Oid {
-    const peeled = repo.peel(io, oid) catch return null;
-    const header = repo.objectDatabase().readHeader(io, peeled) catch return null;
+/// The commit `oid` is or peels to, or `null`; a cancel is returned.
+fn commitOf(io: Io, repo: *Repository, oid: Oid) Io.Cancelable!?Oid {
+    const peeled = repo.peel(io, oid) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return null,
+    };
+    const header = repo.objectDatabase().readHeader(io, peeled) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return null,
+    };
     return if (header.type == .commit) peeled else null;
 }
 
@@ -712,4 +718,38 @@ fn fuzzHeader(_: void, case: *shakedown.Case) anyerror!void {
         defer out.deinit();
         try h.writeSummary(&out.writer);
     }
+}
+
+const testgit = @import("../testing/git.zig");
+const testing_io = @import("../testing/io.zig");
+
+test "a cancel that lands in peeling a bundle's revision to its commit is returned, not taken for no commit" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    try git.exec(io, &.{ "commit", "-q", "--allow-empty", "-m", "one" });
+    try git.exec(io, &.{ "tag", "-a", "-m", "tagged", "v1" });
+    const text = try git.line(io, &.{ "rev-parse", "v1" });
+    defer gpa.free(text);
+    const Peel = struct {
+        git: *testgit.Repo,
+        // Each run's own: what one read, the next must read again.
+        repo: Repository = undefined,
+        tag: Oid,
+        pub fn setUp(p: *@This(), _: *shakedown.FaultIo) !void {
+            p.repo = try .open(std.testing.allocator, std.testing.io, p.git.dir, .{});
+        }
+        pub fn run(p: *@This(), task_io: Io) !void {
+            if (try commitOf(task_io, &p.repo, p.tag) == null) return error.NoCommit;
+        }
+        pub fn check(_: *@This(), task_io: Io, result: anyerror!void, injected: ?shakedown.Injected) !void {
+            try testing_io.cancelKept(task_io, result, injected);
+        }
+        pub fn tearDown(p: *@This()) void {
+            p.repo.deinit(std.testing.io);
+        }
+    };
+    var peel: Peel = .{ .git = &git, .tag = try Oid.parse(.sha1, text) };
+    try testing_io.everyCancel(gpa, io, &peel);
 }

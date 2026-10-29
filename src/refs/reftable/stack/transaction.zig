@@ -1062,9 +1062,15 @@ fn clean(gpa: Allocator, io: Io, parent: Io.Dir, kind: Kind, options: Options) r
         // oldest and the newest update index; a file too short for one is
         // no table.
         var header: [24]u8 = undefined;
-        const file = dir.openFile(io, table, .{}) catch continue;
+        const file = dir.openFile(io, table, .{}) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => continue,
+        };
         defer file.close(io);
-        const got = file.readPositionalAll(io, &header, 0) catch continue;
+        const got = file.readPositionalAll(io, &header, 0) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => continue,
+        };
         if (got < header.len or !std.mem.eql(u8, header[0..4], "REFT")) continue;
         if (std.mem.readInt(u64, header[16..24], .big) > max) continue;
         fs.removeLeftover(io, dir, table);

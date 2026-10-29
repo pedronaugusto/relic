@@ -50,9 +50,15 @@ pub fn read(gpa: Allocator, io: Io, repo: *repo_mod.Repository, programs: ?progr
         defer gpa.free(objects);
         if (!std.mem.endsWith(u8, objects, "/objects")) continue;
         const repo_path = objects[0 .. objects.len - "/objects".len];
-        var top = Io.Dir.cwd().openDir(io, repo_path, .{}) catch continue;
+        var top = Io.Dir.cwd().openDir(io, repo_path, .{}) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => continue,
+        };
         defer top.close(io);
-        const refs = top.statFile(io, "refs", .{}) catch continue;
+        const refs = top.statFile(io, "refs", .{}) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => continue,
+        };
         if (refs.kind != .directory) continue;
         if (command) |line| {
             const allowed = programs orelse return error.AlternateRefsCommandNotRun;
@@ -118,4 +124,43 @@ test "a pattern takes a ref at it or under it, as for-each-ref's does" {
     try std.testing.expect(underAny("refs/heads/main", "refs/heads/main"));
     try std.testing.expect(!underAny("refs/heads/main", "refs/heads/ma"));
     try std.testing.expect(!underAny("refs/tags/v1", "refs/heads"));
+}
+
+const shakedown = @import("shakedown");
+const testgit = @import("../testing/git.zig");
+const testing_io = @import("../testing/io.zig");
+
+test "a cancel that lands in finding an alternate's refs is returned, not taken for no repository there" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var lender = try testgit.Repo.init(gpa, io, &.{});
+    defer lender.deinit();
+    try lender.exec(io, &.{ "commit", "-q", "--allow-empty", "-m", "lent" });
+    var borrower = try testgit.Repo.init(gpa, io, &.{});
+    defer borrower.deinit();
+    const lender_git = try lender.dir.realPathFileAlloc(io, ".git", gpa);
+    defer gpa.free(lender_git);
+    const lender_objects = try std.mem.concat(gpa, u8, &.{ lender_git, "/objects" });
+    defer gpa.free(lender_objects);
+    try borrower.writeFile(io, ".git/objects/info/alternates", lender_objects);
+    var repo = try repo_mod.Repository.open(gpa, io, borrower.dir, .{});
+    defer repo.deinit(io);
+    const refs_path = try std.mem.concat(gpa, u8, &.{ lender_git, "/refs" });
+    defer gpa.free(refs_path);
+    // The lender opened to look for its refs, its `refs` looked at, and
+    // the lender opened as a repository to list them.
+    const at = [_]shakedown.IoPlan.At{
+        .{ .nth = .{ .call = .dirOpenDir, .n = 1, .path = .{ .exact = lender_git } } },
+        .{ .nth = .{ .call = .dirStatFile, .n = 1, .path = .{ .exact = refs_path } } },
+        .{ .nth = .{ .call = .dirOpenDir, .n = 2, .path = .{ .exact = lender_git } } },
+    };
+    for (at) |where| {
+        const plan = [_]shakedown.IoPlan.Entry{.{ .at = where, .fault = .cancel, .times = 1 }};
+        const faults = try shakedown.FaultIo.init(gpa, io, .{ .plan = &plan });
+        defer faults.deinit();
+        if (read(gpa, faults.io(), &repo, null, null)) |tips| {
+            gpa.free(tips);
+            return error.TestUnexpectedResult;
+        } else |err| try std.testing.expectEqual(error.Canceled, err);
+    }
 }

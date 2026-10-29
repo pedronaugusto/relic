@@ -719,7 +719,11 @@ pub const Repository = struct {
             path = try fs.realPath(io, start, &path_buf);
             ceiling = nearestCeiling(path, options.ceiling_directories);
         }
-        const device = if (fs.statAt(io, start, ".") catch null) |found| found.stat.dev else 0;
+        const here = fs.statAt(io, start, ".") catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => null,
+        };
+        const device = if (here) |found| found.stat.dev else 0;
         var depth: u8 = 0;
         while (true) : (depth += 1) {
             if (depth > max_discovery_depth) break;
@@ -732,7 +736,10 @@ pub const Repository = struct {
                 errdefer git_dir.deinit(io);
                 var work = fs.OwnedDir.init(try current.openDir(io, ".", .{ .iterate = true }));
                 errdefer work.deinit(io);
-                const is_file = if (current.statFile(io, ".git", .{})) |st| st.kind == .file else |_| false;
+                const is_file = if (current.statFile(io, ".git", .{})) |st| st.kind == .file else |err| switch (err) {
+                    error.Canceled => return error.Canceled,
+                    else => false,
+                };
                 try checkOwnership(gpa, io, options, if (is_file) work.lend().get() else null, work.lend().get(), git_dir.lend().get());
                 return withCommon(io, git_dir, &work);
             }
@@ -2640,4 +2647,29 @@ test "required filter discovery keeps full names, and reads the policy without t
     config_gpa.* = failing.allocator();
     defer config_gpa.* = gpa;
     try std.testing.expectEqual(@as(usize, 1), try Read.count(&r));
+}
+
+const shakedown = @import("shakedown");
+const testgit = @import("../testing/git.zig");
+
+test "a cancel that lands in discovering a repository's start or its .git is returned, not taken for no device or no file" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    // The start's device, read before the walk, then `.git` looked at.
+    const at = [_]shakedown.IoPlan.At{
+        .{ .nth = .{ .call = .checkCancel, .n = 1 } },
+        .{ .nth = .{ .call = .dirStatFile, .n = 2, .path = .{ .suffix = ".git" } } },
+    };
+    for (at) |where| {
+        const plan = [_]shakedown.IoPlan.Entry{.{ .at = where, .fault = .cancel, .times = 1 }};
+        const faults = try shakedown.FaultIo.init(gpa, io, .{ .plan = &plan });
+        defer faults.deinit();
+        if (Repository.open(gpa, faults.io(), git.dir, .{})) |opened| {
+            var repo = opened;
+            repo.deinit(io);
+            return error.TestUnexpectedResult;
+        } else |err| try std.testing.expectEqual(error.Canceled, err);
+    }
 }

@@ -32,6 +32,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
+const fs = @import("../fs/fs.zig");
 const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
 const repo_mod = @import("../repo/repo.zig");
@@ -267,12 +268,17 @@ pub const Helper = struct {
     /// and the helper waited for.
     pub fn deinit(h: *Helper, io: Io) void {
         if (h.conn) |conn| {
-            // glint-ignore: Z026 -- the blank line is a courtesy; the helper is waited for whether or not it heard it
-            sayGoodbye(conn) catch {};
+            // The blank line is a courtesy; the helper is waited for whether
+            // or not it heard it. A cancel is put back for the caller.
+            sayGoodbye(conn) catch |err| switch (err) {
+                error.WriteFailed => if (conn.failure() == error.Canceled) io.recancel(),
+                else => {},
+            };
             conn.deinit(io);
         }
-        // glint-ignore: Z026 -- a lock file that cannot be removed is stale, and the next run that needs it says so
-        for (h.locks.items) |path| Io.Dir.cwd().deleteFile(io, path) catch {};
+        // A lock file that cannot be removed is stale, and the next run that
+        // needs it says so.
+        for (h.locks.items) |path| fs.removeLeftover(io, Io.Dir.cwd(), path);
         h.locks.deinit(h.gpa);
         h.unchanged.deinit(h.gpa);
         h.fetched.deinit(h.gpa);
@@ -703,8 +709,13 @@ pub const Helper = struct {
         w.flush() catch return conn.failure();
         var report = try h.readStatus(gpa, commands);
         errdefer report.deinit();
-        // glint-ignore: Z026 -- the marks are an optimisation for the next push, as git's are: kept when they can be, and the push stands either way
-        if (export_tmp) |tmp| Io.Dir.rename(Io.Dir.cwd(), tmp, Io.Dir.cwd(), h.export_marks.?, h.io) catch {};
+        // The marks are an optimisation for the next push, as git's are:
+        // kept when they can be, and the push stands either way, a cancel
+        // put back for the caller's next cancelation point.
+        if (export_tmp) |tmp| Io.Dir.rename(Io.Dir.cwd(), tmp, Io.Dir.cwd(), h.export_marks.?, h.io) catch |err| switch (err) {
+            error.Canceled => h.io.recancel(),
+            else => {},
+        };
         return report;
     }
 

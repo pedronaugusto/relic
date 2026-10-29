@@ -1757,8 +1757,10 @@ pub const Server = struct {
         if (builtin.is_test) return;
         var buffer: [256]u8 = undefined;
         var stderr = Io.File.stderr().writerStreaming(s.io, &buffer);
-        stderr.interface.writeAll(text) catch {}; // glint-ignore: Z026 -- a message to a closed standard error has nowhere else to go, as git's has not
-        stderr.interface.flush() catch {}; // glint-ignore: Z026 -- as above
+        // A message to a closed standard error has nowhere else to go, as
+        // git's has not; a cancel is returned.
+        stderr.interface.writeAll(text) catch return canceledOr(&stderr);
+        stderr.interface.flush() catch return canceledOr(&stderr);
     }
 
     /// What git writes on its own standard error rather than the side band:
@@ -1767,8 +1769,16 @@ pub const Server = struct {
         if (text.len == 0 or builtin.is_test) return;
         var buffer: [256]u8 = undefined;
         var stderr = Io.File.stderr().writerStreaming(s.io, &buffer);
-        stderr.interface.writeAll(text) catch {}; // glint-ignore: Z026 -- a message to a closed standard error has nowhere else to go, as git's has not
-        stderr.interface.flush() catch {}; // glint-ignore: Z026 -- as above
+        // A message to a closed standard error has nowhere else to go, as
+        // git's has not; a cancel is returned.
+        stderr.interface.writeAll(text) catch return canceledOr(&stderr);
+        stderr.interface.flush() catch return canceledOr(&stderr);
+    }
+
+    /// `error.Canceled` where a write to standard error was canceled;
+    /// nothing for any other failure.
+    fn canceledOr(stderr: *const Io.File.Writer) Io.Cancelable!void {
+        if (stderr.err) |err| if (err == error.Canceled) return error.Canceled;
     }
 
     fn rpError(s: *Server, comptime fmt: []const u8, args: anytype) Self.Error!void {
