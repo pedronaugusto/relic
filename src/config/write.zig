@@ -29,11 +29,17 @@ pub const Edit = union(enum) {
     unset: struct { name: []const u8, value: ?[]const u8 = null },
     /// `git config --remove-section`, the header matched as spelled.
     remove_section: struct { section: []const u8, subsection: ?[]const u8 = null },
+    /// git's `repo_config_rename_section`, as `git branch -m` renames a
+    /// branch's: every header of `old`, a full name, written as `new`'s.
+    rename_section: struct { old: []const u8, new: []const u8 },
+    /// git's `repo_config_copy_section`, as `git branch -c` copies a
+    /// branch's: each section `old` followed by a copy of it as `new`.
+    copy_section: struct { old: []const u8, new: []const u8 },
 };
 
 /// Errors from writing a configuration file.
 pub const Error = errors: {
-    break :errors config.Config.SetError || config.ParseError || fs.LockError || fs.CommitError ||
+    break :errors config.Config.SectionError || fs.LockError || fs.CommitError ||
         aegis.own.ReadFileError;
 };
 
@@ -107,7 +113,7 @@ pub fn prepare(
         .set => |e| _ = try config.checkKey(e.name),
         .unset => |e| _ = try config.checkKey(e.name),
         .add => |e| _ = try config.checkKey(e.name),
-        .remove_section => {},
+        .remove_section, .rename_section, .copy_section => {},
     };
     const buffer = try gpa.alloc(u8, 16 * 1024);
     errdefer gpa.free(buffer);
@@ -128,6 +134,8 @@ pub fn prepare(
         .remove_section => |e| if (try file.removeSectionIn(level, e.section, e.subsection)) {
             outcome.sections_removed += 1;
         },
+        .rename_section => |e| _ = try file.renameSectionIn(level, e.old, e.new),
+        .copy_section => |e| _ = try file.copySectionIn(level, e.old, e.new),
     };
     const bytes = try file.renderWritable();
     return .{ .gpa = gpa, .dir = dir, .sub_path = sub_path, .lock = lock, .buffer = buffer, .bytes = bytes, .outcome = outcome };

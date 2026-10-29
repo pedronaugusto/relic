@@ -1480,9 +1480,9 @@ pub const Repository = struct {
         }
         _ = config_write.editFile(gpa, io, git_dir, "config", .local, .{ .shared = shared }, edits.items) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            // unreachable: every key is one of git's own, and the one file
-            // read is the one written
-            error.InvalidKey, error.NoWritableSource => unreachable,
+            // unreachable: every key is one of git's own, the one file
+            // read is the one written, and no section is renamed or copied
+            error.InvalidKey, error.NoWritableSource, error.InvalidSectionName => unreachable,
             else => |e| return e,
         };
     }
