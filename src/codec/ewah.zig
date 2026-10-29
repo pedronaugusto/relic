@@ -249,7 +249,7 @@ pub fn writePositions(gpa: Allocator, positions: []const u32) Allocator.Error![]
     const words = try gpa.alloc(u64, wordsFor(bit_count));
     defer gpa.free(words);
     @memset(words, 0);
-    for (positions) |p| words[p / 64] |= @as(u64, 1) << @intCast(p % 64); // safe: below 64
+    for (positions) |p| words[p / 64] |= @as(u64, 1) << @intCast(p % 64);
     return write(gpa, words, bit_count) catch |err| switch (err) {
         error.InvalidBitmapInput => unreachable, // unreachable: the words hold every bit counted
         error.OutOfMemory => |e| return e,
