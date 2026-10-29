@@ -32,6 +32,7 @@
 
 const ErrorNamespace = @This();
 const glob_mod = @import("../text.zig").glob;
+const decimal = @import("../text.zig").decimal;
 const fs = @import("../fs/fs.zig");
 const Self = @This();
 
@@ -721,11 +722,9 @@ pub fn configBool(value: []const u8, fallback: bool) bool {
 }
 
 /// git-lfs's `config.Int`: `fallback` for an empty value or one Go's
-/// `strconv.Atoi` refuses, which takes a sign and decimal digits and
-/// nothing else (no `_`, which `std.fmt.parseInt` skips).
+/// `strconv.Atoi` refuses (`text.decimal.goInt`).
 pub fn configInt(value: []const u8, fallback: i64) i64 {
-    if (std.mem.findScalar(u8, value, '_') != null) return fallback;
-    return std.fmt.parseInt(i64, value, 10) catch fallback;
+    return decimal.goInt(i64, value) orelse fallback;
 }
 
 const testing = std.testing;

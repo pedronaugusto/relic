@@ -1484,7 +1484,7 @@ pub const Client = struct {
         }
         const programs = c.options.programs orelse return error.ProgramsNotGranted;
         const invocation = try sshArguments(arena, programs.environ, c.settings, ssh, operation);
-        const retries: usize = @intCast(@max(0, c.settings.getInt("lfs.ssh.retries", 5)));
+        const retries = std.math.cast(usize, @max(0, c.settings.getInt("lfs.ssh.retries", 5))) orelse std.math.maxInt(usize);
         var attempt: usize = 0;
         while (true) : (attempt += 1) {
             var outcome = try program.run(c.gpa, io, programs, invocation, .{ .output = .limited(1 << 20) });
@@ -2814,7 +2814,8 @@ fn timeoutsFor(settings: *const Settings, scratch: Allocator, url: url_mod.Url) 
 /// `n` seconds, above zero, as uplink's span; one past what it holds is the
 /// longest there is.
 fn seconds(n: i64) uplink.Duration {
-    return .fromRaw(std.math.mul(u64, @intCast(n), std.time.ns_per_s) catch std.math.maxInt(u64));
+    const whole = std.math.cast(u64, n) orelse 0;
+    return .fromRaw(std.math.mul(u64, whole, std.time.ns_per_s) catch std.math.maxInt(u64));
 }
 
 /// How long a `Retry-After` value asks to wait, as git-lfs reads it: whole

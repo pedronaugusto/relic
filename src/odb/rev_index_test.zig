@@ -3,6 +3,8 @@ const hash = @import("../hash/hash.zig");
 const testing = std.testing;
 const testremote = @import("../testing/remote.zig");
 const repo_mod = @import("../repo/repo.zig");
+const config_mod = @import("../config/config.zig");
+const rev_index = @import("rev_index.zig");
 
 test "a pack relic writes has the reverse index git's index-pack writes for it" {
     const gpa = testing.allocator;
@@ -33,4 +35,14 @@ test "a pack relic writes has the reverse index git's index-pack writes for it" 
     const theirs = try tmp.dir.readFileAlloc(io, "check.rev", gpa, .unlimited);
     defer gpa.free(theirs);
     try testing.expectEqualSlices(u8, theirs, ours);
+}
+
+test "pack.writeReverseIndex that is no boolean is refused, as git dies on it" {
+    var config = try config_mod.Config.parseText(testing.allocator,
+        \\[pack]
+        \\    writeReverseIndex = sometimes
+    , .local);
+    defer config.deinit();
+    try testing.expectError(error.NotABoolean, rev_index.wanted(&config));
+    try testing.expect(try rev_index.wanted(null));
 }

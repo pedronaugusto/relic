@@ -217,7 +217,7 @@ const Limits = struct {
         const batch = settings.getInt("lfs.transfer.batchsize", 100);
         const concurrent = settings.getInt("lfs.concurrenttransfers", 8);
         return .{
-            .batch_size = if (batch > 0) @intCast(batch) else 100,
+            .batch_size = if (batch > 0) std.math.cast(usize, batch) orelse std.math.maxInt(usize) else 100,
             .max_retries = if (retries >= 1) @intCast(@min(retries, 1000)) else 8,
             .max_retry_delay = .fromRaw(if (delay >= 0) @intCast(@min(delay, 3600)) else 10),
             .max_retry_time = .fromRaw(if (retry_time >= 1) @intCast(@min(retry_time, 86400)) else 300),
@@ -796,9 +796,11 @@ fn runTransfers(io: Io, server: *lfsapi.Server, operation: lfsapi.Operation, obj
     var jobs: std.ArrayList(Job) = .empty;
     // The custom adapter the answers chose, if one did.
     var chosen: ?custom.Adapter = null;
-    var start: usize = 0;
-    while (start < pending.items.len) : (start += limits.batch_size) {
-        const chunk = pending.items[start..@min(pending.items.len, start + limits.batch_size)];
+    aegis.assert.invariant(limits.batch_size != 0, "Limits.read gives a batch at least one long");
+    var rest = pending.items;
+    while (rest.len != 0) {
+        const chunk = rest[0..@min(rest.len, limits.batch_size)];
+        rest = rest[chunk.len..];
         try batchChunk(&state, chunk, outcome.results, missing_here.items, adapters, &chosen, &jobs);
     }
     if (jobs.items.len == 0) return outcome;
@@ -2249,7 +2251,7 @@ fn recentPointers(arena: Allocator, io: Io, server: *lfsapi.Server, repo: *Repos
     }
 
     if (refs_days > 0) {
-        const since = (now orelse return error.LfsRecentNeedsTime) - refs_days * 86400;
+        const since = daysBefore(now orelse return error.LfsRecentNeedsTime, refs_days);
         var listing = try repo.refStore().list(server.gpa, io, "refs/");
         defer listing.deinit();
         const remote_prefix = try arena.print("refs/remotes/{s}/", .{server.remote});
@@ -2276,7 +2278,7 @@ fn recentPointers(arena: Allocator, io: Io, server: *lfsapi.Server, repo: *Repos
     if (commits_days > 0) {
         for (unique.items) |tip| {
             const tip_time = commitTime(arena, io, repo, tip) orelse continue;
-            const since = tip_time - commits_days * 86400;
+            const since = daysBefore(tip_time, commits_days);
             var walk = rev_walk.Walk.init(server.gpa, repo.objectDatabase());
             defer walk.deinit();
             try walk.push(tip);
@@ -2309,6 +2311,14 @@ fn containsOid(list: []const Oid, oid: Oid) bool {
 }
 
 /// The committer time of `oid` when it is a commit.
+/// `days` days (above zero) before `from`, as git-lfs's
+/// `AddDate(0, 0, -days)` asks: a span past what a timestamp holds reaches
+/// back past every commit, where the product overflowed.
+fn daysBefore(from: i64, days: i64) i64 {
+    const span = std.math.mul(i64, days, 86400) catch return std.math.minInt(i64);
+    return std.math.sub(i64, from, span) catch std.math.minInt(i64);
+}
+
 fn commitTime(arena: Allocator, io: Io, repo: *Repository, oid: Oid) ?i64 {
     const found = repo.objectDatabase().read(io, oid) catch return null;
     defer repo.objectDatabase().allocator().free(found.bytes);
@@ -2680,4 +2690,10 @@ test "LFS URL rewriting preserves allocation resource failures" {
         var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
         try testing.expectError(error.OutOfMemory, rewriteHref(&state, failing.allocator(), "https://old/object"));
     }
+}
+
+test "a recent-fetch span past what a timestamp holds reaches back past every commit" {
+    try std.testing.expectEqual(@as(i64, 1_000_000 - 7 * 86400), daysBefore(1_000_000, 7));
+    try std.testing.expectEqual(@as(i64, std.math.minInt(i64)), daysBefore(1_000_000, std.math.maxInt(i64)));
+    try std.testing.expectEqual(@as(i64, std.math.minInt(i64)), daysBefore(std.math.minInt(i64) + 1, 2));
 }

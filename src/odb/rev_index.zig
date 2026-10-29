@@ -98,13 +98,3 @@ pub fn write(
     file.close(io);
     failed = false;
 }
-
-test "pack.writeReverseIndex that is no boolean is refused, as git dies on it" {
-    var config = try config_mod.Config.parseText(std.testing.allocator,
-        \\[pack]
-        \\    writeReverseIndex = sometimes
-    , .local);
-    defer config.deinit();
-    try std.testing.expectError(error.NotABoolean, wanted(&config));
-    try std.testing.expect(try wanted(null));
-}

@@ -37,9 +37,10 @@ pub fn goInt(comptime T: type, text: []const u8) ?T {
     const body = if (text[0] == '+' or text[0] == '-') text[1..] else text;
     const magnitude = digits(u128, body) orelse return null;
     if (negative) {
-        if (magnitude > @as(u128, 1) << 127) return null;
-        const value: i128 = if (magnitude == @as(u128, 1) << 127) std.math.minInt(i128) else -@as(i128, @intCast(magnitude));
-        return std.math.cast(T, value);
+        if (std.math.cast(i128, magnitude)) |m| return std.math.cast(T, -m);
+        // One past an i128's largest is its smallest when negated.
+        if (magnitude == @as(u128, 1) << 127) return std.math.cast(T, std.math.minInt(i128));
+        return null;
     }
     return std.math.cast(T, magnitude);
 }
