@@ -289,4 +289,7 @@ test "git clones and fetches over the dumb protocol from relic's server, its pac
     const refused_path = try gpa.print("{s}/refused", .{root_path});
     defer gpa.free(refused_path);
     try testing.expectError(error.GitFailed, testremote.gitInputEnv(gpa, io, root.dir, &env, &.{ "clone", "-q", url, refused_path }, "", false));
+    // Nor with it malformed, which git's http-backend dies on.
+    try git(gpa, io, served_dir, &env, &.{ "config", "http.getanyfile", "maybe" });
+    try testing.expectError(error.GitFailed, testremote.gitInputEnv(gpa, io, root.dir, &env, &.{ "clone", "-q", url, refused_path }, "", false));
 }

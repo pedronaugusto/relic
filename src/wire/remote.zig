@@ -33,7 +33,7 @@ pub const Error = error{
     InvalidRefspec,
     /// A quoted configuration value that does not unquote.
     MalformedValue,
-} || Allocator.Error;
+} || config_mod.ValueError;
 
 /// What a fetch does with the tags a remote has.
 pub const TagMode = enum {
@@ -149,15 +149,15 @@ pub const Remote = struct {
             if (std.mem.eql(u8, text, "--tags")) remote.tags = .all;
             if (std.mem.eql(u8, text, "--no-tags")) remote.tags = .none;
         }
-        remote.prune = boolOf(config, try key("prune", arena, name)) orelse boolOf(config, "fetch.prune");
-        remote.prune_tags = boolOf(config, try key("prunetags", arena, name)) orelse boolOf(config, "fetch.prunetags");
+        remote.prune = (try boolOf(config, try key("prune", arena, name))) orelse (try boolOf(config, "fetch.prune"));
+        remote.prune_tags = (try boolOf(config, try key("prunetags", arena, name))) orelse (try boolOf(config, "fetch.prunetags"));
         {
             var it = config.iterate(&.{ try key("skipfetchall", arena, name), try key("skipdefaultupdate", arena, name) });
             while (it.next()) |entry| remote.skip_default_update = config_mod.parseBool(entry.value orelse "true") catch remote.skip_default_update;
         }
         remote.upload_pack = try valueOf(arena, config, try key("uploadpack", arena, name));
         remote.receive_pack = try valueOf(arena, config, try key("receivepack", arena, name));
-        remote.mirror = boolOf(config, try key("mirror", arena, name)) orelse false;
+        remote.mirror = (try boolOf(config, try key("mirror", arena, name))) orelse false;
         remote.negotiation_restrict = try resetList(arena, config, try key("negotiationrestrict", arena, name));
         remote.negotiation_include = try resetList(arena, config, try key("negotiationinclude", arena, name));
         return remote;
@@ -461,9 +461,11 @@ fn refspecsOf(
     return out.items;
 }
 
-fn boolOf(config: *const Config, key: []const u8) ?bool {
+/// `key` as a boolean, `null` where it is not set; a malformed one is
+/// refused, as git's `handle_config` and `git_fetch_config` die on it.
+fn boolOf(config: *const Config, key: []const u8) config_mod.ValueError!?bool {
     if (!config.has(key)) return null;
-    return config.getBool(key, false) catch null;
+    return try config.getBool(key, false);
 }
 
 const testing = std.testing;
@@ -496,6 +498,19 @@ test "a configured remote carries its URLs, refspecs and tag rule" {
     try testing.expectEqual(TagMode.none, remote.tags);
     try testing.expectEqual(@as(?bool, true), remote.prune);
     try testing.expectEqual(@as(?bool, true), remote.prune_tags);
+}
+
+test "a malformed prune, pruneTags or mirror is refused, as git dies on it, where it was taken as unset" {
+    const gpa = testing.allocator;
+    for ([_][]const u8{
+        "[remote \"origin\"]\n\turl = x\n\tprune = maybe\n",
+        "[remote \"origin\"]\n\turl = x\n[fetch]\n\tpruneTags = maybe\n",
+        "[remote \"origin\"]\n\turl = x\n\tmirror = maybe\n",
+    }) |text| {
+        var config = try Config.parseText(gpa, text, .local);
+        defer config.deinit();
+        try testing.expectError(error.NotABoolean, Remote.get(gpa, &config, .sha1, "origin"));
+    }
 }
 
 test "an empty url, pushurl or transport option clears the values before it, as git's add_url and parse_transport_option" {

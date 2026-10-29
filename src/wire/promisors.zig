@@ -188,9 +188,10 @@ pub fn decode(arena: Allocator, text: []const u8) Allocator.Error![]u8 {
 
 /// What a server with `config` advertises as `promisor-remote=`, or
 /// `null` when `promisor.advertise` is off or it has no promisor remote
-/// with a URL. The result is `arena`'s.
-pub fn advertisement(arena: Allocator, config: *const config_mod.Config, warnings: ?*warning.Warnings) Allocator.Error!?[]const u8 {
-    const on = config.getBool("promisor.advertise", false) catch false;
+/// with a URL; a malformed `promisor.advertise` is refused, as git's
+/// `repo_config_get_bool` dies on it. The result is `arena`'s.
+pub fn advertisement(arena: Allocator, config: *const config_mod.Config, warnings: ?*warning.Warnings) config_mod.ValueError!?[]const u8 {
+    const on = try config.getBool("promisor.advertise", false);
     if (!on) return null;
     const infos = try configured(arena, config, try Fields.read(config, "promisor.sendFields", warnings));
     if (infos.len == 0) return null;
@@ -638,6 +639,14 @@ test "a server advertises its promisor remotes and the fields it sends" {
     try testing.expectEqualStrings("name=lop,url=https://example.com/a%2cb%3bc,partialCloneFilter=blob:none,token=s3cret", text);
     try testing.expectEqual(@as(usize, 1), warnings.items.items.len);
     try testing.expectEqualStrings("lop", (try acceptedByClient(arena, &config, "lop;nobody", &warnings))[0]);
+}
+
+test "a malformed promisor.advertise is refused, as git dies on it, where it advertised nothing" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    var config = try config_mod.Config.parseText(testing.allocator, "[promisor]\n\tadvertise = maybe\n[remote \"lop\"]\n\turl = https://example.com/lop\n\tpromisor = true\n", .local);
+    defer config.deinit();
+    try testing.expectError(error.NotABoolean, advertisement(arena_state.allocator(), &config, null));
 }
 
 test "a client takes what promisor.acceptFromServer and checkFields allow, and stores what storeFields asks" {

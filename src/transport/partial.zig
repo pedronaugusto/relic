@@ -115,11 +115,12 @@ pub fn storeAdvertised(io: Io, repo: *Repository, creates: []const promisors.Cre
 }
 
 /// Whether `name` is a promisor remote of `config`'s repository: one
-/// `promisorRemotes` lists.
-pub fn isPromisor(config: *const config_mod.Config, name: []const u8) bool {
+/// `promisorRemotes` lists. A malformed `remote.<name>.promisor` is
+/// refused, as git's `promisor_remote_config` dies on it.
+pub fn isPromisor(config: *const config_mod.Config, name: []const u8) config_mod.ValueError!bool {
     var buf: [256]u8 = undefined;
     const key = std.mem.print(&buf, "remote.{s}.promisor", .{name}) catch return false;
-    if (config.getBool(key, false) catch false) return true;
+    if (try config.getBool(key, false)) return true;
     const filter_key = std.mem.print(&buf, "remote.{s}.partialclonefilter", .{name}) catch return false;
     if (config.get(filter_key) != null) return true;
     const named = config.get("extensions.partialclone") orelse return false;
@@ -370,6 +371,12 @@ test "filters are read and sent as git reads and sends them, and the ones git do
     try std.testing.expectError(error.InvalidFilter, normalize(arena, "combine:blob:none+tree:x"));
     try std.testing.expectError(error.InvalidFilter, normalize(arena, "combine:blob:none+sparse:oid=a~b"));
     try std.testing.expectError(error.InvalidFilter, normalize(arena, "sparse:path=x"));
+}
+
+test "a malformed remote.<name>.promisor is refused, as git dies on it, where the remote was taken for no promisor" {
+    var config = try config_mod.Config.parseText(std.testing.allocator, "[remote \"lop\"]\n\turl = https://example.com/lop\n\tpromisor = maybe\n", .local);
+    defer config.deinit();
+    try std.testing.expectError(error.NotABoolean, isPromisor(&config, "lop"));
 }
 
 test "fuzz: a filter is sent as git spells it or refused by name" {

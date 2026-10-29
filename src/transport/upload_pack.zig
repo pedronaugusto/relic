@@ -70,7 +70,7 @@ pub const Error = error{
     /// The program making the pack failed: the client was told on channel
     /// three, as git's "git-pack-objects died with error" tells it.
     PackObjectsFailed,
-} || program.Error || Io.Reader.Error || odb_mod.Error || object_walk.Error || local.Error || Allocator.Error || Io.Cancelable;
+} || program.Error || Io.Reader.Error || odb_mod.Error || object_walk.Error || local.Error || config_mod.ValueError || Allocator.Error || Io.Cancelable;
 
 /// What the server allows, as git's `upload_pack.*` settings say; `null`
 /// takes the served repository's own setting.
@@ -189,32 +189,33 @@ pub const Server = struct {
     promisor_taken: bool = false,
 
     /// Serve `remote` in `version`; `stateless` for HTTP, where every
-    /// request stands alone.
-    pub fn init(gpa: Allocator, io: Io, remote: *local.Remote, version: protocol.Version, options: Options) Server {
+    /// request stands alone. A malformed setting is refused, as git's
+    /// upload-pack dies on it (`git_config_bool`, `git_config_int`).
+    pub fn init(gpa: Allocator, io: Io, remote: *local.Remote, version: protocol.Version, options: Options) config_mod.ValueError!Server {
         const config = remote.repo.configuration();
-        const any = options.allow_any orelse (config.getBool("uploadpack.allowanysha1inwant", false) catch false);
+        const any = options.allow_any orelse (try config.getBool("uploadpack.allowanysha1inwant", false));
         var s: Server = .{
             .gpa = gpa,
             .io = io,
             .remote = remote,
             .version = version,
             .stateless = options.stateless,
-            .allow_filter = options.allow_filter orelse (config.getBool("uploadpack.allowfilter", false) catch false),
-            .allow_tip = any or (options.allow_tip orelse (config.getBool("uploadpack.allowtipsha1inwant", false) catch false)),
-            .allow_reachable = any or (options.allow_reachable orelse (config.getBool("uploadpack.allowreachablesha1inwant", false) catch false)),
+            .allow_filter = options.allow_filter orelse (try config.getBool("uploadpack.allowfilter", false)),
+            .allow_tip = any or (options.allow_tip orelse (try config.getBool("uploadpack.allowtipsha1inwant", false))),
+            .allow_reachable = any or (options.allow_reachable orelse (try config.getBool("uploadpack.allowreachablesha1inwant", false))),
             .allow_any = any,
             .advertise_bundle_uris = options.advertise_bundle_uris orelse advertisesBundleUris(config),
-            .allow_ref_in_want = options.allow_ref_in_want orelse (config.getBool("uploadpack.allowrefinwant", false) catch false),
-            .allow_sideband_all = options.allow_sideband_all orelse (config.getBool("uploadpack.allowsidebandall", false) catch false),
+            .allow_ref_in_want = options.allow_ref_in_want orelse (try config.getBool("uploadpack.allowrefinwant", false)),
+            .allow_sideband_all = options.allow_sideband_all orelse (try config.getBool("uploadpack.allowsidebandall", false)),
             .allow_packfile_uris = namesPackfileUris(config),
             .filters = .read(config),
-            .advertise_object_info = config.getBool("transfer.advertiseobjectinfo", false) catch false,
-            .keepalive = .fromRaw(config.getInt(c_int, "uploadpack.keepalive", 5) catch 5),
+            .advertise_object_info = try config.getBool("transfer.advertiseobjectinfo", false),
+            .keepalive = .fromRaw(try config.getInt(c_int, "uploadpack.keepalive", 5)),
             .pack_objects_hook = if (config.findProtected("uploadpack.packobjectshook")) |entry| entry.value else null,
             .programs = options.programs,
             .warnings = options.warnings,
         };
-        if (config.getBool("transfer.advertisesid", false) catch false) s.session_id_len = protocol.sessionId(io, &s.session_id_buf).len;
+        if (try config.getBool("transfer.advertisesid", false)) s.session_id_len = protocol.sessionId(io, &s.session_id_buf).len;
         return s;
     }
 
@@ -266,7 +267,7 @@ pub const Server = struct {
         };
     }
 
-    fn advertiseV2(s: *Server, w: *Io.Writer) (pkt_line.WriteError || Allocator.Error)!void {
+    fn advertiseV2(s: *Server, w: *Io.Writer) (pkt_line.WriteError || config_mod.ValueError)!void {
         try pkt_line.write(w, "version 2\n");
         try pkt_line.print(w, "agent={s}\n", .{protocol.agent});
         try pkt_line.write(w, "ls-refs=unborn\n");
@@ -1687,10 +1688,11 @@ fn writeError(err: pkt_line.WriteError) Error {
 /// A conversation with `remote`'s own upload-pack, in this process: each
 /// request answered whole as it is sent, as over HTTP. The result is the
 /// caller's; closing it closes `remote` too.
-pub fn connect(gpa: Allocator, io: Io, remote: *local.Remote, version: protocol.Version, options: Options) Allocator.Error!*Connection {
+pub fn connect(gpa: Allocator, io: Io, remote: *local.Remote, version: protocol.Version, options: Options) config_mod.ValueError!*Connection {
     var serving = options;
     serving.stateless = true;
-    return in_process.InProcess(Server, told).create(gpa, io, remote, .init(gpa, io, remote, version, serving));
+    const server: Server = try .init(gpa, io, remote, version, serving);
+    return in_process.InProcess(Server, told).create(gpa, io, remote, server);
 }
 
 /// The refusals upload-pack answers the client with, which it reads.
@@ -1699,6 +1701,41 @@ fn told(err: Error) bool {
         error.NotOurRef, error.FilterRefused, error.ProtocolError => true,
         else => false,
     };
+}
+
+const testgit = @import("../testing/git.zig");
+
+test "a malformed uploadpack.* or transfer.* setting is refused, as git's upload-pack dies on it, where the default was taken" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var git = try testgit.Repo.init(gpa, io, &.{"--bare"});
+    defer git.deinit();
+    const path = try git.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(path);
+    const keys = [_][]const u8{
+        "uploadpack.allowanysha1inwant", "uploadpack.allowfilter",     "uploadpack.allowtipsha1inwant",
+        "uploadpack.allowreachablesha1inwant", "uploadpack.allowrefinwant", "uploadpack.allowsidebandall",
+        "transfer.advertiseobjectinfo", "transfer.advertisesid", "uploadpack.keepalive",
+    };
+    for (keys) |key| {
+        try git.exec(io, &.{ "config", key, "maybe" });
+        var remote = try local.Remote.open(gpa, io, path, .{});
+        defer remote.deinit(io);
+        const refused = Server.init(gpa, io, &remote, .v2, .{});
+        if (refused) |_| {
+            std.debug.print("{s} = maybe was taken\n", .{key});
+            return error.TestUnexpectedResult;
+        } else |err| try std.testing.expect(err == error.NotABoolean or err == error.NotAnInteger);
+        try git.exec(io, &.{ "config", "--unset", key });
+    }
+    // `promisor.advertise`, read as the capabilities are written.
+    try git.exec(io, &.{ "config", "promisor.advertise", "maybe" });
+    var remote = try local.Remote.open(gpa, io, path, .{});
+    defer remote.deinit(io);
+    var server: Server = try .init(gpa, io, &remote, .v2, .{});
+    var out: Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    try std.testing.expectError(error.NotABoolean, server.advertise(&out.writer));
 }
 
 test "fuzz: whatever a client sends is answered or refused, in v2 and v0" {
@@ -1720,7 +1757,7 @@ fn fuzzServe(remote: *local.Remote, case: *shakedown.Case) anyerror!void {
     const input = scratch[0..shakedown.gen.intRange(case.source, usize, 0, scratch.len)];
     case.source.bytes(input);
     for ([_]protocol.Version{ .v2, .v0 }) |version| {
-        var server: Server = .init(std.testing.allocator, std.testing.io, remote, version, .{ .stateless = true, .allow_filter = true });
+        var server: Server = try .init(std.testing.allocator, std.testing.io, remote, version, .{ .stateless = true, .allow_filter = true });
         var fixed: Io.Reader = .fixed(input);
         var buffer: [pkt_line.max_line]u8 = undefined;
         var limited = fixed.limited(.unlimited, &buffer);
