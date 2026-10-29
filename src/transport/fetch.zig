@@ -418,7 +418,7 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
 
     // A promisor remote's packs are filtered as the clone was, and what
     // they leave out is promised rather than missing.
-    const promisor = remote.name != null and partial.isPromisor(repo.configuration(), remote.name.?);
+    const promisor = remote.name != null and (try partial.isPromisor(repo.configuration(), remote.name.?));
     // `auto` is the filter of the promisor remotes taken from the server's
     // advertisement, known once the session is open.
     const selection = try selectFilter(arena, repo.configuration(), options.filter, promisor, remote.name);
@@ -722,7 +722,7 @@ const Brought = struct {
         outcome.objects = b.packs[0].objects;
         // With packs named by URI, git's `get_pack` keeps the pack.
         if (kept or b.uri_packs.len != 0) return;
-        if (try b.unpackSmall(io, repo, unpackLimit(repo.configuration()))) outcome.pack = null;
+        if (try b.unpackSmall(io, repo, try unpackLimit(repo.configuration()))) outcome.pack = null;
     }
 
     /// Each pack of fewer than `limit` objects stored loose
@@ -752,10 +752,11 @@ const Brought = struct {
     }
 };
 
-/// git's `fetch.unpackLimit`, else `transfer.unpackLimit`, else 100.
-fn unpackLimit(config: *const config_mod.Config) u64 {
+/// git's `fetch.unpackLimit`, else `transfer.unpackLimit`, else 100; a
+/// malformed one is refused, as git's `repo_config_get_int` dies on it.
+fn unpackLimit(config: *const config_mod.Config) config_mod.ValueError!u64 {
     for ([_][]const u8{ "fetch.unpacklimit", "transfer.unpacklimit" }) |key| {
-        const value = config.getInt(c_int, key, -1) catch -1;
+        const value = try config.getInt(c_int, key, -1);
         if (value >= 0) return @intCast(value);
     }
     return 100;
@@ -1430,7 +1431,7 @@ const Tips = struct { ours: []const Oid, common: []const Oid };
 /// git's `fetch.negotiationAlgorithm`, `feature.experimental` making
 /// `skipping` the default, as `prepare_repo_settings` reads them.
 fn negotiationAlgorithm(config: *const config_mod.Config) Error!fetch_pack.Negotiation {
-    const experimental = config.getBool("feature.experimental", false) catch false;
+    const experimental = try config.getBool("feature.experimental", false);
     const default: fetch_pack.Negotiation = if (experimental) .skipping else .consecutive;
     const text = config.get("fetch.negotiationalgorithm") orelse return default;
     for ([_]fetch_pack.Negotiation{ .skipping, .noop, .consecutive }) |algorithm| {
@@ -2114,7 +2115,7 @@ fn checkedOutBranches(arena: Allocator, gpa: Allocator, io: Io, repo: *Repositor
     // The main working tree's `HEAD`, whichever worktree this repository
     // was opened from.
     if (!repo.isBare() or repo.isLinkedWorktree()) {
-        const bare = repo.configuration().getBool("core.bare", false) catch false;
+        const bare = try repo.configuration().getBool("core.bare", false);
         if (!bare) {
             if (try repo.refStore().read(gpa, io, "main-worktree/HEAD")) |head| switch (head) {
                 .symbolic => |target| {
@@ -2454,6 +2455,18 @@ fn expectSameRefs(gpa: Allocator, io: Io, a: *testgit.Repo, b: *testgit.Repo) !v
             const tab_b = std.mem.findScalar(u8, eb.?, '\t') orelse eb.?.len;
             try testing.expectEqualStrings(ea.?[tab_a..], eb.?[tab_b..]);
         }
+    }
+}
+
+test "a malformed feature.experimental or unpack limit is refused, as git dies on it, where the default was taken" {
+    const gpa = testing.allocator;
+    var experimental = try config_mod.Config.parseText(gpa, "[feature]\n\texperimental = maybe\n", .local);
+    defer experimental.deinit();
+    try testing.expectError(error.NotABoolean, negotiationAlgorithm(&experimental));
+    for ([_][]const u8{ "[fetch]\n\tunpackLimit = lots\n", "[transfer]\n\tunpackLimit = lots\n" }) |text| {
+        var config = try config_mod.Config.parseText(gpa, text, .local);
+        defer config.deinit();
+        try testing.expectError(error.NotAnInteger, unpackLimit(&config));
     }
 }
 

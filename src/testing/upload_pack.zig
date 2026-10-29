@@ -52,7 +52,7 @@ pub fn main(init: std.process.Init) !void {
         .home = locations.home,
     });
     defer remote.deinit(io);
-    var server: upload_pack.Server = .init(gpa, io, &remote, version, .{ .stateless = stateless, .programs = programs });
+    var server: upload_pack.Server = try .init(gpa, io, &remote, version, .{ .stateless = stateless, .programs = programs });
 
     const in_buffer = try arena.alloc(u8, pkt_line.max_line);
     var in = Io.File.stdin().readerStreaming(io, in_buffer);

@@ -290,7 +290,7 @@ pub const Session = struct {
             session.owned_server_options = try remote_mod.serverOptions(gpa, config, name);
             session.server_options = session.owned_server_options;
         };
-        if (options.config) |config| if (config.getBool("transfer.advertisesid", false) catch false) {
+        if (options.config) |config| if (try config.getBool("transfer.advertisesid", false)) {
             session.session_id_len = protocol.sessionId(io, &session.session_id_buf).len;
         };
         return session;
