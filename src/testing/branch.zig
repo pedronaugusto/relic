@@ -542,3 +542,267 @@ test "delete-merged refuses a pattern that names no branch, as git 2.56's does" 
     defer repo.deinit(io);
     try std.testing.expectError(error.NotABranchOrPattern, branch.deleteMerged(gpa, io, &repo, .{ .upstreams = &.{"nope"} }, .{}));
 }
+
+fn expectSameHead(pair: *Pair, io: Io) !void {
+    for ([_][]const []const u8{
+        &.{ "symbolic-ref", "-q", "HEAD" },
+        &.{ "reflog", "show", "--format=%H %gn <%ge> %gs", "HEAD", "--" },
+    }) |args| {
+        pair.git.report_failures = false;
+        pair.ours.report_failures = false;
+        defer pair.git.report_failures = true;
+        defer pair.ours.report_failures = true;
+        const left = pair.git.run(io, args) catch try pair.gpa.dupe(u8, "");
+        defer pair.gpa.free(left);
+        const right = pair.ours.run(io, args) catch try pair.gpa.dupe(u8, "");
+        defer pair.gpa.free(right);
+        try std.testing.expectEqualStrings(left, right);
+    }
+}
+
+/// One `git branch -m`, `-M`, `-c` or `-C`, or a step both sides take.
+const Move = struct {
+    /// Run on both sides first.
+    setup: []const []const []const u8 = &.{},
+    args: []const []const u8 = &.{},
+    copy: bool = false,
+    old: []const u8 = "",
+    new: []const u8 = "",
+    force: bool = false,
+    err: ?anyerror = null,
+    /// What `misnamed` comes back as.
+    misnamed: bool = false,
+};
+
+test "a branch is renamed and copied as git 2.56's branch -m and -c move it, its log, HEAD and its configuration" {
+    try testgit.eachRefFormat(struct {
+        fn f(format: testgit.RefFormat) !void {
+            const gpa = std.testing.allocator;
+            const io = std.testing.io;
+            // t3200's cases, in its order where they build on each other.
+            const steps = [_]Move{
+                .{ .setup = &.{ &.{ "config", "branch.topic.remote", "origin" }, &.{ "config", "branch.topic.merge", "refs/heads/topic" } }, .args = &.{ "branch", "-m", "topic", "t/t" }, .old = "topic", .new = "t/t" },
+                .{ .args = &.{ "branch", "-m", "t/t", "t" }, .old = "t/t", .new = "t" },
+                .{ .setup = &.{ &.{ "branch", "o/p" }, &.{ "branch", "o/q" } }, .args = &.{ "branch", "-m", "o/q", "o/p" }, .old = "o/q", .new = "o/p", .err = error.BranchExists },
+                .{ .args = &.{ "branch", "-M", "o/q", "o/p" }, .old = "o/q", .new = "o/p", .force = true },
+                .{ .setup = &.{&.{ "branch", "r" }}, .args = &.{ "branch", "-m", "t", "r/q" }, .old = "t", .new = "r/q", .err = error.RefNameConflict },
+                .{ .args = &.{ "branch", "-M", "o/p", "main" }, .old = "o/p", .new = "main", .force = true, .err = error.BranchCheckedOut },
+                .{ .args = &.{ "branch", "-m", "o/p", "a..b" }, .old = "o/p", .new = "a..b", .err = error.InvalidBranchName },
+                .{ .args = &.{ "branch", "-m", "none", "other" }, .old = "none", .new = "other", .err = error.NoSuchBranch },
+                // The checked-out branch: HEAD follows it, with both lines.
+                .{ .args = &.{ "branch", "-M", "main", "main" }, .old = "main", .new = "main", .force = true },
+                .{ .args = &.{ "branch", "-m", "main", "bbb" }, .old = "main", .new = "bbb" },
+                .{ .args = &.{ "branch", "-m", "bbb", "main" }, .old = "bbb", .new = "main" },
+                // Copies, of the checked-out branch too, which HEAD stays on.
+                .{ .setup = &.{&.{ "config", "branch.o/p.description", "copied along" }}, .args = &.{ "branch", "-c", "o/p", "cp" }, .copy = true, .old = "o/p", .new = "cp" },
+                .{ .args = &.{ "branch", "-c", "cp", "cp" }, .copy = true, .old = "cp", .new = "cp" },
+                .{ .args = &.{ "branch", "-C", "main", "c2" }, .copy = true, .old = "main", .new = "c2", .force = true },
+                .{ .args = &.{ "branch", "-c", "cp", "o/p" }, .copy = true, .old = "cp", .new = "o/p", .err = error.BranchExists },
+                .{ .args = &.{ "branch", "-C", "cp", "o/p" }, .copy = true, .old = "cp", .new = "o/p", .force = true },
+                .{ .args = &.{ "branch", "-c", "cp", "cp/cp" }, .copy = true, .old = "cp", .new = "cp/cp", .err = error.RefNameConflict },
+                .{ .args = &.{ "branch", "-C", "cp", "main" }, .copy = true, .old = "cp", .new = "main", .force = true, .err = error.BranchCheckedOut },
+                // A branch made by accident under a name git no longer makes.
+                .{ .setup = &.{&.{ "update-ref", "refs/heads/-dash", "main" }}, .args = &.{ "branch", "-m", "--", "-dash", "undashed" }, .old = "-dash", .new = "undashed", .misnamed = true },
+                // An orphan branch is renamed in HEAD and the configuration
+                // alone, and cannot be copied.
+                .{ .setup = &.{ &.{ "checkout", "-q", "--orphan", "orphan" }, &.{ "config", "branch.orphan.remote", "origin" } }, .args = &.{ "branch", "-m", "orphan", "orphan2" }, .old = "orphan", .new = "orphan2" },
+                .{ .args = &.{ "branch", "-c", "orphan2", "x" }, .copy = true, .old = "orphan2", .new = "x", .err = error.NoCommitOnBranch },
+                .{ .setup = &.{&.{ "checkout", "-q", "-f", "main" }} },
+            };
+            var pair: Pair = undefined;
+            try Pair.init(gpa, io, &pair, format, script);
+            defer pair.deinit();
+            for (steps) |step| {
+                for (step.setup) |args| for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| try r.exec(io, args);
+                if (step.args.len == 0) continue;
+                var repo = try pair.open(io);
+                defer repo.deinit(io);
+                const inputs: branch.RenameInputs = .{ .old = step.old, .new = step.new };
+                const options: branch.RenameOptions = .{ .who = who, .force = step.force };
+                const ours = if (step.copy) branch.copy(gpa, io, &repo, inputs, options) else branch.rename(gpa, io, &repo, inputs, options);
+                if (step.err) |want| {
+                    pair.git.report_failures = false;
+                    try std.testing.expectError(error.GitFailed, pair.git.exec(io, step.args));
+                    pair.git.report_failures = true;
+                    try std.testing.expectError(want, ours);
+                } else {
+                    try pair.git.exec(io, step.args);
+                    const moved = ours catch |err| {
+                        std.debug.print("git {s} {s} {s}: {t}\n", .{ step.args[1], step.old, step.new, err });
+                        return err;
+                    };
+                    try std.testing.expectEqual(step.misnamed, moved.misnamed);
+                    if (!std.mem.startsWith(u8, step.new, "orphan")) try expectSameLog(&pair, io, step.new);
+                }
+                expectSame(&pair, io) catch |err| {
+                    std.debug.print("after git {s} {s} {s}\n", .{ step.args[1], step.old, step.new });
+                    return err;
+                };
+                expectSameHead(&pair, io) catch |err| {
+                    std.debug.print("HEAD after git {s} {s} {s}\n", .{ step.args[1], step.old, step.new });
+                    return err;
+                };
+            }
+        }
+    }.f);
+}
+
+fn expectSameIn(pair: *Pair, io: Io, args: []const []const u8) !void {
+    pair.git.report_failures = false;
+    pair.ours.report_failures = false;
+    defer pair.git.report_failures = true;
+    defer pair.ours.report_failures = true;
+    const left = pair.git.run(io, args) catch try pair.gpa.dupe(u8, "");
+    defer pair.gpa.free(left);
+    const right = pair.ours.run(io, args) catch try pair.gpa.dupe(u8, "");
+    defer pair.gpa.free(right);
+    try std.testing.expectEqualStrings(left, right);
+}
+
+test "a branch another worktree holds is renamed there too, from either worktree, and one a worktree rebases or bisects is not, as git 2.56's branch -m does" {
+    try testgit.eachRefFormat(struct {
+        fn f(format: testgit.RefFormat) !void {
+            const gpa = std.testing.allocator;
+            const io = std.testing.io;
+            var pair: Pair = undefined;
+            try Pair.init(gpa, io, &pair, format, script);
+            defer pair.deinit();
+            for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+                try r.exec(io, &.{ "worktree", "add", "-q", "wt", "topic" });
+                try r.exec(io, &.{ "worktree", "add", "-q", "--detach", "busy", "main" });
+                try r.exec(io, &.{ "branch", "o" });
+            }
+            const wt_state = [_][]const []const u8{
+                &.{ "-C", "wt", "symbolic-ref", "-q", "HEAD" },
+                &.{ "-C", "wt", "reflog", "show", "--format=%H %gn <%ge> %gs", "HEAD", "--" },
+            };
+            // From the main worktree: the linked one's HEAD follows.
+            {
+                var repo = try pair.open(io);
+                defer repo.deinit(io);
+                try pair.git.exec(io, &.{ "branch", "-m", "topic", "t2" });
+                _ = try branch.rename(gpa, io, &repo, .{ .old = "topic", .new = "t2" }, .{ .who = who });
+                pair.git.report_failures = false;
+                try std.testing.expectError(error.GitFailed, pair.git.exec(io, &.{ "branch", "-M", "o", "t2" }));
+                pair.git.report_failures = true;
+                try std.testing.expectError(error.BranchCheckedOut, branch.rename(gpa, io, &repo, .{ .old = "o", .new = "t2" }, .{ .who = who, .force = true }));
+            }
+            try expectSame(&pair, io);
+            for (wt_state) |args| try expectSameIn(&pair, io, args);
+            // From the worktree that holds it.
+            {
+                const at = try pair.ours.dir.openDir(io, "wt", .{});
+                defer at.close(io);
+                var repo = try @import("../repo/repo.zig").Repository.open(gpa, io, at, .{});
+                defer repo.deinit(io);
+                try pair.git.exec(io, &.{ "-C", "wt", "branch", "-m", "t2", "t3" });
+                _ = try branch.rename(gpa, io, &repo, .{ .old = "t2", .new = "t3" }, .{ .who = who });
+                const current = (try repo.refStore().currentBranch(gpa, io)).?;
+                defer gpa.free(current);
+                try std.testing.expectEqualStrings("t3", current);
+            }
+            try expectSame(&pair, io);
+            for (wt_state) |args| try expectSameIn(&pair, io, args);
+            // A detached worktree rebasing it, or whose bisection started
+            // from it.
+            for ([_][]const u8{ ".git/worktrees/busy/rebase-merge/head-name", ".git/worktrees/busy/BISECT_START" }, [_][]const u8{ "refs/heads/o\n", "o\n" }, [_]anyerror{ error.BranchBeingRebased, error.BranchBeingBisected }) |path, text, want| {
+                for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+                    try r.writeFile(io, path, text);
+                    try r.writeFile(io, ".git/worktrees/busy/BISECT_LOG", "");
+                }
+                var repo = try pair.open(io);
+                defer repo.deinit(io);
+                pair.git.report_failures = false;
+                try std.testing.expectError(error.GitFailed, pair.git.exec(io, &.{ "branch", "-m", "o", "o2" }));
+                pair.git.report_failures = true;
+                try std.testing.expectError(want, branch.rename(gpa, io, &repo, .{ .old = "o", .new = "o2" }, .{ .who = who }));
+                for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+                    try r.dir.deleteFile(io, path);
+                    try r.dir.deleteFile(io, ".git/worktrees/busy/BISECT_LOG");
+                }
+            }
+            try expectSame(&pair, io);
+        }
+    }.f);
+}
+
+/// One `git branch -d`, or a step both sides take.
+const Deletion = struct {
+    setup: []const []const []const u8 = &.{},
+    args: []const []const u8 = &.{},
+    names: []const []const u8 = &.{},
+    remote: bool = false,
+    force: bool = false,
+    /// Whether git exits non-zero: some branch was left.
+    fails: bool = false,
+    deleted: []const []const u8 = &.{},
+    refused: []const branch.Refusal.Why = &.{},
+    warned: usize = 0,
+};
+
+test "branches are deleted as git 2.56's branch -d deletes them, with their configuration, and left where git leaves them" {
+    try testgit.eachRefFormat(struct {
+        fn f(format: testgit.RefFormat) !void {
+            const gpa = std.testing.allocator;
+            const io = std.testing.io;
+            const steps = [_]Deletion{
+                .{ .setup = &.{ &.{ "branch", "gone" }, &.{ "config", "branch.gone.remote", "origin" } }, .args = &.{ "branch", "-d", "gone" }, .names = &.{"gone"}, .deleted = &.{"gone"} },
+                .{ .args = &.{ "branch", "-d", "main" }, .names = &.{"main"}, .fails = true, .refused = &.{.checked_out} },
+                .{ .args = &.{ "branch", "-d", "nothing" }, .names = &.{"nothing"}, .fails = true, .refused = &.{.not_found} },
+                // A bisection's start left behind with no bisection running
+                // holds nothing.
+                .{ .setup = &.{ &.{ "branch", "stale" }, &.{ "write", ".git/BISECT_START", "stale\n" } }, .args = &.{ "branch", "-d", "stale" }, .names = &.{"stale"}, .deleted = &.{"stale"} },
+                .{ .setup = &.{&.{ "update-ref", "refs/remotes/rm", "main" }}, .args = &.{ "branch", "-d", "rm" }, .names = &.{"rm"}, .fails = true, .refused = &.{.remote_exists} },
+                // Work that has not landed, then a branch tracking it: merged
+                // to its upstream and not to HEAD, which git warns of.
+                .{ .setup = &.{ &.{ "checkout", "-q", "-b", "ahead" }, &.{ "commit", "-q", "--allow-empty", "-m", "ahead" }, &.{ "checkout", "-q", "main" }, &.{ "branch", "--track", "w", "ahead" } }, .args = &.{ "branch", "-d", "ahead", "w" }, .names = &.{ "ahead", "w" }, .fails = true, .deleted = &.{"w"}, .refused = &.{.not_merged}, .warned = 1 },
+                .{ .args = &.{ "branch", "-D", "ahead" }, .names = &.{"ahead"}, .force = true, .deleted = &.{"ahead"} },
+                .{ .args = &.{ "branch", "-d", "-r", "origin/topic" }, .names = &.{"origin/topic"}, .remote = true, .deleted = &.{"origin/topic"} },
+                .{ .setup = &.{&.{ "symbolic-ref", "refs/heads/sym", "refs/heads/topic" }}, .args = &.{ "branch", "-d", "sym" }, .names = &.{"sym"}, .deleted = &.{"sym"} },
+                // A branch at an object that is gone goes only by force: a
+                // commit made, the branch put on it, the commit removed.
+                .{ .setup = &.{&.{"dangling"}}, .args = &.{ "branch", "-d", "dangling" }, .names = &.{"dangling"}, .fails = true, .refused = &.{.no_commit} },
+                .{ .args = &.{ "branch", "-D", "dangling" }, .names = &.{"dangling"}, .force = true, .deleted = &.{"dangling"} },
+            };
+            var pair: Pair = undefined;
+            try Pair.init(gpa, io, &pair, format, script);
+            defer pair.deinit();
+            for (steps) |step| {
+                for (step.setup) |args| for ([_]*testgit.Repo{ &pair.git, &pair.ours }) |r| {
+                    if (std.mem.eql(u8, args[0], "write")) {
+                        try r.writeFile(io, args[1], args[2]);
+                        continue;
+                    }
+                    if (!std.mem.eql(u8, args[0], "dangling")) {
+                        try r.exec(io, args);
+                        continue;
+                    }
+                    const made = try r.line(io, &.{ "commit-tree", "HEAD^{tree}", "-m", "dangling" });
+                    defer gpa.free(made);
+                    try r.exec(io, &.{ "update-ref", "refs/heads/dangling", made });
+                    const object = try gpa.print(".git/objects/{s}/{s}", .{ made[0..2], made[2..] });
+                    defer gpa.free(object);
+                    try r.dir.deleteFile(io, object);
+                };
+                var repo = try pair.open(io);
+                defer repo.deinit(io);
+                pair.git.report_failures = false;
+                const git_failed = if (pair.git.exec(io, step.args)) |_| false else |err| if (err == error.GitFailed) true else return err;
+                pair.git.report_failures = true;
+                try std.testing.expectEqual(step.fails, git_failed);
+                var outcome = try branch.delete(gpa, io, &repo, .{ .names = step.names, .remote = step.remote }, .{ .force = step.force });
+                defer outcome.deinit();
+                try std.testing.expectEqual(step.deleted.len, outcome.deleted.len);
+                for (step.deleted, outcome.deleted) |want, got| try std.testing.expectEqualStrings(want, got.name);
+                try std.testing.expectEqual(step.refused.len, outcome.refused.len);
+                for (step.refused, outcome.refused) |want, got| try std.testing.expectEqual(want, got.why);
+                try std.testing.expectEqual(step.warned, outcome.warnings.len);
+                expectSame(&pair, io) catch |err| {
+                    std.debug.print("after git {s} {s}\n", .{ step.args[1], step.names[0] });
+                    return err;
+                };
+                try expectSameIn(&pair, io, &.{ "for-each-ref", "--format=%(refname) %(objectname)", "refs/remotes" });
+            }
+        }
+    }.f);
+}

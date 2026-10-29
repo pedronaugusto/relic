@@ -1209,7 +1209,8 @@ pub const Store = struct {
         // A reftable has nothing to do for a ref moved onto itself; the
         // files format moves it out and back, its log gaining the line.
         if (store.refFormat() == .reftable and std.mem.eql(u8, old, new)) return;
-        if (try store.nameTaken(gpa, io, new, old)) return error.RefNameConflict;
+        // A copy leaves the old ref where it stands, in the way too.
+        if (try store.nameTaken(gpa, io, new, if (how == .rename) old else null)) return error.RefNameConflict;
         if (store.refFormat() == .reftable) return stack_engine.copyRef(gpa, io, store, .{ .old = old, .new = new, .delete_old = how == .rename }, log);
         return store.moveLoose(gpa, io, .{ .old = old, .new = new, .oid = orig, .how = how }, log);
     }
@@ -1287,34 +1288,38 @@ pub const Store = struct {
             try fs.rename(io, logs, renamed_log, new_log);
             log_placed.* = true;
         }
+        // git locks the new ref with the old one's object as its old
+        // value, so its line goes from the object to itself, and `HEAD`'s
+        // too when `HEAD` names a new ref that was there already (a copy
+        // onto a branch), which it reads before the ref is written.
+        const head_too = head: {
+            const head_ref = (try store.read(gpa, io, "HEAD")) orelse break :head false;
+            const target = switch (head_ref) {
+                .direct => break :head false,
+                .symbolic => |target| target,
+            };
+            defer gpa.free(target);
+            break :head std.mem.eql(u8, target, p.new) and try store.readOid(gpa, io, p.new) != null;
+        };
         {
             var tx = store.begin(gpa);
             defer tx.deinit(io);
             try tx.change(p.new, .{ .direct = p.oid }, .any, .{ .no_deref = true });
             try tx.commit(io, null);
         }
-        // git locks the new ref with the old one's object as its old
-        // value, so its line goes from the object to itself, and `HEAD`'s
-        // too when `HEAD` names the new ref.
         try store.appendLog(gpa, io, .{ .name = p.new, .old = p.oid, .new = p.oid }, log);
-        const head_ref = (try store.read(gpa, io, "HEAD")) orelse return;
-        switch (head_ref) {
-            .direct => {},
-            .symbolic => |target| {
-                defer gpa.free(target);
-                if (std.mem.eql(u8, target, p.new)) try store.appendLog(gpa, io, .{ .name = "HEAD", .old = p.oid, .new = p.oid }, log);
-            },
-        }
+        if (head_too) try store.appendLog(gpa, io, .{ .name = "HEAD", .old = p.oid, .new = p.oid }, log);
     }
 
-    /// git's `refs_verify_refname_available` with one name passed over: a
+    /// git's `refs_verify_refname_available`, with one name passed over: a
     /// ref other than `skip` stands where `name` would go, at a leading
     /// part of it or under it.
-    fn nameTaken(store: *const Store, gpa: Allocator, io: Io, name: []const u8, skip: []const u8) ReadError!bool {
+    fn nameTaken(store: *const Store, gpa: Allocator, io: Io, name: []const u8, skip: ?[]const u8) ReadError!bool {
+        const passed = skip orelse "";
         var end: usize = 0;
         while (std.mem.findScalarPos(u8, name, end + 1, '/')) |slash| : (end = slash) {
             const parent = name[0..slash];
-            if (std.mem.findScalar(u8, parent, '/') == null or std.mem.eql(u8, parent, skip)) continue;
+            if (std.mem.findScalar(u8, parent, '/') == null or std.mem.eql(u8, parent, passed)) continue;
             const found = (try store.read(gpa, io, parent)) orelse continue;
             switch (found) {
                 .direct => {},
@@ -1327,10 +1332,10 @@ pub const Store = struct {
         var listing = try store.list(gpa, io, folder);
         defer listing.deinit();
         for (listing.entries) |entry| {
-            if (!std.mem.eql(u8, entry.name, skip)) return true;
+            if (!std.mem.eql(u8, entry.name, passed)) return true;
         }
         for (listing.broken) |broken| {
-            if (!std.mem.eql(u8, broken.name, skip)) return true;
+            if (!std.mem.eql(u8, broken.name, passed)) return true;
         }
         return false;
     }
