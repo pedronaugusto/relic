@@ -412,12 +412,16 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, mailboxes: []const []con
     try repo.refStore().root().delete(repo.allocator(), io, .rebase_head);
 
     // the mails, cut as `git mailsplit -d4 -b` cuts them
-    const keep_cr = options.keep_cr orelse (config.getBool("am.keepcr", false) catch false);
+    const keep_cr = options.keep_cr orelse (try config.getBool("am.keepcr", false));
     var count: usize = 0;
     for (mailboxes) |box| {
         var cut = mailinfo.split(gpa, box, .{ .keep_cr = keep_cr, .mboxrd = format == .mboxrd, .allow_bare = true }) catch |err| {
-            // glint-ignore: Z026 -- the split's error is the one to report; a state directory left behind is what `am --abort` removes
-            destroy(io, repo) catch {};
+            // The split's error is the one to report; a state directory left
+            // behind is what `am --abort` removes. A cancel is put back.
+            destroy(io, repo) catch |e| switch (e) {
+                error.Canceled => io.recancel(),
+                else => {},
+            };
             return err;
         };
         defer cut.deinit();
@@ -430,12 +434,12 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, mailboxes: []const []con
     s.cur = 1;
     s.last = count;
 
-    s.three_way = options.rebasing or (options.three_way orelse (config.getBool("am.threeway", false) catch false));
+    s.three_way = options.rebasing or (options.three_way orelse (try config.getBool("am.threeway", false)));
     s.quiet = options.quiet;
     s.signoff = options.signoff;
     s.utf8 = options.utf8;
     s.keep = options.keep;
-    s.message_id = options.message_id orelse (config.getBool("am.messageid", false) catch false);
+    s.message_id = options.message_id orelse (try config.getBool("am.messageid", false));
     s.scissors = options.scissors;
     s.quoted_cr = options.quoted_cr;
     s.apply_opt = try applyWords(a, options.apply);
@@ -569,7 +573,7 @@ fn parseMail(s: *Session, name: []const u8) Error!bool {
         .keep_subject = s.keep == .subject,
         .keep_non_patch_brackets = s.keep == .non_patch,
         .add_message_id = s.message_id,
-        .scissors = s.scissors orelse (config.getBool("mailinfo.scissors", false) catch false),
+        .scissors = s.scissors orelse (try config.getBool("mailinfo.scissors", false)),
     };
     if (s.quoted_cr) |q| {
         options.quoted_cr = q;
@@ -665,7 +669,7 @@ fn writeCommitPatch(s: *Session, parents: []const Oid, tree: Oid) Error!void {
     }, .{
         .full_index = true,
         .binary_patches = true,
-        .quote_path = s.repo.configuration().getBool("core.quotepath", true) catch true,
+        .quote_path = (try s.repo.configuration().getBool("core.quotepath", true)),
     }) catch |err| switch (err) {
         error.WriteFailed => return error.OutOfMemory,
         else => |e| return e,
