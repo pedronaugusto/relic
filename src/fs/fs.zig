@@ -1741,6 +1741,7 @@ pub fn readSecretFile(
     const guess = std.math.cast(usize, file.length(io) catch 0) orelse max_bytes;
     var secret = try aegis.SecretBytes.init(gpa, @min(guess, max_bytes) + 1);
     errdefer secret.deinit();
+    var at: Reading = .offset;
     while (true) {
         const have = secret.len();
         if (have == secret.capacity()) {
@@ -1749,8 +1750,7 @@ pub fn readSecretFile(
         }
         // unreachable: the capacity was just made room for.
         secret.resizeWithinCapacity(secret.capacity()) catch unreachable;
-        const n = file.readStreaming(io, &.{secret.exposeMut()[have..]}) catch |err| switch (err) {
-            error.EndOfStream => 0,
+        const read = at.read(io, file, secret.exposeMut()[have..], have) catch |err| switch (err) {
             error.IsDir => {
                 secret.deinit();
                 return null;
@@ -1758,12 +1758,43 @@ pub fn readSecretFile(
             else => |e| return e,
         };
         // unreachable: the read filled no more than the capacity.
-        secret.resizeWithinCapacity(have + n) catch unreachable;
-        if (n == 0) break;
+        secret.resizeWithinCapacity(have + (read orelse 0)) catch unreachable;
+        if (read == null) break;
     }
     if (secret.len() > max_bytes) return error.StreamTooLong;
     return secret;
 }
+
+/// How a whole-file read reads: at an offset, as `readFileAlloc` (aegis's
+/// `own.readFile`) reads, so the file's shared position is no part of it;
+/// a file with no offsets (a pipe) as a stream.
+const Reading = enum {
+    offset,
+    stream,
+
+    /// Bytes read into `dest` at `pos`, or null at the end. At an offset a
+    /// read of no bytes is the end; a streamed read may give none short of
+    /// it (std allows "including 0", and reactor's io_uring answers so for
+    /// an interrupted read), and only `EndOfStream` ends it.
+    fn read(at: *Reading, io: Io, file: Io.File, dest: []u8, pos: usize) aegis.own.ReadFileError!?usize {
+        while (true) switch (at.*) {
+            .offset => {
+                const n = file.readPositional(io, &.{dest}, pos) catch |err| switch (err) {
+                    error.Unseekable => {
+                        at.* = .stream;
+                        continue;
+                    },
+                    else => |e| return e,
+                };
+                return if (n == 0) null else n;
+            },
+            .stream => return file.readStreaming(io, &.{dest}) catch |err| switch (err) {
+                error.EndOfStream => null,
+                else => |e| e,
+            },
+        };
+    }
+};
 
 /// Join path components with `/`, which is the separator every git format
 /// uses whatever the platform underneath. The result is the caller's.
@@ -1992,6 +2023,49 @@ test "a secret file is read whole into its owner, and refused past its limit as 
     try std.testing.expectError(error.StreamTooLong, readSecretFile(gpa, io, dir, "f", 4));
     try std.testing.expect(try readSecretFile(gpa, io, dir, "missing", 1 << 20) == null);
     try std.testing.expect(try readSecretFile(gpa, io, dir, "d", 1 << 20) == null);
+}
+
+/// An `Io` with no offsets to read at, as a pipe has, whose first streaming
+/// read gives five bytes and whose second gives none, short of the end: what
+/// reactor's io_uring backend answers for an interrupted read, and what
+/// `readStreaming` allows ("including 0").
+const ZeroMidStream = @import("shakedown").Layer(struct { reads: u32 = 0 }, .{ .operate = ZeroMidStreamOps.operate, .fileReadPositional = ZeroMidStreamOps.unseekable });
+const ZeroMidStreamOps = struct {
+    fn unseekable(userdata: ?*anyopaque, file: Io.File, data: []const []u8, offset: u64) Io.File.ReadPositionalError!usize {
+        _ = .{ userdata, file, data, offset };
+        return error.Unseekable;
+    }
+
+    fn operate(userdata: ?*anyopaque, operation: Io.Operation) Io.Cancelable!Io.Operation.Result {
+        const l = ZeroMidStream.of(userdata);
+        if (operation == .file_read_streaming) {
+            l.state.reads += 1;
+            switch (l.state.reads) {
+                1 => {
+                    var short = operation;
+                    const first = operation.file_read_streaming.data[0];
+                    short.file_read_streaming.data = &.{first[0..@min(first.len, 5)]};
+                    return l.base.vtable.operate(l.base.userdata, short);
+                },
+                2 => return .{ .file_read_streaming = 0 },
+                else => {},
+            }
+        }
+        return l.base.vtable.operate(l.base.userdata, operation);
+    }
+};
+
+test "a secret file is read on past a streamed read that gives no bytes short of the end" {
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "f", .data = "twelve bytes" });
+
+    var secret: ZeroMidStream = .init(std.testing.io, .{});
+    var kept = (try readSecretFile(gpa, secret.io(), tmp.dir, "f", 1 << 20)).?;
+    defer kept.deinit();
+    try std.testing.expectEqualStrings("twelve bytes", kept.expose());
+    try std.testing.expect(secret.state.reads > 2);
 }
 
 test "a lock is refused, not broken, and says who holds it" {

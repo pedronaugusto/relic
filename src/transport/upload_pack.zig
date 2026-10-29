@@ -1664,8 +1664,10 @@ const Paced = struct {
         defer file.close(p.io);
         var said: [128]u8 = undefined;
         while (true) {
+            // A read may give no bytes short of the end (std allows "including
+            // 0"): only EndOfStream, or a failure, ends the relay.
             const n = file.readStreaming(p.io, &.{&said}) catch return;
-            if (n == 0) return;
+            if (n == 0) continue;
             p.sendBand(2, said[0..n]) catch return;
         }
     }
