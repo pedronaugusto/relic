@@ -3614,7 +3614,7 @@ pub const RacyCheck = struct {
     }
 
     fn changed(node: *const index_mod.WriteOptions.Racy, index: *const Index, entry: index_mod.Entry) bool {
-        const c: *const RacyCheck = @alignCast(@fieldParentPtr("node", node)); // safe: the field belongs to this record
+        const c: *const RacyCheck = @alignCast(@fieldParentPtr("node", node)); // aegis: no-danger: changed is installed only on a RacyCheck's node
         return differsFromIndex(c.gpa, c.io, c.wt, .{ .index = index, .entry = entry }, c.rules) catch true;
     }
 };

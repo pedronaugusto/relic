@@ -139,7 +139,7 @@ const OneThread = struct {
         return false;
     }
     fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
-        const o: *OneThread = @ptrCast(@alignCast(ctx)); // aegis: boundary: std.mem.Allocator's vtable hands back the ctx allocator() gave it, this owner, as *anyopaque
+        const o: *OneThread = @ptrCast(@alignCast(ctx)); // std.mem.Allocator's vtable hands back the ctx allocator() gave it, this owner
         if (!o.mine()) return null;
         const p = o.child.rawAlloc(len, alignment, ret) orelse return null;
         o.live += len;
@@ -147,7 +147,7 @@ const OneThread = struct {
         return p;
     }
     fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret: usize) bool {
-        const o: *OneThread = @ptrCast(@alignCast(ctx)); // aegis: boundary: std.mem.Allocator's vtable hands back the ctx allocator() gave it, this owner, as *anyopaque
+        const o: *OneThread = @ptrCast(@alignCast(ctx)); // std.mem.Allocator's vtable hands back the ctx allocator() gave it, this owner
         if (!o.mine()) return false;
         if (!o.child.rawResize(memory, alignment, new_len, ret)) return false;
         o.live = o.live - memory.len + new_len;
@@ -155,7 +155,7 @@ const OneThread = struct {
         return true;
     }
     fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret: usize) ?[*]u8 {
-        const o: *OneThread = @ptrCast(@alignCast(ctx)); // aegis: boundary: std.mem.Allocator's vtable hands back the ctx allocator() gave it, this owner, as *anyopaque
+        const o: *OneThread = @ptrCast(@alignCast(ctx)); // std.mem.Allocator's vtable hands back the ctx allocator() gave it, this owner
         if (!o.mine()) return null;
         const p = o.child.rawRemap(memory, alignment, new_len, ret) orelse return null;
         o.live = o.live - memory.len + new_len;
@@ -163,7 +163,7 @@ const OneThread = struct {
         return p;
     }
     fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret: usize) void {
-        const o: *OneThread = @ptrCast(@alignCast(ctx)); // aegis: boundary: std.mem.Allocator's vtable hands back the ctx allocator() gave it, this owner, as *anyopaque
+        const o: *OneThread = @ptrCast(@alignCast(ctx)); // std.mem.Allocator's vtable hands back the ctx allocator() gave it, this owner
         _ = o.mine();
         o.child.rawFree(memory, alignment, ret);
         o.live -= memory.len;
@@ -402,20 +402,20 @@ const Phases = struct {
             return .{ .ptr = s, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
         }
         fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
-            const s: *Spy = @ptrCast(@alignCast(ctx)); // aegis: boundary: std.mem.Allocator's vtable hands back the ctx allocator() gave it, this owner, as *anyopaque
+            const s: *Spy = @ptrCast(@alignCast(ctx)); // std.mem.Allocator's vtable hands back the ctx allocator() gave it, this owner
             if (len >= 16 * 1024) s.phases.event(.search_alloc);
             return s.child.rawAlloc(len, alignment, ret);
         }
         fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret: usize) bool {
-            const s: *Spy = @ptrCast(@alignCast(ctx)); // aegis: boundary: std.mem.Allocator's vtable hands back the ctx allocator() gave it, this owner, as *anyopaque
+            const s: *Spy = @ptrCast(@alignCast(ctx)); // std.mem.Allocator's vtable hands back the ctx allocator() gave it, this owner
             return s.child.rawResize(memory, alignment, new_len, ret);
         }
         fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret: usize) ?[*]u8 {
-            const s: *Spy = @ptrCast(@alignCast(ctx)); // aegis: boundary: std.mem.Allocator's vtable hands back the ctx allocator() gave it, this owner, as *anyopaque
+            const s: *Spy = @ptrCast(@alignCast(ctx)); // std.mem.Allocator's vtable hands back the ctx allocator() gave it, this owner
             return s.child.rawRemap(memory, alignment, new_len, ret);
         }
         fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret: usize) void {
-            const s: *Spy = @ptrCast(@alignCast(ctx)); // aegis: boundary: std.mem.Allocator's vtable hands back the ctx allocator() gave it, this owner, as *anyopaque
+            const s: *Spy = @ptrCast(@alignCast(ctx)); // std.mem.Allocator's vtable hands back the ctx allocator() gave it, this owner
             s.child.rawFree(memory, alignment, ret);
         }
     };
@@ -597,25 +597,25 @@ const OneAtATime = struct {
         _ = o.inside.fetchSub(1, .release);
     }
     fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
-        const o: *OneAtATime = @ptrCast(@alignCast(ctx)); // aegis: boundary: std.mem.Allocator's vtable hands back the ctx allocator() gave it, this owner, as *anyopaque
+        const o: *OneAtATime = @ptrCast(@alignCast(ctx)); // std.mem.Allocator's vtable hands back the ctx allocator() gave it, this owner
         o.enter();
         defer o.leave();
         return o.child.rawAlloc(len, alignment, ret);
     }
     fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret: usize) bool {
-        const o: *OneAtATime = @ptrCast(@alignCast(ctx)); // aegis: boundary: std.mem.Allocator's vtable hands back the ctx allocator() gave it, this owner, as *anyopaque
+        const o: *OneAtATime = @ptrCast(@alignCast(ctx)); // std.mem.Allocator's vtable hands back the ctx allocator() gave it, this owner
         o.enter();
         defer o.leave();
         return o.child.rawResize(memory, alignment, new_len, ret);
     }
     fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret: usize) ?[*]u8 {
-        const o: *OneAtATime = @ptrCast(@alignCast(ctx)); // aegis: boundary: std.mem.Allocator's vtable hands back the ctx allocator() gave it, this owner, as *anyopaque
+        const o: *OneAtATime = @ptrCast(@alignCast(ctx)); // std.mem.Allocator's vtable hands back the ctx allocator() gave it, this owner
         o.enter();
         defer o.leave();
         return o.child.rawRemap(memory, alignment, new_len, ret);
     }
     fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret: usize) void {
-        const o: *OneAtATime = @ptrCast(@alignCast(ctx)); // aegis: boundary: std.mem.Allocator's vtable hands back the ctx allocator() gave it, this owner, as *anyopaque
+        const o: *OneAtATime = @ptrCast(@alignCast(ctx)); // std.mem.Allocator's vtable hands back the ctx allocator() gave it, this owner
         o.enter();
         defer o.leave();
         o.child.rawFree(memory, alignment, ret);

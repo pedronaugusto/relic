@@ -384,7 +384,7 @@ pub fn probeTimestampResolution(io: Io, dir: Io.Dir) Resolution {
     while (unit > 1 and divisor % unit != 0) unit /= 10;
     // A power of ten no coarser than a second, which is what a stat
     // comparison rounds a nanosecond field down to.
-    aegis.assert.invariant(std.time.ns_per_s % unit == 0, "a resolution is a power of ten of nanoseconds within a second");
+    aegis.assert.invariant(std.time.ns_per_s % unit == 0, "a resolution is a power of ten of nanoseconds within a second"); // aegis: no-danger: a divisibility check on the power of ten the loop above made, no unit converted
     return .{ .ns = unit, .measured = true };
 }
 
