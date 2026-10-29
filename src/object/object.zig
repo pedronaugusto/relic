@@ -277,8 +277,7 @@ pub const Tree = struct {
             const raw_len = it.tree.kind.rawLen();
             const oid_start = space + 1 + nul + 1;
             if (rest.len < oid_start + raw_len) return error.TruncatedTree;
-            // aegis: no-danger: the slice is cut to the format's raw length
-            const oid = Oid.fromRaw(it.tree.kind, rest[oid_start..][0..raw_len]) catch unreachable;
+            const oid = Oid.fromCut(it.tree.kind, rest[oid_start..][0..raw_len]);
             it.offset += oid_start + raw_len;
             return .{ .mode = mode, .name = name, .oid = oid };
         }

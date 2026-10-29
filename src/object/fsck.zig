@@ -792,7 +792,7 @@ const TreeEntry = struct {
     len: usize,
 
     fn oidValue(e: TreeEntry, kind: Kind) Oid {
-        return Oid.fromRaw(kind, e.oid) catch unreachable; // aegis: no-danger: decodeEntry took exactly rawLen bytes
+        return Oid.fromCut(kind, e.oid);
     }
 };
 
