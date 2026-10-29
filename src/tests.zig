@@ -198,6 +198,7 @@ test {
         _ = @import("wire/promisors_test.zig");
         _ = @import("wire/url_test.zig");
         _ = @import("wire/credential_test.zig");
+        _ = @import("wire/credential/cache.zig");
         _ = @import("testing/shared.zig");
         _ = @import("repo/ident_test.zig");
     }
