@@ -384,7 +384,7 @@ pub fn probeTimestampResolution(io: Io, dir: Io.Dir) Resolution {
     while (unit > 1 and divisor % unit != 0) unit /= 10;
     // A power of ten no coarser than a second, which is what a stat
     // comparison rounds a nanosecond field down to.
-    assert(std.time.ns_per_s % unit == 0); // aegis: no-danger: a resolution, a power of ten of nanoseconds within a second
+    aegis.assert.invariant(std.time.ns_per_s % unit == 0, "a resolution is a power of ten of nanoseconds within a second");
     return .{ .ns = unit, .measured = true };
 }
 
@@ -1370,14 +1370,14 @@ fn ownedWindows(io: Io, dir: Io.Dir, sub_path: []const u8, home: ?[]const u8) bo
     var size: u32 = 0;
     if (GetTokenInformation(token, token_user, &user_buf, user_buf.len, &size).toBool()) {
         // TOKEN_USER begins with the user's SID
-        const user_sid: *anyopaque = @as(*const *anyopaque, @ptrCast(&user_buf)).*; // aegis: no-danger: TOKEN_USER's first field is a SID pointer, and the buffer is aligned for it
+        const user_sid: *anyopaque = @as(*const *anyopaque, @ptrCast(&user_buf)).*; // aegis: boundary: TOKEN_USER's first field is a SID pointer, and the buffer is aligned for it
         if (IsValidSid(user_sid).toBool() and EqualSid(sid, user_sid).toBool()) return true;
     }
     if (IsWellKnownSid(sid, win_builtin_administrators_sid).toBool()) {
         var member: std.os.windows.BOOL = .FALSE;
         if (CheckTokenMembership(null, sid, &member).toBool() and member.toBool()) return true;
         var linked: std.os.windows.HANDLE = undefined;
-        if (GetTokenInformation(token, token_linked_token, @ptrCast(&linked), @sizeOf(std.os.windows.HANDLE), &size).toBool()) { // aegis: no-danger: TOKEN_LINKED_TOKEN is one handle, which this receives
+        if (GetTokenInformation(token, token_linked_token, @ptrCast(&linked), @sizeOf(std.os.windows.HANDLE), &size).toBool()) { // aegis: boundary: TOKEN_LINKED_TOKEN is one handle, which this receives
             defer _ = CloseHandle(linked);
             if (CheckTokenMembership(linked, sid, &member).toBool() and member.toBool()) return true;
         }
