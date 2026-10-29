@@ -689,7 +689,7 @@ const ZipSink = struct {
     writer: Io.Writer,
 
     fn drain(w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
-        const sink: *ZipSink = @alignCast(@fieldParentPtr("writer", w)); // aegis: no-danger: the vtable is installed only on a ZipSink's writer
+        const sink: *ZipSink = @alignCast(@fieldParentPtr("writer", w)); // aegis: boundary: std.Io.Writer's vtable hands drain the writer it was installed on, only a ZipSink's
         try sink.z.write(w.buffered());
         w.end = 0;
         var n: usize = 0;
@@ -875,7 +875,7 @@ const Walk = struct {
         const config = wk.repo.configuration();
         const head = stream.reader().peek(@intCast(@min(stream.size, zip_stream_piece))) catch |err| switch (err) {
             error.ReadFailed => return stream.err().?,
-            // aegis: no-danger: a stream gives its length's bytes or fails
+            // aegis: internal: an Odb.Stream's reader gives exactly its size's bytes, a short or corrupt object failing as ReadFailed, and this peeks at most that
             error.EndOfStream => unreachable,
         };
         return driver_mod.Driver.of(config, applied.get("diff")).isBinary(config, head);

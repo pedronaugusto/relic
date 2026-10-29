@@ -544,8 +544,7 @@ pub const Notes = struct {
     /// `construct_path_with_fanout`.
     fn pathWithFanout(t: *const Notes, key: []const u8, fanout: usize, buf: []u8) []u8 {
         var hex_buf: [hash.max_hex_len]u8 = undefined;
-        // aegis: no-danger: a raw name of the format's length is at most max_hex_len hex digits
-        const hex = std.mem.print(&hex_buf, "{x}", .{key[0..t.rawLen()]}) catch unreachable;
+        const hex = hash.Oid.fromCut(t.repo.objectFormat(), key[0..t.rawLen()]).hex(&hex_buf);
         // Each fanout level is two of the name's digits and a slash, and
         // some of the name is left for the file.
         assert(2 * fanout < hex.len);

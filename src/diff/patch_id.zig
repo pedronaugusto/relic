@@ -83,8 +83,7 @@ pub fn ofTrees(gpa: Allocator, io: Io, db: *odb_mod.Odb, inputs: diff.TreeInputs
             carry >>= 8;
         }
     }
-    // aegis: no-danger: the slice is cut to the format's raw length
-    return Oid.fromRaw(db.objectFormat(), result[0..raw_len]) catch unreachable;
+    return Oid.fromCut(db.objectFormat(), result[0..raw_len]);
 }
 
 /// The bytes of `text` that are not whitespace, in `buf`.

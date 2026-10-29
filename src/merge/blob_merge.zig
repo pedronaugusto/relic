@@ -97,6 +97,10 @@ pub const BlobResult = struct {
 /// The largest side git merges as text, `MAX_XDIFF_SIZE`: a larger one is
 /// merged as binary data is.
 pub const max_text_size: usize = 1023 * 1024 * 1024;
+comptime {
+    // A merge's three sides, each of at most this, are what parallax counts in a u32.
+    std.debug.assert(3 * @as(u64, max_text_size) <= std.math.maxInt(u32));
+}
 
 /// Whether `ll_merge`'s text driver takes `bytes`: no larger than
 /// `max_text_size`, and not binary by git's rule. Allocates nothing.
@@ -136,7 +140,7 @@ pub fn blobs(gpa: Allocator, io: Io, sides: Sides, options: BlobOptions) Self.Bl
     }) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.Canceled => return error.Canceled,
-        // aegis: no-danger: three sides of max_text_size at most hold fewer bytes and lines than a u32 counts
+        // aegis: internal: three sides of max_text_size at most hold fewer bytes and lines than a u32 counts, parallax's limit (checked at comptime below)
         error.InputTooLarge => unreachable,
     };
     return .{ .gpa = gpa, .bytes = merged.bytes, .status = if (merged.conflicts == 0) .clean else .conflicted };
