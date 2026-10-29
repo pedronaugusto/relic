@@ -194,13 +194,13 @@ const Reader = struct {
             .diff_options = try diff.configured(config, .{}),
             .renames = (try diff.RenameSettings.read(config)).options(),
             .order = try diff.Order.configured(a, io, repo.topDirectory().get(), config),
-            .show_root = config.getBool("log.showroot", true) catch true,
-            .quote_path = config.getBool("core.quotepath", true) catch true,
+            .show_root = (try config.getBool("log.showroot", true)),
+            .quote_path = (try config.getBool("core.quotepath", true)),
             .textconv = options.textconv,
             .encoding = try message.logOutputEncoding(config),
         };
         errdefer r.deinit();
-        if (config.getBool("log.mailmap", true) catch true) r.mailmap = try mailmap_mod.Mailmap.load(gpa, io, repo);
+        if (try config.getBool("log.mailmap", true)) r.mailmap = try mailmap_mod.Mailmap.load(gpa, io, repo);
         if (options.notes) {
             const ref = try notes_mod.defaultRef(gpa, repo);
             defer gpa.free(ref);
