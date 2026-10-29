@@ -343,7 +343,8 @@ fn logOrder(_: void, a: reftable.LogRecord, b: reftable.LogRecord) bool {
 const UntrustedName = aegis.input.Untrusted([]const u8);
 
 /// A name with a table's shape (`isTableName`): a file in the reftable
-/// directory and nothing past it. Only `checkTableName` makes one.
+/// directory and nothing past it. `checkTableName` makes one of a name
+/// read; `tableName` one it forms, which has git's shape.
 pub const TableName = struct { bytes: []const u8 };
 
 fn parseTableName(_: void, raw: []const u8) error{MalformedTablesList}!TableName {
@@ -375,7 +376,8 @@ fn tableName(io: Io, buf: *[64]u8, min: u64, max: u64) TableName {
         max,
         std.mem.readInt(u32, &random, .little),
     }) catch unreachable; // aegis: no-danger: two u64 of at most sixteen hex digits, a u32 of eight and fourteen bytes fit 64
-    return checkTableName(printed) catch unreachable; // aegis: no-danger: hex, dashes and `.ref` are a table's shape
+    // Hex digits, dashes and `.ref`: no slash, and no leading dot.
+    return .{ .bytes = printed };
 }
 
 //=========================================================================
