@@ -12,7 +12,6 @@ const refs = @import("../../value.zig");
 const cache = @import("cache.zig");
 pub const Options = @import("policy.zig").Options;
 pub const Error = @import("policy.zig").Error;
-const state_mod = @import("../../state.zig");
 const ref_names = @import("../../../names.zig").ref;
 const Stack = cache.Stack;
 const Cache = cache.Cache;
@@ -31,7 +30,7 @@ const View = struct {
     stacks: *const Stacks,
 
     fn acquire(gpa: Allocator, io: Io, store: anytype, owned: *?Stacks) Error!View {
-        if (state_mod.get(store.state).cache) |c| {
+        if (store.state.cache) |c| {
             var guard = try c.held.acquire(io);
             errdefer guard.deinit(io);
             const st = try cache.internal.refresh(c, &guard, io, store);
@@ -939,8 +938,8 @@ pub fn compactIn(gpa: Allocator, io: Io, parent: Io.Dir, inputs: CompactInputs, 
     var held: std.ArrayList([]u8) = .empty;
     defer {
         for (held.items) |lock_name| {
-            // glint-ignore: Z026 -- releasing a lock this transaction holds; one that cannot be removed is reported stale by the next writer, as git's is
-            dir.deleteFile(io, lock_name) catch {};
+            // One that will not go is reported stale by the next writer, as git's is.
+            fs.removeLeftover(io, dir, lock_name);
             gpa.free(lock_name);
         }
         held.deinit(gpa);
@@ -973,8 +972,8 @@ pub fn compactIn(gpa: Allocator, io: Io, parent: Io.Dir, inputs: CompactInputs, 
         new_name = name;
     }
     var installed = false;
-    // glint-ignore: Z026 -- a merged table no list names is only left for the next compaction to find
-    defer if (!installed) if (new_name) |name| dir.deleteFile(io, name) catch {};
+    // A merged table no list names is only left for the next compaction to find.
+    defer if (!installed) if (new_name) |name| fs.removeLeftover(io, dir, name);
 
     // The list again, as it is now: writers may have added tables, and the
     // merged ones are wherever it has them, in the order they were merged.
@@ -1002,8 +1001,8 @@ pub fn compactIn(gpa: Allocator, io: Io, parent: Io.Dir, inputs: CompactInputs, 
     // when it finds it gone. A platform that will not remove a file another
     // process has open leaves it for the next compaction to find.
     cache.internal.closeUnclaimed(&stack, &.{});
-    // glint-ignore: Z026 -- the list no longer names these tables; one a platform will not remove is left for the next compaction
-    for (stack.names[first .. last + 1]) |name| dir.deleteFile(io, name) catch {};
+    // The list no longer names these tables; one a platform will not remove is left for the next compaction.
+    for (stack.names[first .. last + 1]) |name| fs.removeLeftover(io, dir, name);
 }
 
 /// `Store.pack` over reftable, as git's `reftable_be_optimize`: the
@@ -1068,8 +1067,7 @@ fn clean(gpa: Allocator, io: Io, parent: Io.Dir, kind: Kind, options: Options) r
         const got = file.readPositionalAll(io, &header, 0) catch continue;
         if (got < header.len or !std.mem.eql(u8, header[0..4], "REFT")) continue;
         if (std.mem.readInt(u64, header[16..24], .big) > max) continue;
-        // glint-ignore: Z026 -- a stale table a platform will not remove is left for the next clean, as git's unlink leaves it
-        dir.deleteFile(io, table) catch {};
+        fs.removeLeftover(io, dir, table);
     }
 }
 
@@ -1086,8 +1084,8 @@ fn lockTables(gpa: Allocator, io: Io, dir: Io.Dir, names: []const []const u8, he
         if (dir.createFile(io, lock_name, .{ .exclusive = true })) |file| {
             file.close(io);
             held.append(gpa, lock_name) catch |err| {
-                // glint-ignore: Z026 -- the allocation's error is the one to report; a lock left behind is one git reports by name
-                dir.deleteFile(io, lock_name) catch {};
+                // The allocation's error is the one to report; a lock left behind is one git reports by name.
+                fs.removeLeftover(io, dir, lock_name);
                 gpa.free(lock_name);
                 return err;
             };

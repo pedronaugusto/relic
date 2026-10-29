@@ -1036,6 +1036,18 @@ test "the backoff grows as git's does, by squares to a second, with spread" {
     try std.testing.expectEqual(@as(i64, 1249), backoffMs(40, 499));
 }
 
+/// Removes `name` from `dir` when a cleanup leaves it behind: a lock let
+/// go, a temporary, a table a compaction replaced. As git's `unlink` there,
+/// a file that will not go stays for the next clean, and its error is not
+/// the caller's; a cancel that lands here is put back for the task's next
+/// cancelation point rather than lost.
+pub fn removeLeftover(io: Io, dir: Io.Dir, name: []const u8) void {
+    dir.deleteFile(io, name) catch |err| switch (err) {
+        error.Canceled => io.recancel(),
+        else => {},
+    };
+}
+
 /// Rename over the name `new_name`, as git renames: with no sync, and on
 /// Windows retried while a scanner or indexer holds either name.
 pub fn rename(io: Io, dir: Io.Dir, old_name: []const u8, new_name: []const u8) Io.Dir.RenameError!void {
@@ -2308,4 +2320,35 @@ test "an entry past 4 GiB gives its length in full, the index's stat modulo 2^32
     const found = (try statAt(io, tmp.dir, "big")).?;
     try std.testing.expectEqual(length, found.size);
     try std.testing.expectEqual(@as(u32, 21), found.stat.size);
+}
+
+test "a cancel that lands in removing a leftover is put back for the task, not lost" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "left.lock", .data = "" });
+    const Remove = struct {
+        fn run(task_io: Io, gate: *Io.Event, dir: Io.Dir) Io.Cancelable!void {
+            // Out of the cancel's reach until the cancel is asked for.
+            const before = task_io.swapCancelProtection(.blocked);
+            gate.waitUncancelable(task_io);
+            _ = task_io.swapCancelProtection(before);
+            removeLeftover(task_io, dir, "left.lock");
+            return task_io.checkCancel();
+        }
+    };
+    var gate: Io.Event = .unset;
+    var task = io.concurrent(Remove.run, .{ io, &gate, tmp.dir }) catch return error.SkipZigTest;
+    const Open = struct {
+        fn run(task_io: Io, g: *Io.Event) !void {
+            try task_io.sleep(.fromMilliseconds(50), .awake);
+            g.set(task_io);
+        }
+    };
+    var opener = try io.concurrent(Open.run, .{ io, &gate });
+    const outcome = task.cancel(io);
+    try opener.await(io);
+    try std.testing.expectError(error.Canceled, outcome);
+    // The cancel landed at the removal, which left the file.
+    try tmp.dir.access(io, "left.lock", .{});
 }

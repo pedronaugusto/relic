@@ -13,7 +13,6 @@ const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
 const odb_mod = @import("../odb/odb.zig");
 const refs_mod = @import("../refs/refs.zig");
-const refs_state = @import("../refs/state.zig");
 const reftable_stack = @import("../refs/reftable/stack.zig");
 const signing = @import("../object/signing.zig");
 const repo_mod = @import("repo.zig");
@@ -976,7 +975,7 @@ test "a refresh changing the ref backend requires reopening and keeps the old st
         defer repo.deinit(io);
         var diagnostic = repo_mod.Diagnostic.init(gpa);
         defer diagnostic.deinit();
-        const cache = refs_state.get(repo.refStore().state).cache;
+        const cache = repo.refStore().state.cache;
         const replacement = if (format == .files)
             "[core]\nrepositoryformatversion = 1\n[extensions]\nrefStorage = reftable\n[user]\nname = changed\n"
         else
@@ -985,7 +984,7 @@ test "a refresh changing the ref backend requires reopening and keeps the old st
         try std.testing.expectError(error.RefStorageChanged, repo.refreshConfig(io, .{ .diagnostic = &diagnostic }));
         try std.testing.expectEqualStrings("extensions.refStorage", diagnostic.unsupported_setting);
         try std.testing.expectEqual(format, repo.refStore().refFormat());
-        try std.testing.expectEqual(cache, refs_state.get(repo.refStore().state).cache);
+        try std.testing.expectEqual(cache, repo.refStore().state.cache);
         try std.testing.expect(repo.configuration().get("user.name") == null);
         // A refused refresh did not acknowledge the new file.
         try std.testing.expectError(error.RefStorageChanged, repo.refreshConfig(io, .{}));
@@ -997,7 +996,7 @@ test "a refresh changing the ref backend requires reopening and keeps the old st
         try std.testing.expect(try repo.refreshConfig(io, .{ .diagnostic = &diagnostic }));
         try std.testing.expectEqualStrings("", diagnostic.unsupported_setting);
         try std.testing.expectEqualStrings("accepted", repo.configuration().get("user.name").?);
-        try std.testing.expectEqual(cache, refs_state.get(repo.refStore().state).cache);
+        try std.testing.expectEqual(cache, repo.refStore().state.cache);
     }
 }
 
@@ -1027,7 +1026,7 @@ test "a refresh updates reftable write settings together with the configuration"
     defer tmp.cleanup();
     var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{ .default_branch = "main", .ref_format = .reftable });
     defer repo.deinit(io);
-    const cache = refs_state.get(repo.refStore().state).cache;
+    const cache = repo.refStore().state.cache;
     const prefix = "[core]\nrepositoryformatversion = 1\n[extensions]\nrefStorage = reftable\n[reftable]\n";
     try repo.gitDirectory().get().writeFile(io, .{ .sub_path = "config", .data = prefix ++
         "blockSize = 8192\nrestartInterval = 32\nindexObjects = false\ngeometricFactor = 4\nlockTimeout = 0\n" });
@@ -1038,7 +1037,7 @@ test "a refresh updates reftable write settings together with the configuration"
     try std.testing.expect(!options.write.index_objects);
     try std.testing.expectEqual(@as(u8, 4), options.geometric_factor);
     try std.testing.expectEqual(fs_mod.OnContention.fail, options.lock);
-    try std.testing.expectEqual(cache, refs_state.get(repo.refStore().state).cache);
+    try std.testing.expectEqual(cache, repo.refStore().state.cache);
     try repo.gitDirectory().get().writeFile(io, .{ .sub_path = "config", .data = prefix ++ "blockSize = invalid\n" });
     try std.testing.expectError(error.NotAnInteger, repo.refreshConfig(io, .{}));
     try std.testing.expectEqualDeep(options, repo.refStore().reftableOptions());
@@ -1046,7 +1045,7 @@ test "a refresh updates reftable write settings together with the configuration"
     try repo.gitDirectory().get().writeFile(io, .{ .sub_path = "config", .data = prefix ++ "lockTimeout = 200\n" });
     try std.testing.expect(try repo.refreshConfig(io, .{}));
     try std.testing.expectEqualDeep(reftable_stack.Options{ .lock = .{ .wait = .fromMilliseconds(200) } }, repo.refStore().reftableOptions());
-    try std.testing.expectEqual(cache, refs_state.get(repo.refStore().state).cache);
+    try std.testing.expectEqual(cache, repo.refStore().state.cache);
 }
 
 test "a reftable HEAD read failure does not become a detached branch" {

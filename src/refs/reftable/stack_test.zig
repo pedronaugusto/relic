@@ -9,7 +9,6 @@ const refs = @import("../refs.zig");
 const reflog = @import("../reflog.zig");
 const testgit = @import("../../testing/git.zig");
 const repo_mod = @import("../../repo/repo.zig");
-const state_mod = @import("../state.zig");
 const config_mod = @import("../../config/config.zig");
 
 test "a zone is git's hhmm number both ways" {
@@ -477,7 +476,7 @@ test "a repository's stack is kept between reads and read again only when it cha
 
     var repo = try repo_mod.Repository.open(gpa, io, git.dir, .{});
     defer repo.deinit(io);
-    const cache = state_mod.get(repo.refStore().state).cache.?;
+    const cache = repo.refStore().state.cache.?;
     for (0..50) |_| {
         const head = (try repo.head(io)).?;
         gpa.free(head.name);

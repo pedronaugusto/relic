@@ -143,12 +143,12 @@ pub const Store = struct {
     /// The returned owner must be released with `deinit`.
     pub fn init(gpa: Allocator, kind: Kind, git_dir: fs.LentDir, common_dir: fs.LentDir, options: Options) Allocator.Error!Store {
         const state = try state_mod.create(gpa, kind, options.format, options.reftable, git_dir, common_dir);
-        state_mod.get(state).shared = options.shared;
-        state_mod.get(state).fsync = options.fsync;
-        state_mod.get(state).options.fsync = options.fsync;
-        state_mod.get(state).locks = options.locks;
-        state_mod.get(state).precompose = options.precompose_unicode;
-        state_mod.get(state).symlink_refs = options.prefer_symlink_refs;
+        state.shared = options.shared;
+        state.fsync = options.fsync;
+        state.options.fsync = options.fsync;
+        state.locks = options.locks;
+        state.precompose = options.precompose_unicode;
+        state.symlink_refs = options.prefer_symlink_refs;
         return .{ .state = state };
     }
 
@@ -178,36 +178,36 @@ pub const Store = struct {
     /// Changing the backend or object format requires opening another store.
     /// What `core.sharedRepository` asks of what this store writes.
     pub fn sharedPermissions(store: *const Store) fs.Shared {
-        return state_mod.get(store.state).shared;
+        return store.state.shared;
     }
 
     /// The directories `init` was lent, lent on: their owner is the caller
     /// of `init`.
     pub fn gitDir(store: *const Store) fs.LentDir {
-        return state_mod.get(store.state).git_dir;
+        return store.state.git_dir;
     }
     pub fn commonDir(store: *const Store) fs.LentDir {
-        return state_mod.get(store.state).common_dir;
+        return store.state.common_dir;
     }
 
     pub fn objectFormat(store: *const Store) Kind {
-        return state_mod.get(store.state).kind;
+        return store.state.kind;
     }
 
     pub fn refFormat(store: *const Store) Format {
-        return state_mod.get(store.state).format;
+        return store.state.format;
     }
 
     /// The current write policy, returned by value.
     pub fn reftableOptions(store: *const Store) stack_engine.Options {
-        return state_mod.get(store.state).options;
+        return store.state.options;
     }
 
     /// Replace write policy without changing the backend, hash or read cache.
     /// The permissions and syncs it carries are the store's, which
     /// `configureWrites` sets.
     pub fn configureReftable(store: *Store, options: stack_engine.Options) void {
-        const data = state_mod.get(store.state);
+        const data = store.state;
         data.options = options;
         data.options.shared = data.shared;
         data.options.fsync = data.fsync;
@@ -215,13 +215,13 @@ pub const Store = struct {
 
     /// How a reference this store writes is synced.
     pub fn referenceSync(store: *const Store) fs.Sync {
-        return state_mod.get(store.state).fsync.sync(.reference);
+        return store.state.fsync.sync(.reference);
     }
 
     /// Change the permissions and syncs of what this store writes, as a
     /// refreshed configuration's `core.sharedRepository` and `core.fsync` say.
     pub fn configureWrites(store: *Store, shared: fs.Shared, fsync: fs.Fsync) void {
-        const data = state_mod.get(store.state);
+        const data = store.state;
         data.shared = shared;
         data.fsync = fsync;
         data.options.shared = shared;
@@ -231,30 +231,30 @@ pub const Store = struct {
     /// Take `locks` for every lock from here on, as a refreshed
     /// configuration says.
     pub fn configureLocks(store: *Store, wanted: Locks) void {
-        state_mod.get(store.state).locks = wanted;
-        state_mod.get(store.state).options.pid_file = wanted.pid_file;
+        store.state.locks = wanted;
+        store.state.options.pid_file = wanted.pid_file;
     }
 
     /// How the store's locks behave (`configureLocks`).
     pub fn locks(store: *const Store) Locks {
-        return state_mod.get(store.state).locks;
+        return store.state.locks;
     }
 
     /// Read the names of loose refs composed or not, as a newly published
     /// `core.precomposeUnicode` says.
     pub fn configureNames(store: *Store, precompose_unicode: bool) void {
-        state_mod.get(store.state).precompose = precompose_unicode;
+        store.state.precompose = precompose_unicode;
     }
 
     /// Write symbolic refs as symbolic links from here on, or not, as a
     /// refreshed configuration's `core.preferSymlinkRefs` says.
     pub fn configureSymlinkRefs(store: *Store, prefer: bool) void {
-        state_mod.get(store.state).symlink_refs = prefer;
+        store.state.symlink_refs = prefer;
     }
 
     /// Whether loose ref names are read composed (`configureNames`).
     pub fn precomposeUnicode(store: *const Store) bool {
-        return state_mod.get(store.state).precompose;
+        return store.state.precompose;
     }
 
     /// Release the backend and every cached stack together.
@@ -264,7 +264,7 @@ pub const Store = struct {
     /// It writes that worktree's own refs and logs, which this store
     /// refuses. The directory is borrowed; release with `deinit`.
     pub fn sibling(store: *const Store, git_dir: fs.LentDir) Allocator.Error!Store {
-        const d = state_mod.get(store.state);
+        const d = store.state;
         return Store.init(d.gpa, d.kind, git_dir, d.common_dir, .{
             .format = d.format,
             .reftable = d.options,
@@ -277,7 +277,7 @@ pub const Store = struct {
     }
 
     pub fn deinit(store: *Store) void {
-        state_mod.destroy(state_mod.get(store.state).gpa, store.state);
+        state_mod.destroy(store.state.gpa, store.state);
         store.* = undefined;
     }
 
@@ -688,7 +688,7 @@ pub const Store = struct {
     /// The store's snapshot of `packed-refs`, brought up to date, with its
     /// lock held: give it back with `release`.
     fn acquirePacked(store: *const Store, io: Io) ReadError!packed_cache.Cache.Snapshot {
-        return state_mod.get(store.state).packed_refs.?.snapshot(io, store.commonDir().get(), store.objectFormat());
+        return store.state.packed_refs.?.snapshot(io, store.commonDir().get(), store.objectFormat());
     }
 
     /// The object `packed-refs` names for `name`, or `null`.
@@ -716,7 +716,7 @@ pub const Store = struct {
     /// removes loose files after it, and a crash must not keep their
     /// removal and lose the name that holds them now.
     fn lockPacked(store: *const Store, io: Io, buffer: []u8) TransactionError!fs.LockFile {
-        const data = state_mod.get(store.state);
+        const data = store.state;
         return fs.LockFile.open(data.gpa, io, store.commonDir().get(), .{ .sub_path = "packed-refs", .buffer = buffer }, .{
             .shared = store.sharedPermissions(),
             .sync = store.referenceSync(),
@@ -740,7 +740,7 @@ pub const Store = struct {
         }
         try lock.commit(io);
         // The stat would tell the next lookup as much; this is cheaper.
-        if (state_mod.get(store.state).packed_refs) |c| c.forget(io);
+        if (store.state.packed_refs) |c| c.forget(io);
     }
 
     /// Which refs `pack` packs, and what becomes of their loose files.
@@ -852,7 +852,7 @@ pub const Store = struct {
     /// Remove `name`'s loose file under its lock when it holds `oid`;
     /// whether it went.
     fn removeLooseHolding(store: *const Store, io: Io, ref: names.Checked, oid: Oid) TransactionError!bool {
-        const data = state_mod.get(store.state);
+        const data = store.state;
         const dir = store.dirFor(ref.bytes).get();
         var buffer: [max_loose_ref]u8 = undefined;
         var lock = fs.LockFile.open(data.gpa, io, dir, .{ .sub_path = ref.bytes, .buffer = &buffer }, .{ .shared = store.sharedPermissions(), .sync = store.referenceSync(), .on_contention = data.locks.loose, .write_pid = data.locks.pid_file }) catch |err| switch (err) {
@@ -1106,7 +1106,7 @@ pub const Store = struct {
     /// `core.preferSymlinkRefs` (`configureSymlinkRefs`), where a link can be
     /// made: not on Windows, where git has `NO_SYMLINK_HEAD`.
     pub fn preferSymlinkRefs(store: *const Store) bool {
-        return builtin.target.os.tag != .windows and state_mod.get(store.state).symlink_refs;
+        return builtin.target.os.tag != .windows and store.state.symlink_refs;
     }
 
     /// Remove `name`'s log and every entry in it, as git's
@@ -1814,8 +1814,7 @@ pub const Transaction = struct {
                     tx.packed_announced = true;
                     try tx.announceAs(io, .prepared, true);
                 } else {
-                    // glint-ignore: Z026 -- as git's run_transaction_hook for an aborted state: the hook's status changes nothing
-                    tx.announceAs(io, .aborted, true) catch {};
+                    tx.announceSettled(io, .aborted, true);
                 }
             }
             try tx.announce(io, .prepared);
@@ -2035,6 +2034,18 @@ pub const Transaction = struct {
         return tx.announceAs(io, state, false);
     }
 
+    /// Tell the hook a transaction is settled, `committed` or `aborted`, with
+    /// the lines `announceAs` writes. As git's `run_transaction_hook` for a
+    /// settled state, the hook's failure changes nothing: the refs moved, or
+    /// stayed. A cancel that lands in the hook is put back for the task's
+    /// next cancelation point rather than lost.
+    fn announceSettled(tx: *Transaction, io: Io, state: hooks.Runner.TransactionState, packed_step: bool) void {
+        tx.announceAs(io, state, packed_step) catch |err| switch (err) {
+            error.Canceled => io.recancel(),
+            else => {},
+        };
+    }
+
     /// With `packed`, the lines of the `packed-refs` step: one per deleted
     /// ref, with no old value and no new one.
     fn announceAs(tx: *Transaction, io: Io, state: hooks.Runner.TransactionState, packed_step: bool) hooks.Error!void {
@@ -2081,8 +2092,7 @@ pub const Transaction = struct {
             try stack_engine.commit(io, tx, log);
             tx.finished = true;
             tx.releaseLocks(io);
-            // glint-ignore: Z026 -- the refs have moved; as git, a hook failing on "committed" changes nothing
-            if (tx.announced) tx.announce(io, .committed) catch {};
+            if (tx.announced) tx.announceSettled(io, .committed, false);
             return;
         }
 
@@ -2117,8 +2127,7 @@ pub const Transaction = struct {
         if (tx.packed_rewrite) try tx.removeFromPacked(io);
         if (tx.packed_announced) {
             tx.packed_announced = false;
-            // glint-ignore: Z026 -- packed-refs is rewritten; as git, a hook failing on "committed" changes nothing
-            tx.announceAs(io, .committed, true) catch {};
+            tx.announceSettled(io, .committed, true);
         }
         for (tx.edits.items) |edit| {
             if (edit.via != null or edit.new != null or edit.rejected) continue;
@@ -2173,8 +2182,7 @@ pub const Transaction = struct {
         }
         // The refs have moved; a hook failing now changes nothing, and its
         // status is not an error of the transaction's.
-        // glint-ignore: Z026 -- the refs have moved; as git, a hook failing on "committed" changes nothing
-        if (tx.announced) tx.announce(io, .committed) catch {};
+        if (tx.announced) tx.announceSettled(io, .committed, false);
     }
 
     /// Rewrite `packed-refs` without the deleted refs, from the file as it
@@ -2214,11 +2222,9 @@ pub const Transaction = struct {
             tx.finished = true;
             if (tx.packed_announced) {
                 tx.packed_announced = false;
-                // glint-ignore: Z026 -- as git's run_transaction_hook for an aborted state: the hook's status changes nothing
-                tx.announceAs(io, .aborted, true) catch {};
+                tx.announceSettled(io, .aborted, true);
             }
-            // glint-ignore: Z026 -- as git's run_transaction_hook for an aborted state: the hook's status changes nothing
-            if (tx.announced) tx.announce(io, .aborted) catch {};
+            if (tx.announced) tx.announceSettled(io, .aborted, false);
         }
     }
 
@@ -2503,7 +2509,7 @@ test "a store parses packed-refs once, and again when the file is replaced" {
     defer held_other.deinit(io);
     var other: Store = try .init(gpa, .sha1, held_other.lend(), held_other.lend(), .{});
     defer other.deinit();
-    const cache = state_mod.get(store.state).packed_refs.?;
+    const cache = store.state.packed_refs.?;
 
     const one = try Oid.parse(.sha1, &@as([40]u8, @splat('1')));
     const two = try Oid.parse(.sha1, &@as([40]u8, @splat('2')));
@@ -2916,6 +2922,58 @@ test "reference-transaction hears from a transaction what git's hears" {
         try tx.commit(io, null);
     }
     try twin.expectSameLog(io);
+}
+
+test "a cancel that lands in the hook a committed transaction runs is put back for the task, not lost" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var twin = try HookTwin.init(gpa, io, "block_on", "committed\n.git/hook-started\n.git/hook-release\n");
+    defer twin.deinit();
+    const first_text = try twin.relic.line(io, &.{ "rev-parse", "HEAD~1" });
+    defer gpa.free(first_text);
+    const first = try Oid.parse(.sha1, first_text);
+    var git_dir = fs.OwnedDir.init(try twin.relic.gitDir(io));
+    defer git_dir.deinit(io);
+    var config = try config_mod.Config.parseText(gpa, "", .local);
+    defer config.deinit();
+    var work = fs.OwnedDir.init(try twin.relic.dir.openDir(io, ".", .{ .iterate = true }));
+    defer work.deinit(io);
+    var runner = try hooks.Runner.init(gpa, io, .{
+        .config = &config,
+        .git_dir = git_dir.lend(),
+        .common_dir = git_dir.lend(),
+        .work_dir = work.lend(),
+    }, .{ .environ = &twin.environ }, .{ .output = .ignore });
+    defer runner.deinit();
+    var store: Store = try .init(gpa, .sha1, git_dir.lend(), git_dir.lend(), .{});
+    defer store.deinit();
+    const Commit = struct {
+        fn run(task_io: Io, s: *Store, r: *hooks.Runner, oid: Oid) !void {
+            var tx = s.begin(std.testing.allocator);
+            defer tx.deinit(task_io);
+            tx.hooks = r;
+            try tx.update("refs/heads/topic", .{ .direct = oid }, .any);
+            try tx.commit(task_io, null);
+            // The refs moved; a cancel that landed in the hook is still the task's.
+            try task_io.checkCancel();
+        }
+        fn release(task_io: Io, dir: Io.Dir) !void {
+            try task_io.sleep(.fromMilliseconds(200), .awake);
+            try dir.writeFile(task_io, .{ .sub_path = ".git/hook-release", .data = "" });
+        }
+    };
+    var task = io.concurrent(Commit.run, .{ io, &store, &runner, first }) catch return error.SkipZigTest;
+    while (true) {
+        if (twin.relic.dir.access(io, ".git/hook-started", .{})) |_| break else |_| {}
+        try io.sleep(.fromMilliseconds(5), .awake);
+    }
+    // Lets the hook go however its run ends, whether the cancel stops the
+    // wait for it or not.
+    var releaser = try io.concurrent(Commit.release, .{ io, twin.relic.dir });
+    const outcome = task.cancel(io);
+    try releaser.await(io);
+    try std.testing.expectError(error.Canceled, outcome);
+    try std.testing.expect((try store.read(gpa, io, "refs/heads/topic")).?.direct.eql(first));
 }
 
 test "an update goes through HEAD to its branch, and both logs record it, as git's does" {

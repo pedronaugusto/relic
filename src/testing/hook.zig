@@ -82,6 +82,7 @@ const actions: std.StaticStringMap(Action) = .initComptime(.{
     .{ "signing_wrapper", signingWrapper },
     .{ "history_record", historyRecord },
     .{ "context", context },
+    .{ "block_on", blockOn },
 });
 
 /// Say the data.
@@ -185,6 +186,24 @@ fn recordStdin(h: *const Hook) !u8 {
     try stdin.interface.appendRemainingUnlimited(h.arena, &entry);
     try appendFile(h.io, path, entry.items);
     return if (reject_state.len != 0 and std.mem.eql(u8, state, reject_state)) 1 else 0;
+}
+
+/// Run as the state on the data's first line names: write the file on its
+/// second line, then wait until the file on its third exists, so a test
+/// can act while the hook runs. Any other state returns at once.
+fn blockOn(h: *const Hook) !u8 {
+    var lines = std.mem.splitScalar(u8, h.data, '\n');
+    const state = lines.next() orelse return error.InvalidFixture;
+    const started = lines.next() orelse return error.InvalidFixture;
+    const release = std.mem.trimEnd(u8, lines.next() orelse return error.InvalidFixture, "\r");
+    if (h.args.len < 2 or !std.mem.eql(u8, h.args[1], state)) return 0;
+    var input = try h.readStdin();
+    defer input.deinit(h.arena);
+    try Io.Dir.cwd().writeFile(h.io, .{ .sub_path = started, .data = "" });
+    while (true) {
+        if (Io.Dir.cwd().access(h.io, release, .{})) |_| return 0 else |_| {}
+        try h.io.sleep(.fromMilliseconds(5), .awake);
+    }
 }
 
 /// Log a commit hook's view to `.git/hook.log`, then sign the message off
