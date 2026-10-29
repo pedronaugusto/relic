@@ -42,7 +42,7 @@ fn acks(gpa: std.mem.Allocator, io: Io, version: protocol.Version, repeat: usize
 
     var remote = try local.Remote.open(gpa, io, path, .{});
     defer remote.deinit(io);
-    var server = upload_pack.Server.init(gpa, io, &remote, version, .{ .stateless = true });
+    var server = try upload_pack.Server.init(gpa, io, &remote, version, .{ .stateless = true });
     var in_buffer: [pkt_line.max_line]u8 = undefined;
     var request_reader: Io.Reader = .fixed(request.written());
     var in = request_reader.limited(.unlimited, &in_buffer);

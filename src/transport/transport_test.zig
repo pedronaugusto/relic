@@ -217,6 +217,18 @@ test "a transport the configuration or GIT_ALLOW_PROTOCOL refuses is not opened"
     try testing.expectError(error.TransportNotAllowed, transport.Session.open(gpa, io, "/nonexistent/repo.git", .{ .service = .upload_pack, .kind = .sha1 }, .{ .from_user = false }));
 }
 
+test "a malformed transfer.advertiseSID is refused, as git dies on it, where no session id was sent" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var served = try testgit.Repo.init(gpa, io, &.{"--bare"});
+    defer served.deinit();
+    const path = try testremote.absolutePath(gpa, io, served.dir);
+    defer gpa.free(path);
+    var config = try config_mod.Config.parseText(gpa, "[transfer]\n\tadvertiseSID = maybe\n", .local);
+    defer config.deinit();
+    try testing.expectError(error.NotABoolean, transport.Session.open(gpa, io, path, .{ .service = .upload_pack, .kind = .sha1 }, .{ .config = &config }));
+}
+
 test "a missing repository, a dumb setting and a header that is not one are refused by name" {
     const gpa = testing.allocator;
     const io = testing.io;

@@ -35,6 +35,7 @@ const pkt_line = @import("../codec.zig").pkt_line;
 const protocol = @import("../wire.zig").protocol;
 const percent = @import("../text.zig").percent;
 const local = @import("local.zig");
+const config_mod = @import("../config/config.zig");
 const date = @import("../text.zig").date;
 const upload_pack = @import("upload_pack.zig");
 const receive_pack = @import("receive_pack.zig");
@@ -110,7 +111,7 @@ pub const Backend = struct {
             .receive_pack => .receive_pack,
         };
         const user = b.options.caller.user(b.options.caller.context, request);
-        if (!service.enabled(&remote, user)) return forbidden(io, response);
+        if (!try service.enabled(&remote, user)) return forbidden(io, response);
 
         const version = versionAsked(request);
         try response.header("Expires", "Fri, 01 Jan 1980 00:00:00 GMT");
@@ -145,7 +146,7 @@ pub const Backend = struct {
     fn serveDumb(b: *Backend, io: Io, arena: Allocator, remote: *local.Remote, dumb: Dumb, file: []const u8, request: *Request, response: *Response) anyerror!void {
         if (!request.method.eql(.GET) and !request.method.eql(.HEAD)) return methodNotAllowed(io, response);
         const config = remote.repo.configuration();
-        if (!(config.getBool("http.getanyfile", true) catch true)) return forbidden(io, response);
+        if (!try config.getBool("http.getanyfile", true)) return forbidden(io, response);
         var body: std.ArrayList(u8) = .empty;
         switch (dumb.kind) {
             .head => {
@@ -224,7 +225,7 @@ pub const Backend = struct {
         var body = request.reader(io).limited(.unlimited, buffer);
         switch (service) {
             .upload_pack => {
-                var server: upload_pack.Server = .init(b.gpa, io, remote, version, .{ .stateless = true });
+                var server: upload_pack.Server = try .init(b.gpa, io, remote, version, .{ .stateless = true });
                 switch (step) {
                     .advertise => try server.advertise(w),
                     .request => try server.serveRequest(w, &body.interface),
@@ -270,13 +271,14 @@ const Service = enum {
     }
 
     /// git's `http.uploadpack` (on unless off) and `http.receivepack`
-    /// (on for an authenticated caller unless set).
-    fn enabled(s: Service, remote: *local.Remote, user: ?[]const u8) bool {
+    /// (on for an authenticated caller unless set); a malformed one is
+    /// refused, as git's `http_config` dies on it.
+    fn enabled(s: Service, remote: *local.Remote, user: ?[]const u8) config_mod.ValueError!bool {
         const config = remote.repo.configuration();
         return switch (s) {
-            .upload_pack => config.getBool("http.uploadpack", true) catch true,
+            .upload_pack => try config.getBool("http.uploadpack", true),
             .receive_pack => if (config.find("http.receivepack") != null)
-                config.getBool("http.receivepack", false) catch false
+                try config.getBool("http.receivepack", false)
             else
                 user != null and user.?.len != 0,
         };
@@ -447,4 +449,22 @@ fn methodNotAllowed(io: Io, response: *Response) anyerror!void {
 test "a repository path stays under the root" {
     try std.testing.expect(safe("a/b.git"));
     for ([_][]const u8{ "", "../x", "a/../b", "a//b", "./a", "c:x" }) |bad| try std.testing.expect(!safe(bad));
+}
+
+const testgit = @import("../testing/git.zig");
+
+test "a malformed http.uploadpack or http.receivepack is refused, as git's http_config dies on it, where the default was taken" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var git = try testgit.Repo.init(gpa, io, &.{"--bare"});
+    defer git.deinit();
+    const path = try git.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(path);
+    for ([_]struct { []const u8, Service }{ .{ "http.uploadpack", .upload_pack }, .{ "http.receivepack", .receive_pack } }) |case| {
+        try git.exec(io, &.{ "config", case[0], "maybe" });
+        var remote = try local.Remote.open(gpa, io, path, .{});
+        defer remote.deinit(io);
+        try std.testing.expectError(error.NotABoolean, case[1].enabled(&remote, "someone"));
+        try git.exec(io, &.{ "config", "--unset", case[0] });
+    }
 }

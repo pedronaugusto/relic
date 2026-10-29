@@ -400,7 +400,7 @@ test "git 2.56, relic's upload-pack answers bundle-uri as git's under uploadpack
     defer remote.deinit(io);
     var said: warning.Warnings = .init(gpa);
     defer said.deinit();
-    var server: upload_pack_mod.Server = .init(gpa, io, &remote, .v2, .{ .stateless = true, .warnings = &said });
+    var server: upload_pack_mod.Server = try .init(gpa, io, &remote, .v2, .{ .stateless = true, .warnings = &said });
     var fixed: Io.Reader = .fixed(request);
     var buffer: [pkt_line.max_line]u8 = undefined;
     var in = fixed.limited(.unlimited, &buffer);

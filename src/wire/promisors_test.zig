@@ -84,7 +84,7 @@ test "a served repository advertises its promisor remotes as git's upload-pack d
 
     var remote = try local.Remote.open(gpa, io, path, .{});
     defer remote.deinit(io);
-    var s: upload_pack.Server = .init(gpa, io, &remote, .v2, .{});
+    var s: upload_pack.Server = try .init(gpa, io, &remote, .v2, .{});
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
     try s.advertise(&out.writer);
@@ -242,7 +242,7 @@ test "git 2.56, a request naming promisor-remote with no value ends the conversa
 
     var remote = try local.Remote.open(gpa, io, path, .{});
     defer remote.deinit(io);
-    var s: upload_pack.Server = .init(gpa, io, &remote, .v2, .{ .stateless = true });
+    var s: upload_pack.Server = try .init(gpa, io, &remote, .v2, .{ .stateless = true });
     var fixed: Io.Reader = .fixed(request.written());
     var buffer: [pkt_line.max_line]u8 = undefined;
     var in = fixed.limited(.unlimited, &buffer);
