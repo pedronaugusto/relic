@@ -1881,10 +1881,9 @@ pub const Odb = struct {
         out.file_writer = out.file.?.lend().get().writer(io, out.out_buffer);
         out.compressed_writer = .init(&out.compress, &out.file_writer.interface, out.window);
         out.hasher.updateHeader(t.name(), size);
-        var header_buf: [64]u8 = undefined;
-        // aegis: no-danger: a type name is at most six bytes and a u64 at most twenty digits
-        const header = std.mem.print(&header_buf, "{s} {d}\x00", .{ t.name(), size }) catch unreachable;
-        out.compressed_writer.interface.writeAll(header) catch |err| {
+        var digits: [20]u8 = undefined;
+        const size_text = digits[0..std.fmt.printInt(&digits, size, 10, .lower, .{})];
+        for ([_][]const u8{ t.name(), " ", size_text, "\x00" }) |part| out.compressed_writer.interface.writeAll(part) catch |err| {
             out.abort(io);
             return err;
         };
@@ -2189,7 +2188,7 @@ pub const Odb = struct {
         const raw_len = p.kind.rawLen();
         try p.readStored(io, p.bodyEnd(), trailer[0..raw_len]);
         // unreachable: the trailer is cut to the format's raw length
-        const stored = Oid.fromRaw(p.kind, trailer[0..raw_len]) catch unreachable;
+        const stored = Oid.fromCut(p.kind, trailer[0..raw_len]);
         if (!computed.eql(stored) or !stored.eql(p.index.pack_checksum)) return error.ChecksumMismatch;
     }
 
@@ -4574,28 +4573,28 @@ const LockedAllocator = struct {
     const vtable: Allocator.VTable = .{ .alloc = alloc, .resize = resize, .remap = remap, .free = free };
 
     fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
-        const l: *LockedAllocator = @ptrCast(@alignCast(ctx)); // aegis: no-danger: installed only by `allocator` on a LockedAllocator
+        const l: *LockedAllocator = @ptrCast(@alignCast(ctx)); // aegis: boundary: std.mem.Allocator erases its context; only `allocator` installs it, on a LockedAllocator
         var child = l.child.acquireUncancelable(l.io);
         defer child.deinit(l.io);
         return child.value().rawAlloc(len, alignment, ret_addr);
     }
 
     fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
-        const l: *LockedAllocator = @ptrCast(@alignCast(ctx)); // aegis: no-danger: installed only by `allocator` on a LockedAllocator
+        const l: *LockedAllocator = @ptrCast(@alignCast(ctx)); // aegis: boundary: std.mem.Allocator erases its context; only `allocator` installs it, on a LockedAllocator
         var child = l.child.acquireUncancelable(l.io);
         defer child.deinit(l.io);
         return child.value().rawResize(memory, alignment, new_len, ret_addr);
     }
 
     fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
-        const l: *LockedAllocator = @ptrCast(@alignCast(ctx)); // aegis: no-danger: installed only by `allocator` on a LockedAllocator
+        const l: *LockedAllocator = @ptrCast(@alignCast(ctx)); // aegis: boundary: std.mem.Allocator erases its context; only `allocator` installs it, on a LockedAllocator
         var child = l.child.acquireUncancelable(l.io);
         defer child.deinit(l.io);
         return child.value().rawRemap(memory, alignment, new_len, ret_addr);
     }
 
     fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
-        const l: *LockedAllocator = @ptrCast(@alignCast(ctx)); // aegis: no-danger: installed only by `allocator` on a LockedAllocator
+        const l: *LockedAllocator = @ptrCast(@alignCast(ctx)); // aegis: boundary: std.mem.Allocator erases its context; only `allocator` installs it, on a LockedAllocator
         var child = l.child.acquireUncancelable(l.io);
         defer child.deinit(l.io);
         child.value().rawFree(memory, alignment, ret_addr);

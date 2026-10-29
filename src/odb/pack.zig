@@ -200,8 +200,7 @@ pub const Index = struct {
         var checksum_hasher: hash.Hasher = .init(kind);
         checksum_hasher.update(bytes[0 .. bytes.len - raw_len]);
         const computed_checksum = checksum_hasher.final();
-        // aegis: no-danger: the slice is cut to the format's raw length
-        const stored_checksum = Oid.fromRaw(kind, bytes[bytes.len - raw_len ..][0..raw_len]) catch unreachable;
+        const stored_checksum = Oid.fromCut(kind, bytes[bytes.len - raw_len ..][0..raw_len]);
         if (!computed_checksum.eql(stored_checksum)) return error.ChecksumMismatch;
 
         const fanout_at: usize = 8;
@@ -223,8 +222,7 @@ pub const Index = struct {
         if (remaining % 8 != 0) return error.TruncatedIndex;
         const large = Rows.cut(bytes, large_at, remaining / 8, 8) orelse return error.TruncatedIndex;
 
-        // aegis: no-danger: the slice is cut to the format's raw length
-        const pack_checksum = Oid.fromRaw(kind, bytes[bytes.len - 2 * raw_len ..][0..raw_len]) catch unreachable;
+        const pack_checksum = Oid.fromCut(kind, bytes[bytes.len - 2 * raw_len ..][0..raw_len]);
 
         const index: Index = .{
             .gpa = gpa,
@@ -262,8 +260,7 @@ pub const Index = struct {
 
         var checksum_hasher: hash.Hasher = .init(kind);
         checksum_hasher.update(bytes[0 .. bytes.len - raw_len]);
-        // aegis: no-danger: the slice is cut to the format's raw length
-        const stored_checksum = Oid.fromRaw(kind, bytes[bytes.len - raw_len ..][0..raw_len]) catch unreachable;
+        const stored_checksum = Oid.fromCut(kind, bytes[bytes.len - raw_len ..][0..raw_len]);
         if (!checksum_hasher.final().eql(stored_checksum)) return error.ChecksumMismatch;
 
         const index: Index = .{
@@ -278,8 +275,7 @@ pub const Index = struct {
             .offsets = names,
             .crcs = .empty,
             .large = .empty,
-            // aegis: no-danger: the slice is cut to the format's raw length
-            .pack_checksum = Oid.fromRaw(kind, bytes[bytes.len - 2 * raw_len ..][0..raw_len]) catch unreachable,
+            .pack_checksum = Oid.fromCut(kind, bytes[bytes.len - 2 * raw_len ..][0..raw_len]),
         };
         try index.checkOrder();
         return index;
@@ -321,8 +317,7 @@ pub const Index = struct {
 
     /// The name of the object at position `i`.
     pub fn nameAt(index: Index, i: u32) Self.IndexError!Oid {
-        // aegis: no-danger: rawNameAt cuts the name to the format's raw length
-        return Oid.fromRaw(index.kind, try index.rawNameAt(i)) catch unreachable;
+        return Oid.fromCut(index.kind, try index.rawNameAt(i));
     }
 
     /// The pack offset of the object at position `i`.
@@ -629,8 +624,8 @@ pub const Pack = struct {
             .max_depth = options.max_depth,
             .max_chain_bytes = options.max_chain_bytes,
             .decoder = decoder,
-            // aegis: no-danger: read_block_bytes is a nonzero constant
-            .slots = @intCast(@max(1, @min(options.read_cache_bytes / read_block_bytes, std.math.divCeil(u64, stat.size, read_block_bytes) catch unreachable))),
+            // As many blocks as the file has, rounded up, and at least one.
+            .slots = @intCast(@max(1, @min(options.read_cache_bytes / read_block_bytes, stat.size / read_block_bytes + @intFromBool(stat.size % read_block_bytes != 0)))),
         };
     }
 
@@ -912,8 +907,7 @@ pub const Pack = struct {
             7 => blk: {
                 const raw_len = p.kind.rawLen();
                 if (i + raw_len > bytes.len) return null;
-                // aegis: no-danger: the slice is cut to the format's raw length
-                const oid = Oid.fromRaw(p.kind, bytes[i..][0..raw_len]) catch unreachable;
+                const oid = Oid.fromCut(p.kind, bytes[i..][0..raw_len]);
                 i += raw_len;
                 break :blk .{ .ref_delta = oid };
             },
@@ -1412,7 +1406,7 @@ pub const Pack = struct {
         const raw_len = p.kind.rawLen();
         try p.readAtExact(io, p.bodyEnd(), trailer[0..raw_len]);
         // unreachable: the trailer is cut to the format's raw length
-        const stored = Oid.fromRaw(p.kind, trailer[0..raw_len]) catch unreachable;
+        const stored = Oid.fromCut(p.kind, trailer[0..raw_len]);
         if (!computed.eql(stored)) return error.ChecksumMismatch;
         if (!stored.eql(p.index.pack_checksum)) return error.ChecksumMismatch;
     }
@@ -1938,6 +1932,8 @@ pub const WriteError = error{
     /// An object added from a reader carries the signature of a SHA-1
     /// collision attack, where the caller asked for the check.
     CollisionAttack,
+    /// `WriteOptions.prefix` is longer than `WriteOptions.max_prefix`.
+    PrefixTooLong,
 } || retention.Error || Allocator.Error || Io.File.OpenError || Io.Writer.Error ||
     fs.SyncError || Io.Dir.RenameError || Io.Dir.DeleteFileError ||
     Io.Dir.CreateDirError || Io.File.WritePositionalError ||
@@ -1998,10 +1994,12 @@ pub const WriteOptions = struct {
     mtimes: ?*const Oid.Map(u32) = null,
     /// The files' names before `-<name>`: git's `pack-objects <base>`,
     /// which `maintenance`'s loose-objects task gives as `loose`. At most
-    /// sixteen bytes.
+    /// `max_prefix` bytes; `Writer.open` refuses a longer one.
     prefix: []const u8 = "pack",
     /// `pack.indexVersion`: `IndexWriteOptions.version`.
     index_version: u2 = 2,
+
+    pub const max_prefix = 16;
 };
 
 /// What a finished pack turned out to be.
@@ -2085,6 +2083,21 @@ pub const Deflater = struct {
 /// the header and the header is written first. Every `add` streams straight
 /// to the file; `finish` writes the index and renames both into place under
 /// the name the pack's checksum gives it.
+/// The longest name `fileName` makes: a prefix, `-`, a hex name and `.mtimes`.
+const file_name_len = WriteOptions.max_prefix + 1 + hash.max_hex_len + ".mtimes".len;
+
+/// `<prefix>-<hex><extension>` in `buf`: a pack's file names, its prefix
+/// checked against `WriteOptions.max_prefix` when the writer opened.
+fn fileName(buf: *[file_name_len]u8, prefix: []const u8, hex: []const u8, extension: []const u8) []const u8 {
+    aegis.assert.invariant(prefix.len <= WriteOptions.max_prefix and hex.len <= hash.max_hex_len and extension.len <= ".mtimes".len, "open checked the prefix; hex names and extensions are the format's");
+    var at: usize = 0;
+    for ([_][]const u8{ prefix, "-", hex, extension }) |part| {
+        @memcpy(buf[at..][0..part.len], part);
+        at += part.len;
+    }
+    return buf[0..at];
+}
+
 pub const Writer = struct {
     pub const Error = ErrorNamespace.Error;
 
@@ -2095,10 +2108,11 @@ pub const Writer = struct {
     /// How many objects the header was written with, or `null` when the
     /// count was not known and the header will be patched at the end.
     expected: ?u32,
-    /// The names already written, so that a caller feeding objects it has
-    /// not de-duplicated cannot put one in twice -- which an index, whose
-    /// names must rise, cannot hold.
-    seen: Oid.Set,
+    /// The names already written, each at its entry's offset, so that a
+    /// caller feeding objects it has not de-duplicated cannot put one in
+    /// twice -- which an index, whose names must rise, cannot hold -- and
+    /// one added again from a reader is answered with the first's offset.
+    seen: Oid.Map(u64),
 
     temp: [64]u8,
     temp_len: usize,
@@ -2175,6 +2189,7 @@ pub const Writer = struct {
     /// Begin a pack in `dir`. Nothing is published until finish.
     /// An unknown count is patched into the header at finish before checksumming.
     pub fn open(gpa: Allocator, io: Io, dir: Io.Dir, inputs: OpenInputs, options: WriteOptions) Self.WriteError!*Writer {
+        if (options.prefix.len > WriteOptions.max_prefix) return error.PrefixTooLong;
         return initMaybeCounted(gpa, io, dir, inputs.kind, inputs.object_count, options);
     }
 
@@ -2492,12 +2507,9 @@ pub const Writer = struct {
         const oid = hasher.final();
         if (hasher.collisionAttack()) return error.CollisionAttack;
         if (options.expect) |expected| if (!expected.eql(oid)) return error.ObjectNameMismatch;
-        if (w.seen.contains(oid)) {
+        if (w.seen.get(oid)) |held| {
             if (w.streaming) return error.DuplicateObject;
             try w.dropLast(io);
-            const held = for (w.entries.items) |entry| {
-                if (entry.oid.eql(oid)) break entry.offset;
-            } else unreachable; // aegis: no-danger: `seen` holds what `entries` does
             return .{ .oid = oid, .offset = held, .new = false };
         }
         _ = try w.endEntry(oid, at);
@@ -2566,7 +2578,7 @@ pub const Writer = struct {
 
     fn endEntry(w: *Writer, oid: Oid, at: u64) WriteError!u64 {
         try w.entries.append(w.gpa, .{ .oid = oid, .offset = at, .crc = w.sink.crc.final() });
-        try w.seen.put(w.gpa, oid, {});
+        try w.seen.put(w.gpa, oid, at);
         return at;
     }
 
@@ -2607,12 +2619,10 @@ pub const Writer = struct {
 
         var hex: [hash.max_hex_len]u8 = undefined;
         const text = checksum.hex(&hex);
-        var pack_name_buf: [hash.max_hex_len + 32]u8 = undefined;
-        // aegis: no-danger: a hex name is at most max_hex_len digits, a prefix of sixteen bytes and the rest eight
-        const pack_name = std.mem.print(&pack_name_buf, "{s}-{s}.pack", .{ w.options.prefix, text }) catch unreachable;
-        var idx_name_buf: [hash.max_hex_len + 32]u8 = undefined;
-        // aegis: no-danger: a hex name is at most max_hex_len digits, a prefix of sixteen bytes and the rest eight
-        const idx_name = std.mem.print(&idx_name_buf, "{s}-{s}.idx", .{ w.options.prefix, text }) catch unreachable;
+        var pack_name_buf: [file_name_len]u8 = undefined;
+        const pack_name = fileName(&pack_name_buf, w.options.prefix, text, ".pack");
+        var idx_name_buf: [file_name_len]u8 = undefined;
+        const idx_name = fileName(&idx_name_buf, w.options.prefix, text, ".idx");
 
         // The index goes to a temporary of its own, because the order the two
         // become visible in is not free to choose: a reader finds a pack by
@@ -2649,15 +2659,13 @@ pub const Writer = struct {
         };
         // The reverse index before the index, as git renames them.
         if (rev_temp) |t| {
-            var rev_name_buf: [hash.max_hex_len + 32]u8 = undefined;
-            // aegis: no-danger: a hex name is at most max_hex_len digits, a prefix of sixteen bytes and the rest eight
-            const rev_name = std.mem.print(&rev_name_buf, "{s}-{s}.rev", .{ w.options.prefix, text }) catch unreachable;
+            var rev_name_buf: [file_name_len]u8 = undefined;
+            const rev_name = fileName(&rev_name_buf, w.options.prefix, text, ".rev");
             try fs.rename(io, w.dir, t, rev_name);
         }
         if (mtimes_temp) |t| {
-            var mtimes_name_buf: [hash.max_hex_len + 32]u8 = undefined;
-            // aegis: no-danger: a hex name is at most max_hex_len digits, a prefix of sixteen bytes and the rest eight
-            const mtimes_name = std.mem.print(&mtimes_name_buf, "{s}-{s}.mtimes", .{ w.options.prefix, text }) catch unreachable;
+            var mtimes_name_buf: [file_name_len]u8 = undefined;
+            const mtimes_name = fileName(&mtimes_name_buf, w.options.prefix, text, ".mtimes");
             try fs.rename(io, w.dir, t, mtimes_name);
         }
         fs.rename(io, w.dir, idx_temp, idx_name) catch |err| {
@@ -2851,6 +2859,18 @@ pub fn writeIndexFile(
     file.close(io);
     failed = false;
     return written;
+}
+
+test "a writer refuses a prefix longer than its file names hold, and names files with the longest" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try std.testing.expectError(error.PrefixTooLong, Writer.open(gpa, io, tmp.dir, .{ .kind = .sha1, .object_count = 0 }, .{ .prefix = &@as([WriteOptions.max_prefix + 1]u8, @splat('a')) }));
+    var buf: [file_name_len]u8 = undefined;
+    const longest: [WriteOptions.max_prefix]u8 = @splat('p');
+    const hex: [hash.max_hex_len]u8 = @splat('f');
+    try std.testing.expectEqualStrings(&longest ++ "-" ++ &hex ++ ".mtimes", fileName(&buf, &longest, &hex, ".mtimes"));
 }
 
 test "a written pack and its index read back, entry kind for entry kind" {
@@ -3399,25 +3419,25 @@ const LiveAllocator = struct {
         return .{ .ptr = l, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
     }
     fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
-        const l: *LiveAllocator = @ptrCast(@alignCast(ctx)); // aegis: no-danger: ctx is the pointer `allocator` handed out
+        const l: *LiveAllocator = @ptrCast(@alignCast(ctx)); // aegis: boundary: std.mem.Allocator erases its context; ctx is the LiveAllocator `allocator` handed out
         const p = l.child.rawAlloc(len, alignment, ret) orelse return null;
         l.live += len;
         return p;
     }
     fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret: usize) bool {
-        const l: *LiveAllocator = @ptrCast(@alignCast(ctx)); // aegis: no-danger: ctx is the pointer `allocator` handed out
+        const l: *LiveAllocator = @ptrCast(@alignCast(ctx)); // aegis: boundary: std.mem.Allocator erases its context; ctx is the LiveAllocator `allocator` handed out
         if (!l.child.rawResize(memory, alignment, new_len, ret)) return false;
         l.live = l.live - memory.len + new_len;
         return true;
     }
     fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret: usize) ?[*]u8 {
-        const l: *LiveAllocator = @ptrCast(@alignCast(ctx)); // aegis: no-danger: ctx is the pointer `allocator` handed out
+        const l: *LiveAllocator = @ptrCast(@alignCast(ctx)); // aegis: boundary: std.mem.Allocator erases its context; ctx is the LiveAllocator `allocator` handed out
         const p = l.child.rawRemap(memory, alignment, new_len, ret) orelse return null;
         l.live = l.live - memory.len + new_len;
         return p;
     }
     fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret: usize) void {
-        const l: *LiveAllocator = @ptrCast(@alignCast(ctx)); // aegis: no-danger: ctx is the pointer `allocator` handed out
+        const l: *LiveAllocator = @ptrCast(@alignCast(ctx)); // aegis: boundary: std.mem.Allocator erases its context; ctx is the LiveAllocator `allocator` handed out
         l.child.rawFree(memory, alignment, ret);
         l.live -= memory.len;
     }

@@ -436,7 +436,7 @@ pub fn receive(
     const result: Result = .{
         .keep = token,
         .name = streamed.name,
-        .objects = @intCast(index_entries.len), // safe: one entry per object of the stream, which counts them in a u32
+        .objects = @intCast(index_entries.len), // one entry per object of the stream, which counts them in a u32
         .deltas = indexer.deltas,
         .appended = streamed.appended,
     };
@@ -476,7 +476,7 @@ fn indexStream(indexer: *Indexer, in: *Io.Reader) Self.Error!?Streamed {
     var streamed: Streamed = .{ .name = read.trailer };
     if (indexer.thin_bases.items.len != 0) {
         streamed.name = try indexer.appendBases(read.body_end, count);
-        streamed.appended = @intCast(indexer.thin_bases.items.len); // safe: one base for each of at most `count` deltas, a u32
+        streamed.appended = @intCast(indexer.thin_bases.items.len); // one base for each of at most `count` deltas, a u32
     }
     try indexer.checkFound();
     return streamed;
@@ -565,8 +565,7 @@ fn readEntries(tee: *Tee, indexer: *Indexer, count: u32, kind: Kind) Error!struc
     const copied = tee.finish();
     if (copied.size < 12 + raw_len) return error.TruncatedPack;
     if (!copied.trailerMatches(kind)) return error.PackChecksumMismatch;
-    // aegis: no-danger: the tail is cut to the format's raw length
-    const trailer = Oid.fromRaw(kind, copied.tail[0..raw_len]) catch unreachable;
+    const trailer = Oid.fromCut(kind, copied.tail[0..raw_len]);
     const body_end = copied.size - raw_len;
     if (parsed_end > body_end) return error.TruncatedPack;
     if (parsed_end != body_end) return error.PackTrailingGarbage;
@@ -625,8 +624,7 @@ const Copied = struct {
     tail: [hash.max_raw_len]u8,
 
     fn trailerMatches(c: *const Copied, kind: Kind) bool {
-        // aegis: no-danger: the tail is cut to the format's raw length
-        const trailer = Oid.fromRaw(kind, c.tail[0..kind.rawLen()]) catch unreachable;
+        const trailer = Oid.fromCut(kind, c.tail[0..kind.rawLen()]);
         return trailer.eql(c.checksum);
     }
 };
@@ -976,8 +974,7 @@ const Indexer = struct {
                 entry.kind = .ref_delta;
                 try x.ref_bases.append(x.gpa, .{
                     .child = @intCast(x.entries.items.len),
-                    // aegis: no-danger: the slice is cut to the format's raw length
-                    .base = Oid.fromRaw(x.kind, raw[0..x.kind.rawLen()]) catch unreachable,
+                    .base = Oid.fromCut(x.kind, raw[0..x.kind.rawLen()]),
                 });
             },
             else => return x.fail(error.InvalidPackEntryType, .{ .offset = offset }),
@@ -2335,28 +2332,28 @@ const Peak = struct {
     }
 
     fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
-        const p: *Peak = @ptrCast(@alignCast(ctx)); // aegis: no-danger: only `allocator` hands this pointer out
+        const p: *Peak = @ptrCast(@alignCast(ctx)); // aegis: boundary: std.mem.Allocator erases its context; only `allocator` hands this Peak out
         const out = p.child.rawAlloc(len, alignment, ret) orelse return null;
         p.note(len, 0);
         return out;
     }
 
     fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, len: usize, ret: usize) bool {
-        const p: *Peak = @ptrCast(@alignCast(ctx)); // aegis: no-danger: only `allocator` hands this pointer out
+        const p: *Peak = @ptrCast(@alignCast(ctx)); // aegis: boundary: std.mem.Allocator erases its context; only `allocator` hands this Peak out
         if (!p.child.rawResize(memory, alignment, len, ret)) return false;
         p.note(len, memory.len);
         return true;
     }
 
     fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, len: usize, ret: usize) ?[*]u8 {
-        const p: *Peak = @ptrCast(@alignCast(ctx)); // aegis: no-danger: only `allocator` hands this pointer out
+        const p: *Peak = @ptrCast(@alignCast(ctx)); // aegis: boundary: std.mem.Allocator erases its context; only `allocator` hands this Peak out
         const out = p.child.rawRemap(memory, alignment, len, ret) orelse return null;
         p.note(len, memory.len);
         return out;
     }
 
     fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret: usize) void {
-        const p: *Peak = @ptrCast(@alignCast(ctx)); // aegis: no-danger: only `allocator` hands this pointer out
+        const p: *Peak = @ptrCast(@alignCast(ctx)); // aegis: boundary: std.mem.Allocator erases its context; only `allocator` hands this Peak out
         p.child.rawFree(memory, alignment, ret);
         p.note(0, memory.len);
     }
@@ -2903,7 +2900,7 @@ test "a pack received as a task and canceled, reading its stream or resolving it
         }
 
         fn stream(r: *Io.Reader, w: *Io.Writer, limit: Io.Limit) Io.Reader.StreamError!usize {
-            const t: *@This() = @alignCast(@fieldParentPtr("interface", r)); // safe: the reader is a Trickle's interface
+            const t: *@This() = @alignCast(@fieldParentPtr("interface", r)); // the reader is a Trickle's interface
             if (t.at == t.source.len) return error.EndOfStream;
             const dest = limit.slice(try w.writableSliceGreedy(1));
             const n = @min(dest.len, t.source.len - t.at, 256);

@@ -177,8 +177,7 @@ pub const Index = struct {
 
     /// The checksum that names a bitmap written beside this index.
     pub fn checksum(index: *const Index) Oid {
-        // aegis: no-danger: the slice is the last raw length of bytes, which parse checked are there
-        return Oid.fromRaw(index.kind, index.bytes[index.bytes.len - index.kind.rawLen() ..]) catch unreachable;
+        return Oid.fromCut(index.kind, index.bytes[index.bytes.len - index.kind.rawLen() ..]);
     }
 
     /// Name-order position at a pseudo-pack position, when RIDX is present.
@@ -254,8 +253,7 @@ pub const Index = struct {
     /// The name of the object at `position`.
     pub fn nameAt(index: *const Index, position: u32) Self.PositionError!Oid {
         const row = index.oids.at(position) orelse return error.CorruptMultiPackIndex;
-        // aegis: no-danger: a row of `oids` is the format's raw length
-        return Oid.fromRaw(index.kind, row) catch unreachable;
+        return Oid.fromCut(index.kind, row);
     }
 
     /// How many names begin with a byte up to `bucket`.

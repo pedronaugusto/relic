@@ -246,8 +246,7 @@ pub const Graph = struct {
 
     /// The trailing digest, checked when the graph is parsed.
     pub fn checksum(graph: *const Graph) Oid {
-        // aegis: no-danger: the slice is the last raw length of bytes, which parse checked are there
-        return Oid.fromRaw(graph.kind, graph.bytes[graph.bytes.len - graph.kind.rawLen() ..]) catch unreachable;
+        return Oid.fromCut(graph.kind, graph.bytes[graph.bytes.len - graph.kind.rawLen() ..]);
     }
 
     /// The changed-path filter at a global graph position, or null.
@@ -307,8 +306,7 @@ pub const Graph = struct {
     pub fn nameAt(graph: *const Graph, position: u32) Self.PositionError!Oid {
         if (position < graph.base_count) return graph.base.?.nameAt(position);
         const row = graph.names.at(position - graph.base_count) orelse return error.CorruptCommitGraph;
-        // aegis: no-danger: a row of `names` is the format's raw length
-        return Oid.fromRaw(graph.kind, row) catch unreachable;
+        return Oid.fromCut(graph.kind, row);
     }
 
     /// Where `oid` is in the graph, or `null`.
@@ -336,8 +334,7 @@ pub const Graph = struct {
         const local = position - graph.base_count;
         const raw_len = graph.kind.rawLen();
         const row = graph.data.at(local) orelse return error.CorruptCommitGraph;
-        // aegis: no-danger: a row of `data` is the format's raw length and 16 bytes
-        const tree = Oid.fromRaw(graph.kind, row[0..raw_len]) catch unreachable;
+        const tree = Oid.fromCut(graph.kind, row[0..raw_len]);
         const first = std.mem.readInt(u32, row[raw_len..][0..4], .big);
         const second = std.mem.readInt(u32, row[raw_len + 4 ..][0..4], .big);
         const packed_time = std.mem.readInt(u64, row[raw_len + 8 ..][0..8], .big);
