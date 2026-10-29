@@ -476,7 +476,7 @@ pub const Table = struct {
         if (block.restart_off < skip) return error.CorruptBlock;
         block.restarts = codec.Rows.exactly(block.data[block.restart_off..end], count, restart_width) orelse return error.CorruptBlock;
         for (0..count) |i| {
-            const r = block.restart(i);
+            const r = try block.restart(i);
             if (r < skip or r >= block.restart_off) return error.CorruptBlock;
         }
         if (block.full_size == 0) return error.CorruptBlock;
@@ -542,10 +542,10 @@ const Block = struct {
         b.* = undefined;
     }
 
-    /// Where restart point `i`, one the table holds, starts.
-    fn restart(b: *const Block, i: usize) usize {
-        // aegis: no-danger: `i` is below the count the table was cut to
-        const row = b.restarts.at(i) orelse unreachable;
+    /// Where restart point `i` starts; a point the table does not hold is
+    /// a corrupt block.
+    fn restart(b: *const Block, i: usize) Error!usize {
+        const row = b.restarts.at(i) orelse return error.CorruptBlock;
         return std.mem.readInt(u24, row[0..restart_width], .big);
     }
 
@@ -640,14 +640,14 @@ pub const Iterator = struct {
             const mid = lo + (hi - lo) / 2;
             scratch.clearRetainingCapacity();
             var r = block.records();
-            r.seek = block.restart(mid);
+            r.seek = try block.restart(mid);
             // A restart's key shares nothing with the one before it.
             if ((r.peekByte() catch return error.CorruptBlock) != 0) return error.CorruptBlock;
             _ = try takeKey(it.gpa, &r, &scratch);
             if (std.mem.order(u8, scratch.items, want) == .gt) hi = mid else lo = mid + 1;
         }
         it.records = block.records();
-        if (lo != 0) it.records.seek = block.restart(lo - 1);
+        if (lo != 0) it.records.seek = try block.restart(lo - 1);
         it.key.clearRetainingCapacity();
         var previous: std.ArrayList(u8) = .empty;
         defer previous.deinit(it.gpa);
@@ -742,9 +742,7 @@ fn skipValue(t: *const Table, typ: u8, r: *Io.Reader, extra: u3, key: []const u8
 }
 
 fn takeOid(t: *const Table, r: *Io.Reader) Error!Oid {
-    const bytes = r.take(t.kind.rawLen()) catch return error.CorruptRecord;
-    // aegis: no-danger: the slice is cut to the format's raw length
-    return Oid.fromRaw(t.kind, bytes) catch unreachable;
+    return Oid.fromCut(t.kind, r.take(t.kind.rawLen()) catch return error.CorruptRecord);
 }
 
 /// A string stored as its length and its bytes.

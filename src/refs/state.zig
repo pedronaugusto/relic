@@ -8,9 +8,8 @@ const stack = @import("reftable/stack/cache.zig");
 const packed_cache = @import("packed.zig");
 const policy = @import("reftable/stack/policy.zig");
 
-pub const State = opaque {};
-
-pub const Data = struct {
+/// The store's format, directories and caches: `Store.state`, private to it.
+pub const State = struct {
     gpa: std.mem.Allocator,
     /// Lent by the store's caller, which closes them after the store.
     git_dir: fs.LentDir,
@@ -45,12 +44,8 @@ pub const Locks = struct {
     pid_file: bool = false,
 };
 
-pub fn get(state: *State) *Data {
-    return @ptrCast(@alignCast(state)); // aegis: no-danger: create allocates every State as an aligned Data.
-}
-
 pub fn create(gpa: std.mem.Allocator, kind: hash.Kind, format: refs.Format, options: policy.Options, git_dir: fs.LentDir, common_dir: fs.LentDir) std.mem.Allocator.Error!*State {
-    const data = try gpa.create(Data);
+    const data = try gpa.create(State);
     errdefer gpa.destroy(data);
     const cache = if (format == .reftable) blk: {
         const c = try gpa.create(stack.Cache);
@@ -64,11 +59,11 @@ pub fn create(gpa: std.mem.Allocator, kind: hash.Kind, format: refs.Format, opti
         break :blk c;
     } else null;
     data.* = .{ .gpa = gpa, .git_dir = git_dir, .common_dir = common_dir, .kind = kind, .format = format, .options = options, .cache = cache, .packed_refs = packed_refs };
-    return @ptrCast(data); // aegis: no-danger: the opaque owner retains the allocated Data pointer.
+    return data;
 }
 
 pub fn destroy(gpa: std.mem.Allocator, state: *State) void {
-    const data = get(state);
+    const data = state;
     if (data.cache) |c| {
         c.deinit();
         gpa.destroy(c);
