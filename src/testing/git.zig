@@ -68,8 +68,10 @@ pub const Repo = struct {
     /// The environment git runs in, when a test needs one of its own — a
     /// fixed commit date, or a `GNUPGHOME` that is not the person's. `null`
     /// is the harness's isolated one; a test building its own starts from
-    /// `isolatedEnviron` or passes its map through `isolate`.
-    environ: ?*const Environ.Map = null,
+    /// `isolatedEnviron` or passes its map through `isolate`. The test owns
+    /// the map and lends it whole, so a helper may set a variable for one
+    /// command and take it out again.
+    environ: ?*Environ.Map = null,
     /// The scratch home the isolated environment points at: empty, and
     /// removed with the repository. A harness made around a directory the
     /// test owns, rather than by `init`, has none, and its git runs with

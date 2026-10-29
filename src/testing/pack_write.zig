@@ -139,7 +139,7 @@ const OneThread = struct {
         return false;
     }
     fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
-        const o: *OneThread = @ptrCast(@alignCast(ctx)); // safe: allocator() stores the original aligned owner pointer as its callback context.
+        const o: *OneThread = @ptrCast(@alignCast(ctx)); // aegis: boundary: std.mem.Allocator's vtable hands back the ctx allocator() gave it, this owner, as *anyopaque
         if (!o.mine()) return null;
         const p = o.child.rawAlloc(len, alignment, ret) orelse return null;
         o.live += len;
@@ -147,7 +147,7 @@ const OneThread = struct {
         return p;
     }
     fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret: usize) bool {
-        const o: *OneThread = @ptrCast(@alignCast(ctx)); // safe: allocator() stores the original aligned owner pointer as its callback context.
+        const o: *OneThread = @ptrCast(@alignCast(ctx)); // aegis: boundary: std.mem.Allocator's vtable hands back the ctx allocator() gave it, this owner, as *anyopaque
         if (!o.mine()) return false;
         if (!o.child.rawResize(memory, alignment, new_len, ret)) return false;
         o.live = o.live - memory.len + new_len;
@@ -155,7 +155,7 @@ const OneThread = struct {
         return true;
     }
     fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret: usize) ?[*]u8 {
-        const o: *OneThread = @ptrCast(@alignCast(ctx)); // safe: allocator() stores the original aligned owner pointer as its callback context.
+        const o: *OneThread = @ptrCast(@alignCast(ctx)); // aegis: boundary: std.mem.Allocator's vtable hands back the ctx allocator() gave it, this owner, as *anyopaque
         if (!o.mine()) return null;
         const p = o.child.rawRemap(memory, alignment, new_len, ret) orelse return null;
         o.live = o.live - memory.len + new_len;
@@ -163,7 +163,7 @@ const OneThread = struct {
         return p;
     }
     fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret: usize) void {
-        const o: *OneThread = @ptrCast(@alignCast(ctx)); // safe: allocator() stores the original aligned owner pointer as its callback context.
+        const o: *OneThread = @ptrCast(@alignCast(ctx)); // aegis: boundary: std.mem.Allocator's vtable hands back the ctx allocator() gave it, this owner, as *anyopaque
         _ = o.mine();
         o.child.rawFree(memory, alignment, ret);
         o.live -= memory.len;
@@ -402,20 +402,20 @@ const Phases = struct {
             return .{ .ptr = s, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
         }
         fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
-            const s: *Spy = @ptrCast(@alignCast(ctx)); // safe: allocator() stores the original aligned owner pointer as its callback context.
+            const s: *Spy = @ptrCast(@alignCast(ctx)); // aegis: boundary: std.mem.Allocator's vtable hands back the ctx allocator() gave it, this owner, as *anyopaque
             if (len >= 16 * 1024) s.phases.event(.search_alloc);
             return s.child.rawAlloc(len, alignment, ret);
         }
         fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret: usize) bool {
-            const s: *Spy = @ptrCast(@alignCast(ctx)); // safe: allocator() stores the original aligned owner pointer as its callback context.
+            const s: *Spy = @ptrCast(@alignCast(ctx)); // aegis: boundary: std.mem.Allocator's vtable hands back the ctx allocator() gave it, this owner, as *anyopaque
             return s.child.rawResize(memory, alignment, new_len, ret);
         }
         fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret: usize) ?[*]u8 {
-            const s: *Spy = @ptrCast(@alignCast(ctx)); // safe: allocator() stores the original aligned owner pointer as its callback context.
+            const s: *Spy = @ptrCast(@alignCast(ctx)); // aegis: boundary: std.mem.Allocator's vtable hands back the ctx allocator() gave it, this owner, as *anyopaque
             return s.child.rawRemap(memory, alignment, new_len, ret);
         }
         fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret: usize) void {
-            const s: *Spy = @ptrCast(@alignCast(ctx)); // safe: allocator() stores the original aligned owner pointer as its callback context.
+            const s: *Spy = @ptrCast(@alignCast(ctx)); // aegis: boundary: std.mem.Allocator's vtable hands back the ctx allocator() gave it, this owner, as *anyopaque
             s.child.rawFree(memory, alignment, ret);
         }
     };
@@ -597,25 +597,25 @@ const OneAtATime = struct {
         _ = o.inside.fetchSub(1, .release);
     }
     fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
-        const o: *OneAtATime = @ptrCast(@alignCast(ctx)); // safe: allocator() stores the original aligned owner pointer as its callback context.
+        const o: *OneAtATime = @ptrCast(@alignCast(ctx)); // aegis: boundary: std.mem.Allocator's vtable hands back the ctx allocator() gave it, this owner, as *anyopaque
         o.enter();
         defer o.leave();
         return o.child.rawAlloc(len, alignment, ret);
     }
     fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret: usize) bool {
-        const o: *OneAtATime = @ptrCast(@alignCast(ctx)); // safe: allocator() stores the original aligned owner pointer as its callback context.
+        const o: *OneAtATime = @ptrCast(@alignCast(ctx)); // aegis: boundary: std.mem.Allocator's vtable hands back the ctx allocator() gave it, this owner, as *anyopaque
         o.enter();
         defer o.leave();
         return o.child.rawResize(memory, alignment, new_len, ret);
     }
     fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret: usize) ?[*]u8 {
-        const o: *OneAtATime = @ptrCast(@alignCast(ctx)); // safe: allocator() stores the original aligned owner pointer as its callback context.
+        const o: *OneAtATime = @ptrCast(@alignCast(ctx)); // aegis: boundary: std.mem.Allocator's vtable hands back the ctx allocator() gave it, this owner, as *anyopaque
         o.enter();
         defer o.leave();
         return o.child.rawRemap(memory, alignment, new_len, ret);
     }
     fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret: usize) void {
-        const o: *OneAtATime = @ptrCast(@alignCast(ctx)); // safe: allocator() stores the original aligned owner pointer as its callback context.
+        const o: *OneAtATime = @ptrCast(@alignCast(ctx)); // aegis: boundary: std.mem.Allocator's vtable hands back the ctx allocator() gave it, this owner, as *anyopaque
         o.enter();
         defer o.leave();
         o.child.rawFree(memory, alignment, ret);
@@ -672,7 +672,8 @@ fn gitPacked(gpa: std.mem.Allocator, io: Io, depth: []const u8) !testgit.Repo {
 /// Each entry of a pack file: whether it is a delta, its zlib stream, and,
 /// for an offset delta, how deep its chain is.
 const Entries = struct {
-    const Entry = struct { delta: bool, stream: []const u8, depth: u32 };
+    /// `at` is where `stream` starts in the pack's bytes.
+    const Entry = struct { delta: bool, stream: []const u8, at: usize, depth: u32 };
     bytes: []u8,
     map: hash.Oid.Map(Entry) = .empty,
 
@@ -703,7 +704,8 @@ const Entries = struct {
                 .ref_delta => return error.TestUnexpectedResult,
             };
             try depths.put(gpa, at.offset, depth);
-            try e.map.put(gpa, at.oid, .{ .delta = header.kind != .object, .stream = e.bytes[@intCast(header.data_at)..@intCast(end)], .depth = depth });
+            const start: usize = @intCast(header.data_at);
+            try e.map.put(gpa, at.oid, .{ .delta = header.kind != .object, .stream = e.bytes[start..@intCast(end)], .at = start, .depth = depth });
         }
         return e;
     }
@@ -835,7 +837,7 @@ test "a stored delta whose bytes no longer match the pack index's CRC is refused
     const at = while (it.next()) |entry| {
         const t = theirs.map.get(entry.key_ptr.*).?;
         if (t.delta and entry.value_ptr.delta and std.mem.eql(u8, t.stream, entry.value_ptr.stream))
-            break @intFromPtr(t.stream.ptr) - @intFromPtr(theirs.bytes.ptr) + t.stream.len / 2; // safe: both pointers are into one buffer, the stream inside the bytes
+            break t.at + t.stream.len / 2;
     } else return error.TestUnexpectedResult;
     theirs.bytes[at] ^= 0x10;
     var name: [128]u8 = undefined;

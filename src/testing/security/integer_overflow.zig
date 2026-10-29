@@ -25,7 +25,7 @@ const testgit = @import("../git.zig");
 /// A slice of `n` items that is never read: what a size check is asked
 /// about before it looks at a byte.
 fn unread(comptime T: type, n: usize) []const T {
-    const many: [*]const T = @ptrFromInt(@alignOf(T)); // safe: a size check refuses it before any item is read
+    const many: [*]const T = @ptrFromInt(@alignOf(T)); // aegis: design: the test's subject is a length no memory could back, asked of a size check that refuses it before any item is read
     return many[0..n];
 }
 
