@@ -39,7 +39,6 @@ const lfstransfer = @import("transfer.zig");
 const lfslocks = @import("locks.zig");
 const auth = @import("../wire.zig").auth;
 const push_mod = @import("../transport/push.zig");
-const config_mod = @import("../config/config.zig");
 
 const Repository = repo_mod.Repository;
 
@@ -266,7 +265,11 @@ fn verifyState(a: Allocator, settings: *const lfsapi.Settings, url: []const u8) 
             std.ascii.eqlIgnoreCase(parts.host, "github.com");
         return if (known) .enabled else .unknown;
     };
-    const enabled = config_mod.parseBool(value) catch false;
+    // git-lfs's getVerifyStateFor reads it with Go's strconv.ParseBool,
+    // where only these spell true and anything it refuses is disabled.
+    const enabled = for ([_][]const u8{ "1", "t", "T", "TRUE", "true", "True" }) |word| {
+        if (std.mem.eql(u8, value, word)) break true;
+    } else false;
     return if (enabled) .enabled else .disabled;
 }
 

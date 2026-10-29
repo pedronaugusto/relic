@@ -32,6 +32,7 @@ const assert = std.debug.assert;
 const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
 const odb_mod = @import("../odb/odb.zig");
+const config_mod = @import("../config/config.zig");
 const repo_mod = @import("../repo/repo.zig");
 const refs_mod = @import("../refs/refs.zig");
 const rev_parse = @import("../repo/rev_parse.zig");
@@ -303,7 +304,7 @@ pub const Error = error{
     PrerequisitesNotConnected,
     /// A bundle in another object format than the repository's.
     ObjectFormatMismatch,
-} || Allocator.Error || odb_mod.Error || object_walk.Error || index_pack.Error || OpenError || Io.File.Writer.Error || refs_mod.ReadError;
+} || Allocator.Error || odb_mod.Error || object_walk.Error || index_pack.Error || OpenError || Io.File.Writer.Error || refs_mod.ReadError || config_mod.ValueError;
 
 /// What `verify` found.
 pub const Verification = struct {
@@ -404,7 +405,7 @@ pub fn unbundle(gpa: Allocator, io: Io, repo: *Repository, bundle: *File, option
         .fix_thin = true,
         .fsck = if (options.check_objects) &strict else null,
         .progress = options.progress,
-        .reverse_index = rev_index.wanted(repo.configuration()),
+        .reverse_index = try rev_index.wanted(repo.configuration()),
         .threads = index_pack.configuredThreads(repo.configuration()),
     });
 }

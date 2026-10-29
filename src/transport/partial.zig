@@ -306,7 +306,7 @@ pub const Lazy = struct {
             .tips = &.{},
             .include_tag = false,
             .filter = "blob:none",
-        } }, .{ .receive = .{ .keep = true, .fsck = if (rules) |*r| r else null, .promised = true, .reverse_index = rev_index.wanted(repo.configuration()) } });
+        } }, .{ .receive = .{ .keep = true, .fsck = if (rules) |*r| r else null, .promised = true, .reverse_index = try rev_index.wanted(repo.configuration()) } });
         defer fetched.deinit(io);
         if (fetched.pack) |pack_name| try writePromisor(l.gpa, io, repo.objectDatabase(), pack_name, &.{});
         for (fetched.uri_packs) |p| try writePromisor(l.gpa, io, repo.objectDatabase(), p.name, &.{});

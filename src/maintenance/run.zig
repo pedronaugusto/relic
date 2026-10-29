@@ -471,7 +471,7 @@ fn runTask(gpa: Allocator, io: Io, repo: *Repository, task: Task, phase: Phase, 
             if (!try repo.configuration().getBool("core.multipackindex", true)) return;
             _ = try ops.writeMidx(gpa, io, db, .{});
             _ = try ops.expireMidx(gpa, io, db, null);
-            _ = try ops.repackMidx(gpa, io, db, .{ .batch_size = try autoBatchSize(gpa, io, repo), .pack = packOptions(repo, options) });
+            _ = try ops.repackMidx(gpa, io, db, .{ .batch_size = try autoBatchSize(gpa, io, repo), .pack = try packOptions(repo, options) });
         },
         .geometric_repack => try geometricRepack(gpa, io, repo, options),
         .commit_graph => _ = try ops.writeConfiguredCommitGraph(gpa, io, repo, .maintenance),
@@ -494,7 +494,7 @@ fn packLoose(io: Io, repo: *Repository, options: RunOptions) Self.Error!void {
     if (loose.entries.len == 0) return;
     const batch = try taskInt(repo, .loose_objects, "batchsize", 50000);
     const take = if (batch <= 0) loose.entries.len else @min(loose.entries.len, @as(usize, @intCast(batch)));
-    var pack_options = packOptions(repo, options);
+    var pack_options = try packOptions(repo, options);
     pack_options.prefix = "loose";
     var opened_dir = try db.openPackDirectory(io);
     defer opened_dir.deinit(io);
@@ -505,9 +505,9 @@ fn packLoose(io: Io, repo: *Repository, options: RunOptions) Self.Error!void {
 
 /// The packs a task writes as the pack-objects git runs for it builds
 /// them: `pack.writeReverseIndex` read.
-fn packOptions(repo: *Repository, options: RunOptions) odb_mod.PackOptions {
+fn packOptions(repo: *Repository, options: RunOptions) config_mod.ValueError!odb_mod.PackOptions {
     var pack_options = options.pack orelse repo.objectDatabase().packOptions();
-    pack_options.reverse_index = pack_options.reverse_index or rev_index.wanted(repo.configuration());
+    pack_options.reverse_index = pack_options.reverse_index or try rev_index.wanted(repo.configuration());
     return pack_options;
 }
 

@@ -358,7 +358,8 @@ const Op = struct {
         if (repo.configuration().sources.worktree != null) return;
         // What the shared file says, kept before a write replaces the
         // configuration it is read from.
-        const bare = if (sharedValue(repo.configuration(), "core.bare")) |v| config_mod.parseBool(v) catch false else false;
+        // git_configset_get_bool: a value it cannot read dies.
+        const bare = if (sharedValue(repo.configuration(), "core.bare")) |v| try config_mod.parseBool(v) else false;
         const core_worktree = if (sharedValue(repo.configuration(), "core.worktree")) |v| try repo.allocator().dupe(u8, v) else null;
         defer if (core_worktree) |v| repo.allocator().free(v);
 

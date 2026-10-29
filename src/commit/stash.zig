@@ -891,7 +891,7 @@ pub fn applyEntry(io: Io, repo: *Repository, stash: Stash, options: ApplyOptions
     const current_tree = try worktree.writeTree(gpa, io, &ctx.locked.index, db);
 
     // `--index`: the stash's staged changes, merged onto the index as it is.
-    const use_index = options.index orelse (repo.configuration().getBool("stash.index", false) catch false);
+    const use_index = options.index orelse (try repo.configuration().getBool("stash.index", false));
     const restored_index = if (use_index) try stagedTree(gpa, io, db, stash, current_tree) else null;
 
     const labels: merge.Labels = .{

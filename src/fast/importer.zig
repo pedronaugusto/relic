@@ -429,8 +429,8 @@ const Importer = struct {
             .import_marks = options.import_marks,
             .import_marks_if_exists = options.import_marks_if_exists,
             .export_marks = options.export_marks,
-            .ignore_case = config.getBool("core.ignorecase", false) catch false,
-            .quote_path = config.getBool("core.quotepath", true) catch true,
+            .ignore_case = try config.getBool("core.ignorecase", false),
+            .quote_path = try config.getBool("core.quotepath", true),
             .empty_tree = kind.emptyTree(),
             .unpack_limit = try unpackLimitOf(config),
         };

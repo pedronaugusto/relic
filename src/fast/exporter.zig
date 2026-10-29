@@ -26,6 +26,7 @@ const Io = std.Io;
 const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
 const odb_mod = @import("../odb/odb.zig");
+const config_mod = @import("../config/config.zig");
 const repo_mod = @import("../repo/repo.zig");
 const rev_walk = @import("../walk/walk.zig");
 const diff = @import("../diff/diff.zig");
@@ -62,7 +63,7 @@ pub const Error = error{
     /// A `refspecs` entry that does not parse.
     InvalidRefspec,
 } || Allocator.Error || odb_mod.Error || rev_walk.Error || diff.Error || Io.Writer.Error ||
-    aegis.own.ReadFileError || Io.Dir.CreateDirPathError || fs.LockError || fs.CommitError || object.ParseError;
+    aegis.own.ReadFileError || Io.Dir.CreateDirPathError || fs.LockError || fs.CommitError || object.ParseError || config_mod.ValueError;
 
 /// What becomes of a signature: git's `--signed-tags` and
 /// `--signed-commits`.
@@ -144,7 +145,7 @@ pub fn write(gpa: Allocator, io: Io, w: *Io.Writer, repo: *Repository, options: 
         .w = w,
         .options = options,
         .arena_state = .init(gpa),
-        .quote_path = repo.configuration().getBool("core.quotepath", true) catch true,
+        .quote_path = try repo.configuration().getBool("core.quotepath", true),
     };
     defer ex.deinit();
     try ex.run();

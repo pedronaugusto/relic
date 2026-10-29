@@ -54,7 +54,7 @@ pub const Error = errors: {
         NameOnlyDisallowedCharacters,
         /// `GIT_<ROLE>_DATE` git cannot read: "invalid date format".
         InvalidDate,
-    } || Allocator.Error;
+    } || Allocator.Error || config_mod.ValueError;
 };
 
 fn decoded(arena: Allocator, raw: []const u8) Allocator.Error![]const u8 {
@@ -107,7 +107,7 @@ pub fn signature(arena: Allocator, config: *const config_mod.Config, environ: ?*
     const machine = inputs.machine;
     const now = inputs.now;
     const role_name = @tagName(role);
-    const config_only = config.getBool("user.useconfigonly", false) catch false;
+    const config_only = try config.getBool("user.useconfigonly", false);
     const email_given = config.has("author.email") or config.has("committer.email") or config.has("user.email");
     const name_given = config.has("author.name") or config.has("committer.name") or config.has("user.name");
 

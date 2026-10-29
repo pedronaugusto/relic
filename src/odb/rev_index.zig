@@ -27,9 +27,9 @@ pub const Error = Allocator.Error || Io.File.OpenError || fs.SyncError || Io.Wri
 
 /// Whether `config` asks for reverse indexes: `pack.writeReverseIndex`,
 /// true when unset, as git has it since 2.41.
-pub fn wanted(config: ?*const config_mod.Config) bool {
+pub fn wanted(config: ?*const config_mod.Config) config_mod.ValueError!bool {
     const c = config orelse return true;
-    return c.getBool("pack.writereverseindex", true) catch true;
+    return c.getBool("pack.writereverseindex", true);
 }
 
 /// Write the reverse index of a pack whose `.idx` holds `entries`, sorted
@@ -97,4 +97,14 @@ pub fn write(
     try fs.syncFile(io, file, .{ .policy = sync });
     file.close(io);
     failed = false;
+}
+
+test "pack.writeReverseIndex that is no boolean is refused, as git dies on it" {
+    var config = try config_mod.Config.parseText(std.testing.allocator,
+        \\[pack]
+        \\    writeReverseIndex = sometimes
+    , .local);
+    defer config.deinit();
+    try std.testing.expectError(error.NotABoolean, wanted(&config));
+    try std.testing.expect(try wanted(null));
 }

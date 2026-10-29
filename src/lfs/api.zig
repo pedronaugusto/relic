@@ -350,15 +350,23 @@ pub const Settings = struct {
         return false;
     }
 
-    fn lastEntry(s: *const Settings, full_name: []const u8) ?config_mod.Entry {
-        if (s.config.find(full_name)) |entry| return entry;
+    /// The value git-lfs reads from `entry`, or `null` where it reads none: a
+    /// name written with no `=` is dropped from the `git config -l -z` it
+    /// reads (`lfs.configValue`), and from `.lfsconfig` it takes only the
+    /// keys the file may set.
+    fn readValue(entry: config_mod.Entry, from_file: bool) ?[]const u8 {
+        if (from_file and !fileMayHold(entry)) return null;
+        return entry.value;
+    }
+
+    fn lastValue(s: *const Settings, full_name: []const u8) ?[]const u8 {
+        if (lfs.configValue(s.config, full_name)) |value| return value;
         const file = if (s.file) |*f| f else return null;
         const split = config_mod.splitFullName(full_name) orelse return null;
-        var found: ?config_mod.Entry = null;
+        var found: ?[]const u8 = null;
         for (file.entries.items) |entry| {
             if (!entry.matches(split.section, split.subsection, split.name)) continue;
-            if (!fileMayHold(entry)) continue;
-            found = entry;
+            found = readValue(entry, true) orelse continue;
         }
         return found;
     }
@@ -366,24 +374,21 @@ pub const Settings = struct {
     /// The value of `full_name`, unquoted into `a`: the configuration's
     /// last, else `.lfsconfig`'s.
     pub fn get(s: *const Settings, a: Allocator, full_name: []const u8) Self.Error!?[]const u8 {
-        const entry = s.lastEntry(full_name) orelse return null;
-        const value = try unquoteValue(a, entry.value orelse "");
+        const raw = s.lastValue(full_name) orelse return null;
+        const value = try unquoteValue(a, raw);
         return value;
     }
 
-    /// The value of `full_name` as a boolean, or `fallback` when it is not
-    /// set or is not one.
+    /// The value of `full_name` as git-lfs's `config.Bool` reads it
+    /// (`lfs.configBool`): `fallback` when it is not set or is empty.
     pub fn getBool(s: *const Settings, full_name: []const u8, fallback: bool) bool {
-        const entry = s.lastEntry(full_name) orelse return fallback;
-        const value = entry.value orelse return true;
-        return config_mod.parseBool(value) catch fallback;
+        return lfs.configBool(s.lastValue(full_name) orelse "", fallback);
     }
 
-    /// The value of `full_name` as an integer, or `fallback` when it is not
-    /// set or is not one.
+    /// The value of `full_name` as git-lfs's `config.Int` reads it
+    /// (`lfs.configInt`): `fallback` when it is not set or is not one.
     pub fn getInt(s: *const Settings, full_name: []const u8, fallback: i64) i64 {
-        const entry = s.lastEntry(full_name) orelse return fallback;
-        return config_mod.parseInteger(i64, entry.value orelse "") catch fallback;
+        return lfs.configInt(s.lastValue(full_name) orelse "", fallback);
     }
 
     /// git-lfs's URL-scoped lookup: `<section>.<url>.<key>` for the
@@ -403,8 +408,8 @@ pub const Settings = struct {
             if (best) |subsection| {
                 for (config.entries.items) |entry| {
                     if (!entry.matches(section, subsection, key)) continue;
-                    if (source_index == 1 and !fileMayHold(entry)) continue;
-                    try out.append(a, try unquoteValue(a, entry.value orelse ""));
+                    const value = readValue(entry, source_index == 1) orelse continue;
+                    try out.append(a, try unquoteValue(a, value));
                 }
                 return out.items;
             }
@@ -413,8 +418,8 @@ pub const Settings = struct {
             const config = maybe orelse continue;
             for (config.entries.items) |entry| {
                 if (!entry.matches(section, prefix, key)) continue;
-                if (source_index == 1 and !fileMayHold(entry)) continue;
-                try out.append(a, try unquoteValue(a, entry.value orelse ""));
+                const value = readValue(entry, source_index == 1) orelse continue;
+                try out.append(a, try unquoteValue(a, value));
             }
             if (out.items.len != 0) return out.items;
         }
@@ -513,7 +518,7 @@ fn bestUrlMatch(config: *const Config, section: []const u8, prefix: ?[]const u8,
         if (entry.subsection.len == 0) continue;
         if (!std.ascii.eqlIgnoreCase(entry.section, section)) continue;
         if (!std.ascii.eqlIgnoreCase(entry.name, key)) continue;
-        if (from_file and !Settings.fileMayHold(entry)) continue;
+        if (Settings.readValue(entry, from_file) == null) continue;
         var configured_url = entry.subsection;
         if (prefix) |p| {
             if (configured_url.len <= p.len or !std.mem.startsWith(u8, configured_url, p) or configured_url[p.len] != '.') continue;

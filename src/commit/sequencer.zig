@@ -554,7 +554,7 @@ fn pickOne(r: *Replay, oid: Oid) Error!Picked {
     var author: ?object.Signature = null;
     switch (r.action) {
         .revert => {
-            if (repo.configuration().getBool("revert.reference", false) catch false) return error.RevertReferenceNeedsEditor;
+            if (try repo.configuration().getBool("revert.reference", false)) return error.RevertReferenceNeedsEditor;
             base_tree = commit.tree;
             base_label = label;
             next_tree = if (parent) |p| try repo.commitTree(io, p) else null;

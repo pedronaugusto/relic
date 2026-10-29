@@ -815,7 +815,7 @@ fn bringObjects(
     } }, .{
         .warnings = b.options.warnings,
         .progress = b.options.progress,
-        .receive = receiveOptions(repo, b.checks, b.promisor, b.options.warnings, &links),
+        .receive = try receiveOptions(repo, b.checks, b.promisor, b.options.warnings, &links),
         .shallow_info = &shallow_info,
     });
     errdefer fetched.deinit(io);
@@ -839,7 +839,7 @@ fn bringObjects(
             .map = b.map,
             .tips = tips,
             .progress = b.options.progress,
-            .receive = receiveOptions(repo, b.checks, b.promisor, b.options.warnings, null),
+            .receive = try receiveOptions(repo, b.checks, b.promisor, b.options.warnings, null),
             .came = &tag_pack,
         })
     else
@@ -1587,13 +1587,13 @@ fn readCommit(arena: Allocator, gpa: Allocator, io: Io, db: *odb_mod.Odb, oid: O
 
 /// How a fetched pack is received: checked by `checks`, its missing
 /// objects promised when `promisor`, its links kept in `links` when set.
-fn receiveOptions(repo: *Repository, checks: ?*const fsck.Rules, promisor: bool, warnings: ?*warning.Warnings, links: ?*index_pack.Links) index_pack.Options {
+fn receiveOptions(repo: *Repository, checks: ?*const fsck.Rules, promisor: bool, warnings: ?*warning.Warnings, links: ?*index_pack.Links) config_mod.ValueError!index_pack.Options {
     return .{
         .keep = true,
         .fsck = checks,
         .promised = promisor,
         .warnings = warnings,
-        .reverse_index = rev_index.wanted(repo.configuration()),
+        .reverse_index = try rev_index.wanted(repo.configuration()),
         .links = links,
         .threads = index_pack.configuredThreads(repo.configuration()),
     };

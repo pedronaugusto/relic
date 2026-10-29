@@ -1867,7 +1867,7 @@ pub const Listing = struct {
     /// git's `refs_shorten_unambiguous_ref`, strict as
     /// `core.warnAmbiguousRefs` (on unless set off) makes it.
     pub fn shortenUnambiguous(l: *Listing, name: []const u8) ErrorNamespace.Error![]const u8 {
-        const strict = l.repo.configuration().getBool("core.warnambiguousrefs", true) catch true;
+        const strict = try l.repo.configuration().getBool("core.warnambiguousrefs", true);
         var i: usize = ref_names.rev_parse_rules.len - 1;
         while (i > 0) : (i -= 1) {
             const short = ref_names.matchRule(name, ref_names.rev_parse_rules[i]) orelse continue;

@@ -607,7 +607,7 @@ fn receiveObjects(
         .filter = ask.filter,
     } }, .{
         .progress = options.progress,
-        .receive = .{ .keep = true, .fsck = if (rules) |*r| r else null, .promised = ask.filter != null, .warnings = options.warnings, .reverse_index = rev_index.wanted(ask.settings), .links = &links, .threads = index_pack.configuredThreads(ask.settings) },
+        .receive = .{ .keep = true, .fsck = if (rules) |*r| r else null, .promised = ask.filter != null, .warnings = options.warnings, .reverse_index = try rev_index.wanted(ask.settings), .links = &links, .threads = index_pack.configuredThreads(ask.settings) },
         .shallow_info = &shallow_info,
         .warnings = options.warnings,
     });

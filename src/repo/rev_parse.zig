@@ -76,7 +76,7 @@ pub const Error = error{
     AmbiguousRevision,
     /// A path relative to a working directory: `:./x`, `HEAD:../x`.
     RelativePathUnsupported,
-} || ere.Error || ResourceError;
+} || ere.Error || ResourceError || config_mod.ValueError;
 
 /// What `expr` names in `source`.
 pub fn resolve(gpa: Allocator, io: Io, source: Source, expr: []const u8) Self.Error!Oid {
@@ -115,7 +115,7 @@ pub const Dwim = struct {
 pub fn dwimRef(arena: Allocator, io: Io, source: Source, name: []const u8) Self.Error!?Dwim {
     var r: Resolver = .{ .gpa = arena, .a = arena, .io = io, .src = source, .clock = null };
     const full = try r.substituteBranch(name);
-    const warn = source.config.getBool("core.warnambiguousrefs", true) catch true;
+    const warn = try source.config.getBool("core.warnambiguousrefs", true);
     var found: ?Dwim = null;
     const rules = ref_names.rev_parse_rules;
     inline for (rules) |rule| {

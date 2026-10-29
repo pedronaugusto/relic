@@ -283,7 +283,7 @@ pub fn repack(gpa: Allocator, io: Io, repo: *Repository, asked: Options) Self.Er
     if (bitmaps != false and options.local and db.hasAlternates()) bitmaps = false;
     var pack_options = options.pack orelse db.packOptions();
     // `pack.writeReverseIndex`, as pack-objects reads it.
-    pack_options.reverse_index = pack_options.reverse_index or rev_index.wanted(config);
+    pack_options.reverse_index = pack_options.reverse_index or try rev_index.wanted(config);
 
     var islands: ?islands_odb.Islands = if (options.delta_islands orelse try config.getBool("repack.usedeltaislands", false)) try islands_mod.load(gpa, io, repo) else null;
     defer if (islands) |*i| i.deinit();

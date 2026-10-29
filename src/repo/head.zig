@@ -22,6 +22,7 @@ const Io = std.Io;
 const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
 const refs_mod = @import("../refs/refs.zig");
+const config_mod = @import("../config/config.zig");
 const repo_mod = @import("repo.zig");
 const fs = @import("../fs/fs.zig");
 const state_file = @import("state.zig");
@@ -159,7 +160,7 @@ fn appendHeadLog(io: Io, repo: *Repository, old: ?Oid, new: Oid, log: Log) Error
 /// map and its strings are `arena`'s.
 pub fn checkedOutBranches(arena: Allocator, io: Io, repo: *Repository) CheckedOutError!std.StringHashMapUnmanaged([]const u8) {
     var map: std.StringHashMapUnmanaged([]const u8) = .empty;
-    const bare = repo.configuration().getBool("core.bare", false) catch false;
+    const bare = try repo.configuration().getBool("core.bare", false);
     if (!bare) main: {
         var buf: [4096]u8 = undefined;
         const common = fs.realPath(io, repo.commonDirectory().get(), &buf) catch break :main;
@@ -177,14 +178,14 @@ pub fn checkedOutBranches(arena: Allocator, io: Io, repo: *Repository) CheckedOu
 }
 
 /// Errors from `checkedOutBranches`.
-pub const CheckedOutError = refs_mod.ReadError || worktrees.Error || aegis.own.ReadFileError;
+pub const CheckedOutError = refs_mod.ReadError || worktrees.Error || aegis.own.ReadFileError || config_mod.ValueError;
 
 /// Where the worktree is whose bisection started from `ref`, a branch's
 /// full name, or `null` when none did: git's `branch_bisecting`, which
 /// `git branch -d` reports apart from a branch held otherwise. The path is
 /// `arena`'s.
 pub fn bisectingBranch(arena: Allocator, io: Io, repo: *Repository, ref: []const u8) CheckedOutError!?[]const u8 {
-    const bare = repo.configuration().getBool("core.bare", false) catch false;
+    const bare = try repo.configuration().getBool("core.bare", false);
     if (!bare) main: {
         const from = (try bisectedFrom(arena, io, repo, repo.commonDirectory().get())) orelse break :main;
         if (!std.mem.eql(u8, from, ref)) break :main;

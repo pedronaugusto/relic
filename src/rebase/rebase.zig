@@ -1260,7 +1260,7 @@ fn sheetText(r: *Run, gpa: Allocator, items: []const todo.Item, upstream: Oid, o
     };
     todo.format(&out.writer, items, .{
         .short = if (short) .{ .context = r, .shortenFn = Shorten.shorten } else null,
-        .abbreviate_commands = r.repo.configuration().getBool("rebase.abbreviatecommands", false) catch false,
+        .abbreviate_commands = try r.repo.configuration().getBool("rebase.abbreviatecommands", false),
     }) catch return error.OutOfMemory;
     var count: usize = 0;
     for (items) |item| {

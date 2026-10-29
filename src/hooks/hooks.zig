@@ -1003,6 +1003,7 @@ fn readConfigured(
         } else if (std.ascii.eqlIgnoreCase(entry.name, "command")) {
             try commands.put(arena, name, value);
         } else if (std.ascii.eqlIgnoreCase(entry.name, "enabled")) {
+            // git_parse_maybe_bool: an unrecognised value is ignored.
             const on = config_mod.parseBool(value) catch continue;
             if (on) _ = disabled.remove(name) else try disabled.put(arena, name, {});
         } else if (std.ascii.eqlIgnoreCase(entry.name, "parallel")) {

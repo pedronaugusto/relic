@@ -251,7 +251,7 @@ pub const UpstreamOptions = struct { arena: Allocator };
 
 pub fn upstreams(gpa: Allocator, io: Io, repo: *Repository, options: UpstreamOptions) Self.Error![]const Target {
     const arena = options.arena;
-    if (!(repo.configuration().getBool("merge.defaulttoupstream", true) catch true)) return error.NoMergeTarget;
+    if (!try repo.configuration().getBool("merge.defaulttoupstream", true)) return error.NoMergeTarget;
     var head = try head_mod.read(gpa, io, repo);
     defer head.deinit(gpa);
     const branch = head.shortName() orelse return error.NoDefaultUpstream;
@@ -1337,11 +1337,24 @@ pub fn removeMergeState(io: Io, repo: *Repository, who: object.Signature) Self.E
     _ = try stash.restoreAutostash(io, repo, autostash_place, .{ .who = who, .apply = false });
 }
 
+/// `merge.ff`, every value in order as `git_merge_config` reads it: git's
+/// `git_parse_maybe_bool`, else exactly `only`; a value it cannot read
+/// leaves what came before ("do not barf on values from future versions").
 fn configuredFastForward(repo: *Repository) FastForward {
-    const text = repo.configuration().get("merge.ff") orelse return .allow;
-    if (std.ascii.eqlIgnoreCase(text, "only")) return .only;
-    const on = config.parseBool(text) catch return .allow;
-    return if (on) .allow else .never;
+    var out: FastForward = .allow;
+    var it = repo.configuration().iterate(&.{"merge.ff"});
+    while (it.next()) |entry| {
+        const text = entry.value orelse {
+            out = .allow;
+            continue;
+        };
+        if (config.parseBool(text)) |on| {
+            out = if (on) .allow else .never;
+        } else |_| if (std.mem.eql(u8, text, "only")) {
+            out = .only;
+        }
+    }
+    return out;
 }
 
 /// What `fmt_merge_msg_config` reads, every value in order, as `git merge`

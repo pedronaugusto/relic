@@ -442,9 +442,12 @@ pub const Settings = struct {
                 const fallback: UntrackedCacheSetting = if (try config.getBool("feature.manyfiles", false)) .write else .keep;
                 const entry = config.find("core.untrackedcache") orelse break :untracked fallback;
                 const value = entry.value orelse break :untracked fallback;
+                // git_parse_maybe_bool: `keep`, or anything else it cannot read,
+                // leaves the default (prepare_repo_settings).
                 const on = config_mod.parseBool(value) catch break :untracked fallback;
                 break :untracked if (on) .write else .remove;
             },
+            // repo_config_get_maybe_bool: a value it cannot read is unset.
             .split_index = if (config.find("core.splitindex")) |entry|
                 (if (entry.value) |value| (config_mod.parseBool(value) catch null) else true)
             else
@@ -1318,7 +1321,7 @@ pub const Repository = struct {
         fs.adjustShared(io, git_dir, ".", shared);
 
         const object_format = options.object_format orelse initObjectFormat(&user);
-        const ref_format = options.ref_format orelse initRefFormat(&user);
+        const ref_format = options.ref_format orelse try initRefFormat(&user);
         const choices = try initChoices(gpa, io, git_dir, options);
         const branch = choices.branch;
         defer gpa.free(branch);
@@ -1361,14 +1364,15 @@ pub const Repository = struct {
     /// `init.defaultRefFormat`, and `feature.experimental` for a reftable
     /// while no known format is named yet, in the configuration's order, as
     /// git's `read_default_format_config` reads them; files when none.
-    fn initRefFormat(config: *const config_mod.Config) refs_mod.Format {
+    fn initRefFormat(config: *const config_mod.Config) config_mod.ValueError!refs_mod.Format {
         var chosen: ?refs_mod.Format = null;
         var it = config.iterate(&.{ "init.defaultrefformat", "feature.experimental" });
         while (it.next()) |entry| {
             if (std.ascii.eqlIgnoreCase(entry.name, "defaultrefformat")) {
                 chosen = refs_mod.Format.parse(entry.value orelse "");
             } else if (chosen == null) {
-                const on = if (entry.value) |v| config_mod.parseBool(v) catch false else true;
+                // git_config_bool: a value it cannot read dies.
+                const on = if (entry.value) |v| try config_mod.parseBool(v) else true;
                 if (on) chosen = .reftable;
             }
         }

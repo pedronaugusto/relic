@@ -147,7 +147,12 @@ fn converse(gpa: Allocator, io: Io, repo: *repo_mod.Repository, in: *Io.Reader, 
         return end(&mux, out);
     }
     const treeish = parsed.treeish orelse return refuseText(out, usage);
-    const allow_unreachable = repo.configuration().getBool("uploadarchive.allowunreachable", false) catch false;
+    // git's `repo_config_get_bool`: a value it cannot read dies, and the
+    // client is told.
+    const allow_unreachable = repo.configuration().getBool("uploadarchive.allowunreachable", false) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return refuse(out, "bad boolean config value '{s}' for 'uploadarchive.allowunreachable'", .{repo.configuration().get("uploadarchive.allowunreachable") orelse ""}),
+    };
     if (!allow_unreachable) {
         const name = treeish[0 .. std.mem.findScalar(u8, treeish, ':') orelse treeish.len];
         const found = rev_parse.dwimRef(arena, io, repo.revisionSource(), name) catch null;

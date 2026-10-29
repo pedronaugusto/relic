@@ -642,7 +642,8 @@ pub const Lfs = struct {
         // git-lfs's own setting, expanded as git-lfs expands it: no
         // `:(optional)`.
         const root = if (config.get("lfs.storage")) |raw| try config_mod.interpolatePath(a, raw, config.context.home) else "lfs";
-        const case_fold = config.getBool("core.ignorecase", false) catch false;
+        // filepathfilter reads it through git-lfs's gitEnv.Bool.
+        const case_fold = configBool(configValue(config, "core.ignorecase") orelse "", false);
 
         const include = try settingValue(a, config, if (file_config) |*c| c else null, "lfs.fetchinclude");
         const exclude = try settingValue(a, config, if (file_config) |*c| c else null, "lfs.fetchexclude");
@@ -695,6 +696,38 @@ fn settingValue(
     return copy;
 }
 
+/// The value git-lfs sees for `full_name` in `config`: the last one written
+/// with a value. git-lfs reads `git config -l -z`, where a name written with
+/// no `=` has no value line, and drops it (`git.ParseConfigEntries`).
+pub fn configValue(config: *const config_mod.Config, full_name: []const u8) ?[]const u8 {
+    const split = config_mod.splitFullName(full_name) orelse return null;
+    var found: ?[]const u8 = null;
+    for (config.entries.items) |entry| {
+        if (!entry.matches(split.section, split.subsection, split.name)) continue;
+        found = entry.value orelse continue;
+    }
+    return found;
+}
+
+/// git-lfs's `config.Bool`, which every boolean git-lfs setting is read
+/// through: `fallback` for an empty value; `true`, `1`, `on`, `yes` and `t`
+/// in any case are true, and anything else is false.
+pub fn configBool(value: []const u8, fallback: bool) bool {
+    if (value.len == 0) return fallback;
+    for ([_][]const u8{ "true", "1", "on", "yes", "t" }) |word| {
+        if (std.ascii.eqlIgnoreCase(value, word)) return true;
+    }
+    return false;
+}
+
+/// git-lfs's `config.Int`: `fallback` for an empty value or one Go's
+/// `strconv.Atoi` refuses, which takes a sign and decimal digits and
+/// nothing else (no `_`, which `std.fmt.parseInt` skips).
+pub fn configInt(value: []const u8, fallback: i64) i64 {
+    if (std.mem.findScalar(u8, value, '_') != null) return fallback;
+    return std.fmt.parseInt(i64, value, 10) catch fallback;
+}
+
 const testing = std.testing;
 
 fn pointerText(comptime oid: []const u8, comptime size: []const u8) []const u8 {
@@ -723,6 +756,27 @@ test "settings that outgrow the arena's first block are all freed with it" {
     defer lfs.deinit();
     try std.testing.expectEqual(@as(usize, 3001), lfs.settings.fetch_include.len);
     try std.testing.expectEqual(@as(usize, 3001), lfs.settings.fetch_exclude.len);
+}
+
+test "a setting is read as git-lfs reads it: its config.Bool and config.Int, and a name with no value not there" {
+    var config = try config_mod.Config.parseText(std.testing.allocator,
+        \\[lfs]
+        \\    on = t
+        \\    word = sometimes
+        \\    empty =
+        \\    count = 1_000
+        \\    bare = 7
+        \\    bare
+    , .local);
+    defer config.deinit();
+    try std.testing.expect(configBool(configValue(&config, "lfs.on").?, false));
+    try std.testing.expect(!configBool(configValue(&config, "lfs.word").?, true));
+    try std.testing.expect(configBool(configValue(&config, "lfs.empty").?, true));
+    try std.testing.expect(!configBool("2", true));
+    try std.testing.expectEqual(@as(i64, 8), configInt(configValue(&config, "lfs.count").?, 8));
+    try std.testing.expectEqual(@as(i64, 8), configInt("1k", 8));
+    try std.testing.expectEqual(@as(i64, -3), configInt("-3", 8));
+    try std.testing.expectEqualStrings("7", configValue(&config, "lfs.bare").?);
 }
 
 test "a pointer decodes and encodes to the same bytes" {

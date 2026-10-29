@@ -738,7 +738,7 @@ pub const Server = struct {
         received.result = try index_pack.receive(s.gpa, s.io, &q.db, .{ .pack_dir = pack_dir, .in = in }, .{
             .fsck = if (rules) |*r| r else null,
             .max_pack_bytes = s.settings.max_input_size,
-            .reverse_index = rev_index.wanted(config),
+            .reverse_index = try rev_index.wanted(config),
             .links = &received.links,
             .threads = index_pack.configuredThreads(config),
             .diagnostic = diagnostic,

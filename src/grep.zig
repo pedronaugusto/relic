@@ -1217,11 +1217,11 @@ const task_output_bytes: usize = 1 << 20;
 
 /// The pattern syntax asked for, else the one `grep.patternType` (or the
 /// older `grep.extendedRegexp`) names, else basic.
-fn patternSyntax(repo: *Repository, options: Options) Syntax {
+fn patternSyntax(repo: *Repository, options: Options) config_mod.ValueError!Syntax {
     if (options.syntax) |syntax| return syntax;
     const config = repo.configuration();
     var syntax: Syntax = .basic;
-    if (config.getBool("grep.extendedregexp", false) catch false) syntax = .extended;
+    if (try config.getBool("grep.extendedregexp", false)) syntax = .extended;
     if (config.get("grep.patterntype")) |v| {
         if (std.mem.eql(u8, v, "basic")) syntax = .basic else if (std.mem.eql(u8, v, "extended")) syntax = .extended else if (std.mem.eql(u8, v, "fixed")) syntax = .fixed else if (std.mem.eql(u8, v, "perl")) syntax = .perl;
     }
@@ -1300,12 +1300,12 @@ pub fn grep(gpa: Allocator, io: Io, w: *Io.Writer, repo: *Repository, options: O
     const a = arena_instance.allocator();
     const config = repo.configuration();
 
-    const column = options.column orelse (config.getBool("grep.column", false) catch false);
-    var searcher = try compile(a, gpa, options, patternSyntax(repo, options), column);
+    const column = options.column orelse (try config.getBool("grep.column", false));
+    var searcher = try compile(a, gpa, options, try patternSyntax(repo, options), column);
     defer searcher.deinit();
     const fmt: Format = .{
         .show = options.show,
-        .line_number = options.line_number orelse (config.getBool("grep.linenumber", false) catch false),
+        .line_number = options.line_number orelse (try config.getBool("grep.linenumber", false)),
         .column = column,
         .only_matching = options.only_matching,
         .pathname = options.with_filename,
@@ -1330,7 +1330,7 @@ pub fn grep(gpa: Allocator, io: Io, w: *Io.Writer, repo: *Repository, options: O
         .gpa = gpa,
         .io = io,
         .spec = &spec,
-        .recurse = options.recurse_submodules orelse (config.getBool("submodule.recurse", false) catch false),
+        .recurse = options.recurse_submodules orelse (try config.getBool("submodule.recurse", false)),
         .repos = &repos,
         .items = &items,
     };

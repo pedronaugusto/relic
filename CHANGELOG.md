@@ -8,6 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Breaking
 
+- `merge.rerere.enabled` and `odb.rev_index.wanted` return `config.ValueError!bool`: a `rerere.enabled` or `pack.writeReverseIndex` that is no boolean is `error.NotABoolean`, as git dies on it, where it was read as unset.
 - `lfs.Pointer.encodeBuf` returns `error{PointerTooLong}`: a pointer a caller made with extension names longer than `decode` reads did not fit the buffer and reached an `unreachable`; one `decode` made always fits.
 - `index.WriteError` has `TooManyEntries`: an index of more entries than the format counts (2^32, git's `unsigned int`) is refused when written, where its count was cast unchecked.
 - `index.WriteOptions.racy` is a `*const WriteOptions.Racy`, a node its owner embeds (`Racy.changed` takes the node), and `checkout.native.Observer` likewise (`missing_fn` takes the `*Observer`, `SessionOptions.observer` is a pointer), where each carried an `*anyopaque` context: `worktree.RacyCheck` and `filter.Report` embed theirs and find themselves from it.
@@ -92,6 +93,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `lfs.configValue`, `lfs.configBool` and `lfs.configInt`: a setting as git-lfs reads it (the last value written with one; its `config.Bool` and `config.Int`).
 - `hash.Oid.fromCut`: an object name from bytes a parser has already cut to the format's length, the cut checked in every build, for the sites that wrote `fromRaw(...) catch unreachable`.
 - `text.date.showFixed(w, secs, tz, form)`: a date in one of the forms `show` writes from its own zone alone (`text.date.Fixed`: `short`, `iso8601`, `iso8601_strict`, `rfc2822`), which `show` writes through and which asks no clock, so it cannot fail with `DateNeedsClock`. `format-patch`'s `Date:` and `http-backend`'s headers are written through it.
 - `text.date.Calendar` and `text.date.calendarIn`, git's `time_to_tm`: the calendar a time falls on in a zone, each field in its range, or `null` where git's `gmtime_r` has none. `Calendar.fromFields` reads a date and time of day as text writes them (`null` for one that does not exist) and `Calendar.moment` is the time a calendar is, so relic has one calendar both ways: the LFS API's RFC 3339 and HTTP dates are read and written through it.
@@ -295,6 +297,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A boolean setting git reads with `git_config_bool`, which dies on a value that is no boolean ("bad boolean config value"), is refused with `error.NotABoolean` where relic fell back to its default: `grep.extendedRegexp`, `grep.column`, `grep.lineNumber` and `submodule.recurse` in grep, `stash.index`, `merge.defaultToUpstream`, `revert.reference`, `uploadArchive.allowUnreachable`, `rerere.enabled` and `rerere.autoUpdate`, `core.ignoreCase` and `core.quotePath` in fast-import and fast-export, `core.warnAmbiguousRefs`, `rebase.abbreviateCommands`, `user.useConfigOnly`, `pack.writeReverseIndex`, `core.bare` (HEAD's checks, and `init_worktree_config`'s shared file) and `feature.experimental` in init. The settings git reads as maybe-bool keep its fallback, named where they are read (`core.untrackedCache`, `core.splitIndex`, `hook.<name>.enabled`).
+- `merge.ff` is read value by value as git's `git_merge_config` reads it: a later value git cannot read leaves the earlier one, and only `only` exactly is fast-forward-only, where the last value alone decided and `Only` counted.
+- LFS settings are read as git-lfs reads them: a boolean through its `config.Bool` (`t` is true, an empty value is the default, any other word is false), a number through its `config.Int` (decimal digits only), and a name with no `=` is not set, as `git config -l -z` gives git-lfs no value for it (`lfs.Settings`, `lfs.customtransfer.<name>.concurrent`, `core.ignoreCase` for fetch patterns). `lfs.<url>.locksverify` is Go's `strconv.ParseBool`, as git-lfs's lock verifier reads it: `yes` or `on` turn verification off there.
 - `patch.apply` reaches the working tree with a patch's name only as a checked path, under `--unsafe-paths` too, as the files it writes already are: the old file of a deletion is read through `checkout.readable`, and removed, with its emptied directories, through a `names.path.Checked` held to git's `verify_path`. Under `--unsafe-paths` a deletion of `.git/...` or a path out of the tree read and removed it.
 - An LFS time (`GoTime.format`) whose offset moves it past what a timestamp holds is `error.UnwritableTime`, where adding the offset overflowed.
 - `am` reads a session's `next` and `last` as git holds them, in an `int`: one below zero or past an `int` is `error.MalformedState`, where `last` past one was a count `am` ran to. An author date whose zone a commit cannot carry is `error.InvalidDate`, where it was cast unchecked.
