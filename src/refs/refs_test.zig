@@ -485,3 +485,79 @@ test "a transaction that allows failure refuses an edit alone, in git's words, a
         }
     }.inFormat);
 }
+
+test "a ref is renamed and copied with its log as git's rename_ref and copy_existing_ref move it" {
+    try testgit.eachRefFormat(struct {
+        fn inFormat(format: testgit.RefFormat) !void {
+            const gpa = std.testing.allocator;
+            const io = std.testing.io;
+            var theirs = try twoCommits(gpa, io, format);
+            defer theirs.deinit();
+            var ours = try twoCommits(gpa, io, format);
+            defer ours.deinit();
+            // A branch nothing has checked out, moved on and then below
+            // its own name, and the checked-out one copied.
+            try theirs.exec(io, &.{ "branch", "-m", "side", "moved" });
+            try theirs.exec(io, &.{ "branch", "-m", "moved", "moved/deeper" });
+            try theirs.exec(io, &.{ "branch", "-c", "main", "copied" });
+            try ours.exec(io, &.{ "symbolic-ref", "refs/heads/named", "refs/heads/main" });
+            {
+                var repo = try Repository.open(gpa, io, ours.dir, .{});
+                defer repo.deinit(io);
+                const store = repo.refStore();
+                try store.renameRef(gpa, io, .{ .old = "refs/heads/side", .new = "refs/heads/moved" }, .{ .who = who, .message = "Branch: renamed refs/heads/side to refs/heads/moved" });
+                try store.renameRef(gpa, io, .{ .old = "refs/heads/moved", .new = "refs/heads/moved/deeper" }, .{ .who = who, .message = "Branch: renamed refs/heads/moved to refs/heads/moved/deeper" });
+                try store.copyRef(gpa, io, .{ .old = "refs/heads/main", .new = "refs/heads/copied" }, .{ .who = who, .message = "Branch: copied refs/heads/main to refs/heads/copied" });
+
+                // What stands in the way, or is not there to move, moves nothing.
+                try std.testing.expectError(error.RefNameConflict, store.renameRef(gpa, io, .{ .old = "refs/heads/copied", .new = "refs/heads/main/below" }, .{ .who = who }));
+                try std.testing.expectError(error.RefNameConflict, store.copyRef(gpa, io, .{ .old = "refs/heads/main", .new = "refs/heads/moved" }, .{ .who = who }));
+                try std.testing.expectError(error.NoSuchRef, store.renameRef(gpa, io, .{ .old = "refs/heads/side", .new = "refs/heads/other" }, .{ .who = who }));
+                try std.testing.expectError(error.SymbolicRef, store.renameRef(gpa, io, .{ .old = "refs/heads/named", .new = "refs/heads/other" }, .{ .who = who }));
+                try std.testing.expectError(error.InvalidRefName, store.renameRef(gpa, io, .{ .old = "HEAD", .new = "refs/heads/other" }, .{ .who = who }));
+                try std.testing.expect(try gitHas(io, &ours, "refs/heads/copied"));
+            }
+            var mine = try Repository.open(gpa, io, ours.dir, .{});
+            defer mine.deinit(io);
+            var git = try Repository.open(gpa, io, theirs.dir, .{});
+            defer git.deinit(io);
+            for ([_][]const u8{ "refs/heads/side", "refs/heads/moved", "refs/heads/moved/deeper", "refs/heads/main", "refs/heads/copied", "HEAD" }) |name| {
+                try std.testing.expectEqual(try gitHas(io, &theirs, name), try gitHas(io, &ours, name));
+                try std.testing.expectEqual(try git.refStore().logExists(gpa, io, name), try mine.refStore().logExists(gpa, io, name));
+                var expected = try git.refStore().readLog(gpa, io, name);
+                defer expected.deinit();
+                var got = try mine.refStore().readLog(gpa, io, name);
+                defer got.deinit();
+                try std.testing.expectEqual(expected.entries.len, got.entries.len);
+                for (expected.entries, got.entries) |e, g| {
+                    try std.testing.expect(e.old.eql(g.old));
+                    try std.testing.expect(e.new.eql(g.new));
+                    try std.testing.expectEqualStrings(e.message, g.message);
+                }
+            }
+        }
+    }.inFormat);
+}
+
+test "a rename that fails on its way puts the old ref and its log back, as git's rollback does" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var r = try twoCommits(gpa, io, .files);
+    defer r.deinit();
+    const side = try oidOf(gpa, io, &r, "side");
+    var repo = try Repository.open(gpa, io, r.dir, .{});
+    defer repo.deinit(io);
+    const store = repo.refStore();
+    var before = try store.readLog(gpa, io, "refs/heads/side");
+    defer before.deinit();
+    // The new ref's lock is held, so the last step fails, with the old
+    // ref deleted and its log at the new name by then.
+    try r.writeFile(io, ".git/refs/heads/moved.lock", "");
+    try std.testing.expectError(error.LockHeld, store.renameRef(gpa, io, .{ .old = "refs/heads/side", .new = "refs/heads/moved" }, .{ .who = who, .message = "Branch: renamed" }));
+    try std.testing.expect((try oidOf(gpa, io, &r, "refs/heads/side")).eql(side));
+    try std.testing.expect(!try gitHas(io, &r, "refs/heads/moved"));
+    var after = try store.readLog(gpa, io, "refs/heads/side");
+    defer after.deinit();
+    try std.testing.expectEqualStrings(before.bytes, after.bytes);
+    try std.testing.expect(!try store.logExists(gpa, io, "refs/heads/moved"));
+}

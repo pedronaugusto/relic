@@ -561,7 +561,88 @@ pub fn appendLog(
     } } };
     const bytes = try reftable.write(gpa, store.objectFormat(), .{ .min_update_index = update_index, .max_update_index = update_index, .refs = &.{}, .logs = &.{record} }, store.reftableOptions().write);
     defer gpa.free(bytes);
-    try install(gpa, io, &locked, &stack, bytes, update_index);
+    try install(gpa, io, &locked, &stack, bytes, update_index, update_index);
+    try compactAfter(gpa, io, parent, store);
+}
+
+/// What `copyRef` moves: `old` to `new`, deleting `old` for a rename.
+pub const CopyInputs = struct { old: []const u8, new: []const u8, delete_old: bool };
+
+/// `Store.renameRef` and `Store.copyRef` over reftable, as git's
+/// `write_copy_table`: one table under the stack's lock. The new ref takes
+/// the old one's record, and its log the old log's entries, each at its
+/// own update index. A rename writes the table over two update indexes:
+/// at the first the old ref and its log go, and the new log gains the
+/// old object's deletion under `log`'s line (`HEAD`'s too, when `HEAD`
+/// names the old ref, as the files format's deletion writes it); at the
+/// second the new ref is written and its log gains the creation. A copy
+/// writes the creation alone. The caller has checked that the old ref
+/// points at an object, that the two names differ and that nothing stands
+/// in the new one's way.
+pub fn copyRef(gpa: Allocator, io: Io, store: anytype, inputs: CopyInputs, log: refs.LogMessage) (refs.TransactionError || error{ NoSuchRef, SymbolicRef })!void {
+    const who = log.who;
+    if (std.mem.findAny(u8, who.name, "<>\n") != null or
+        std.mem.findAny(u8, who.email, "<>\n") != null) return error.InvalidSignature;
+    const parent = store.commonDir().get();
+    var locked = try lockStack(gpa, io, parent, store.reftableOptions());
+    defer releaseLocked(gpa, io, &locked);
+    var stack = try Stack.load(gpa, io, locked.dir.lend().get(), store.objectFormat());
+    defer stack.deinit();
+    var arena_instance: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_instance.deinit();
+    const arena = arena_instance.allocator();
+    const kind = store.objectFormat();
+
+    // Read again under the lock: another process may have moved it.
+    const old_ref = (try stack.lookup(gpa, inputs.old, .{ .out = arena })) orelse return error.NoSuchRef;
+    const orig = switch (old_ref.value) {
+        .deletion => return error.NoSuchRef,
+        .symbolic => return error.SymbolicRef,
+        .direct => |oid| oid,
+        .peeled => |p| p.value,
+    };
+    const deletion_index = try stack.nextUpdateIndex();
+    const creation_index = if (inputs.delete_old) deletion_index + 1 else deletion_index;
+
+    var records: std.ArrayList(reftable.RefRecord) = .empty;
+    try records.append(arena, .{ .name = inputs.new, .update_index = creation_index, .value = old_ref.value });
+    if (inputs.delete_old) try records.append(arena, .{ .name = inputs.old, .update_index = deletion_index, .value = .deletion });
+
+    const message = try logMessage(arena, try reflog.normalizeMessage(arena, log.message), store.reftableOptions().write.block_size);
+    const entry: reftable.LogUpdate = .{
+        .old = Oid.zero(kind),
+        .new = orig,
+        .name = who.name,
+        .email = who.email,
+        .time = std.math.cast(u64, who.when_secs) orelse 0,
+        .tz_offset = zoneFromMinutes(who.offset_minutes),
+        .message = message,
+    };
+    var logs: std.ArrayList(reftable.LogRecord) = .empty;
+    if (inputs.delete_old) {
+        var gone = entry;
+        gone.old = orig;
+        gone.new = Oid.zero(kind);
+        try logs.append(arena, .{ .name = inputs.new, .update_index = deletion_index, .value = .{ .update = gone } });
+        if (try stack.lookup(gpa, "HEAD", .{ .out = arena })) |head| switch (head.value) {
+            .symbolic => |target| if (std.mem.eql(u8, target, inputs.old))
+                try logs.append(arena, .{ .name = "HEAD", .update_index = deletion_index, .value = .{ .update = gone } }),
+            else => {},
+        };
+    }
+    try logs.append(arena, .{ .name = inputs.new, .update_index = creation_index, .value = .{ .update = entry } });
+    for (try stack.logsFor(gpa, inputs.old, .{ .arena = arena })) |old_log| {
+        var copied = old_log;
+        copied.name = inputs.new;
+        try logs.append(arena, copied);
+        if (inputs.delete_old) try logs.append(arena, .{ .name = inputs.old, .update_index = old_log.update_index, .value = .deletion });
+    }
+    std.mem.sort(reftable.RefRecord, records.items, {}, lessThanRef);
+    std.mem.sort(reftable.LogRecord, logs.items, {}, logOrder);
+
+    const bytes = try reftable.write(gpa, kind, .{ .min_update_index = deletion_index, .max_update_index = creation_index, .refs = records.items, .logs = logs.items }, store.reftableOptions().write);
+    defer gpa.free(bytes);
+    try install(gpa, io, &locked, &stack, bytes, deletion_index, creation_index);
     try compactAfter(gpa, io, parent, store);
 }
 
@@ -634,7 +715,7 @@ pub fn expireLog(
 
     const bytes = try reftable.write(gpa, store.objectFormat(), .{ .min_update_index = update_index, .max_update_index = update_index, .refs = ref_records[0..ref_count], .logs = logs.items }, store.reftableOptions().write);
     defer gpa.free(bytes);
-    try install(gpa, io, &locked, &stack, bytes, update_index);
+    try install(gpa, io, &locked, &stack, bytes, update_index, update_index);
     try compactAfter(gpa, io, parent, store);
 }
 
@@ -653,7 +734,7 @@ pub fn createLog(gpa: Allocator, io: Io, store: anytype, name: []const u8) refs.
     const logs = [_]reftable.LogRecord{marker(store.objectFormat(), name, update_index)};
     const bytes = try reftable.write(gpa, store.objectFormat(), .{ .min_update_index = update_index, .max_update_index = update_index, .refs = &.{}, .logs = &logs }, store.reftableOptions().write);
     defer gpa.free(bytes);
-    try install(gpa, io, &locked, &stack, bytes, update_index);
+    try install(gpa, io, &locked, &stack, bytes, update_index, update_index);
     try compactAfter(gpa, io, parent, store);
 }
 
@@ -677,7 +758,7 @@ pub fn deleteLog(gpa: Allocator, io: Io, store: anytype, name: []const u8) refs.
     std.mem.sort(reftable.LogRecord, logs, {}, logOrder);
     const bytes = try reftable.write(gpa, store.objectFormat(), .{ .min_update_index = update_index, .max_update_index = update_index, .refs = &.{}, .logs = logs }, store.reftableOptions().write);
     defer gpa.free(bytes);
-    try install(gpa, io, &locked, &stack, bytes, update_index);
+    try install(gpa, io, &locked, &stack, bytes, update_index, update_index);
     try compactAfter(gpa, io, parent, store);
 }
 
@@ -737,11 +818,12 @@ fn compactAfter(gpa: Allocator, io: Io, parent: Io.Dir, store: anytype) refs.Tra
     };
 }
 
-/// Put a new table beside the others and name it last in `tables.list`,
-/// through the lock the caller holds.
-fn install(gpa: Allocator, io: Io, locked: *Pending.Locked, stack: *const Stack, bytes: []const u8, update_index: u64) refs.TransactionError!void {
+/// Put a new table, of the update indexes `min` to `max`, beside the
+/// others and name it last in `tables.list`, through the lock the caller
+/// holds.
+fn install(gpa: Allocator, io: Io, locked: *Pending.Locked, stack: *const Stack, bytes: []const u8, min: u64, max: u64) refs.TransactionError!void {
     var name_buf: [64]u8 = undefined;
-    const name = tableName(io, &name_buf, update_index, update_index).bytes;
+    const name = tableName(io, &name_buf, min, max).bytes;
     try writeTable(gpa, io, locked.dir.lend().get(), name, bytes, locked.shared, locked.sync);
     const w = locked.lock.writer();
     w.writeAll(stack.list) catch return error.WriteFailed;
@@ -848,7 +930,7 @@ fn addTable(
 
     const bytes = try reftable.write(gpa, store.objectFormat(), .{ .min_update_index = update_index, .max_update_index = update_index, .refs = records.items, .logs = logs.items }, store.reftableOptions().write);
     defer gpa.free(bytes);
-    try install(gpa, io, locked, stack, bytes, update_index);
+    try install(gpa, io, locked, stack, bytes, update_index, update_index);
 }
 
 /// A reflog message as git's reftable writer keeps it: on one line, no
@@ -1197,7 +1279,7 @@ pub fn writeInitial(gpa: Allocator, io: Io, store: anytype, refs_in: anytype) re
     if (records.len == 0) return;
     const bytes = try reftable.write(gpa, store.objectFormat(), .{ .min_update_index = update_index, .max_update_index = update_index, .refs = records, .logs = &.{} }, store.reftableOptions().write);
     defer gpa.free(bytes);
-    try install(gpa, io, &locked, &stack, bytes, update_index);
+    try install(gpa, io, &locked, &stack, bytes, update_index, update_index);
     if (!store.reftableOptions().auto_compact) return;
     compactIn(gpa, io, store.commonDir().get(), .{ .kind = store.objectFormat(), .which = .auto }, store.reftableOptions()) catch |err| switch (err) {
         error.LockHeld => {},
