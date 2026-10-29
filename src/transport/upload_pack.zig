@@ -1725,9 +1725,9 @@ test "a malformed uploadpack.* or transfer.* setting is refused, as git's upload
     const path = try git.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(path);
     const keys = [_][]const u8{
-        "uploadpack.allowanysha1inwant", "uploadpack.allowfilter",     "uploadpack.allowtipsha1inwant",
+        "uploadpack.allowanysha1inwant",       "uploadpack.allowfilter",    "uploadpack.allowtipsha1inwant",
         "uploadpack.allowreachablesha1inwant", "uploadpack.allowrefinwant", "uploadpack.allowsidebandall",
-        "transfer.advertiseobjectinfo", "transfer.advertisesid", "uploadpack.keepalive",
+        "transfer.advertiseobjectinfo",        "transfer.advertisesid",     "uploadpack.keepalive",
     };
     for (keys) |key| {
         try git.exec(io, &.{ "config", key, "maybe" });
