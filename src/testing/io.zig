@@ -65,3 +65,29 @@ pub fn moved(faults: *shakedown.FaultIo, call: shakedown.IoCall) u64 {
     };
     return bytes;
 }
+
+/// `shakedown.everyFault` with a cancel at each cancelation point of the
+/// operation `ctx` describes, and no other fault: each run's `check` can
+/// hand its result to `cancelKept`.
+pub fn everyCancel(gpa: std.mem.Allocator, io: Io, ctx: anytype) !void {
+    var failed: shakedown.EveryFaultReport = .{};
+    defer failed.deinit();
+    var report = shakedown.everyFault(gpa, io, ctx, .{ .errors = &.{}, .short = false, .alloc = false, .trace = .all, .diagnostics = &failed }) catch |err| {
+        if (failed.failure) |f| std.debug.print("{t} at {?any} (first difference {?d}):\n{s}\n", .{ f.err, f.injected, f.difference, f.trace });
+        return err;
+    };
+    report.deinit();
+}
+
+/// For `everyFault`'s `check`: a cancel that landed comes back as
+/// `error.Canceled`, or, where the operation went on to an outcome of its
+/// own, waits at the task's next cancelation point. It is never lost.
+pub fn cancelKept(io: Io, result: anyerror!void, injected: ?shakedown.Injected) !void {
+    const at = injected orelse return result;
+    if (at.fault != .cancel) return;
+    if (result) |_| {
+        io.checkCancel() catch return;
+    } else |err| if (err == error.Canceled) return;
+    std.debug.print("a cancel at step {d} ({t}) was lost\n", .{ at.step, at.call });
+    return error.CancelLost;
+}

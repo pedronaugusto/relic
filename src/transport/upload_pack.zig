@@ -1452,22 +1452,22 @@ const Negotiation = struct {
             // a line each, as git's `relay_pack_data` takes them.
             var named: std.ArrayList([]const u8) = .empty;
             while (true) {
-                const head = pack.interface.peek(4) catch return paced.died();
+                const head = pack.interface.peek(4) catch return paced.failed(pack.err);
                 if (std.mem.eql(u8, head, "PACK")) break;
-                const line = pack.interface.takeDelimiterInclusive('\n') catch return paced.died();
+                const line = pack.interface.takeDelimiterInclusive('\n') catch return paced.failed(pack.err);
                 try named.append(n.arena, try n.arena.dupe(u8, line));
             }
             try openPack(n.arena, paced, named.items);
         }
         _ = pack.interface.streamRemaining(packed_writer) catch |err| switch (err) {
             error.WriteFailed => return error.WriteFailed,
-            error.ReadFailed => return paced.died(),
+            error.ReadFailed => return paced.failed(pack.err),
         };
         if (relay) |*task| {
             task.await(s.io);
             relay = null;
         }
-        const term = running.wait(s.io) catch return paced.died();
+        const term = running.wait(s.io) catch |err| return paced.failed(err);
         switch (term) {
             .exited => |code| if (code != 0) return paced.died(),
             else => return paced.died(),
@@ -1492,7 +1492,10 @@ const Negotiation = struct {
             var current = tip;
             var depth: u8 = 0;
             while (depth < 16) : (depth += 1) {
-                const header = n.db().readHeader(n.io(), current) catch break;
+                const header = n.db().readHeader(n.io(), current) catch |err| switch (err) {
+                    error.Canceled => return error.Canceled,
+                    else => break,
+                };
                 if (header.type != .tag) break;
                 try chain.append(n.arena, current);
                 const found = try n.db().read(n.io(), current);
@@ -1675,6 +1678,13 @@ const Paced = struct {
 
     /// git's `fail` in `create_pack_file`: the client told on channel
     /// three, or on nothing without a side band.
+    /// `died`, unless what failed was canceled: a cancel is the caller's,
+    /// not the program's death, and is returned as it is.
+    fn failed(p: *Paced, cause: ?anyerror) Error {
+        if (cause) |err| if (err == error.Canceled) return error.Canceled;
+        return p.died();
+    }
+
     fn died(p: *Paced) Error {
         if (p.band != .none) p.sendBand(3, "aborting due to possible repository corruption on the remote side.") catch return error.WriteFailed;
         return error.PackObjectsFailed;

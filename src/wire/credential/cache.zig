@@ -59,13 +59,16 @@ pub const max_request = 1 << 20;
 /// directory is there, else `$XDG_CACHE_HOME/git/credential/socket`
 /// (`~/.cache/git/credential/socket` without it); `null` with no home to
 /// name either. `arena`'s.
-pub fn defaultSocket(arena: Allocator, io: Io, environ: *const std.process.Environ.Map) Allocator.Error!?[]const u8 {
+pub fn defaultSocket(arena: Allocator, io: Io, environ: *const std.process.Environ.Map) (Allocator.Error || Io.Cancelable)!?[]const u8 {
     const home = environ.get("HOME");
     if (home) |h| {
         const old = try Io.Dir.path.join(arena, &.{ h, ".git-credential-cache" });
         if (Io.Dir.cwd().statFile(io, old, .{})) |st| {
             if (st.kind == .directory) return try Io.Dir.path.join(arena, &.{ old, "socket" });
-        } else |_| {}
+        } else |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => {},
+        }
     }
     if (environ.get("XDG_CACHE_HOME")) |xdg| if (xdg.len != 0) {
         return try Io.Dir.path.join(arena, &.{ xdg, "git", "credential", "socket" });
@@ -140,4 +143,34 @@ pub fn request(gpa: Allocator, io: Io, socket: []const u8, req: Request) Self.Er
         into.interface.flush() catch return error.OutOfMemory;
     }
     return answer;
+}
+
+const shakedown = @import("shakedown");
+const testing_io = @import("../../testing/io.zig");
+
+test "a cancel that lands in finding the default socket is returned, not taken for no directory" {
+    const gpa = std.testing.allocator;
+    var home = std.testing.tmpDir(.{});
+    defer home.cleanup();
+    try home.dir.createDirPath(std.testing.io, ".git-credential-cache");
+    const home_path = try home.dir.realPathFileAlloc(std.testing.io, ".", gpa);
+    defer gpa.free(home_path);
+    var environ: std.process.Environ.Map = .init(gpa);
+    defer environ.deinit();
+    try environ.put("HOME", home_path);
+    const Find = struct {
+        environ: *const std.process.Environ.Map,
+        pub fn setUp(_: *@This(), _: *shakedown.FaultIo) !void {}
+        pub fn run(f: *@This(), io: Io) !void {
+            var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer arena.deinit();
+            _ = try defaultSocket(arena.allocator(), io, f.environ);
+        }
+        pub fn check(_: *@This(), io: Io, result: anyerror!void, injected: ?shakedown.Injected) !void {
+            try testing_io.cancelKept(io, result, injected);
+        }
+        pub fn tearDown(_: *@This()) void {}
+    };
+    var find: Find = .{ .environ = &environ };
+    try testing_io.everyCancel(gpa, std.testing.io, &find);
 }
