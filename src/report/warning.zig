@@ -26,6 +26,9 @@ pub const Warning = union(enum) {
     /// What `ssh` wrote on its standard error, a line to a line, on a
     /// conversation that went on to succeed.
     ssh_said: []const u8,
+    /// What git says of an alternate a dumb HTTP server names, which it
+    /// borrows from or passes over: the text.
+    dumb_alternate: []const u8,
     /// A ref from a shallow remote left alone, because taking it would move
     /// this repository's boundary and the fetch did not say to: the local
     /// ref's name.
@@ -156,6 +159,7 @@ pub const Warning = union(enum) {
             .filter_not_supported => "filtering not recognized by server, ignoring",
             .ssl_verify_disabled => |setting| arena.print("the server's certificate is not checked ({s})", .{setting}),
             .ssh_said => |text| text,
+            .dumb_alternate => |text| text,
             .shallow_update_rejected => |name| arena.print("rejected {s} because shallow roots are not allowed to be updated", .{name}),
             .proxy_auth_method_unknown => |name| arena.print("unsupported proxy authentication method {s}: using anyauth", .{name}),
             .commit_graph_write_failed => |err| arena.print("commit-graph write failed: {s}", .{err}),
@@ -225,6 +229,7 @@ pub const Warnings = struct {
             .filter_not_supported => .filter_not_supported,
             .ssl_verify_disabled => |t| .{ .ssl_verify_disabled = try a.dupe(u8, t) },
             .ssh_said => |t| .{ .ssh_said = try a.dupe(u8, t) },
+            .dumb_alternate => |t| .{ .dumb_alternate = try a.dupe(u8, t) },
             .shallow_update_rejected => |t| .{ .shallow_update_rejected = try a.dupe(u8, t) },
             .proxy_auth_method_unknown => |t| .{ .proxy_auth_method_unknown = try a.dupe(u8, t) },
             .commit_graph_write_failed => |err| .{ .commit_graph_write_failed = try a.dupe(u8, err) },
