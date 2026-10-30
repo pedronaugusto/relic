@@ -192,6 +192,10 @@ pub const HttpServer = struct {
     /// The repository whose next `times` requests for `info/refs` are
     /// answered 500, as a server that fails a clone; `failFirst` sets it.
     failing: struct { repository: []const u8 = "", times: u32 = 0 } = .{},
+    /// How many requests are being answered, and the most there were at
+    /// once since `mostAtOnce` was last asked.
+    busy: u32 = 0,
+    most_busy: u32 = 0,
     /// One line per request that carried a `Cookie`: its value.
     cookies: std.ArrayList(u8) = .empty,
 
@@ -229,6 +233,14 @@ pub const HttpServer = struct {
         /// Answer a `GET` of `/files/<rest>` with the file `<rest>` under
         /// the root, as a web server serves a bundle; 404 when there is none.
         files: bool = false,
+        /// Answer as a static file host does, git's dumb protocol: the query
+        /// string is dropped, so git's backend answers `info/refs` with the
+        /// plain listing and every other file as itself.
+        static: bool = false,
+        /// Answer a `GET` under a repository's `objects/` with a redirect
+        /// to the same file under `/files/`, as a host that moved its
+        /// objects does: every request after the first is redirected.
+        redirect_objects: bool = false,
     };
 
     /// Listen on an ephemeral port and serve the repositories under `root`.
@@ -293,6 +305,26 @@ pub const HttpServer = struct {
         return gpa.dupe(u8, s.cookies.items);
     }
 
+    /// The most requests answered at once since the last call.
+    pub fn mostAtOnce(s: *HttpServer) u32 {
+        s.log_mutex.lockUncancelable(s.io);
+        defer s.log_mutex.unlock(s.io);
+        defer s.most_busy = s.busy;
+        return s.most_busy;
+    }
+
+    fn answering(s: *HttpServer, by: enum { one_more, one_fewer }) void {
+        s.log_mutex.lockUncancelable(s.io);
+        defer s.log_mutex.unlock(s.io);
+        switch (by) {
+            .one_more => {
+                s.busy += 1;
+                s.most_busy = @max(s.most_busy, s.busy);
+            },
+            .one_fewer => s.busy -= 1,
+        }
+    }
+
     pub fn connectionCount(s: *HttpServer) u32 {
         s.log_mutex.lockUncancelable(s.io);
         defer s.log_mutex.unlock(s.io);
@@ -327,6 +359,8 @@ pub const HttpServer = struct {
         }
         while (true) {
             var request = server.receiveHead() catch return;
+            s.answering(.one_more);
+            defer s.answering(.one_fewer);
             try s.answer(&request);
             if (!s.options.keep_alive) return;
         }
@@ -427,6 +461,19 @@ pub const HttpServer = struct {
         return request.respond("", .{ .status = .too_many_requests, .keep_alive = s.options.keep_alive, .extra_headers = after });
     }
 
+    /// Where a `GET` of `path` is redirected, or `null`: `/moved/<rest>`
+    /// to `/<rest>`, and under `redirect_objects` a repository's objects
+    /// to `/files/`.
+    fn redirectFor(s: *HttpServer, arena: Allocator, path: []const u8, query: []const u8) !?[]const u8 {
+        if (s.options.redirect and std.mem.startsWith(u8, path, "/moved/")) {
+            return try arena.print("{s}{s}{s}{s}", .{ s.options.redirect_to orelse "", path["/moved".len..], if (query.len != 0) "?" else "", query });
+        }
+        if (s.options.redirect_objects and !std.mem.startsWith(u8, path, "/files/") and std.mem.find(u8, path, "/objects/") != null) {
+            return try arena.print("/files{s}", .{path});
+        }
+        return null;
+    }
+
     fn answer(s: *HttpServer, request: *std.http.Server.Request) !void {
         const io = s.io;
         const gpa = s.gpa;
@@ -454,10 +501,9 @@ pub const HttpServer = struct {
         const path = target[0 .. question orelse target.len];
         const query = if (question) |q| target[q + 1 ..] else "";
 
-        if (s.options.redirect and method == .GET and std.mem.startsWith(u8, path, "/moved/")) {
-            const location = try arena.print("{s}{s}{s}{s}", .{ s.options.redirect_to orelse "", path["/moved".len..], if (query.len != 0) "?" else "", query });
+        if (method == .GET) if (try s.redirectFor(arena, path, query)) |location| {
             return request.respond("", .{ .status = .found, .keep_alive = s.options.keep_alive, .extra_headers = &.{.{ .name = "Location", .value = location }} });
-        }
+        };
         if (s.options.files and method == .GET and std.mem.startsWith(u8, path, "/files/")) return s.serveFile(arena, request, path["/files/".len..]);
 
         var remote_user: ?[]const u8 = null;
@@ -504,7 +550,7 @@ pub const HttpServer = struct {
         try cgi_env.put("GIT_HTTP_EXPORT_ALL", "1");
         try cgi_env.put("PATH_INFO", path);
         try cgi_env.put("REQUEST_METHOD", @tagName(method));
-        try cgi_env.put("QUERY_STRING", query);
+        try cgi_env.put("QUERY_STRING", if (s.options.static) "" else query);
         try cgi_env.put("REMOTE_ADDR", "127.0.0.1");
         if (content_type) |ct| try cgi_env.put("CONTENT_TYPE", ct);
         if (content_encoding) |ce| try cgi_env.put("HTTP_CONTENT_ENCODING", ce);
