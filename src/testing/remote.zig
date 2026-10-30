@@ -223,6 +223,10 @@ pub const HttpServer = struct {
         /// string is dropped, so git's backend answers `info/refs` with the
         /// plain listing and every other file as itself.
         static: bool = false,
+        /// Answer a `GET` under a repository's `objects/` with a redirect
+        /// to the same file under `/files/`, as a host that moved its
+        /// objects does: every request after the first is redirected.
+        redirect_objects: bool = false,
     };
 
     /// Listen on an ephemeral port and serve the repositories under `root`.
@@ -396,6 +400,19 @@ pub const HttpServer = struct {
         return true;
     }
 
+    /// Where a `GET` of `path` is redirected, or `null`: `/moved/<rest>`
+    /// to `/<rest>`, and under `redirect_objects` a repository's objects
+    /// to `/files/`.
+    fn redirectFor(s: *HttpServer, arena: Allocator, path: []const u8, query: []const u8) !?[]const u8 {
+        if (s.options.redirect and std.mem.startsWith(u8, path, "/moved/")) {
+            return try arena.print("{s}{s}{s}{s}", .{ s.options.redirect_to orelse "", path["/moved".len..], if (query.len != 0) "?" else "", query });
+        }
+        if (s.options.redirect_objects and !std.mem.startsWith(u8, path, "/files/") and std.mem.find(u8, path, "/objects/") != null) {
+            return try arena.print("/files{s}", .{path});
+        }
+        return null;
+    }
+
     fn answer(s: *HttpServer, request: *std.http.Server.Request) !void {
         const io = s.io;
         const gpa = s.gpa;
@@ -425,10 +442,9 @@ pub const HttpServer = struct {
         const path = target[0 .. question orelse target.len];
         const query = if (question) |q| target[q + 1 ..] else "";
 
-        if (s.options.redirect and method == .GET and std.mem.startsWith(u8, path, "/moved/")) {
-            const location = try arena.print("{s}{s}{s}{s}", .{ s.options.redirect_to orelse "", path["/moved".len..], if (query.len != 0) "?" else "", query });
+        if (method == .GET) if (try s.redirectFor(arena, path, query)) |location| {
             return request.respond("", .{ .status = .found, .keep_alive = s.options.keep_alive, .extra_headers = &.{.{ .name = "Location", .value = location }} });
-        }
+        };
         if (s.options.files and method == .GET and std.mem.startsWith(u8, path, "/files/")) return s.serveFile(arena, request, path["/files/".len..]);
 
         var remote_user: ?[]const u8 = null;

@@ -329,3 +329,91 @@ test "dumb HTTP: a fetch takes only what is missing, as the server's log shows, 
 fn lessThan(_: void, a: []const u8, b: []const u8) bool {
     return std.mem.order(u8, a, b) == .lt;
 }
+
+/// `<root>/<name>`, a bare copy of `source` with every object loose.
+fn publishLoose(s: *Served, io: Io, source: *testgit.Repo, name: []const u8) ![]const u8 {
+    const path = try std.Io.Dir.path.join(s.arena(), &.{ s.root_path, name });
+    _ = try s.git(io, &.{ "init", "-q", "--bare", "--initial-branch=main", path });
+    _ = try s.git(io, &.{ "-C", path, "config", "receive.unpackLimit", "100000" });
+    try source.exec(io, &.{ "push", "-q", "--mirror", path });
+    return path;
+}
+
+/// git's dumb clone of `remote` fails, as relic's does with `expected`.
+fn expectBothRefuse(s: *Served, io: Io, remote: []const u8, tag: []const u8, git_args: []const []const u8, options: clone_mod.Options, expected: anyerror) !void {
+    const arena = s.arena();
+    const theirs = try std.Io.Dir.path.join(arena, &.{ s.out_path, try std.mem.concat(arena, u8, &.{ "git-", tag }) });
+    try testing.expectError(error.GitFailed, testremote.gitInputEnv(arena, io, s.out.dir, &s.env, try std.mem.concat(arena, []const u8, &.{ &.{ "clone", "-q" }, git_args, &.{ remote, theirs } }), "", false));
+    const made = try s.target(io, try std.mem.concat(arena, u8, &.{ "relic-", tag }));
+    var dir = made.dir;
+    defer dir.close(io);
+    var opts = options;
+    opts.programs = .{ .environ = &s.env };
+    try testing.expectError(expected, clone_mod.clone(s.gpa, io, remote, dir, opts));
+}
+
+test "dumb HTTP: a corrupt or missing object, a depth or a date, a push and a redirect after the first request are refused as git refuses them; an exclusion and a filter fetch everything, as git's" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const s = try Served.init(gpa, io, .{ .files = true, .redirect_objects = true });
+    defer s.deinit();
+    var source = try testremote.historyRepo(gpa, io, 3);
+    defer source.deinit();
+    const blob_out = try source.run(io, &.{ "rev-parse", "HEAD:src/a.txt" });
+    defer gpa.free(blob_out);
+    const other_out = try source.run(io, &.{ "rev-parse", "HEAD:docs/b.md" });
+    defer gpa.free(other_out);
+    const blob = std.mem.trimEnd(u8, blob_out, "\n");
+    const other = std.mem.trimEnd(u8, other_out, "\n");
+    const fan = try std.mem.concat(s.arena(), u8, &.{ "objects/", blob[0..2], "/", blob[2..] });
+
+    // A loose file that inflates to another object.
+    const corrupt = try publishLoose(s, io, &source, "corrupt.git");
+    {
+        var dir = try Io.Dir.cwd().openDir(io, corrupt, .{});
+        defer dir.close(io);
+        const misnamed = try dir.readFileAlloc(io, try std.mem.concat(s.arena(), u8, &.{ "objects/", other[0..2], "/", other[2..] }), s.arena(), .unlimited);
+        try dir.deleteFile(io, fan);
+        try dir.writeFile(io, .{ .sub_path = fan, .data = misnamed });
+    }
+    // An object nowhere.
+    const missing = try publishLoose(s, io, &source, "missing.git");
+    {
+        var dir = try Io.Dir.cwd().openDir(io, missing, .{});
+        defer dir.close(io);
+        try dir.deleteFile(io, fan);
+    }
+    const whole = try publishLoose(s, io, &source, "whole.git");
+    _ = whole;
+
+    // Followed only where every redirect is.
+    try expectBothRefuse(s, io, try s.url("whole.git"), "initial", &.{}, .{ .who = who }, error.HttpStatus);
+    var follow = try config_mod.Config.parseText(gpa, "[http]\n\tfollowRedirects = true\n", .command);
+    defer follow.deinit();
+    const git_follow = [_][]const u8{ "-c", "http.followRedirects=true" };
+    {
+        const made = try cloneBoth(s, io, "whole.git", "followed", &git_follow, .{ .who = who, .config = &follow });
+        try expectSameClone(s, io, made.theirs, made.ours, false);
+    }
+    try expectBothRefuse(s, io, try s.url("corrupt.git"), "corrupt", &git_follow, .{ .who = who, .config = &follow }, error.CorruptObject);
+    try expectBothRefuse(s, io, try s.url("missing.git"), "missing", &git_follow, .{ .who = who, .config = &follow }, error.ObjectMissing);
+    try expectBothRefuse(s, io, try s.url("whole.git"), "depth", &(git_follow ++ [_][]const u8{ "--depth", "1" }), .{ .who = who, .config = &follow, .depth = 1 }, error.DumbHttpShallow);
+    try expectBothRefuse(s, io, try s.url("whole.git"), "since", &(git_follow ++ [_][]const u8{"--shallow-since=2000-01-01"}), .{ .who = who, .config = &follow, .shallow_since = .fromNanoseconds(946_684_800 * std.time.ns_per_s) }, error.DumbHttpShallow);
+
+    // An exclusion git's `fetch_dumb` does not read: everything comes.
+    {
+        const made = try cloneBoth(s, io, "whole.git", "exclude", &(git_follow ++ [_][]const u8{"--shallow-exclude=side"}), .{ .who = who, .config = &follow, .shallow_exclude = &.{"side"} });
+        try expectSameClone(s, io, made.theirs, made.ours, false);
+        try testing.expectEqualStrings("false\n", try s.git(io, &.{ "-C", made.ours, "rev-parse", "--is-shallow-repository" }));
+    }
+
+    // A filter is never read: everything comes, and what each records of
+    // it is git's.
+    {
+        const made = try cloneBoth(s, io, "whole.git", "filter", &(git_follow ++ [_][]const u8{"--filter=blob:none"}), .{ .who = who, .config = &follow, .filter = "blob:none" });
+        try expectSameClone(s, io, made.theirs, made.ours, false);
+    }
+
+    // A push goes nowhere: git's needs WebDAV.
+    try testing.expectError(error.DumbHttpPushUnsupported, transport.Session.open(gpa, io, try s.url("whole.git"), .{ .service = .receive_pack }, .{ .who = who, .programs = .{ .environ = &s.env } }));
+}
