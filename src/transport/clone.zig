@@ -177,6 +177,15 @@ pub const Options = struct {
     /// `null` takes `init.defaultRefFormat` from `user_config`, as
     /// `Repository.CreateOptions.ref_format` does.
     ref_format: ?refs_mod.Format = null,
+    /// `--template`: the directory copied into the new git directory, as
+    /// `Repository.CreateOptions.template` copies it, opened by the caller.
+    /// The `config` it holds becomes the new repository's own, and git reads
+    /// its settings after `init_db`, so it is read with `user_config` for
+    /// the clone too: `clone.defaultRemoteName`, `url.<base>.insteadOf` and
+    /// the transport's settings from it apply, under `config` as the new
+    /// repository's own do. A template git does not copy from
+    /// (`Repository.templateUsable`) is not read.
+    template: ?Io.Dir = null,
     /// Check the branch out.
     checkout: bool = true,
     /// Clone into `dir` as the git directory of a working tree that is
@@ -370,20 +379,25 @@ fn settingBool(settings: ?*const config_mod.Config, name: []const u8) Error!bool
     };
 }
 
+/// What git reads once `init_db` has made the repository: the caller's
+/// levels, and the template's `config` as the new repository's own.
 fn userConfiguration(gpa: Allocator, io: Io, options: Options) Error!?config_mod.Config {
+    if (options.config != null) return null;
     const user = options.user_config;
-    const has_user_config = user.system != null or user.xdg != null or user.global != null or user.command.len != 0 or user.pairs.len != 0;
-    var user_settings: ?config_mod.Config = null;
-    if (options.config == null and has_user_config) {
-        user_settings = try config_mod.Config.open(gpa, io, .{
-            .system = user.system,
-            .xdg = user.xdg,
-            .global = user.global,
-            .command = user.command,
-            .pairs = user.pairs,
-        }, .{ .home = options.home });
-    }
-    return user_settings;
+    const local: ?config_mod.Sources.Path = if (options.template) |template|
+        (if (try Repository.templateUsable(gpa, io, template)) .{ .dir = template, .sub_path = "config" } else null)
+    else
+        null;
+    const has_config = local != null or user.system != null or user.xdg != null or user.global != null or user.command.len != 0 or user.pairs.len != 0;
+    if (!has_config) return null;
+    return try config_mod.Config.open(gpa, io, .{
+        .system = user.system,
+        .xdg = user.xdg,
+        .global = user.global,
+        .local = local,
+        .command = user.command,
+        .pairs = user.pairs,
+    }, .{ .home = options.home });
 }
 
 /// Whether `dir` holds nothing. It is opened again to be read, so any handle
@@ -1074,6 +1088,7 @@ fn initRepository(gpa: Allocator, io: Io, dir: Io.Dir, options: Options, object_
         .object_format = object_format,
         .ref_format = options.ref_format,
         .default_branch = initial,
+        .template = options.template,
         .bare = options.bare or options.separate_git_dir,
         .odb = options.odb,
         .system_config = user.system,
@@ -1780,6 +1795,92 @@ test "clone.defaultRemoteName names the remote unless the clone does, and clone.
         var repo = try made;
         repo.deinit(io);
         try expectSameClone(gpa, io, &env, by_git.dir.lend().get(), by_relic.dir.lend().get(), false);
+    }
+}
+
+test "a clone copies its template and reads the template's configuration, as git clone --template does" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var env = try testremote.environ(gpa);
+    defer env.deinit();
+    var source = try testremote.historyRepo(gpa, io, 3);
+    defer source.deinit();
+    const source_path = try testremote.absolutePath(gpa, io, source.dir);
+    defer gpa.free(source_path);
+    var root = testing.tmpDir(.{ .iterate = true });
+    defer root.cleanup();
+    const root_path = try testremote.absolutePath(gpa, io, root.dir);
+    defer gpa.free(root_path);
+
+    // A template with hooks, a dotfile and a configuration naming the
+    // remote, turning the reflogs off and rewriting the URL the clone is
+    // given to the source's path; and one of a format git does not copy,
+    // whose configuration names the remote too.
+    const full_config = try gpa.print("[clone]\n\tdefaultRemoteName = upstream\n[core]\n\tlogallrefupdates = false\n[url \"{s}\"]\n\tinsteadOf = elsewhere:\n", .{source_path});
+    defer gpa.free(full_config);
+    for ([_][]const u8{ "full/hooks", "full/info", "future" }) |sub| try root.dir.createDirPath(io, sub);
+    try root.dir.writeFile(io, .{ .sub_path = "full/config", .data = full_config });
+    try root.dir.writeFile(io, .{ .sub_path = "full/description", .data = "a template\n" });
+    try root.dir.writeFile(io, .{ .sub_path = "full/hooks/post-update", .data = "#!/bin/sh\nexit 0\n" });
+    if (Io.File.Permissions.has_executable_bit) try root.dir.setFilePermissions(io, "full/hooks/post-update", .fromMode(0o755), .{});
+    try root.dir.writeFile(io, .{ .sub_path = "full/info/exclude", .data = "*.tmp\n" });
+    try root.dir.writeFile(io, .{ .sub_path = "full/.hidden", .data = "not copied\n" });
+    try root.dir.writeFile(io, .{ .sub_path = "future/config", .data = "[core]\n\trepositoryformatversion = 9\n[clone]\n\tdefaultRemoteName = upstream\n" });
+    try root.dir.writeFile(io, .{ .sub_path = "future/description", .data = "not copied\n" });
+
+    const Case = struct { template: []const u8, url: []const u8, bare: bool = false, remote: []const u8 };
+    const cases = [_]Case{
+        .{ .template = "full", .url = "elsewhere:", .remote = "upstream\n" },
+        .{ .template = "full", .url = "elsewhere:", .bare = true, .remote = "upstream\n" },
+        .{ .template = "future", .url = source_path, .remote = "origin\n" },
+    };
+    for (cases) |case| {
+        var by_git = try Twin.init(gpa, io);
+        defer by_git.deinit(gpa, io);
+        var by_relic = try Twin.init(gpa, io);
+        defer by_relic.deinit(gpa, io);
+        const template_arg = try gpa.print("--template={s}/{s}", .{ root_path, case.template });
+        defer gpa.free(template_arg);
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(gpa);
+        try argv.appendSlice(gpa, &.{ "clone", "-q", template_arg });
+        if (case.bare) try argv.append(gpa, "--bare");
+        try argv.appendSlice(gpa, &.{ case.url, by_git.path });
+        gpa.free(try git(gpa, io, &env, by_git.tmp.dir, argv.items));
+
+        var template = try root.dir.openDir(io, case.template, .{ .iterate = true });
+        defer template.close(io);
+        var repo = try clone(gpa, io, case.url, by_relic.dir.lend().get(), .{ .who = test_who, .bare = case.bare, .template = template });
+        repo.deinit(io);
+        try expectSameClone(gpa, io, &env, by_git.dir.lend().get(), by_relic.dir.lend().get(), case.bare);
+        const remotes = try git(gpa, io, &env, by_relic.dir.lend().get(), &.{"remote"});
+        defer gpa.free(remotes);
+        try testing.expectEqualStrings(case.remote, remotes);
+        // What the template put in the git directory, byte for byte, the
+        // hook with its executable bit.
+        const git_dir = if (case.bare) "" else ".git/";
+        for ([_][]const u8{ "description", "hooks/post-update", "info/exclude", ".hidden" }) |name| {
+            const path = try gpa.print("{s}{s}", .{ git_dir, name });
+            defer gpa.free(path);
+            var said: [2][]u8 = undefined;
+            var mode: [2]?Io.File.Permissions = undefined;
+            for ([_]Io.Dir{ by_git.dir.lend().get(), by_relic.dir.lend().get() }, &said, &mode) |dir, *out, *m| {
+                out.* = dir.readFileAlloc(io, path, gpa, .limited(1 << 20)) catch |err| switch (err) {
+                    error.FileNotFound => try gpa.dupe(u8, "(none)"),
+                    else => return err,
+                };
+                m.* = if (dir.statFile(io, path, .{})) |st| st.permissions else |_| null;
+            }
+            defer for (said) |o| gpa.free(o);
+            try testing.expectEqualStrings(said[0], said[1]);
+            if (Io.File.Permissions.has_executable_bit) try testing.expectEqual(mode[0], mode[1]);
+        }
+        const settings = [_][]const u8{ "config", "--local", "--get-regexp", "^(clone|url|core\\.logallrefupdates)" };
+        const theirs = try gitOrEmpty(gpa, io, &env, by_git.dir.lend().get(), &settings);
+        defer gpa.free(theirs);
+        const ours = try gitOrEmpty(gpa, io, &env, by_relic.dir.lend().get(), &settings);
+        defer gpa.free(ours);
+        try testing.expectEqualStrings(theirs, ours);
     }
 }
 

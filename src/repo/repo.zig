@@ -1501,8 +1501,9 @@ pub const Repository = struct {
 
     /// Whether a template's own `config`, when it has one, is of a format
     /// git copies from: a `core.repositoryformatversion` of 0 or 1, or
-    /// none.
-    fn templateUsable(gpa: Allocator, io: Io, template: Io.Dir) ErrorNamespace.Error!bool {
+    /// none. A template that is not is neither copied nor read: its
+    /// configuration is not the new repository's.
+    pub fn templateUsable(gpa: Allocator, io: Io, template: Io.Dir) ErrorNamespace.Error!bool {
         const text = (try fs.readFileAlloc(gpa, io, template, "config", 1 << 20)) orelse return true;
         defer gpa.free(text);
         var config = config_mod.Config.parseText(gpa, text, .local) catch return false;
