@@ -34,6 +34,7 @@ const index_pack = @import("../odb/index_pack.zig");
 const send_pack = @import("../wire.zig").send_pack;
 const local = @import("local.zig");
 const ssh = @import("../wire.zig").ssh;
+const daemon = @import("../wire.zig").daemon;
 const smart_http = @import("../wire.zig").smart_http;
 const dumb_http = @import("../wire/dumb_http.zig");
 
@@ -74,8 +75,9 @@ const Service = connection.Service;
 
 /// Errors from opening and using a remote.
 pub const Error = error{
-    /// A transport relic does not have: `git://`, `rsync://`, a remote
-    /// helper's `<helper>::<address>`.
+    /// A transport relic does not have: `rsync://`, a remote helper's
+    /// `<helper>::<address>`, or `git://` straight to its host where relic
+    /// was built without `http`, so without a TCP dialer.
     UnsupportedTransport,
     /// `object-info` asked of a bundle file, a remote helper or a
     /// repository read directly: git's "remote does not support
@@ -95,7 +97,7 @@ pub const Error = error{
     /// A pack the server named by URI does not have the checksum it named:
     /// git's "pack downloaded from <uri> does not match expected hash".
     PackfileUriMismatch,
-} || local.Error || receive_pack.Error || fetch_pack.Error || protocol.Error || program.Error || ssh.Error || smart_http.Error || dumb_http.Error || send_pack.Error || bundle.Error ||
+} || local.Error || receive_pack.Error || fetch_pack.Error || protocol.Error || program.Error || ssh.Error || daemon.Error || smart_http.Error || dumb_http.Error || send_pack.Error || bundle.Error ||
     remote_helper.Error;
 
 /// How a remote is reached.
@@ -455,7 +457,18 @@ pub const Session = struct {
                     },
                 }
             },
-            .git => return error.UnsupportedTransport,
+            .git => {
+                var identity = try url.Identity.parse(gpa, remote_url);
+                defer identity.deinit();
+                const conn = try daemon.connect(gpa, io, identity.url, service, .{
+                    .programs = options.programs,
+                    .config = options.config,
+                    .service_program = options.service_program,
+                    .protocol_v2 = options.protocol_v2 orelse wantsV2(options.config),
+                });
+                errdefer conn.deinit(io);
+                return fromConnection(gpa, conn, service, kind);
+            },
         }
     }
 

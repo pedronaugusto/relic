@@ -590,6 +590,184 @@ pub const HttpServer = struct {
     }
 };
 
+/// git's own daemon on 127.0.0.1: every connection the test accepts is
+/// handed to `git daemon --inetd --verbose --base-path=<root>`, which serves
+/// it on its standard input and output, relayed here. So no port is raced
+/// for, and the client's side is a real TCP connection. What the daemon
+/// logged is kept: the virtual host and the protocol a request named, the
+/// path it asked for, and why it was refused.
+pub const DaemonServer = struct {
+    gpa: Allocator,
+    io: Io,
+    listener: Io.net.Server,
+    port: u16,
+    /// `--base-path`: the directory a request's path is taken under.
+    root: []u8,
+    env: Environ.Map,
+    options: DaemonOptions,
+    task: Io.Future(void) = undefined,
+    handlers: Io.Group = .init,
+    stopping: std.atomic.Value(bool) = .init(false),
+    /// What the daemon wrote on its standard error, every connection's.
+    log: std.ArrayList(u8) = .empty,
+    log_mutex: Io.Mutex = .init,
+    /// Connections accepted and not yet over, their logs still to come.
+    active: u32 = 0,
+
+    /// What the daemon serves.
+    pub const DaemonOptions = struct {
+        /// `--export-all`: every repository, where off only one holding
+        /// `git-daemon-export-ok` is served.
+        export_all: bool = true,
+        /// `--enable=receive-pack`: pushes are taken.
+        receive_pack: bool = false,
+    };
+
+    /// Listen on an ephemeral port and serve the repositories under `root`.
+    pub fn start(gpa: Allocator, io: Io, root: Io.Dir, options: DaemonOptions) !*DaemonServer {
+        try testgit.requireGit(gpa, io);
+        const s = try gpa.create(DaemonServer);
+        errdefer gpa.destroy(s);
+        const address = try Io.net.IpAddress.parse("127.0.0.1", 0);
+        var listener = try address.listen(io, .{ .reuse_address = true });
+        errdefer listener.deinit(io);
+        var env = try environ(gpa);
+        errdefer env.deinit();
+        const root_path = try absolutePath(gpa, io, root);
+        errdefer gpa.free(root_path);
+        s.* = .{
+            .gpa = gpa,
+            .io = io,
+            .listener = listener,
+            .port = listener.socket.address.getPort(),
+            .root = root_path,
+            .env = env,
+            .options = options,
+        };
+        s.task = io.concurrent(serve, .{s}) catch return error.SkipZigTest;
+        return s;
+    }
+
+    /// Stop serving and release everything.
+    pub fn stop(s: *DaemonServer) void {
+        const io = s.io;
+        s.stopping.store(true, .release);
+        // Wake the accept with a connection of its own.
+        const address = Io.net.IpAddress.parse("127.0.0.1", s.port) catch unreachable;
+        if (address.connect(io, .{ .mode = .stream })) |stream| stream.close(io) else |_| {}
+        s.task.await(io);
+        s.listener.deinit(io);
+        s.handlers.cancel(io);
+        s.env.deinit();
+        s.gpa.free(s.root);
+        s.log.deinit(s.gpa);
+        s.gpa.destroy(s);
+    }
+
+    /// `git://127.0.0.1:<port>/<path>`. The result is the caller's.
+    pub fn url(s: *const DaemonServer, gpa: Allocator, path: []const u8) ![]u8 {
+        return gpa.print("git://127.0.0.1:{d}/{s}", .{ s.port, path });
+    }
+
+    /// What the daemon logged, once every connection accepted is over.
+    /// A client that has its answer has been accepted, so its log is in.
+    /// The result is the caller's.
+    pub fn logged(s: *DaemonServer, gpa: Allocator) ![]u8 {
+        while (true) {
+            {
+                s.log_mutex.lockUncancelable(s.io);
+                defer s.log_mutex.unlock(s.io);
+                if (s.active == 0) return gpa.dupe(u8, s.log.items);
+            }
+            try s.io.sleep(.fromMilliseconds(5), .awake);
+        }
+    }
+
+    fn serve(s: *DaemonServer) void {
+        while (!s.stopping.load(.acquire)) {
+            const stream = s.listener.accept(s.io) catch return;
+            if (s.stopping.load(.acquire)) return stream.close(s.io);
+            s.count(.one_more);
+            s.handlers.concurrent(s.io, serveConnection, .{ s, stream }) catch {
+                s.count(.one_fewer);
+                stream.close(s.io);
+            };
+        }
+    }
+
+    fn count(s: *DaemonServer, by: enum { one_more, one_fewer }) void {
+        s.log_mutex.lockUncancelable(s.io);
+        defer s.log_mutex.unlock(s.io);
+        switch (by) {
+            .one_more => s.active += 1,
+            .one_fewer => s.active -= 1,
+        }
+    }
+
+    fn serveConnection(s: *DaemonServer, stream: Io.net.Stream) void {
+        defer s.count(.one_fewer);
+        defer stream.close(s.io);
+        // glint-ignore: Z026 -- a connection that fails is its client's to report; the server goes on to the next
+        s.relay(stream) catch {};
+    }
+
+    /// One connection through one `git daemon --inetd`: what the client
+    /// sends goes to its standard input, ended when the client's ends, and
+    /// what it writes goes back, until it exits.
+    fn relay(s: *DaemonServer, stream: Io.net.Stream) !void {
+        const io = s.io;
+        var arena_state: std.heap.ArenaAllocator = .init(s.gpa);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+        var argv: std.ArrayList([]const u8) = .empty;
+        try argv.appendSlice(arena, &.{ "git", "daemon", "--inetd", "--verbose", try arena.print("--base-path={s}", .{s.root}) });
+        if (s.options.export_all) try argv.append(arena, "--export-all");
+        if (s.options.receive_pack) try argv.append(arena, "--enable=receive-pack");
+        var running = try program.start(s.gpa, io, .{ .environ = &s.env }, .{ .argv = argv.items, .stderr = .capture });
+        defer running.deinit(io);
+        const stdin = running.child.takeStdin().?;
+        var client_read: [16 * 1024]u8 = undefined;
+        var client_write: [16 * 1024]u8 = undefined;
+        var daemon_read: [16 * 1024]u8 = undefined;
+        var from_client = stream.reader(io, &client_read);
+        var to_client = stream.writer(io, &client_write);
+        var from_daemon = running.child.stdoutFile().?.readerStreaming(io, &daemon_read);
+        var upward = io.concurrent(feed, .{ io, &from_client.interface, stdin }) catch {
+            stdin.close(io);
+            return error.SkipZigTest;
+        };
+        copy(&from_daemon.interface, &to_client.interface);
+        upward.cancel(io);
+        _ = try running.wait(io);
+        const stderr = running.child.takeStderr() orelse return;
+        defer stderr.close(io);
+        var log_read: [4096]u8 = undefined;
+        var from_log = stderr.readerStreaming(io, &log_read);
+        const said = try from_log.interface.allocRemaining(arena, .unlimited);
+        s.log_mutex.lockUncancelable(io);
+        defer s.log_mutex.unlock(io);
+        try s.log.appendSlice(s.gpa, said);
+    }
+
+    /// The client's bytes to the daemon's standard input, which is closed
+    /// when the client's stream ends or the relay stops.
+    fn feed(io: Io, from: *Io.Reader, stdin: Io.File) void {
+        defer stdin.close(io);
+        var buffer: [16 * 1024]u8 = undefined;
+        var to = stdin.writerStreaming(io, &buffer);
+        copy(from, &to.interface);
+    }
+
+    fn copy(from: *Io.Reader, to: *Io.Writer) void {
+        while (true) {
+            from.fillMore() catch return;
+            to.writeAll(from.buffered()) catch return;
+            from.tossBuffered();
+            to.flush() catch return;
+        }
+    }
+};
+
 /// TLS on 127.0.0.1 in front of answers a test writes beforehand:
 /// `openssl s_server -HTTP` answers each `GET /<target>` with the file
 /// `<target>` under its directory, which holds a whole HTTP response, and

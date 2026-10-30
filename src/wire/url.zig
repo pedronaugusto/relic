@@ -51,6 +51,10 @@ pub const Url = struct {
     /// Empty for a local path; a non-local file authority is kept here.
     host: []const u8 = "",
     port: ?u16 = null,
+    /// For ssh and git, the address before the path as written, user,
+    /// brackets and port and all: git's `hostandport`, which `git://`
+    /// matches `core.gitProxy` against and names its host by.
+    target: []const u8 = "",
     /// For ssh, the path spelling (use Identity for decoded bytes): `~user/repo` or
     /// `/srv/repo.git`, or `path/repo` relative to the login directory for
     /// the scp-like form. For a local path, the path. For http, the path
@@ -89,6 +93,7 @@ pub const Url = struct {
         // bracketed host is the ssh target, the rest the path.
         var url: Url = .{ .scheme = .ssh, .path = "", .raw = text };
         const colon = std.mem.findScalarPos(u8, text, bracketEnd(text), ':') orelse return error.MalformedUrl;
+        url.target = text[0..colon];
         try splitTarget(&url, text[0..colon]);
         url.path = homePath(text[colon + 1 ..]);
         return url;
@@ -119,6 +124,7 @@ pub const Url = struct {
     fn parseConnect(text: []const u8, scheme: Scheme, rest: []const u8) Url.ParseError!Url {
         var url: Url = .{ .scheme = scheme, .path = "", .raw = text };
         const slash = std.mem.findScalarPos(u8, rest, bracketEnd(rest), '/') orelse return error.MalformedUrl;
+        url.target = rest[0..slash];
         try splitTarget(&url, rest[0..slash]);
         url.path = homePath(rest[slash..]);
         return url;

@@ -356,6 +356,16 @@ Decoding precedes splitting, including home paths and encoded delimiters.
 Scp shorthand and plain paths keep percent signs literal, HTTP keeps its
 encoded request path, and `identity.url.raw` always retains the original.
 
+**`git://` is reached as git reaches it.** The program `GIT_PROXY_COMMAND`
+names, else the first `core.gitProxy` that matches the host and port as
+written (` for <domain>` at a dot boundary, `none` for none), is run with the
+host and the port and carries the conversation. Without one, a TCP connection
+goes to the port, 9418 unless the URL names another, through uplink's dialer.
+The request is git daemon's, with protocol v2 for upload-pack alone and
+`GIT_OVERRIDE_VIRTUAL_HOST` as the host when it is set; a daemon that refuses
+is `RemoteError`, with its `ERR` words. Built without `http`, relic has no
+dialer, and only a proxied `git://` works.
+
 **HTTP and TLS are [uplink](https://github.com/pedronaugusto/uplink)'s.** relic reads git's
 `http.*` settings, its environment and git-lfs's own settings, and hands
 uplink what they say: the authorities trusted (`http.sslCAInfo` in place
@@ -807,7 +817,7 @@ reread the affected refs before retrying.
 - **A promisor fetch's pack takes every `.gitmodules` and `.gitattributes` it lacks as promised,** where git asks whether a promisor pack names the blob. With nothing configured, a fetch still checks what it receives, at git's levels with `.`, `..` and `.git` in a tree refused (`fsck.baseline`), where git checks nothing; `fetch.fsckObjects=false` checks nothing.
 - **`repack --drop-filtered` drops promisor blobs only.** A blob the filter leaves out that no promisor remote has, one committed here, is still packed apart, where git 2.56 deletes it with the old packs and leaves the repository missing it.
 - **A fetch that takes packs by URI keeps none of them after.** git 2.56's fetch leaves its main pack's `.keep` when packfile URIs came (it records that lock for removal only when the fetch asked to keep the pack), so gc never repacks it; relic removes it as after any fetch. Nor does relic keep a pack of no objects, as git's fetch does when every object it asked for came by URI.
-- **No `git://`.** Refused by name. **Dumb HTTP** is cloned and fetched from as git's walker does (loose objects, packs, alternates), never pushed to: git pushes there over WebDAV, `DumbHttpPushUnsupported`. A depth, a date or an exclusion is `DumbHttpShallow`; git refuses the first two and silently fetches everything for an exclusion (remote-curl.c:1175), which relic refuses on purpose. A remote helper is spoken to through `connect`, `fetch`, `import`, `push` and `export`; one with only `stateless-connect` or `get` cannot fetch here, `HelperCannotFetch`.
+- **Dumb HTTP** is cloned and fetched from as git's walker does (loose objects, packs, alternates), never pushed to: git pushes there over WebDAV, `DumbHttpPushUnsupported`. A depth, a date or an exclusion is `DumbHttpShallow`; git refuses the first two and silently fetches everything for an exclusion (remote-curl.c:1175), which relic refuses on purpose. A remote helper is spoken to through `connect`, `fetch`, `import`, `push` and `export`; one with only `stateless-connect` or `get` cannot fetch here, `HelperCannotFetch`.
 - **No editor for a note.** Refused by name.
 - **`apply` with the index compares content where a stat differs.** git says "does not match index" until the index is refreshed; this reads the file and agrees when its content does.
 - **A binary hunk in a written patch is this package's deflate.** It decodes to the same file; the compressed bytes are not zlib's. A cover letter's shortlog under a mailmap is refused by name.
