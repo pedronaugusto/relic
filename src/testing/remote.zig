@@ -219,6 +219,10 @@ pub const HttpServer = struct {
         /// Answer a `GET` of `/files/<rest>` with the file `<rest>` under
         /// the root, as a web server serves a bundle; 404 when there is none.
         files: bool = false,
+        /// Answer as a static file host does, git's dumb protocol: the query
+        /// string is dropped, so git's backend answers `info/refs` with the
+        /// plain listing and every other file as itself.
+        static: bool = false,
     };
 
     /// Listen on an ephemeral port and serve the repositories under `root`.
@@ -471,7 +475,7 @@ pub const HttpServer = struct {
         try cgi_env.put("GIT_HTTP_EXPORT_ALL", "1");
         try cgi_env.put("PATH_INFO", path);
         try cgi_env.put("REQUEST_METHOD", @tagName(method));
-        try cgi_env.put("QUERY_STRING", query);
+        try cgi_env.put("QUERY_STRING", if (s.options.static) "" else query);
         try cgi_env.put("REMOTE_ADDR", "127.0.0.1");
         if (content_type) |ct| try cgi_env.put("CONTENT_TYPE", ct);
         if (content_encoding) |ce| try cgi_env.put("HTTP_CONTENT_ENCODING", ce);

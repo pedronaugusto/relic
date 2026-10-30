@@ -35,6 +35,7 @@ const send_pack = @import("../wire.zig").send_pack;
 const local = @import("local.zig");
 const ssh = @import("../wire.zig").ssh;
 const smart_http = @import("../wire.zig").smart_http;
+const dumb_http = @import("../wire/dumb_http.zig");
 
 const credential = @import("../wire.zig").credential;
 const auth = @import("../wire.zig").auth;
@@ -94,7 +95,7 @@ pub const Error = error{
     /// A pack the server named by URI does not have the checksum it named:
     /// git's "pack downloaded from <uri> does not match expected hash".
     PackfileUriMismatch,
-} || local.Error || receive_pack.Error || fetch_pack.Error || protocol.Error || program.Error || ssh.Error || smart_http.Error || send_pack.Error || bundle.Error ||
+} || local.Error || receive_pack.Error || fetch_pack.Error || protocol.Error || program.Error || ssh.Error || smart_http.Error || dumb_http.Error || send_pack.Error || bundle.Error ||
     remote_helper.Error;
 
 /// How a remote is reached.
@@ -238,6 +239,8 @@ pub const Session = struct {
             creates: []const promisors.Create = &.{},
             stores: []const promisors.Store = &.{},
         },
+        /// A server that speaks git's dumb HTTP protocol: its files.
+        dumb: *dumb_http.Remote,
         /// A remote helper spoken to in its own commands.
         helper: struct {
             h: *remote_helper.Helper,
@@ -253,7 +256,7 @@ pub const Session = struct {
     /// Only a smart server speaks it.
     pub fn negotiateOnly(s: *Session, gpa: Allocator, io: Io, db: *odb_mod.Odb, request: FetchRequest) Self.Error![]Oid {
         return switch (s.impl) {
-            .local, .bundle, .helper => error.NegotiateOnlyNeedsV2,
+            .local, .bundle, .dumb, .helper => error.NegotiateOnlyNeedsV2,
             .smart => |*smart| {
                 // The server is told nothing more after it.
                 smart.done = true;
@@ -434,9 +437,23 @@ pub const Session = struct {
             },
             .http, .https => {
                 // `error.HttpUnavailable` where relic was built without HTTP.
-                const conn = try smart_http.connect(gpa, io, parsed, service, httpOptions(options));
-                errdefer conn.deinit(io);
-                return fromConnection(gpa, conn, service, kind);
+                switch (try smart_http.connect(gpa, io, parsed, service, httpOptions(options))) {
+                    .smart => |conn| {
+                        errdefer conn.deinit(io);
+                        return fromConnection(gpa, conn, service, kind);
+                    },
+                    .dumb => |files| {
+                        const environ = if (options.programs) |p| p.environ else null;
+                        const remote = try dumb_http.Remote.open(gpa, io, files, .{
+                            .http = httpOptions(options),
+                            .policy = .{ .config = options.config, .environ = environ, .from_user = options.from_user },
+                            .warnings = options.warnings,
+                        });
+                        errdefer remote.deinit(io);
+                        if (kind) |k| if (k != remote.kind) return error.ObjectFormatMismatch;
+                        return .{ .gpa = gpa, .service = service, .impl = .{ .dumb = remote } };
+                    },
+                }
             },
             .git => return error.UnsupportedTransport,
         }
@@ -529,6 +546,7 @@ pub const Session = struct {
                 s.gpa.destroy(here);
             },
             .bundle => |f| f.deinit(io),
+            .dumb => |remote| remote.deinit(io),
             .helper => |helper| helper.h.deinit(io),
             .smart => |*smart| {
                 // A conversation over a pipe that the server still waits on
@@ -563,6 +581,7 @@ pub const Session = struct {
             .local => |here| here.repo.objectFormat(),
             .bundle => |f| f.header.object_format,
             .smart => |smart| smart.advertisement.kind,
+            .dumb => |remote| remote.kind,
             .helper => |helper| helper.h.kind,
         };
     }
@@ -571,7 +590,7 @@ pub const Session = struct {
     /// fetch that asks for no depth takes the server's shallow lines to be.
     pub fn advertisedShallow(s: *const Session) []const Oid {
         return switch (s.impl) {
-            .local, .bundle, .helper => &.{},
+            .local, .bundle, .dumb, .helper => &.{},
             .smart => |smart| smart.advertisement.shallow,
         };
     }
@@ -581,7 +600,7 @@ pub const Session = struct {
     /// not: there its index-pack writes the file, empty.
     pub fn promisorNamesRefs(s: *const Session) bool {
         return switch (s.impl) {
-            .local, .bundle, .helper => true,
+            .local, .bundle, .dumb, .helper => true,
             .smart => |smart| !(smart.conn.stateless and smart.advertisement.version != .v2),
         };
     }
@@ -590,7 +609,7 @@ pub const Session = struct {
     /// machine, which speaks none.
     pub fn protocolVersion(s: *const Session) ?protocol.Version {
         return switch (s.impl) {
-            .local, .bundle, .helper => null,
+            .local, .bundle, .dumb, .helper => null,
             .smart => |smart| smart.advertisement.version,
         };
     }
@@ -601,6 +620,7 @@ pub const Session = struct {
         return switch (s.impl) {
             .local => |here| here.listRefs(gpa, io, prefixes),
             .bundle => |f| bundleRefs(gpa, f),
+            .dumb => |remote| remote.listRefs(gpa, prefixes),
             .smart => |*smart| protocol.listRefs(gpa, smart.conn, &smart.advertisement, .{ .prefixes = prefixes, .server_options = s.server_options }),
             .helper => |helper| helper.h.list(gpa, helper.repository, .{ .for_push = s.service == .receive_pack }),
         };
@@ -616,7 +636,7 @@ pub const Session = struct {
     pub fn bundleUri(s: *Session, arena: Allocator, warnings: ?*warning.Warnings) Self.Error!?[]const []const u8 {
         return switch (s.impl) {
             .local => |here| if (upload_pack.advertisesBundleUris(here.repo.configuration())) try upload_pack.bundleSettings(arena, here.repo.configuration(), warnings) else &.{},
-            .bundle, .helper => null,
+            .bundle, .dumb, .helper => null,
             .smart => |*smart| try protocol.bundleUri(arena, smart.conn, &smart.advertisement),
         };
     }
@@ -628,7 +648,7 @@ pub const Session = struct {
     /// id and server options go with it. The lists are `arena`'s.
     pub fn objectInfo(s: *Session, arena: Allocator, request: protocol.ObjectInfoRequest) Self.Error!protocol.ObjectInfo {
         return switch (s.impl) {
-            .local, .bundle, .helper => error.ObjectInfoUnsupported,
+            .local, .bundle, .dumb, .helper => error.ObjectInfoUnsupported,
             .smart => |*smart| {
                 var with_id = request;
                 with_id.extras.session_id = s.sessionId();
@@ -679,7 +699,7 @@ pub const Session = struct {
         return switch (s.impl) {
             .smart => |*smart| .{ .nonce = smart.advertisement.value("push-cert") },
             .helper => .helper,
-            .local, .bundle => .{ .nonce = null },
+            .local, .bundle, .dumb => .{ .nonce = null },
         };
     }
 
@@ -694,6 +714,8 @@ pub const Session = struct {
             // A repository on this machine is pushed to through its
             // receive-pack, and a bundle is only ever fetched from.
             .local, .bundle => return error.UnsupportedTransport,
+            // git pushes to a dumb server over WebDAV.
+            .dumb => return error.DumbHttpPushUnsupported,
             .helper => |helper| {
                 const commands = try gpa.alloc(remote_helper.PushCommand, request.commands.len);
                 defer gpa.free(commands);
@@ -827,6 +849,16 @@ pub const Session = struct {
                     .filter = request.filter,
                 });
                 return .{ .pack = null, .objects = 0 };
+            },
+            .dumb => |remote| {
+                // git's `fetch_dumb`: no depth and no date, and a filter
+                // is never read, so everything comes. A pack is indexed as
+                // git's `index-pack --stdin` indexes it, kept by nothing.
+                if (request.deepen) |d| if (d.depth != null or d.since != null) return error.DumbHttpShallow;
+                var receive = options.receive;
+                receive.keep = false;
+                const got = try remote.fetch(io, db, request.wants, request.tips, receive);
+                return .{ .pack = null, .objects = got.loose };
             },
             .bundle => |f| {
                 // git's bundle transport has no depth and no filter; it

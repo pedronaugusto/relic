@@ -16,7 +16,8 @@
 //! allows, and one to another host or port takes no credential with it:
 //! not the helpers', and not an `Authorization` or `Cookie` among
 //! `http.extraHeader`, which curl does not carry to another host either. A server that answers with
-//! a plain file listing — git's dumb protocol — is refused by name. A
+//! a plain file listing — git's dumb protocol — is handed over as `Files`, its
+//! listing and every later `GET` through the same settings (`dumb_http`). A
 //! request that fits `http.postBuffer` is sent whole, gzipped when it is an
 //! upload-pack request over a kilobyte, as git sends it; a larger one is
 //! sent in chunks as it is written. Connections are kept between requests.
@@ -91,9 +92,12 @@ pub const Error = error{
     RepositoryNotFound,
     /// Any other status than success. `Connection.message` holds it.
     HttpStatus,
-    /// The server speaks git's dumb HTTP protocol, a listing of files,
-    /// which relic does not read.
+    /// The server speaks git's dumb HTTP protocol, a listing of files, to
+    /// a service that has no dumb form: an archive.
     DumbHttpUnsupported,
+    /// A push to a server that speaks git's dumb HTTP protocol, which git
+    /// makes over WebDAV (`http-push`): nobody in the family serves one.
+    DumbHttpPushUnsupported,
     /// The server asked for a client certificate and refused the one it
     /// was sent — or wanted one and was sent none. `Connection.message`
     /// names its TLS alert.
@@ -189,17 +193,86 @@ pub const Options = struct {
 /// for the `git/` in front.
 pub const user_agent = "git/2.0 (relic 0.3)";
 
-/// Open a smart HTTP conversation with the service at `url`.
-pub fn connect(gpa: Allocator, io: Io, url: url_mod.Url, service: Service, options: Options) Self.Error!*Connection {
+/// What the first request found: a smart server's conversation, or a
+/// dumb server's files.
+pub const Opened = union(enum) {
+    pub const Error = Self.Error;
+
+    smart: *Connection,
+    dumb: Files,
+};
+
+/// Open a conversation with the service at `url`: smart HTTP, or for
+/// upload-pack a dumb server's files, as git's `check_smart_http` tells
+/// them apart.
+pub fn connect(gpa: Allocator, io: Io, url: url_mod.Url, service: Service, options: Options) Self.Error!Opened {
     if (comptime !http_enabled) return error.HttpUnavailable;
     const h = try prepare(gpa, io, url, service, options);
     errdefer Http.deinit(io, h);
     // The advertisement is asked for here, so that what can go wrong with
     // the first request — a credential refused, no repository, a dumb
-    // server — is refused by its own name.
-    _ = try h.advertisementInner();
-    return &h.connection;
+    // server to push to — is refused by its own name.
+    switch (try h.advertisementInner()) {
+        .smart => return .{ .smart = &h.connection },
+        .dumb => |listing| switch (service) {
+            .upload_pack => return .{ .dumb = .{ .h = h, .listing = listing } },
+            .receive_pack => return error.DumbHttpPushUnsupported,
+            .upload_archive => return error.DumbHttpUnsupported,
+        },
+    }
 }
+
+/// A dumb server's files, asked for through the conversation that found
+/// it: its settings, credentials, proxy and TLS. A redirect is followed
+/// only under `http.followRedirects=true`, as git's `initial` follows the
+/// first request alone.
+pub const Files = struct {
+    pub const Error = Self.Error;
+
+    h: *Http,
+    /// `info/refs` as the server sent it; the files' own.
+    listing: []const u8,
+
+    /// The files under `url`, with no request made: an alternate a dumb
+    /// server names, asked as its own repository is.
+    pub fn open(gpa: Allocator, io: Io, url: url_mod.Url, options: Options) Self.Error!Files {
+        if (comptime !http_enabled) return error.HttpUnavailable;
+        var plain = options;
+        plain.protocol_v2 = false;
+        const h = try prepare(gpa, io, url, .upload_pack, plain);
+        h.downloading = true;
+        h.base_path = std.mem.trimEnd(u8, url.path, "/");
+        return .{ .h = h, .listing = "" };
+    }
+
+    pub fn deinit(f: *Files, io: Io) void {
+        Http.deinit(io, f.h);
+        f.* = undefined;
+    }
+
+    /// `GET` of `suffix` under the repository, which begins with `/`: its
+    /// body, read until the next `get`, or `null` for a 404, git's
+    /// missing target. Any other status is refused as the conversation
+    /// refuses it.
+    pub fn get(f: *Files, suffix: []const u8) Self.Error!?*Io.Reader {
+        const h = f.h;
+        const res = try h.get(suffix);
+        if (res.status == .not_found) return null;
+        try h.checkStatus(res);
+        return res.readerBuffered(h.io, h.body_buffer);
+    }
+
+    /// The repository's URL, where the first request's redirect led, in
+    /// `arena`.
+    pub fn baseUrl(f: *const Files, arena: Allocator) Allocator.Error![]const u8 {
+        return f.h.origin.join(arena, f.h.base_path);
+    }
+
+    /// What failed last, in words: a status, a reason.
+    pub fn message(f: *const Files) []const u8 {
+        return f.h.connection.message();
+    }
+};
 
 /// One `GET` of `url`, its body written to `w`: what git-remote-https's
 /// `get` does for a bundle URI. git's `http.*` settings for the URL hold
@@ -1092,7 +1165,9 @@ const Http = struct {
         return self(context).body_reader;
     }
 
-    fn advertisementInner(h: *Http) Error!*Io.Reader {
+    const Answer = union(enum) { smart: *Io.Reader, dumb: []const u8 };
+
+    fn advertisementInner(h: *Http) Error!Answer {
         var suffix_buf: [64]u8 = undefined;
         // unreachable: the longer service name, git-receive-pack, makes 35 bytes
         const suffix = std.mem.print(&suffix_buf, "/info/refs?service={s}", .{h.service.name()}) catch unreachable;
@@ -1102,7 +1177,18 @@ const Http = struct {
         // unreachable: the longer service name, git-receive-pack, makes 44 bytes
         const expected = std.mem.print(&expected_buf, "application/x-{s}-advertisement", .{h.service.name()}) catch unreachable;
         const content_type = res.headers.get("content-type") orelse "";
-        if (!std.mem.eql(u8, content_type, expected)) return error.DumbHttpUnsupported;
+        if (!std.mem.eql(u8, content_type, expected)) {
+            // git's `check_smart_http`: anything else is the dumb listing,
+            // read whole as git reads it, and every request after it is a
+            // download.
+            var listing: std.ArrayList(u8) = .empty;
+            res.reader(h.io).appendRemainingUnlimited(h.arena.allocator(), &listing) catch |err| return switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+                error.ReadFailed => h.fail(error.ConnectionFailed, "the body was cut short"),
+            };
+            h.downloading = true;
+            return .{ .dumb = listing.items };
+        }
 
         const body = res.readerBuffered(h.io, h.body_buffer);
         // A v0 answer begins `# service=<name>` and a flush, which say what
@@ -1118,7 +1204,7 @@ const Http = struct {
             }
         }
         h.body_reader = body;
-        return body;
+        return .{ .smart = body };
     }
 
     /// Where the `GET` that was followed ended: its path is the new base,
