@@ -76,6 +76,9 @@ pub const Remote = struct {
     alternates_read: bool = false,
     /// The object a fetch could not find.
     missing: ?Oid = null,
+    /// Loose requests at the repository begun before the walk reaches
+    /// them.
+    early: Prefetch = .{},
 
     /// What a remote reads besides its files: what an alternate may be.
     pub const Options = struct {
@@ -150,6 +153,7 @@ pub const Remote = struct {
 
     pub fn deinit(r: *Remote, io: Io) void {
         const gpa = r.gpa;
+        r.early.deinit(gpa, io);
         for (r.bases.items) |*base| {
             if (base.files) |*f| f.deinit(io);
             if (base.packs) |*list| {
@@ -228,6 +232,8 @@ pub const Remote = struct {
     pub fn fetch(r: *Remote, io: Io, db: *odb_mod.Odb, wants: []const Oid, tips: []const Oid, receive: index_pack.Options) Self.Error!Fetched {
         var walk: Walk = .{ .r = r, .io = io, .db = db, .receive = receive };
         defer walk.deinit();
+        // What the walk never came to.
+        defer r.early.clear(io);
         for (tips) |tip| try walk.markComplete(tip);
         for (wants) |want| try walk.process(want);
         try walk.loop();
@@ -268,6 +274,118 @@ pub fn parseRefs(a: Allocator, listing: []const u8) (Allocator.Error || Own)!str
     }
     return .{ .kind = kind, .refs = try refs.toOwnedSlice(a) };
 }
+
+/// git's `prefetch` and `fill_active_slots`: a loose request at the
+/// repository begun as the walk finds an object missing, up to
+/// `http.maxRequests` under way, each on a task of its own, the rest
+/// waiting in order. The walk takes each in its turn and reads its body
+/// itself, so the database is written by one task. With no task to run
+/// one on, nothing is begun early and the walk asks for each in turn.
+const Prefetch = struct {
+    /// Every one begun or waiting, by the order the walk found them in.
+    waiting: std.ArrayList(Ticket) = .empty,
+    /// The first of `waiting` not yet begun.
+    head: usize = 0,
+    /// How many have been added.
+    count: u64 = 0,
+    lanes: []Lane = &.{},
+    /// No task could be had: nothing more is begun early.
+    off: bool = false,
+
+    const Ticket = struct { oid: Oid, n: u64 };
+
+    const Lane = struct {
+        ticket: ?Ticket = null,
+        early: smart_http.Early,
+        task: ?Io.Future(smart_http.Early.Error!smart_http.Early.Answer) = null,
+        path: LoosePath = undefined,
+        buffer: [1 << 14]u8 = undefined,
+
+        /// The lane free again, its task awaited or canceled.
+        fn end(lane: *Lane, io: Io) void {
+            // What it came to is of no use now.
+            if (lane.task) |*task| _ = task.cancel(io) catch |err| switch (err) {
+                error.OutOfMemory, error.Canceled => {},
+            };
+            lane.task = null;
+            lane.ticket = null;
+            lane.early.reset(io);
+        }
+    };
+
+    /// `oid` found missing: begun when a lane is free, else waiting.
+    fn add(p: *Prefetch, r: *Remote, io: Io, db: *odb_mod.Odb, oid: Oid) Self.Error!void {
+        if (p.off) return;
+        if (p.lanes.len == 0) {
+            p.lanes = try r.gpa.alloc(Lane, r.files.requests());
+            for (p.lanes) |*lane| lane.* = .{ .early = .init(r.gpa) };
+        }
+        try p.waiting.append(r.gpa, .{ .oid = oid, .n = p.count });
+        p.count += 1;
+        try p.fill(r, io, db);
+    }
+
+    /// Each free lane given the next waiting object not here by now.
+    fn fill(p: *Prefetch, r: *Remote, io: Io, db: *odb_mod.Odb) Self.Error!void {
+        for (p.lanes) |*lane| {
+            if (lane.ticket != null) continue;
+            const ticket = while (p.head < p.waiting.items.len) {
+                const next = p.waiting.items[p.head];
+                p.head += 1;
+                if (!try db.exists(io, next.oid)) break next;
+            } else return;
+            lane.ticket = ticket;
+            try r.files.begin(&lane.early, loosePath(&lane.path, ticket.oid));
+            lane.task = io.concurrent(smart_http.Early.send, .{ &lane.early, io }) catch {
+                p.off = true;
+                lane.ticket = null;
+                return;
+            };
+        }
+    }
+
+    /// What `take` gives: the lane, to `end` when done with, and what its
+    /// request came to.
+    const Taken = struct { lane: *Lane, answer: smart_http.Early.Answer };
+
+    /// `oid`'s request, done, or `null` when none was begun. Every one
+    /// found before it the walk has passed, here by now: those begun are
+    /// ended and those waiting dropped.
+    fn take(p: *Prefetch, io: Io, oid: Oid) Self.Error!?Taken {
+        var found: ?*Lane = null;
+        var n: u64 = 0;
+        for (p.lanes) |*lane| if (lane.ticket) |ticket| if (ticket.oid.eql(oid)) {
+            found = lane;
+            n = ticket.n;
+        };
+        // Those begun come before those waiting.
+        if (found == null) n = for (p.waiting.items[p.head..], p.head..) |ticket, at| {
+            if (ticket.oid.eql(oid)) {
+                p.head = at + 1;
+                break ticket.n;
+            }
+        } else return null;
+        for (p.lanes) |*lane| if (lane.ticket) |ticket| if (ticket.n < n) lane.end(io);
+        const lane = found orelse return null;
+        var task = lane.task orelse return null;
+        lane.task = null;
+        return .{ .lane = lane, .answer = try task.await(io) };
+    }
+
+    /// Every lane ended and nothing waiting.
+    fn clear(p: *Prefetch, io: Io) void {
+        for (p.lanes) |*lane| lane.end(io);
+        p.waiting.clearRetainingCapacity();
+        p.head = 0;
+    }
+
+    fn deinit(p: *Prefetch, gpa: Allocator, io: Io) void {
+        p.clear(io);
+        for (p.lanes) |*lane| lane.early.deinit(io);
+        gpa.free(p.lanes);
+        p.waiting.deinit(gpa);
+    }
+};
 
 /// git's walker over one fetch: the objects seen, the queue of those to
 /// fetch or read, and the complete commits by date.
@@ -344,7 +462,10 @@ const Walk = struct {
         f.seen = true;
         if (try w.db.exists(w.io, oid)) {
             f.scan = true;
-        } else if (f.complete) return;
+        } else {
+            if (f.complete) return;
+            try w.r.early.add(w.r, w.io, w.db, oid);
+        }
         try w.queue.append(w.r.gpa, oid);
     }
 
@@ -355,7 +476,10 @@ const Walk = struct {
             const f = (try w.flagsOf(oid)).*;
             // git's `fetch_object` asks again: a pack fetched since may
             // have brought it.
-            if (!f.scan and !try w.db.exists(w.io, oid)) try w.r.fetchObject(w.io, w.db, oid, w.receive, &w.fetched);
+            if (!f.scan and !try w.db.exists(w.io, oid)) {
+                try w.r.fetchObject(w.io, w.db, oid, w.receive, &w.fetched);
+                try w.r.early.fill(w.r, w.io, w.db);
+            }
             try w.processObject(oid);
         }
     }
@@ -445,6 +569,26 @@ fn fetchObjectImpl(r: *Remote, io: Io, db: *odb_mod.Odb, oid: Oid, receive: inde
     // Loose, at the repository and on a 404 at each alternate in turn.
     var corrupt = false;
     var i: usize = 0;
+    // The repository's request, when it was begun early.
+    if (try r.early.take(io, oid)) |taken| {
+        const lane = taken.lane;
+        defer lane.end(io);
+        switch (taken.answer) {
+            .ok => if (lane.early.body(io, &lane.buffer)) |body| {
+                if (try writeLoose(io, db, oid, body) == .written) {
+                    fetched.loose += 1;
+                    return;
+                }
+                corrupt = true;
+                i = r.bases.items.len;
+            },
+            .missing => {
+                try r.readAlternates(io);
+                i = 1;
+            },
+            .again => {},
+        }
+    }
     while (i < r.bases.items.len) : (i += 1) {
         switch (try r.loose(io, db, i, oid)) {
             .written => {
@@ -479,16 +623,26 @@ fn filesOfImpl(r: *Remote, i: usize) *smart_http.Files {
 /// `objects/xx/yyyy…` at base `i`, inflated and named as it is written
 /// (git's `http_object_request`).
 fn looseImpl(r: *Remote, io: Io, db: *odb_mod.Odb, i: usize, oid: Oid) Self.Error!Loose {
+    var path_buf: LoosePath = undefined;
+    const body = (try r.filesOf(i).get(loosePath(&path_buf, oid))) orelse return .missing;
+    return writeLoose(io, db, oid, body);
+}
+
+const LoosePath = ["/objects/".len + 1 + hash.max_hex_len]u8;
+
+/// `/objects/xx/yyyy…`, in `buf`.
+fn loosePath(buf: *LoosePath, oid: Oid) []const u8 {
     var hex_buf: [hash.max_hex_len]u8 = undefined;
     const hex = oid.hex(&hex_buf);
-    // `/objects/xx/yyyy…`.
-    var path_buf: ["/objects/".len + 1 + hash.max_hex_len]u8 = undefined;
-    @memcpy(path_buf[0.."/objects/".len], "/objects/");
-    @memcpy(path_buf["/objects/".len..][0..2], hex[0..2]);
-    path_buf["/objects/".len + 2] = '/';
-    @memcpy(path_buf["/objects/".len + 3 ..][0 .. hex.len - 2], hex[2..]);
-    const path = path_buf[0 .. "/objects/".len + 1 + hex.len];
-    const body = (try r.filesOf(i).get(path)) orelse return .missing;
+    @memcpy(buf[0.."/objects/".len], "/objects/");
+    @memcpy(buf["/objects/".len..][0..2], hex[0..2]);
+    buf["/objects/".len + 2] = '/';
+    @memcpy(buf["/objects/".len + 3 ..][0 .. hex.len - 2], hex[2..]);
+    return buf[0 .. "/objects/".len + 1 + hex.len];
+}
+
+/// A loose object's file, `body`, inflated and written as `oid`.
+fn writeLoose(io: Io, db: *odb_mod.Odb, oid: Oid, body: *Io.Reader) Self.Error!Loose {
     var window: [(1 << 15) + 4096]u8 = undefined;
     var inflate: warp.Inflate.Reader = .init(body, &window, .{});
     const in = &inflate.interface;

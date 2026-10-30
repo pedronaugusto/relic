@@ -192,6 +192,10 @@ pub const HttpServer = struct {
     /// The repository whose next `times` requests for `info/refs` are
     /// answered 500, as a server that fails a clone; `failFirst` sets it.
     failing: struct { repository: []const u8 = "", times: u32 = 0 } = .{},
+    /// How many requests are being answered, and the most there were at
+    /// once since `mostAtOnce` was last asked.
+    busy: u32 = 0,
+    most_busy: u32 = 0,
     /// One line per request that carried a `Cookie`: its value.
     cookies: std.ArrayList(u8) = .empty,
 
@@ -301,6 +305,26 @@ pub const HttpServer = struct {
         return gpa.dupe(u8, s.cookies.items);
     }
 
+    /// The most requests answered at once since the last call.
+    pub fn mostAtOnce(s: *HttpServer) u32 {
+        s.log_mutex.lockUncancelable(s.io);
+        defer s.log_mutex.unlock(s.io);
+        defer s.most_busy = s.busy;
+        return s.most_busy;
+    }
+
+    fn answering(s: *HttpServer, by: enum { one_more, one_fewer }) void {
+        s.log_mutex.lockUncancelable(s.io);
+        defer s.log_mutex.unlock(s.io);
+        switch (by) {
+            .one_more => {
+                s.busy += 1;
+                s.most_busy = @max(s.most_busy, s.busy);
+            },
+            .one_fewer => s.busy -= 1,
+        }
+    }
+
     pub fn connectionCount(s: *HttpServer) u32 {
         s.log_mutex.lockUncancelable(s.io);
         defer s.log_mutex.unlock(s.io);
@@ -335,6 +359,8 @@ pub const HttpServer = struct {
         }
         while (true) {
             var request = server.receiveHead() catch return;
+            s.answering(.one_more);
+            defer s.answering(.one_fewer);
             try s.answer(&request);
             if (!s.options.keep_alive) return;
         }

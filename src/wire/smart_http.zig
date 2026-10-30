@@ -270,6 +270,34 @@ pub const Files = struct {
         return res.readerBuffered(h.io, h.body_buffer);
     }
 
+    /// How many requests `begin` keeps under way: `http.maxRequests`.
+    pub fn requests(f: *const Files) usize {
+        return f.h.max_requests;
+    }
+
+    /// `GET` of `suffix` made ready in `e`, to be sent beside others with
+    /// `Early.send` on a task of its own, as git's curl multi keeps
+    /// `http.maxRequests` under way. It is made on the caller's task,
+    /// with the session's URL and credentials as they are, and the
+    /// session is not changed by it.
+    pub fn begin(f: *Files, e: *Early, suffix: []const u8) Allocator.Error!void {
+        const h = f.h;
+        e.reset(h.io);
+        const a = e.arena.allocator();
+        e.client = &h.client;
+        if (h.credentials.authorization()) |text| {
+            // Its own copy, as a 401 to `get` may change the session's.
+            var copy = aegis.SecretBytes.init(e.arena.child_allocator, text.len) catch return error.OutOfMemory;
+            copy.appendSlice(text) catch {
+                copy.deinit();
+                return error.OutOfMemory;
+            };
+            e.authorization = copy;
+        }
+        e.headers = try h.headers(a, false, if (e.authorization) |*copy| copy.expose() else null, false);
+        e.url = try h.origin.join(a, try a.print("{s}{s}", .{ h.base_path, suffix }));
+    }
+
     /// The repository's URL, where the first request's redirect led, in
     /// `arena`.
     pub fn baseUrl(f: *const Files, arena: Allocator) Allocator.Error![]const u8 {
@@ -279,6 +307,73 @@ pub const Files = struct {
     /// What failed last, in words: a status, a reason.
     pub fn message(f: *const Files) []const u8 {
         return f.h.connection.message();
+    }
+};
+
+/// A request `Files.begin` made ready, sent by `send`.
+pub const Early = struct {
+    pub const Error = Allocator.Error || Io.Cancelable;
+
+    /// What a request came to: a body to read, a 404, or `again`, the
+    /// session's to answer with `Files.get`: a redirect, a 401 or 407, a
+    /// 429, any other status, or a failure.
+    pub const Answer = enum { ok, missing, again };
+
+    arena: std.heap.ArenaAllocator,
+    client: ?*uplink.Client = null,
+    url: []const u8 = "",
+    headers: []const http.Header = &.{},
+    /// The request's `Authorization`, wiped when it ends.
+    authorization: ?aegis.SecretBytes = null,
+    diagnostics: uplink.Diagnostics = .{},
+    /// An `ok` answer's, its body unread.
+    response: ?uplink.Response = null,
+
+    pub fn init(gpa: Allocator) Early {
+        return .{ .arena = .init(gpa) };
+    }
+
+    /// Send the request and read the head of its answer. The client is
+    /// one several tasks may use at once.
+    pub fn send(e: *Early, io: Io) Early.Error!Answer {
+        const client = e.client orelse return .again;
+        var res = client.send(io, .{ .url = e.url, .headers = e.headers, .diagnostics = &e.diagnostics }) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.Canceled => return error.Canceled,
+            else => return .again,
+        };
+        const answer: Answer = switch (res.status) {
+            .ok => .ok,
+            .not_found => .missing,
+            else => .again,
+        };
+        if (answer == .ok) e.response = res else res.deinit(io);
+        return answer;
+    }
+
+    /// An `ok` answer's body, read through `buffer`.
+    pub fn body(e: *Early, io: Io, buffer: []u8) ?*Io.Reader {
+        const res = &(e.response orelse return null);
+        return res.readerBuffered(io, buffer);
+    }
+
+    /// The request ended, ready for the next.
+    pub fn reset(e: *Early, io: Io) void {
+        if (e.response) |*res| res.deinit(io);
+        e.response = null;
+        if (e.authorization) |*copy| copy.deinit();
+        e.authorization = null;
+        e.client = null;
+        e.url = "";
+        e.headers = &.{};
+        e.diagnostics = .{};
+        _ = e.arena.reset(.retain_capacity);
+    }
+
+    pub fn deinit(e: *Early, io: Io) void {
+        e.reset(io);
+        e.arena.deinit();
+        e.* = undefined;
     }
 };
 
@@ -398,6 +493,8 @@ const Http = struct {
     downloading: bool = false,
     /// Whether requests go through a proxy.
     proxied: bool = false,
+    /// `http.maxRequests`: how many a dumb fetch keeps under way.
+    max_requests: usize = 1,
     in_flight: ?uplink.Response = null,
     streaming: ?uplink.Outgoing = null,
     post_buffer: []u8,
@@ -546,6 +643,7 @@ const Http = struct {
         for (settings.env_unparsed) |name| try warning.note(h.options.warnings, .{ .http_env_unparsed = name });
         try h.loadCookies(settings);
         h.rate_limit = .{ .retry_after = settings.retry_after, .max_retries = settings.max_retries, .max_retry_time = settings.max_retry_time };
+        h.max_requests = settings.requests();
         var timeouts: uplink.Timeouts = .{};
         // git's `get_curl_handle`: both above zero, or neither applies.
         if (settings.low_speed_limit > 0 and settings.low_speed_time.compare(.fromRaw(0)) == .gt) timeouts.low_speed = .{
@@ -560,8 +658,9 @@ const Http = struct {
                 .timeouts = timeouts,
                 .http2 = try h.httpVersion(settings.http_version),
                 .cookies = if (h.cookies) |*jar| jar else null,
-                // One connection kept, as curl keeps one for git.
-                .pool = .{ .max_idle_per_route = 1, .max_idle = 1 },
+                // A conversation's one connection kept, as curl keeps it
+                // for git, or each a dumb fetch keeps under way.
+                .pool = .{ .max_idle_per_route = @intCast(h.max_requests), .max_idle = @intCast(h.max_requests) },
                 // git's redirects and retries are its own, decided here:
                 // a 429 is tried again beside a 401, in one loop, as
                 // git's `http_request_recoverable` does.

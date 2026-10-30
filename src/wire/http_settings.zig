@@ -102,9 +102,25 @@ pub const Settings = struct {
     retry_after: Seconds = .fromRaw(0),
     max_retries: i64 = 0,
     max_retry_time: Seconds = .fromRaw(300),
+    /// `http.maxRequests`, else `GIT_HTTP_MAX_REQUESTS` read as C's
+    /// `atoi`: how many requests a dumb fetch keeps under way at once.
+    /// Below one is git's default, `requests` says.
+    max_requests: i64 = -1,
     /// The variables among `GIT_HTTP_LOW_SPEED_*` and `GIT_HTTP_*RETR*`
     /// that are not a number, which git warns of and leaves as they were.
     env_unparsed: []const []const u8 = &.{},
+
+    /// How many requests a dumb fetch keeps under way at once:
+    /// `max_requests`, git's `DEFAULT_MAX_REQUESTS` (5) below one, and no
+    /// more than `max_requests_cap`, where git has no ceiling.
+    pub fn requests(s: *const Settings) usize {
+        if (s.max_requests < 1) return 5;
+        return @intCast(@min(s.max_requests, max_requests_cap));
+    }
+
+    /// The most requests a dumb fetch keeps under way, whatever
+    /// `http.maxRequests` says: each holds a connection and a buffer.
+    pub const max_requests_cap = 64;
 
     /// Take `http.<name>`'s `value` (`null` when it is written without
     /// `=`), from `origin`, as git's `http_options` takes it: a boolean
@@ -242,6 +258,8 @@ pub const Settings = struct {
             settings.max_retries = number;
         } else if (std.mem.eql(u8, name, "maxretrytime")) {
             settings.max_retry_time = .fromRaw(number);
+        } else if (std.mem.eql(u8, name, "maxrequests")) {
+            settings.max_requests = number;
         }
     }
 
@@ -292,6 +310,8 @@ pub const Settings = struct {
         if (env.get("GIT_PROXY_SSL_CAINFO")) |v| settings.proxy_ssl_ca_info = v;
         if (env.get("GIT_PROXY_SSL_CERT_PASSWORD_PROTECTED") != null) settings.proxy_ssl_cert_password_protected = true;
         if (env.get("GIT_SSL_VERSION")) |v| settings.ssl_version = v;
+        // git's `http_init`: C's `atoi`, the number the value starts with.
+        if (env.get("GIT_HTTP_MAX_REQUESTS")) |v| settings.max_requests = @intCast(decimal.strtol(v, 10, 32).value); // aegis: no-danger: strtol of 32 bits fits an i64
         // git's `set_long_from_env`: C's `strtol` over the whole value, a
         // value that is not one warned of and left alone.
         var unparsed: std.ArrayList([]const u8) = .empty;
@@ -509,6 +529,33 @@ test "http.followRedirects is read as git reads it: initial, a boolean, scoped b
     try testing.expectEqual(FollowRedirects.never, (try resolve(arena, testing.io, try url_mod.Url.parse("https://git.example.com/r"), .{ .config = &config })).follow_redirects);
     try testing.expectEqual(FollowRedirects.initial, (try resolve(arena, testing.io, try url_mod.Url.parse("https://initial.example.com/r"), .{ .config = &config })).follow_redirects);
     try testing.expectError(error.InvalidHttpSetting, resolve(arena, testing.io, try url_mod.Url.parse("https://bad.example.com/r"), .{ .config = &config }));
+}
+
+test "http.maxRequests is git's: 5 below one, GIT_HTTP_MAX_REQUESTS over it as atoi reads it" {
+    var config = try config_mod.Config.parseText(testing.allocator,
+        \\[http]
+        \\    maxRequests = 3
+        \\[http "https://none.example.com"]
+        \\    maxRequests = 0
+        \\[http "https://many.example.com"]
+        \\    maxRequests = 1000
+        \\
+    , .local);
+    defer config.deinit();
+    var env: Environ.Map = .init(testing.allocator);
+    defer env.deinit();
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const url = try url_mod.Url.parse("https://a.example.com/r");
+    try testing.expectEqual(5, (try resolve(arena, testing.io, url, .{})).requests());
+    try testing.expectEqual(3, (try resolve(arena, testing.io, url, .{ .config = &config })).requests());
+    try testing.expectEqual(5, (try resolve(arena, testing.io, try url_mod.Url.parse("https://none.example.com/r"), .{ .config = &config })).requests());
+    try testing.expectEqual(Settings.max_requests_cap, (try resolve(arena, testing.io, try url_mod.Url.parse("https://many.example.com/r"), .{ .config = &config })).requests());
+    try env.put("GIT_HTTP_MAX_REQUESTS", "2x");
+    try testing.expectEqual(2, (try resolve(arena, testing.io, url, .{ .config = &config, .environ = &env })).requests());
+    try env.put("GIT_HTTP_MAX_REQUESTS", "none");
+    try testing.expectEqual(5, (try resolve(arena, testing.io, url, .{ .config = &config, .environ = &env })).requests());
 }
 
 test "the environment overrides the files, and no_proxy names hosts as curl reads it" {

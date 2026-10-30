@@ -5,6 +5,7 @@
 //! and compares what each made.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -324,6 +325,37 @@ test "dumb HTTP: a fetch takes only what is missing, as the server's log shows, 
     std.mem.sort([]const u8, asked.items, {}, lessThan);
     try testing.expectEqual(wanted.items.len, asked.items.len);
     for (wanted.items, asked.items) |w, a| try testing.expectEqualStrings(w, a);
+}
+
+test "dumb HTTP: loose objects are asked for up to http.maxRequests at once, as git's dumb client asks for them" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const s = try Served.init(gpa, io, .{ .keep_alive = true });
+    defer s.deinit();
+    var source = try testremote.historyRepo(gpa, io, 8);
+    defer source.deinit();
+    _ = try publishLoose(s, io, &source, "repo.git");
+    try s.env.put("GIT_HTTP_MAX_REQUESTS", "3");
+
+    const arena = s.arena();
+    const remote = try s.url("repo.git");
+    const theirs = try std.Io.Dir.path.join(arena, &.{ s.out_path, "git-repo" });
+    _ = s.server.mostAtOnce();
+    _ = try s.git(io, &.{ "clone", "-q", remote, theirs });
+    const git_most = s.server.mostAtOnce();
+    const made = try s.target(io, "relic-repo");
+    var dir = made.dir;
+    defer dir.close(io);
+    var repo = try clone_mod.clone(gpa, io, remote, dir, .{ .who = who, .programs = .{ .environ = &s.env } });
+    repo.deinit(io);
+    const ours_most = s.server.mostAtOnce();
+    try expectSameClone(s, io, theirs, made.path, false);
+
+    // git's, recorded beside relic's: both within the setting, and
+    // relic's more than one where there are tasks to run them on.
+    try testing.expect(git_most <= 3);
+    try testing.expect(ours_most <= 3);
+    if (!builtin.single_threaded) try testing.expect(ours_most >= 2);
 }
 
 fn lessThan(_: void, a: []const u8, b: []const u8) bool {
