@@ -4083,6 +4083,9 @@ pub const ObjectStream = struct {
     /// The file time the object is given, seconds past the epoch, or
     /// `null` for now, as `Odb.loosen` sets one.
     time: ?i64 = null,
+    /// The name the object must have, as a download is named before it
+    /// comes: another is `ObjectNameMismatch`, and nothing is written.
+    expected: ?Oid = null,
     finished: bool = false,
 
     /// Where the object's bytes go.
@@ -4127,6 +4130,10 @@ pub const ObjectStream = struct {
 
         const oid = s.hasher.final();
         if (s.hasher.collisionAttack()) return error.CollisionAttack;
+        if (s.expected) |want| if (!want.eql(oid)) {
+            fs.removeLeftover(io, s.dir.get(), s.temp[0..s.temp_len]);
+            return error.ObjectNameMismatch;
+        };
         var hex: [hash.max_hex_len]u8 = undefined;
         const text = oid.hex(&hex);
         var fan_out_made = false;
