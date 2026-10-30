@@ -33,6 +33,7 @@ pub const Transport = @import("submodule/submodule.zig").Transport;
 pub const TransportError = @import("submodule/submodule.zig").TransportError;
 pub const UpdateOptions = @import("submodule/submodule.zig").UpdateOptions;
 pub const UpdateOutcome = @import("submodule/submodule.zig").UpdateOutcome;
+pub const Failed = @import("submodule/submodule.zig").Failed;
 pub const update = @import("submodule/submodule.zig").update;
 pub const Visit = @import("submodule/submodule.zig").Visit;
 pub const WalkOptions = @import("submodule/submodule.zig").WalkOptions;

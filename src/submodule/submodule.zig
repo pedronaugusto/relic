@@ -1761,6 +1761,33 @@ pub const UpdateOptions = struct {
     /// What each submodule's repository is opened with.
     open: Repository.OpenOptions = .{},
     refusal: ?*Refusal = null,
+    /// Every submodule the update went on past, appended: see `update`.
+    failed: ?*Failed = null,
+};
+
+/// The submodules an update went on past, each with why: a checkout
+/// refused for local changes in the way, or a failed `post-checkout`, as
+/// git's `update_submodules` goes on past a submodule whose `git checkout`
+/// failed and fails at the end.
+pub const Failed = struct {
+    pub const Error = ErrorNamespace.Error;
+
+    gpa: Allocator,
+    items: std.ArrayList(Failure) = .empty,
+
+    pub const Failure = struct {
+        err: ErrorNamespace.Error,
+        refusal: Refusal,
+    };
+
+    pub fn init(gpa: Allocator) Failed {
+        return .{ .gpa = gpa };
+    }
+
+    pub fn deinit(f: *Failed) void {
+        f.items.deinit(f.gpa);
+        f.* = undefined;
+    }
 };
 
 /// What `update` did.
@@ -1784,19 +1811,35 @@ pub const UpdateOutcome = struct {
 ///
 /// A submodule with no working tree is connected to its repository in
 /// `modules/<name>` when that is on the disk, and cloned through the
-/// transport when it is not; all of those first, `jobs` at once, and once
-/// one has failed nothing is checked out, as git's `update_submodules`
-/// checks nothing out after a failed clone. The `checkout` strategy detaches `HEAD` at the
-/// commit and checks its tree out; without `force` a submodule with
-/// modified tracked content is refused rather than having it carried over,
-/// which is stricter than git, which carries over what it can. `merge` and
-/// `rebase` are refused by name. A `!command` from the repository's own
-/// configuration runs with `programs`, in the submodule, with the commit as
-/// its argument, as git runs it.
+/// transport when it is not; all of those first, `jobs` at once, each
+/// failed clone tried once more, and when one fails again nothing is
+/// checked out, as git's `update_clone` does. The `checkout` strategy
+/// detaches `HEAD` at the commit and checks its tree out; without `force` a
+/// submodule with modified tracked content is refused rather than having it
+/// carried over, which is stricter than git, which carries over what it
+/// can. `merge` and `rebase` run relic's own with `UpdateOptions.merge` and
+/// `rebasing`. A `!command` from the repository's own configuration runs
+/// with `programs`, in the submodule, with the commit as its argument, as
+/// git runs it.
+///
+/// A checkout refused for local changes in the way, or failed by its
+/// `post-checkout`, is git's `git checkout` exiting 1: the update goes on
+/// to the next submodule, leaves that one's own submodules be, and once
+/// every one is done returns the first such error, with its refusal, each
+/// appended to `UpdateOptions.failed`, as git's `update_submodules` goes on
+/// and fails at the end. Anything else is what git dies on, and stops the
+/// update where it is.
 pub fn update(gpa: Allocator, io: Io, repo: *Repository, options: UpdateOptions) Self.Error!UpdateOutcome {
     var outcome: UpdateOutcome = .{};
-    try updateIn(gpa, io, repo, options, options.paths, "", 0, &outcome);
-    return outcome;
+    var own: Failed = .init(gpa);
+    defer own.deinit();
+    const failed = options.failed orelse &own;
+    const before = failed.items.items.len;
+    try updateIn(gpa, io, repo, options, options.paths, "", 0, &outcome, failed);
+    if (failed.items.items.len == before) return outcome;
+    const first = &failed.items.items[before];
+    if (options.refusal) |r| r.* = first.refusal;
+    return first.err;
 }
 
 fn updateIn(
@@ -1808,6 +1851,7 @@ fn updateIn(
     prefix: []const u8,
     depth: u32,
     outcome: *UpdateOutcome,
+    failed: *Failed,
 ) Error!void {
     if (depth > max_depth) return refuse(options.refusal, prefix, "", error.NestingTooDeep);
     if (options.init) _ = try init(gpa, io, repo, .{ .paths = paths, .refusal = options.refusal });
@@ -1859,55 +1903,87 @@ fn updateIn(
     }
     try populateAll(gpa, io, repo, pending.items, try jobs(repo, &listing.gitmodules, options.jobs, null), options, outcome);
 
-    for (pending.items) |item| {
-        if (!item.just_cloned) try correctCoreWorktree(arena, gpa, io, repo, wt, item.path);
-        const display = item.display;
+    for (pending.items) |*item| try updateOne(arena, gpa, io, repo, wt, item, options, depth, outcome, failed);
+}
 
-        var sub = try openSubmodule(gpa, io, repo, item.path, options.open);
-        defer sub.deinit(io);
-        var promised: ?Promised = if (options.transport) |t| .{ .gpa = gpa, .repo = &sub, .transport = t } else null;
-        if (promised) |*p| try p.install(arena);
-        defer if (promised) |*p| p.uninstall();
-        var runner: ?hooks_mod.Runner = if (options.hooks) |hook_options| try hooks_mod.Runner.init(gpa, io, .{
-            .config = sub.configuration(),
-            .git_dir = sub.gitDirectory(),
-            .common_dir = sub.commonDirectory(),
-            .work_dir = sub.workDirectory(),
-        }, options.programs orelse return error.ProgramsNotGranted, hook_options) else null;
-        defer if (runner) |*r| r.deinit();
-        const hooks: ?*hooks_mod.Runner = if (runner) |*r| r else null;
+/// One submodule of `update`'s list, its repository in place: brought to
+/// its commit by its strategy, and its own submodules after it under
+/// `recursive`.
+fn updateOne(
+    arena: Allocator,
+    gpa: Allocator,
+    io: Io,
+    repo: *Repository,
+    wt: Io.Dir,
+    item: *const Pending,
+    options: UpdateOptions,
+    depth: u32,
+    outcome: *UpdateOutcome,
+    failed: *Failed,
+) Error!void {
+    if (!item.just_cloned) try correctCoreWorktree(arena, gpa, io, repo, wt, item.path);
+    const display = item.display;
 
-        var strategy: gitmodules.Update = options.strategy orelse item.configured orelse .checkout;
-        if (item.just_cloned) switch (strategy) {
-            .merge, .rebase, .none => strategy = .checkout,
-            else => {},
-        };
-        const current: ?Oid = if (item.just_cloned)
-            null
-        else
-            (try headOf(gpa, io, &sub)) orelse return refuse(options.refusal, display, "HEAD", error.NoCurrentRevision);
-        const target = if (options.remote) try remoteTip(arena, gpa, io, repo, &sub, &item, options) else item.recorded;
+    var sub = try openSubmodule(gpa, io, repo, item.path, options.open);
+    defer sub.deinit(io);
+    var promised: ?Promised = if (options.transport) |t| .{ .gpa = gpa, .repo = &sub, .transport = t } else null;
+    if (promised) |*p| try p.install(arena);
+    defer if (promised) |*p| p.uninstall();
+    var runner: ?hooks_mod.Runner = if (options.hooks) |hook_options| try hooks_mod.Runner.init(gpa, io, .{
+        .config = sub.configuration(),
+        .git_dir = sub.gitDirectory(),
+        .common_dir = sub.commonDirectory(),
+        .work_dir = sub.workDirectory(),
+    }, options.programs orelse return error.ProgramsNotGranted, hook_options) else null;
+    defer if (runner) |*r| r.deinit();
+    const hooks: ?*hooks_mod.Runner = if (runner) |*r| r else null;
 
-        if (current == null or !current.?.eql(target) or options.force) {
-            try ensureCommit(arena, gpa, io, repo, &sub, item.module, target, display, options);
-            switch (strategy) {
-                .checkout => try checkoutCommit(arena, gpa, io, &sub, target, current == null or options.force, display, hooks, options),
-                .merge => try mergeCommit(arena, gpa, io, &sub, target, display, hooks, options),
-                .rebase => try rebaseOnto(arena, gpa, io, &sub, target, display, hooks, options),
-                .command => |command| try runUpdateCommand(arena, gpa, io, &sub, command, target, display, item.update_key, options),
-                .none => {
-                    outcome.skipped += 1;
-                    continue;
-                },
-            }
-            outcome.updated += 1;
-        } else {
-            outcome.unchanged += 1;
+    var strategy: gitmodules.Update = options.strategy orelse item.configured orelse .checkout;
+    if (item.just_cloned) switch (strategy) {
+        .merge, .rebase, .none => strategy = .checkout,
+        else => {},
+    };
+    const current: ?Oid = if (item.just_cloned)
+        null
+    else
+        (try headOf(gpa, io, &sub)) orelse return refuse(options.refusal, display, "HEAD", error.NoCurrentRevision);
+    const target = if (options.remote) try remoteTip(arena, gpa, io, repo, &sub, item, options) else item.recorded;
+
+    if (current == null or !current.?.eql(target) or options.force) {
+        try ensureCommit(arena, gpa, io, repo, &sub, item.module, target, display, options);
+        switch (strategy) {
+            .checkout => {
+                var refusal: Refusal = .{};
+                var own = options;
+                own.refusal = &refusal;
+                checkoutCommit(arena, gpa, io, &sub, target, current == null or options.force, display, hooks, own) catch |err| switch (err) {
+                    // `git checkout` exiting 1: the update goes on, past
+                    // this submodule's own.
+                    error.LocalModifications, error.HookRejected => {
+                        try failed.items.append(gpa, .{ .err = err, .refusal = refusal });
+                        return;
+                    },
+                    else => {
+                        if (options.refusal) |r| r.* = refusal;
+                        return err;
+                    },
+                };
+            },
+            .merge => try mergeCommit(arena, gpa, io, &sub, target, display, hooks, options),
+            .rebase => try rebaseOnto(arena, gpa, io, &sub, target, display, hooks, options),
+            .command => |command| try runUpdateCommand(arena, gpa, io, &sub, command, target, display, item.update_key, options),
+            .none => {
+                outcome.skipped += 1;
+                return;
+            },
         }
+        outcome.updated += 1;
+    } else {
+        outcome.unchanged += 1;
+    }
 
-        if (options.recursive) {
-            try updateIn(gpa, io, &sub, options, null, try arena.print("{s}/", .{display}), depth + 1, outcome);
-        }
+    if (options.recursive) {
+        try updateIn(gpa, io, &sub, options, null, try arena.print("{s}/", .{display}), depth + 1, outcome, failed);
     }
 }
 

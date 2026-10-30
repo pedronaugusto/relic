@@ -2891,6 +2891,68 @@ test "a submodule whose clone fails is cloned again after the others, as git's u
     };
 }
 
+test "an update goes on past submodules whose checkout git refuses and fails at the end naming each, as git's update_submodules does with two of three refused" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var env = try testremote.environ(gpa);
+    defer env.deinit();
+    var world = try SubmoduleWorld.init(gpa, io);
+    defer world.deinit(gpa);
+    try world.twin(gpa, io, "by-git");
+    // Upstream, inner's README changes and lib and the superproject record
+    // it; the twin takes the superproject's record alone, and changes the
+    // README in both of its inner checkouts, which git will not overwrite.
+    try world.advance(gpa, io, "refs/heads/main", true);
+    try world.git(gpa, io, "by-git", &.{ "pull", "-q", "--no-recurse-submodules" });
+    for ([_][]const u8{ "by-git/lib/inner", "by-git/vendor/inner" }) |at| {
+        var dir = try world.work.dir.openDir(io, at, .{});
+        defer dir.close(io);
+        try dir.writeFile(io, .{ .sub_path = "README", .data = "local\n" });
+    }
+    try world.copy(gpa, io, "by-git", "by-relic");
+
+    var by_git_dir = try world.work.dir.openDir(io, "by-git", .{});
+    defer by_git_dir.close(io);
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(gpa);
+    try argv.append(gpa, "git");
+    try argv.appendSlice(gpa, &testgit.default_settings);
+    try argv.appendSlice(gpa, &.{ "submodule", "update", "-q", "--recursive" });
+    var by_git = try program.run(gpa, io, .{ .environ = &env }, .{ .argv = argv.items, .cwd = .{ .dir = by_git_dir }, .stderr = .capture }, .{});
+    defer by_git.deinit(gpa);
+    // git's own exit status, and the submodules it names, in its order.
+    try testing.expectEqual(program.Term{ .exited = 1 }, by_git.term);
+    var named: std.ArrayList([]const u8) = .empty;
+    defer named.deinit(gpa);
+    var lines = std.mem.splitScalar(u8, by_git.stderr, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.find(u8, line, "Unable to checkout '") == null) continue;
+        const marker = "in submodule path '";
+        const at = (std.mem.find(u8, line, marker) orelse continue) + marker.len;
+        try named.append(gpa, line[at .. std.mem.findScalarLast(u8, line, '\'') orelse continue]);
+    }
+
+    var dir = try world.work.dir.openDir(io, "by-relic", .{});
+    defer dir.close(io);
+    var repo = try repo_mod.Repository.open(gpa, io, dir, .{});
+    defer repo.deinit(io);
+    var t: clone_mod.SubmoduleTransport = .init(.{ .who = test_who, .programs = .{ .environ = &env } });
+    defer t.deinit();
+    var failed: submodule.Failed = .init(gpa);
+    defer failed.deinit();
+    var refusal: submodule.Refusal = .{};
+    try testing.expectError(error.LocalModifications, submodule.update(gpa, io, &repo, .{ .recursive = true, .who = test_who, .transport = t.transport(), .failed = &failed, .refusal = &refusal }));
+    try testing.expectEqualStrings("lib/inner", refusal.path());
+    try testing.expectEqual(named.items.len, failed.items.items.len);
+    for (named.items, failed.items.items) |path, failure| {
+        try testing.expectEqualStrings(path, failure.refusal.path());
+        try testing.expectEqual(error.LocalModifications, failure.err);
+    }
+    try testing.expectEqual(@as(usize, 2), named.items.len);
+    // lib moved on in both, and each inner left as its change left it.
+    try expectSameRecursiveClone(gpa, io, &world);
+}
+
 test "a pull updates the submodules as git's does: checked out after a merge, rebased after a rebase, by --recurse-submodules or submodule.recurse, and a rebase of commits that record one refused" {
     const gpa = testing.allocator;
     const io = testing.io;
