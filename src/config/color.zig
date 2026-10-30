@@ -168,7 +168,7 @@ fn parseSingle(word: []const u8) ?Single {
             // git reads `#rgb` as each digit twice
             const hi = std.fmt.charToDigit(word[at], 16) catch break;
             const lo = std.fmt.charToDigit(word[at + width - 1], 16) catch break;
-            part.* = hi << 4 | lo;
+            part.* = (hi << 4) | lo;
         } else return .{ .rgb = rgb };
     }
     if (std.ascii.eqlIgnoreCase(word, "default")) return .{ .ansi = 39 };

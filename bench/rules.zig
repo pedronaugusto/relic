@@ -68,7 +68,7 @@ pub fn run(init: std.process.Init, args: []const [:0]const u8) !void {
     defer config.deinit();
     const bytes = try gpa.alloc(u8, 1024 * 1024);
     defer gpa.free(bytes);
-    for (bytes, 0..) |*byte, i| byte.* = @truncate(i *% 2654435761 >> 7);
+    for (bytes, 0..) |*byte, i| byte.* = @truncate((i *% 2654435761) >> 7);
     var context: Context = .{ .gpa = gpa, .rules = &rules, .config = &config, .bytes = bytes };
     var buffer: [4096]u8 = undefined;
     var output = std.Io.File.stdout().writer(init.io, &buffer);

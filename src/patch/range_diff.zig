@@ -340,7 +340,7 @@ const Reader = struct {
         while (lines.next()) |line| {
             if (line.len == 0) continue;
             if (std.mem.startsWith(u8, line, "@@ ")) {
-                const rest = line[(std.mem.findPos(u8, line, 3, "@@") orelse line.len - 2) + 2 ..];
+                const rest = line[(std.mem.findPos(u8, line, 3, "@@") orelse (line.len - 2)) + 2 ..];
                 try text.appendSlice(a, "@@");
                 if (rest.len != 0) try text.print(a, " {s}:", .{file_name});
                 try text.appendSlice(a, rest);

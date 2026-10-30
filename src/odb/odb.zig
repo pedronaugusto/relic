@@ -2166,7 +2166,7 @@ pub const Odb = struct {
             // another entry's.
             const offset = try p.index.offsetAt(@intCast(i));
             if (offset >= p.bodyEnd()) return error.TruncatedPack;
-            o.* = offset << 32 | i;
+            o.* = (offset << 32) | i;
         }
         std.mem.sort(u64, order, {}, std.sort.asc(u64));
         const items = try gpa.alloc(VerifyItem, n);
@@ -3406,10 +3406,10 @@ pub const Odb = struct {
 
         fn work(task_io: Io, c: HeaderReads, _: usize, i: usize) ErrorNamespace.Error!void {
             if (c.entries[i].in_pack) return;
-            const found = c.odb.readLooseFor(task_io, c.entries[i].oid, .header) catch |err| {
+            const found = (c.odb.readLooseFor(task_io, c.entries[i].oid, .header) catch |err| {
                 if (opening.readRefusal(err)) return err;
                 return;
-            } orelse return;
+            }) orelse return;
             c.entries[i].header = found.header;
         }
     };
@@ -3430,10 +3430,10 @@ pub const Odb = struct {
         fn work(task_io: Io, c: TreeReads, _: usize, i: usize) ErrorNamespace.Error!void {
             const t = &c.trees[i];
             const into = t.bytes orelse return;
-            const found = c.odb.readLooseFor(task_io, t.oid, .{ .into = into }) catch |err| {
+            const found = (c.odb.readLooseFor(task_io, t.oid, .{ .into = into }) catch |err| {
                 if (opening.readRefusal(err)) return err;
                 return;
-            } orelse return;
+            }) orelse return;
             t.filled = found.header.type == .tree;
         }
     };
@@ -5135,12 +5135,12 @@ const Build = struct {
                     p.filled = true;
                     return;
                 }
-                const found = c.odb.readLooseFor(task_io, oid, .{ .into = into }) catch |err| switch (err) {
+                const found = (c.odb.readLooseFor(task_io, oid, .{ .into = into }) catch |err| switch (err) {
                     // Not the size its header said: read it again, whole,
                     // on the calling task.
                     error.CorruptLooseObject => return,
                     else => |e| return e,
-                } orelse return;
+                }) orelse return;
                 p.type = found.header.type;
                 p.filled = true;
             }

@@ -232,7 +232,7 @@ pub const Describer = struct {
                     break :blk resolved.oid;
                 },
             };
-            const peeled = entry.peeled orelse peelFully(io, d.repo, oid) catch oid;
+            const peeled = (entry.peeled orelse peelFully(io, d.repo, oid)) catch oid;
             const annotated = !peeled.eql(oid);
             const prio: u2 = if (annotated) prio_annotated else if (is_tag) prio_lightweight else prio_head;
             const path = if (d.options.all) refname["refs/".len..] else refname["refs/tags/".len..];
