@@ -311,7 +311,7 @@ pub const Settings = struct {
         if (env.get("GIT_PROXY_SSL_CERT_PASSWORD_PROTECTED") != null) settings.proxy_ssl_cert_password_protected = true;
         if (env.get("GIT_SSL_VERSION")) |v| settings.ssl_version = v;
         // git's `http_init`: C's `atoi`, the number the value starts with.
-        if (env.get("GIT_HTTP_MAX_REQUESTS")) |v| settings.max_requests = @intCast(decimal.strtol(v, 10, 32).value); // aegis: no-danger: strtol of 32 bits fits an i64
+        if (env.get("GIT_HTTP_MAX_REQUESTS")) |v| settings.max_requests = @intCast(decimal.strtol(v, 10, 32).value); // aegis: no-danger(A010): strtol of 32 bits fits an i64
         // git's `set_long_from_env`: C's `strtol` over the whole value, a
         // value that is not one warned of and left alone.
         var unparsed: std.ArrayList([]const u8) = .empty;
