@@ -254,7 +254,14 @@ pub fn parseRefs(a: Allocator, listing: []const u8) (Allocator.Error || Own)!str
         // git reads the hex whatever it holds; a name that is not hex
         // cannot be fetched, which a fetch then says.
         const oid = Oid.parse(kind, listing[start..tab]) catch return error.InvalidInfoRefs;
-        try refs.append(a, .{ .name = try a.dupe(u8, listing[tab + 1 .. i]), .oid = oid });
+        const name = listing[tab + 1 .. i];
+        // A peeled line stays a ref of its own, as git lists it, and is
+        // what the tag before it peels to, as git's fetch reads it.
+        if (std.mem.endsWith(u8, name, "^{}") and refs.items.len != 0) {
+            const tag = &refs.items[refs.items.len - 1];
+            if (std.mem.eql(u8, tag.name, name[0 .. name.len - "^{}".len])) tag.peeled = oid;
+        }
+        try refs.append(a, .{ .name = try a.dupe(u8, name), .oid = oid });
         start = i + 1;
     }
     return .{ .kind = kind, .refs = try refs.toOwnedSlice(a) };

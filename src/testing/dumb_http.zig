@@ -15,6 +15,9 @@ const testremote = @import("remote.zig");
 const object = @import("../object/object.zig");
 const clone_mod = @import("../transport/clone.zig");
 const transport = @import("../transport/transport.zig");
+const fetch_mod = @import("../transport/fetch.zig");
+const repo_mod = @import("../repo/repo.zig");
+const config_mod = @import("../config/config.zig");
 
 const who: object.Signature = .{ .name = "T", .email = "t@example.com", .when_secs = 1_700_000_000, .offset_minutes = 0 };
 
@@ -237,4 +240,92 @@ test "dumb HTTP: a SHA-256 repository, a detached HEAD and a HEAD naming no list
         const remote = try s.url(name);
         try testing.expectEqualStrings(try s.git(io, &.{ "ls-remote", remote }), try lsRemote(s, io, remote));
     }
+}
+
+test "dumb HTTP: objects borrowed through http-alternates (/, ../ and a URL) and alternates come as git's dumb client takes them, and only under http.followRedirects=true" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const s = try Served.init(gpa, io, .{});
+    defer s.deinit();
+    var source = try testremote.historyRepo(gpa, io, 3);
+    defer source.deinit();
+    const base = try s.publish(io, &source, "base.git");
+    _ = try s.git(io, &.{ "-C", base, "repack", "-a", "-d", "-q" });
+    try testremote.addCommits(gpa, io, &source, 10, 1);
+    try source.exec(io, &.{ "push", "-q", base, "HEAD:main" });
+
+    const port_url = try s.url("base.git/objects");
+    const Case = struct { name: []const u8, file: []const u8, text: []const u8 };
+    const cases = [_]Case{
+        .{ .name = "slash.git", .file = "http-alternates", .text = "/base.git/objects\n" },
+        .{ .name = "dots.git", .file = "http-alternates", .text = "../../base.git/objects\n" },
+        .{ .name = "url.git", .file = "http-alternates", .text = try std.mem.concat(s.arena(), u8, &.{ port_url, "\n" }) },
+        .{ .name = "plain.git", .file = "alternates", .text = "../../base.git/objects\n" },
+    };
+    var config = try config_mod.Config.parseText(gpa, "[http]\n\tfollowRedirects = true\n", .command);
+    defer config.deinit();
+    for (cases) |case| {
+        const borrower = try std.Io.Dir.path.join(s.arena(), &.{ s.root_path, case.name });
+        _ = try s.git(io, &.{ "clone", "-q", "--bare", "--shared", base, borrower });
+        const info = try std.Io.Dir.path.join(s.arena(), &.{ borrower, "objects", "info" });
+        var dir = try Io.Dir.cwd().openDir(io, info, .{});
+        defer dir.close(io);
+        // Relative to the objects directory, git's own reads it as well.
+        try dir.writeFile(io, .{ .sub_path = "alternates", .data = "../../base.git/objects\n" });
+        try dir.writeFile(io, .{ .sub_path = case.file, .data = case.text });
+
+        const made = try cloneBoth(s, io, case.name, case.name, &.{ "-c", "http.followRedirects=true" }, .{ .who = who, .config = &config });
+        try expectSameClone(s, io, made.theirs, made.ours, false);
+    }
+
+    // Under git's default, `initial`, neither takes an alternate.
+    const refused = try std.Io.Dir.path.join(s.arena(), &.{ s.out_path, "git-refused" });
+    try testing.expectError(error.GitFailed, testremote.gitInputEnv(s.arena(), io, s.out.dir, &s.env, &.{ "clone", "-q", try s.url("slash.git"), refused }, "", false));
+    const made = try s.target(io, "relic-refused");
+    var dir = made.dir;
+    defer dir.close(io);
+    try testing.expectError(error.ObjectMissing, clone_mod.clone(gpa, io, try s.url("slash.git"), dir, .{ .who = who, .programs = .{ .environ = &s.env } }));
+}
+
+test "dumb HTTP: a fetch takes only what is missing, as the server's log shows, and its refs are git's" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const s = try Served.init(gpa, io, .{});
+    defer s.deinit();
+    var source = try testremote.historyRepo(gpa, io, 3);
+    defer source.deinit();
+    const served = try s.publish(io, &source, "repo.git");
+    const made = try cloneBoth(s, io, "repo.git", "repo", &.{}, .{ .who = who });
+    const before = try s.git(io, &.{ "-C", served, "rev-parse", "main" });
+
+    try testremote.addCommits(gpa, io, &source, 10, 2);
+    try source.exec(io, &.{ "push", "-q", served, "HEAD:main" });
+    _ = try s.git(io, &.{ "-C", made.theirs, "fetch", "-q", "origin" });
+    const seen_before = (try s.server.requests(s.arena())).len;
+    {
+        var dir = try Io.Dir.cwd().openDir(io, made.ours, .{});
+        defer dir.close(io);
+        var repo = try repo_mod.Repository.open(gpa, io, dir, .{});
+        defer repo.deinit(io);
+        var fetched = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = who, .programs = .{ .environ = &s.env } });
+        fetched.deinit();
+    }
+    try expectSameClone(s, io, made.theirs, made.ours, false);
+
+    // Each object the new commits brought, asked for once, and no other.
+    const new = try s.git(io, &.{ "-C", served, "rev-list", "--objects", "--no-object-names", "main", try std.mem.concat(s.arena(), u8, &.{ "^", std.mem.trimEnd(u8, before, "\n") }) });
+    var wanted: std.ArrayList([]const u8) = .empty;
+    var lines = std.mem.tokenizeScalar(u8, new, '\n');
+    while (lines.next()) |hex| try wanted.append(s.arena(), try std.mem.concat(s.arena(), u8, &.{ "GET /repo.git/objects/", hex[0..2], "/", hex[2..], " -" }));
+    std.mem.sort([]const u8, wanted.items, {}, lessThan);
+    var asked: std.ArrayList([]const u8) = .empty;
+    var log = std.mem.tokenizeScalar(u8, (try s.server.requests(s.arena()))[seen_before..], '\n');
+    while (log.next()) |line| if (std.mem.find(u8, line, "/objects/") != null) try asked.append(s.arena(), line);
+    std.mem.sort([]const u8, asked.items, {}, lessThan);
+    try testing.expectEqual(wanted.items.len, asked.items.len);
+    for (wanted.items, asked.items) |w, a| try testing.expectEqualStrings(w, a);
+}
+
+fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+    return std.mem.order(u8, a, b) == .lt;
 }
