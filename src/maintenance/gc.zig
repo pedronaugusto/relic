@@ -240,7 +240,7 @@ const Keeper = struct {
         const when: date.Expiry = .fromRaw(entry.who.when_secs);
         if (when.compare(k.policy.total) == .lt) return false;
         if (when.compare(k.policy.unreached) != .lt) return true;
-        const kind = k.kind orelse k.prepare() catch |err| return k.fail(err);
+        const kind = (k.kind orelse k.prepare()) catch |err| return k.fail(err);
         k.kind = kind;
         if (kind == .always) return false;
         const old_gone = k.isUnreachable(entry.old) catch |err| return k.fail(err);

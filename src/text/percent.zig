@@ -11,7 +11,7 @@ const Allocator = std.mem.Allocator;
 pub fn hexPair(high: u8, low: u8) ?u8 {
     const h = digit(high) orelse return null;
     const l = digit(low) orelse return null;
-    return h << 4 | l;
+    return (h << 4) | l;
 }
 
 fn digit(c: u8) ?u8 {

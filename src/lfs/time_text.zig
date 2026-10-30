@@ -105,7 +105,7 @@ pub const GoTime = struct {
         if (t.offset == 0) return w.writeByte('Z');
         const east = @abs(t.offset);
         if (east / 3600 >= 24) return error.UnwritableTime;
-        try w.print("{c}{d:0>2}:{d:0>2}", .{ @as(u8, if (t.offset < 0) '-' else '+'), east / 3600, east / 60 % 60 });
+        try w.print("{c}{d:0>2}:{d:0>2}", .{ @as(u8, if (t.offset < 0) '-' else '+'), east / 3600, (east / 60) % 60 });
     }
 
     /// A JSON string as Go's `Time.UnmarshalJSON` reads one: its text by

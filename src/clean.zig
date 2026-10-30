@@ -538,11 +538,11 @@ const Remover = struct {
         for (names.items) |name| {
             path.shrinkRetainingCapacity(len);
             try path.appendSlice(r.a, name);
-            const found = fs.statAt(r.io, r.wt, path.items) catch |err| {
+            const found = (fs.statAt(r.io, r.wt, path.items) catch |err| {
                 try r.failures.append(r.a, .{ .path = try r.a.dupe(u8, path.items), .err = err });
                 gone.* = false;
                 break;
-            } orelse continue;
+            }) orelse continue;
             if (found.kind == .directory) {
                 var child_gone = true;
                 try r.removeDirectory(path, &child_gone, depth + 1);
