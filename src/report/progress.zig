@@ -107,7 +107,7 @@ pub fn sanitize(text: []const u8, control: Control, out: []u8) Sanitized {
     while (r < text.len) {
         const c = text[r];
         if (c == 0) return .{ .read = text.len, .written = w };
-        if (c >= 0x20 and c != 0x7f or c == '\t' or c == '\n') {
+        if ((c >= 0x20 and c != 0x7f) or c == '\t' or c == '\n') {
             if (w == out.len) break;
             out[w] = c;
             w += 1;

@@ -354,14 +354,14 @@ pub const Attrs = struct {
         // never through a symbolic link, as git's `READ_ATTR_NOFOLLOW` reads
         // it: a link would have the tree's attributes come from anywhere.
         if (links == .no_follow) {
-            const found = fs.statAt(io, dir, path) catch return orelse return;
+            const found = (fs.statAt(io, dir, path) catch return) orelse return;
             if (found.kind != .file) return;
         }
         const a = attrs.arena.allocator();
-        const bytes = fs.readFileAlloc(a, io, dir, path, max_file_size) catch |err| switch (err) {
+        const bytes = (fs.readFileAlloc(a, io, dir, path, max_file_size) catch |err| switch (err) {
             error.StreamTooLong => return,
             else => |e| return e,
-        } orelse return;
+        }) orelse return;
         try attrs.addText(bytes, .{ .base = base, .source = source, .precedence = precedence });
     }
 
