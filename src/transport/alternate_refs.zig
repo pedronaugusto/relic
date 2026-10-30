@@ -137,7 +137,9 @@ test "a cancel that lands in finding an alternate's refs is returned, not taken 
     try lender.exec(io, &.{ "commit", "-q", "--allow-empty", "-m", "lent" });
     var borrower = try testgit.Repo.init(gpa, io, &.{});
     defer borrower.deinit();
-    const lender_git = try lender.dir.realPathFileAlloc(io, ".git", gpa);
+    // `/`-separated, as `read` names the lender on Windows too, so the
+    // plan's paths are the ones it opens.
+    const lender_git = try fs.realPathAlloc(gpa, io, lender.dir, ".git");
     defer gpa.free(lender_git);
     const lender_objects = try std.mem.concat(gpa, u8, &.{ lender_git, "/objects" });
     defer gpa.free(lender_objects);

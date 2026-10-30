@@ -1879,7 +1879,11 @@ test "a clone copies its template and reads the template's configuration, as git
     // remote, turning the reflogs off and rewriting the URL the clone is
     // given to the source's path; and one of a format git does not copy,
     // whose configuration names the remote too.
-    const full_config = try gpa.print("[clone]\n\tdefaultRemoteName = upstream\n[core]\n\tlogallrefupdates = false\n[url \"{s}\"]\n\tinsteadOf = elsewhere:\n", .{source_path});
+    // `/`-separated: a configuration file's quoted name reads `\` as an
+    // escape, which would eat a Windows path's separators.
+    const source_url = try fs.realPathAlloc(gpa, io, source.dir, ".");
+    defer gpa.free(source_url);
+    const full_config = try gpa.print("[clone]\n\tdefaultRemoteName = upstream\n[core]\n\tlogallrefupdates = false\n[url \"{s}\"]\n\tinsteadOf = elsewhere:\n", .{source_url});
     defer gpa.free(full_config);
     for ([_][]const u8{ "full/hooks", "full/info", "future" }) |sub| try root.dir.createDirPath(io, sub);
     try root.dir.writeFile(io, .{ .sub_path = "full/config", .data = full_config });

@@ -545,7 +545,12 @@ pub const Runner = struct {
             }
         }
         var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        return switch (runner.findFile(io, event, &path_buf) catch return false) {
+        // A cancel, which this has no error to return, is put back for the
+        // caller's next cancelation point.
+        return switch (runner.findFile(io, event, &path_buf) catch |err| {
+            if (err == error.Canceled) io.recancel();
+            return false;
+        }) {
             .found => true,
             else => false,
         };
@@ -553,22 +558,23 @@ pub const Runner = struct {
 
     const Lookup = union(enum) { missing, not_executable, found: []const u8 };
 
-    fn findFile(runner: *Runner, io: Io, event: []const u8, buf: []u8) error{NameTooLong}!Lookup {
+    fn findFile(runner: *Runner, io: Io, event: []const u8, buf: []u8) (error{NameTooLong} || Io.Cancelable)!Lookup {
         const path = std.mem.print(buf, "{s}/{s}", .{ runner.dir, event }) catch return error.NameTooLong;
         if (builtin.target.os.tag == .windows) {
             // Windows has no executable bit. git for Windows runs a file whose
             // name ends in `.exe` or whose first two bytes are `#!`, and tries
             // `<name>.exe` when `<name>` is not one of those.
-            if (runsOnWindows(io, path)) return .{ .found = path };
+            if (try runsOnWindows(io, path)) return .{ .found = path };
             const exe = std.mem.print(buf, "{s}/{s}.exe", .{ runner.dir, event }) catch return error.NameTooLong;
-            Io.Dir.accessAbsolute(io, exe, .{}) catch return .missing;
+            Io.Dir.accessAbsolute(io, exe, .{}) catch |err| return if (err == error.Canceled) error.Canceled else .missing;
             return .{ .found = exe };
         }
         Io.Dir.accessAbsolute(io, path, .{ .execute = true }) catch |err| switch (err) {
             error.AccessDenied, error.PermissionDenied => {
-                Io.Dir.accessAbsolute(io, path, .{}) catch return .missing;
+                Io.Dir.accessAbsolute(io, path, .{}) catch |e| return if (e == error.Canceled) error.Canceled else .missing;
                 return .not_executable;
             },
+            error.Canceled => return error.Canceled,
             else => return .missing,
         };
         return .{ .found = path };
@@ -1092,15 +1098,15 @@ fn cannotStart(err: program.Error) bool {
     };
 }
 
-fn runsOnWindows(io: Io, path: []const u8) bool {
+fn runsOnWindows(io: Io, path: []const u8) Io.Cancelable!bool {
     if (std.ascii.endsWithIgnoreCase(path, ".exe")) {
-        Io.Dir.accessAbsolute(io, path, .{}) catch return false;
+        Io.Dir.accessAbsolute(io, path, .{}) catch |err| return if (err == error.Canceled) error.Canceled else false;
         return true;
     }
-    const file = Io.Dir.openFileAbsolute(io, path, .{}) catch return false;
+    const file = Io.Dir.openFileAbsolute(io, path, .{}) catch |err| return if (err == error.Canceled) error.Canceled else false;
     defer file.close(io);
     var head: [2]u8 = undefined;
-    const n = file.readPositionalAll(io, &head, 0) catch return false;
+    const n = file.readPositionalAll(io, &head, 0) catch |err| return if (err == error.Canceled) error.Canceled else false;
     return n == 2 and head[0] == '#' and head[1] == '!';
 }
 

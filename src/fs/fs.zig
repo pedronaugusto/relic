@@ -1074,12 +1074,12 @@ pub fn rename(io: Io, dir: Io.Dir, old_name: []const u8, new_name: []const u8) I
 /// Take off `sub_path`'s read-only attribute, when it has one, as git for
 /// Windows does before it replaces or removes a file. Returns whether it
 /// did. Elsewhere a file's own write bits do not stop either, and this does
-/// nothing.
-fn clearReadOnly(io: Io, dir: Io.Dir, sub_path: []const u8) bool {
+/// nothing. A cancel is returned.
+fn clearReadOnly(io: Io, dir: Io.Dir, sub_path: []const u8) Io.Cancelable!bool {
     if (builtin.target.os.tag != .windows) return false;
-    const found = (permissionsAt(io, dir, sub_path) catch return false) orelse return false;
+    const found = (permissionsAt(io, dir, sub_path) catch |err| return if (err == error.Canceled) error.Canceled else false) orelse return false;
     if (!isReadOnly(found.permissions)) return false;
-    setFilePermissions(io, dir, sub_path, withReadOnly(found.permissions, false)) catch return false;
+    setFilePermissions(io, dir, sub_path, withReadOnly(found.permissions, false)) catch |err| return if (err == error.Canceled) error.Canceled else false;
     return true;
 }
 
@@ -1371,9 +1371,9 @@ extern "kernel32" fn GetCurrentProcess() callconv(.winapi) std.os.windows.HANDLE
 // aegis: boundary: Win32's CloseHandle, the raw call
 extern "kernel32" fn CloseHandle(handle: std.os.windows.HANDLE) callconv(.winapi) std.os.windows.BOOL;
 
-fn ownedWindows(io: Io, dir: Io.Dir, sub_path: []const u8, home: ?[]const u8) bool {
+fn ownedWindows(io: Io, dir: Io.Dir, sub_path: []const u8, home: ?[]const u8) Io.Cancelable!bool {
     var root_buf: [Io.Dir.max_path_bytes]u8 = undefined;
-    const root_len = dir.realPath(io, &root_buf) catch return false;
+    const root_len = dir.realPath(io, &root_buf) catch |err| return if (err == error.Canceled) error.Canceled else false;
     var path_buf: [Io.Dir.max_path_bytes]u8 = undefined;
     const path = if (std.mem.eql(u8, sub_path, "."))
         root_buf[0..root_len]
@@ -1456,12 +1456,12 @@ fn openAttributesWindows(dir: Io.Dir, sub_path: []const u8) (Io.Dir.PathNameErro
 pub fn deleteFile(io: Io, dir: Io.Dir, sub_path: []const u8) Io.Dir.DeleteFileError!void {
     dir.deleteFile(io, sub_path) catch |err| switch (err) {
         error.AccessDenied, error.PermissionDenied => {
-            if (!clearReadOnly(io, dir, sub_path)) return err;
+            if (!try clearReadOnly(io, dir, sub_path)) return err;
             return dir.deleteFile(io, sub_path);
         },
         error.IsDir => {
             if (builtin.target.os.tag != .windows) return err;
-            const found = (statAt(io, dir, sub_path) catch return err) orelse return error.FileNotFound;
+            const found = (statAt(io, dir, sub_path) catch |e| return if (e == error.Canceled) error.Canceled else err) orelse return error.FileNotFound;
             if (found.kind != .sym_link) return err;
             // A link holds nothing, so it is never `DirNotEmpty`.
             dir.deleteDir(io, sub_path) catch |e| return switch (e) {
