@@ -931,8 +931,8 @@ pub fn expiresWithin(now_at: Io.Timestamp, in_s: i64, at: time_text.GoTime, marg
     // aegis: no-danger(A011): Go's nanoseconds, compared as git-lfs compares them
     if (in_ns != 0) return in_ns < margin_s * std.time.ns_per_s;
     if (at.isZero()) return false;
-    // aegis: no-danger(A011): Go's nanoseconds since the epoch, compared as git-lfs compares them
-    return at.nanoseconds() < @as(i128, now_at.nanoseconds) + margin_s * std.time.ns_per_s;
+    const margin = aegis.units.Duration(.second, i64).fromRaw(margin_s).convert(.nanosecond, i128, .exact);
+    return at.instant().compare(time_text.GoTime.Instant.fromTimestamp(now_at, .exact).saturatingAdd(margin)) == .lt;
 }
 
 /// The program git-lfs runs to reach an ssh remote and the arguments it
