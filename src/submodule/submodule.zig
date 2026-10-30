@@ -57,6 +57,8 @@ const remote_mod = @import("../wire.zig").remote;
 const promisors = @import("../wire.zig").promisors;
 const three_way = @import("../merge/three_way.zig");
 const branch_mod = @import("../commit/branch.zig");
+const merging = @import("../commit/merging.zig");
+const rebase_mod = @import("../rebase/rebase.zig");
 
 const Oid = hash.Oid;
 const Index = index_mod.Index;
@@ -85,9 +87,17 @@ pub const Error = error{
     /// `HEAD` moved, content modified, untracked files, or a gitlink change
     /// staged in the superproject. `force` is what discards them.
     LocalModifications,
-    /// `merge` or `rebase`, which this release does not run. The setting
-    /// names it.
+    /// `merge` or `rebase` with no `UpdateOptions.merge` or `.rebasing` to
+    /// run it with. The setting names it.
     UnsupportedUpdate,
+    /// A `merge` update stopped with conflicts in the submodule: git's
+    /// "Unable to merge '<commit>' in submodule path". The setting names
+    /// the commit; the merge waits there to be concluded.
+    MergeStopped,
+    /// A `rebase` update stopped in the submodule: git's "Unable to rebase
+    /// '<commit>' in submodule path". The setting names the commit; the
+    /// rebase waits there to be continued.
+    RebaseStopped,
     /// A `!command` update, and no `Programs` to run it with.
     UpdateCommandRefused,
     /// The `!command` update exited with a failure.
@@ -144,7 +154,7 @@ pub const Error = error{
     NoSuperprojectBranch,
     /// `submodule.fetchJobs` is not a number, or is below zero.
     InvalidFetchJobs,
-} || branch_mod.Error || pathspec_mod.Error || repo_mod.Error || worktree.Error || gitmodules.ParseError || gitmodules.ResolveError ||
+} || branch_mod.Error || merging.Error || rebase_mod.Error || pathspec_mod.Error || repo_mod.Error || worktree.Error || gitmodules.ParseError || gitmodules.ResolveError ||
     Repository.WriteConfigError || refs_mod.TransactionError || program.Error || gitlink.Error ||
     Io.Dir.RealPathError || Io.Dir.RenameError || Io.Dir.DeleteTreeError;
 
@@ -1708,6 +1718,20 @@ pub const UpdateOptions = struct {
     /// The permission to run a `!command` update. Without it one is
     /// `error.UpdateCommandRefused`.
     programs: ?program.Programs = null,
+    /// What a `merge` update merges the commit with, as git's `git merge
+    /// <commit>` inside the submodule. Without it one is
+    /// `error.UnsupportedUpdate`.
+    merge: ?merging.Options = null,
+    /// What a `rebase` update rebases the submodule's `HEAD` onto the
+    /// commit with, as git's `git rebase <commit>` inside it: `onto` and
+    /// the names are the update's. Without it one is
+    /// `error.UnsupportedUpdate`.
+    rebasing: ?rebase_mod.Options = null,
+    /// git's `GIT_REFLOG_ACTION`, which a pull hands the update it runs: a
+    /// checkout's line in the submodule's `HEAD` log is these words alone,
+    /// where it says `checkout: moving from <a> to <b>`, and a merge's or a
+    /// rebase's lines begin with them.
+    reflog_action: ?[]const u8 = null,
     /// What each submodule's repository is opened with.
     open: Repository.OpenOptions = .{},
     refusal: ?*Refusal = null,
@@ -1834,7 +1858,8 @@ fn updateIn(
             try ensureCommit(arena, gpa, io, repo, &sub, item.module, target, display, options);
             switch (strategy) {
                 .checkout => try checkoutCommit(arena, gpa, io, &sub, target, current == null or options.force, display, options),
-                .merge, .rebase => return refuse(options.refusal, display, strategy.name(), error.UnsupportedUpdate),
+                .merge => try mergeCommit(arena, gpa, io, &sub, target, display, options),
+                .rebase => try rebaseOnto(arena, gpa, io, &sub, target, display, options),
                 .command => |command| try runUpdateCommand(arena, gpa, io, &sub, command, target, display, item.update_key, options),
                 .none => {
                     outcome.skipped += 1;
@@ -2159,10 +2184,38 @@ fn checkoutCommit(
     try tx.change("HEAD", .{ .direct = commit }, .any, .{ .no_deref = true });
     const log: ?refs_mod.LogMessage = if (options.who) |who| .{
         .who = who,
-        .message = try arena.print("checkout: moving from {s} to {s}", .{ from, commit.hex(&hex) }),
+        .message = options.reflog_action orelse try arena.print("checkout: moving from {s} to {s}", .{ from, commit.hex(&hex) }),
         .policy = sub.reflogPolicy(),
     } else null;
     try tx.commit(io, log);
+}
+
+/// `git merge <commit>` inside the submodule, with `UpdateOptions.merge`:
+/// the commit named by its full name, as git names it.
+fn mergeCommit(arena: Allocator, gpa: Allocator, io: Io, sub: *Repository, commit: Oid, display: []const u8, options: UpdateOptions) Error!void {
+    var given = options.merge orelse return refuse(options.refusal, display, "merge", error.UnsupportedUpdate);
+    given.reflog_action = options.reflog_action orelse given.reflog_action;
+    var hex: [hash.max_hex_len]u8 = undefined;
+    const name = try arena.dupe(u8, commit.hex(&hex));
+    var outcome = try merging.start(gpa, io, sub, .{ .oid = commit, .name = name, .kind = .commit }, given);
+    defer outcome.deinit();
+    if (outcome.result == .conflicted) return refuse(options.refusal, display, name, error.MergeStopped);
+}
+
+/// `git rebase <commit>` inside the submodule, with
+/// `UpdateOptions.rebasing`: its `HEAD`, on a branch or detached, onto the
+/// commit, which is its upstream too.
+fn rebaseOnto(arena: Allocator, gpa: Allocator, io: Io, sub: *Repository, commit: Oid, display: []const u8, options: UpdateOptions) Error!void {
+    var given = options.rebasing orelse return refuse(options.refusal, display, "rebase", error.UnsupportedUpdate);
+    given.onto = null;
+    given.onto_name = null;
+    given.upstream_name = null;
+    given.branch = null;
+    given.reflog_action = options.reflog_action orelse given.reflog_action;
+    var outcome = try rebase_mod.start(gpa, io, sub, commit, given);
+    defer outcome.deinit();
+    var hex: [hash.max_hex_len]u8 = undefined;
+    if (outcome.result == .stopped) return refuse(options.refusal, display, try arena.dupe(u8, commit.hex(&hex)), error.RebaseStopped);
 }
 
 /// The variables git clears before it runs a program in another

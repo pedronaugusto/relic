@@ -20,6 +20,7 @@ const object = @import("../object/object.zig");
 const repo_mod = @import("../repo/repo.zig");
 const worktree = @import("../checkout/checkout.zig");
 const submodule = @import("submodule.zig");
+const gitmodules_mod = @import("../config/gitmodules.zig");
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
 const testing = std.testing;
@@ -971,7 +972,7 @@ test "update checks out the recorded commit, and refuses what it will not do by 
     defer gpa.free(lib_status);
     try testing.expectEqualStrings("", lib_status);
 
-    // merge and rebase are named, not run.
+    // merge and rebase are named, not run, without their options.
     try c.git.exec(io, &.{ "config", "submodule.vendor/lib.update", "rebase" });
     try reopen(gpa, io, &repo, c.git.dir);
     try lib.exec(io, &.{ "checkout", "-q", "moved" });
@@ -1024,6 +1025,93 @@ test "a !command update runs only with the permission to run programs" {
     defer gpa.free(recorded);
     try lib.dir.access(io, recorded, .{});
     try lib.dir.access(io, "ran-", .{});
+}
+
+test "git 2.56, update --merge and --rebase merge the recorded commit into the submodule's branch and rebase it there, and stop where git stops" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const Case = struct {
+        strategy: gitmodules_mod.Update,
+        flag: []const u8,
+        /// The local commit and the recorded one change the same line.
+        conflict: bool = false,
+        refused: ?anyerror = null,
+    };
+    const cases = [_]Case{
+        .{ .strategy = .merge, .flag = "--merge" },
+        .{ .strategy = .rebase, .flag = "--rebase" },
+        .{ .strategy = .merge, .flag = "--merge", .conflict = true, .refused = error.MergeStopped },
+        .{ .strategy = .rebase, .flag = "--rebase", .conflict = true, .refused = error.RebaseStopped },
+    };
+    for (cases) |case| {
+        var f = try Fixture.init(gpa, io);
+        defer f.deinit();
+        var env = try testgit.datedEnv(gpa, who.when_secs);
+        defer env.deinit();
+        var twins: [2]Clone = undefined;
+        twins[0] = try Clone.init(gpa, io, &f.super, true);
+        defer twins[0].deinit(io);
+        twins[1] = try Clone.init(gpa, io, &f.super, true);
+        defer twins[1].deinit(io);
+
+        // Upstream, lib moves on and the superproject records it.
+        try f.lib.writeFile(io, if (case.conflict) "l.txt" else "u.txt", "upstream\n");
+        try f.lib.exec(io, &.{ "add", "-A" });
+        try f.lib.exec(io, &.{ "commit", "-q", "-m", "upstream" });
+        var super_lib = f.super;
+        super_lib.dir = try f.super.dir.openDir(io, "vendor/lib", .{});
+        defer super_lib.dir.close(io);
+        try super_lib.exec(io, &.{ "pull", "-q", "--no-rebase", "origin" });
+        try f.super.exec(io, &.{ "commit", "-q", "-am", "record lib" });
+
+        // Each twin: a local commit on a branch in the submodule, then the
+        // superproject's new record pulled with the submodule left be.
+        for (&twins) |*c| {
+            c.git.environ = &env;
+            var lib = c.git;
+            lib.dir = try c.git.dir.openDir(io, "vendor/lib", .{});
+            defer lib.dir.close(io);
+            try lib.exec(io, &.{ "checkout", "-q", "-b", "work" });
+            try lib.writeFile(io, "l.txt", "local\n");
+            try lib.exec(io, &.{ "commit", "-q", "-am", "local" });
+            try lib.exec(io, &.{ "fetch", "-q", "origin" });
+            try c.git.exec(io, &.{ "pull", "-q", "--no-rebase", "--no-recurse-submodules", "origin" });
+        }
+
+        twins[1].git.report_failures = false;
+        const by_git = twins[1].git.run(io, &.{ "submodule", "update", "-q", case.flag });
+        var repo = try twins[0].open(gpa, io);
+        defer repo.deinit(io);
+        var refusal: submodule.Refusal = .{};
+        const updated = submodule.update(gpa, io, &repo, .{
+            .strategy = case.strategy,
+            .who = who,
+            .merge = .{ .who = who },
+            .rebasing = .{ .who = who },
+            .refusal = &refusal,
+        });
+        if (case.refused) |err| {
+            try testing.expectError(error.GitFailed, by_git);
+            try testing.expectError(err, updated);
+            try testing.expectEqualStrings("vendor/lib", refusal.path());
+        } else {
+            gpa.free(try by_git);
+            try testing.expectEqual(@as(u32, 1), (try updated).updated);
+        }
+        // The same commits, the same branch, the same state left behind.
+        var outs: [2][3][]u8 = undefined;
+        for (&twins, &outs) |*c, *out| {
+            var lib = c.git;
+            lib.dir = try c.git.dir.openDir(io, "vendor/lib", .{});
+            defer lib.dir.close(io);
+            lib.report_failures = false;
+            out[0] = try lib.run(io, &.{ "log", "--format=%H %P %s", "-3", "HEAD" });
+            out[1] = lib.run(io, &.{ "symbolic-ref", "-q", "HEAD" }) catch try gpa.dupe(u8, "(detached)");
+            out[2] = try lib.run(io, &.{ "status", "--porcelain=v2" });
+        }
+        defer for (outs) |out| for (out) |o| gpa.free(o);
+        for (outs[0], outs[1]) |ours, theirs| try testing.expectEqualStrings(theirs, ours);
+    }
 }
 
 /// A transport for the test: `git clone --bare` into the directory, turned
