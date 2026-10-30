@@ -106,7 +106,8 @@ fn expectSameClone(s: *Served, io: Io, theirs: []const u8, ours: []const u8, bar
         &.{ "for-each-ref", "--format=%(refname) %(objectname) %(*objectname) %(symref)" },
         &.{ "symbolic-ref", "-q", "HEAD" },
         &.{ "rev-parse", "HEAD" },
-        &.{ "config", "--local", "--get-regexp", "^(remote|branch|core\\.repositoryformatversion|extensions)" },
+        &.{ "config", "--local", "--get-regexp", "^(remote|branch)\\." },
+        &.{ "rev-parse", "--show-object-format" },
     });
     if (!bare) try queries.appendSlice(s.arena(), &.{ &.{ "ls-files", "-s" }, &.{ "status", "--porcelain" } });
     for (queries.items) |q| {
@@ -193,5 +194,47 @@ test "dumb HTTP: a clone of a repository all loose, all packed and mixed is the 
             try ours.print(s.arena(), "{s}\t{s}\n", .{ ref.oid.hex(&hex), ref.name });
         }
         try testing.expectEqualStrings(theirs, ours.items);
+    }
+}
+
+/// relic's listing of `remote`, as git's ls-remote prints one.
+fn lsRemote(s: *Served, io: Io, remote: []const u8) ![]const u8 {
+    var session = try transport.Session.open(s.gpa, io, remote, .{ .service = .upload_pack }, .{ .who = who, .programs = .{ .environ = &s.env } });
+    defer session.deinit(io);
+    var refs = try session.listRefs(s.gpa, io, &.{});
+    defer refs.deinit();
+    var out: std.ArrayList(u8) = .empty;
+    for (refs.refs) |ref| {
+        var hex: [64]u8 = undefined;
+        try out.print(s.arena(), "{s}\t{s}\n", .{ ref.oid.hex(&hex), ref.name });
+    }
+    return out.items;
+}
+
+test "dumb HTTP: a SHA-256 repository, a detached HEAD and a HEAD naming no listed ref clone and list as git's dumb client has them" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const s = try Served.init(gpa, io, .{});
+    defer s.deinit();
+
+    var sha256 = try testgit.Repo.init(gpa, io, &.{"--object-format=sha256"});
+    defer sha256.deinit();
+    try testremote.addCommits(gpa, io, &sha256, 0, 3);
+    try sha256.exec(io, &.{ "tag", "-a", "v1", "-m", "one" });
+    _ = try s.publish(io, &sha256, "sha256.git");
+
+    var source = try testremote.historyRepo(gpa, io, 3);
+    defer source.deinit();
+    const detached = try s.publish(io, &source, "detached.git");
+    const side = try s.git(io, &.{ "-C", detached, "rev-parse", "side" });
+    _ = try s.git(io, &.{ "-C", detached, "update-ref", "--no-deref", "HEAD", std.mem.trimEnd(u8, side, "\n") });
+    const nowhere = try s.publish(io, &source, "nowhere.git");
+    _ = try s.git(io, &.{ "-C", nowhere, "symbolic-ref", "HEAD", "refs/heads/gone" });
+
+    for ([_][]const u8{ "sha256.git", "detached.git", "nowhere.git" }) |name| {
+        const made = try cloneBoth(s, io, name, name, &.{}, .{ .who = who });
+        try expectSameClone(s, io, made.theirs, made.ours, false);
+        const remote = try s.url(name);
+        try testing.expectEqualStrings(try s.git(io, &.{ "ls-remote", remote }), try lsRemote(s, io, remote));
     }
 }
