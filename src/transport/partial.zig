@@ -202,7 +202,7 @@ pub const Lazy = struct {
     }
 
     fn fetchFn(io: Io, context: *anyopaque, oids: []const Oid) (Allocator.Error || Io.Cancelable || error{PromisorFetchFailed})!void {
-        const l: *Lazy = @ptrCast(@alignCast(context)); // aegis: no-danger: the context handed out with this function is a Lazy
+        const l: *Lazy = @ptrCast(@alignCast(context)); // aegis: no-danger(A019): the context handed out with this function is a Lazy
         l.fetch(io, oids) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Canceled => return error.Canceled,

@@ -385,7 +385,7 @@ pub const Checker = struct {
 };
 
 fn levelMatcher(level: Level) *sets.Matcher {
-    return @ptrCast(@alignCast(level.compiled)); // aegis: no-danger: a Level's matcher is allocated as a sets.Matcher and never changes type
+    return @ptrCast(@alignCast(level.compiled)); // aegis: no-danger(A019): a Level's matcher is allocated as a sets.Matcher and never changes type
 }
 
 fn relativeTo(base: []const u8, path: []const u8) ?[]const u8 {

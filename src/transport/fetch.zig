@@ -2767,7 +2767,7 @@ pub const Prefetcher = struct {
     }
 
     fn run(context: *anyopaque, io: Io, repo: *Repository) error{PrefetchFailed}!void {
-        const p: *Prefetcher = @ptrCast(@alignCast(context)); // aegis: no-danger: the context handed out with this function is a Prefetcher
+        const p: *Prefetcher = @ptrCast(@alignCast(context)); // aegis: no-danger(A019): the context handed out with this function is a Prefetcher
         prefetchAll(p.gpa, io, repo, p.options) catch |err| {
             p.failure = err;
             return error.PrefetchFailed;

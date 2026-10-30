@@ -107,12 +107,10 @@ pub fn syncAll(gpa: Allocator, io: Io, files: []const Named, directories: []cons
     defer gpa.free(slots);
     var batch: airlock.Batch = .init(slots);
     defer batch.reset(io);
-    // aegis: no-danger: a slot for each file and each directory
     for (files) |file| batch.addPath(file.dir, file.sub_path) catch unreachable;
-    // aegis: no-danger: a slot for each file and each directory
     for (directories) |directory| batch.addDirPath(directory.dir, directory.sub_path) catch unreachable;
     _ = batch.commitOrRefuse(io, .{ .level = .data }) catch |err| switch (err) {
-        error.BatchFull => unreachable, // aegis: no-danger: nothing was added past the slots
+        error.BatchFull => unreachable,
         else => |e| return e,
     };
 }
@@ -396,7 +394,7 @@ pub fn probeTimestampResolution(io: Io, dir: Io.Dir) Io.Cancelable!Resolution {
     while (unit > 1 and divisor % unit != 0) unit /= 10;
     // A power of ten no coarser than a second, which is what a stat
     // comparison rounds a nanosecond field down to.
-    aegis.assert.invariant(std.time.ns_per_s % unit == 0, "a resolution is a power of ten of nanoseconds within a second"); // aegis: no-danger: a divisibility check on the power of ten the loop above made, no unit converted
+    aegis.assert.invariant(std.time.ns_per_s % unit == 0, "a resolution is a power of ten of nanoseconds within a second"); // aegis: no-danger(A011): a divisibility check on the power of ten the loop above made, no unit converted
     return .{ .ns = unit, .measured = true };
 }
 
@@ -527,7 +525,7 @@ pub const Stat = struct {
     }
 
     fn splitNsec(t: Io.Timestamp) u32 {
-        const rem = @mod(t.nanoseconds, std.time.ns_per_s); // aegis: no-danger: the index's nanoseconds within the second
+        const rem = @mod(t.nanoseconds, std.time.ns_per_s); // aegis: no-danger(A011): the index's nanoseconds within the second
         return @intCast(rem);
     }
 };
@@ -1066,7 +1064,7 @@ pub fn removeLeftover(io: Io, dir: Io.Dir, name: []const u8) void {
 /// Windows retried while a scanner or indexer holds either name.
 pub fn rename(io: Io, dir: Io.Dir, old_name: []const u8, new_name: []const u8) Io.Dir.RenameError!void {
     _ = airlock.rename(io, dir, old_name, dir, new_name, .{ .sync = .{ .level = .none } }) catch |err| switch (err) {
-        error.PublishedNotDurable => unreachable, // aegis: no-danger: a rename asked to sync nothing reports no failed sync
+        error.PublishedNotDurable => unreachable, // aegis: no-danger(A013): a rename asked to sync nothing reports no failed sync
         else => |e| return e,
     };
 }
@@ -1311,7 +1309,7 @@ pub fn hardLink(io: Io, dir: Io.Dir, old_path: []const u8, new_path: []const u8)
     if (!CreateHardLinkW(new_w.span().ptr, old_w.span().ptr, null).toBool()) return error.OperationUnsupported;
 }
 
-// aegis: boundary: Win32's CreateHardLinkW, the raw call
+// aegis: boundary(A019): Win32's CreateHardLinkW, the raw call
 extern "kernel32" fn CreateHardLinkW(new_path: [*:0]const u16, old_path: [*:0]const u16, security_attributes: ?*anyopaque) callconv(.winapi) std.os.windows.BOOL;
 
 /// Whether `sub_path` in `dir` is the current user's: git's
@@ -1350,25 +1348,25 @@ const token_user: c_int = 1;
 const token_linked_token: c_int = 19;
 const win_builtin_administrators_sid: c_int = 26;
 
-// aegis: boundary: Win32's GetNamedSecurityInfoW, the raw call
+// aegis: boundary(A019): Win32's GetNamedSecurityInfoW, the raw call
 extern "advapi32" fn GetNamedSecurityInfoW(object_name: [*:0]const u16, object_type: c_int, info: u32, owner: ?*?*anyopaque, group: ?*?*anyopaque, dacl: ?*?*anyopaque, sacl: ?*?*anyopaque, descriptor: ?*?*anyopaque) callconv(.winapi) u32;
-// aegis: boundary: Win32's OpenProcessToken, the raw call
+// aegis: boundary(A019): Win32's OpenProcessToken, the raw call
 extern "advapi32" fn OpenProcessToken(process: std.os.windows.HANDLE, access: u32, token: *std.os.windows.HANDLE) callconv(.winapi) std.os.windows.BOOL;
-// aegis: boundary: Win32's GetTokenInformation, the raw call
+// aegis: boundary(A019): Win32's GetTokenInformation, the raw call
 extern "advapi32" fn GetTokenInformation(token: std.os.windows.HANDLE, class: c_int, info: ?*anyopaque, length: u32, returned: *u32) callconv(.winapi) std.os.windows.BOOL;
-// aegis: boundary: Win32's IsValidSid, the raw call
+// aegis: boundary(A019): Win32's IsValidSid, the raw call
 extern "advapi32" fn IsValidSid(sid: *anyopaque) callconv(.winapi) std.os.windows.BOOL;
-// aegis: boundary: Win32's EqualSid, the raw call
+// aegis: boundary(A019): Win32's EqualSid, the raw call
 extern "advapi32" fn EqualSid(a: *anyopaque, b: *anyopaque) callconv(.winapi) std.os.windows.BOOL;
-// aegis: boundary: Win32's IsWellKnownSid, the raw call
+// aegis: boundary(A019): Win32's IsWellKnownSid, the raw call
 extern "advapi32" fn IsWellKnownSid(sid: *anyopaque, kind: c_int) callconv(.winapi) std.os.windows.BOOL;
-// aegis: boundary: Win32's CheckTokenMembership, the raw call
+// aegis: boundary(A019): Win32's CheckTokenMembership, the raw call
 extern "advapi32" fn CheckTokenMembership(token: ?std.os.windows.HANDLE, sid: *anyopaque, member: *std.os.windows.BOOL) callconv(.winapi) std.os.windows.BOOL;
-// aegis: boundary: Win32's LocalFree, the raw call
+// aegis: boundary(A019): Win32's LocalFree, the raw call
 extern "kernel32" fn LocalFree(memory: ?*anyopaque) callconv(.winapi) ?*anyopaque;
-// aegis: boundary: Win32's GetCurrentProcess, the raw call
+// aegis: boundary(A019): Win32's GetCurrentProcess, the raw call
 extern "kernel32" fn GetCurrentProcess() callconv(.winapi) std.os.windows.HANDLE;
-// aegis: boundary: Win32's CloseHandle, the raw call
+// aegis: boundary(A019): Win32's CloseHandle, the raw call
 extern "kernel32" fn CloseHandle(handle: std.os.windows.HANDLE) callconv(.winapi) std.os.windows.BOOL;
 
 fn ownedWindows(io: Io, dir: Io.Dir, sub_path: []const u8, home: ?[]const u8) bool {
@@ -1397,14 +1395,14 @@ fn ownedWindows(io: Io, dir: Io.Dir, sub_path: []const u8, home: ?[]const u8) bo
     var size: u32 = 0;
     if (GetTokenInformation(token, token_user, &user_buf, user_buf.len, &size).toBool()) {
         // TOKEN_USER begins with the user's SID
-        const user_sid: *anyopaque = @as(*const *anyopaque, @ptrCast(&user_buf)).*; // aegis: boundary: TOKEN_USER's first field is a SID pointer, and the buffer is aligned for it
+        const user_sid: *anyopaque = @as(*const *anyopaque, @ptrCast(&user_buf)).*; // aegis: boundary(A019): TOKEN_USER's first field is a SID pointer, and the buffer is aligned for it
         if (IsValidSid(user_sid).toBool() and EqualSid(sid, user_sid).toBool()) return true;
     }
     if (IsWellKnownSid(sid, win_builtin_administrators_sid).toBool()) {
         var member: std.os.windows.BOOL = .FALSE;
         if (CheckTokenMembership(null, sid, &member).toBool() and member.toBool()) return true;
         var linked: std.os.windows.HANDLE = undefined;
-        if (GetTokenInformation(token, token_linked_token, @ptrCast(&linked), @sizeOf(std.os.windows.HANDLE), &size).toBool()) { // aegis: boundary: TOKEN_LINKED_TOKEN is one handle, which this receives
+        if (GetTokenInformation(token, token_linked_token, @ptrCast(&linked), @sizeOf(std.os.windows.HANDLE), &size).toBool()) { // aegis: boundary(A019): TOKEN_LINKED_TOKEN is one handle, which this receives
             defer _ = CloseHandle(linked);
             if (CheckTokenMembership(linked, sid, &member).toBool() and member.toBool()) return true;
         }

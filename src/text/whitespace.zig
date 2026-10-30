@@ -123,7 +123,7 @@ pub fn forAttribute(attribute: Attribute, configured: Rule) ParseError!Rule {
 /// The errors `line` has under `rule`: a set of the bits above. `line`
 /// includes its newline, if it has one.
 pub fn check(line: []const u8, rule: Rule) Rule {
-    // aegis: no-danger: with nowhere to write, nothing fails
+    // aegis: no-danger(A013): with nowhere to write, nothing fails
     return checkEmit(line, rule, null) catch unreachable;
 }
 

@@ -38,7 +38,7 @@ pub const session_id_len = 48;
 /// as git writes its, then random bits where git names the host and the
 /// process, which say as surely that two are not the same.
 pub fn sessionId(io: Io, buf: *[session_id_len]u8) []const u8 {
-    const ns = Io.Clock.real.now(io).nanoseconds; // aegis: no-danger: trace2's session id writes the time to the microsecond, split from nanoseconds here
+    const ns = Io.Clock.real.now(io).nanoseconds; // aegis: no-danger(A011): trace2's session id writes the time to the microsecond, split from nanoseconds here
     const secs: u64 = @intCast(@max(0, @divFloor(ns, std.time.ns_per_s)));
     const micros: u64 = @intCast(@divFloor(@mod(ns, std.time.ns_per_s), std.time.ns_per_us));
     const epoch: std.time.epoch.EpochSeconds = .{ .secs = secs };
@@ -682,7 +682,7 @@ pub const Fake = struct {
 
     fn self(context: *anyopaque, c: *Connection) *Fake {
         _ = context;
-        return @alignCast(@fieldParentPtr("connection", c)); // aegis: no-danger: this vtable is installed only on a Fake's own connection
+        return @alignCast(@fieldParentPtr("connection", c));
     }
 
     fn advertisement(context: *anyopaque, c: *Connection) connection.Error!*Io.Reader {

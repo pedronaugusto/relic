@@ -831,7 +831,7 @@ fn finishOutcome(r: *Replay, arena_instance: *std.heap.ArenaAllocator, picked: P
 fn saveTodo(r: *Replay, items: []const todo.Item) Error!void {
     const Shorten = struct {
         fn shorten(context: *anyopaque, oid: Oid, buf: *[hash.max_hex_len]u8) []const u8 {
-            const replay: *Replay = @ptrCast(@alignCast(context)); // aegis: no-danger: the context handed out with this function is a Replay
+            const replay: *Replay = @ptrCast(@alignCast(context)); // aegis: no-danger(A019): the context handed out with this function is a Replay
             const text = abbrev.unique(replay.io, replay.repo.objectDatabase(), oid, replay.abbrev_len, buf) catch return oid.hex(buf);
             return text;
         }
@@ -856,7 +856,7 @@ pub const ResolverContext = struct {
     }
 
     fn resolveName(context: *anyopaque, text: []const u8) ?todo.Resolver.Resolved {
-        const c: *ResolverContext = @ptrCast(@alignCast(context)); // aegis: no-danger: the context handed out with this function is a ResolverContext
+        const c: *ResolverContext = @ptrCast(@alignCast(context)); // aegis: no-danger(A019): the context handed out with this function is a ResolverContext
         const gpa = c.repo.allocator();
         var oid: ?Oid = null;
         if (text.len == c.repo.objectFormat().hexLen()) oid = Oid.parse(c.repo.objectFormat(), text) catch null;

@@ -375,7 +375,7 @@ fn tableName(io: Io, buf: *[64]u8, min: u64, max: u64) TableName {
         min,
         max,
         std.mem.readInt(u32, &random, .little),
-    }) catch unreachable; // aegis: no-danger: two u64 of at most sixteen hex digits, a u32 of eight and fourteen bytes fit 64
+    }) catch unreachable; // aegis: no-danger(A013): two u64 of at most sixteen hex digits, a u32 of eight and fourteen bytes fit 64
     // Hex digits, dashes and `.ref`: no slash, and no leading dot.
     return .{ .bytes = printed };
 }

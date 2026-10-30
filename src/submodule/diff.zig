@@ -62,7 +62,7 @@ pub const DiffWriter = struct {
     }
 
     fn writeFn(io: Io, context: *anyopaque, w: *Io.Writer, change: diff.SubmoduleChange) diff.SubmoduleWriter.Error!void {
-        const d: *DiffWriter = @ptrCast(@alignCast(context)); // aegis: no-danger: `writer` makes the context from a DiffWriter
+        const d: *DiffWriter = @ptrCast(@alignCast(context)); // aegis: no-danger(A019): `writer` makes the context from a DiffWriter
         var arena_instance: std.heap.ArenaAllocator = .init(d.gpa);
         defer arena_instance.deinit();
         return d.write(arena_instance.allocator(), io, w, change);

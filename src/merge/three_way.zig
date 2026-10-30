@@ -733,7 +733,7 @@ const SubmoduleOpener = struct {
     }
 
     fn open(context: *anyopaque, path: []const u8) ?ort.SubmoduleHistory {
-        const s: *SubmoduleOpener = @ptrCast(@alignCast(context)); // aegis: no-danger: the context handed out with this function is a SubmoduleOpener
+        const s: *SubmoduleOpener = @ptrCast(@alignCast(context)); // aegis: no-danger(A019): the context handed out with this function is a SubmoduleOpener
         return s.openInner(path) catch null;
     }
 

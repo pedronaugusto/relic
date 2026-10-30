@@ -392,7 +392,7 @@ pub const InProcess = struct {
     }
 
     fn start(context: ?*anyopaque, io: Io, socket: []const u8) cache.StartError!void {
-        const p: *InProcess = @ptrCast(@alignCast(context.?)); // aegis: no-danger: the context `starter` hands out is this `InProcess`
+        const p: *InProcess = @ptrCast(@alignCast(context.?)); // aegis: no-danger(A019): the context `starter` hands out is this `InProcess`
         const d = p.gpa.create(Daemon) catch return error.CacheDaemonNotStarted;
         d.* = Daemon.listen(p.gpa, io, socket) catch |err| {
             p.gpa.destroy(d);

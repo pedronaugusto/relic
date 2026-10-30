@@ -28,7 +28,7 @@ pub const GoTime = struct {
 
     /// Nanoseconds since the Unix epoch, as a wide integer.
     pub fn nanoseconds(t: GoTime) i128 {
-        return @as(i128, t.unix) * std.time.ns_per_s + t.nanos; // aegis: no-danger: Go's time as nanoseconds since the epoch, as git-lfs compares it
+        return @as(i128, t.unix) * std.time.ns_per_s + t.nanos; // aegis: no-danger(A011): Go's time as nanoseconds since the epoch, as git-lfs compares it
     }
 
     /// `text` as Go's `time.Parse(time.RFC3339, text)` reads it, which is how

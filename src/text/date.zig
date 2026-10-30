@@ -788,7 +788,7 @@ const Approx = struct {
             if (matchString(date, name) >= 3) {
                 var n = a.num - 1;
                 a.num = 0;
-                var diff = a.tm.wday - @as(i64, @intCast(i)); // aegis: no-danger: a weekday's index, below 7
+                var diff = a.tm.wday - @as(i64, @intCast(i)); // aegis: no-danger(A010): a weekday's index, below 7
                 if (diff <= 0) n += 1;
                 diff += 7 * n;
                 _ = a.update(diff * 24 * 60 * 60);
@@ -860,7 +860,7 @@ fn formatUtc(buf: *[40]u8, secs: i64) []const u8 {
     return std.mem.print(buf, "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2}", .{
         year,     cal.month + 1, cal.day,
         cal.hour, cal.minute,    cal.second,
-    }) catch unreachable; // aegis: no-danger: a u64 year is at most twenty bytes, the rest of the stamp fifteen
+    }) catch unreachable; // aegis: no-danger(A013): a u64 year is at most twenty bytes, the rest of the stamp fifteen
 }
 
 // ---------------------------------------------------------------------------

@@ -719,7 +719,7 @@ pub const Session = struct {
         try w.optional("oauth_refresh_token", reveal(&s.oauth_refresh_token));
         if (s.password_expiry_utc != no_expiry) {
             var buf: [24]u8 = undefined;
-            // aegis: no-danger: a u64 is at most 20 digits.
+            // aegis: no-danger(A013): a u64 is at most 20 digits.
             try w.item("password_expiry_utc", std.mem.print(&buf, "{d}", .{s.password_expiry_utc}) catch unreachable);
         }
         for (s.challenges.items) |c| try w.item("wwwauth[]", c);

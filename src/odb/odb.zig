@@ -890,7 +890,7 @@ pub const Odb = struct {
         }
 
         fn streamBody(r: *Io.Reader, w: *Io.Writer, limit: Io.Limit) Io.Reader.StreamError!usize {
-            const s: *Stream = @alignCast(@fieldParentPtr("interface", r)); // aegis: no-danger: the vtable is installed only on a Stream's interface
+            const s: *Stream = @alignCast(@fieldParentPtr("interface", r));
             if (s.failure != null) return error.ReadFailed;
             if (s.remaining == 0) return error.EndOfStream;
             const n = s.inner().stream(w, limit.min(.limited64(s.remaining))) catch |e| switch (e) {
@@ -4097,7 +4097,7 @@ pub const ObjectStream = struct {
     }
 
     fn drain(w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
-        const s: *ObjectStream = @alignCast(@fieldParentPtr("input_writer", w)); // aegis: no-danger: this function is installed only on a Stream's input_writer
+        const s: *ObjectStream = @alignCast(@fieldParentPtr("input_writer", w));
         var total: usize = 0;
         for (data[0 .. data.len - 1]) |slice| {
             total = std.math.add(usize, total, slice.len) catch return error.WriteFailed;
@@ -4266,7 +4266,7 @@ pub const PackOptions = struct {
     /// How long a delta chain may get. git's default is fifty.
     depth: u32 = 50,
     /// Which delta encoding to write.
-    delta: DeltaEncoding = .offset, // aegis: no-danger: an option
+    delta: DeltaEncoding = .offset,
     /// How many bytes of window objects to hold at once. The window is
     /// emptied from the oldest end until it fits, so this is the bound on
     /// what building a pack costs in memory whatever the objects are.
@@ -4592,28 +4592,28 @@ const LockedAllocator = struct {
     const vtable: Allocator.VTable = .{ .alloc = alloc, .resize = resize, .remap = remap, .free = free };
 
     fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
-        const l: *LockedAllocator = @ptrCast(@alignCast(ctx)); // aegis: boundary: std.mem.Allocator erases its context; only `allocator` installs it, on a LockedAllocator
+        const l: *LockedAllocator = @ptrCast(@alignCast(ctx)); // aegis: boundary(A019): std.mem.Allocator erases its context; only `allocator` installs it, on a LockedAllocator
         var child = l.child.acquireUncancelable(l.io);
         defer child.deinit(l.io);
         return child.value().rawAlloc(len, alignment, ret_addr);
     }
 
     fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
-        const l: *LockedAllocator = @ptrCast(@alignCast(ctx)); // aegis: boundary: std.mem.Allocator erases its context; only `allocator` installs it, on a LockedAllocator
+        const l: *LockedAllocator = @ptrCast(@alignCast(ctx)); // aegis: boundary(A019): std.mem.Allocator erases its context; only `allocator` installs it, on a LockedAllocator
         var child = l.child.acquireUncancelable(l.io);
         defer child.deinit(l.io);
         return child.value().rawResize(memory, alignment, new_len, ret_addr);
     }
 
     fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
-        const l: *LockedAllocator = @ptrCast(@alignCast(ctx)); // aegis: boundary: std.mem.Allocator erases its context; only `allocator` installs it, on a LockedAllocator
+        const l: *LockedAllocator = @ptrCast(@alignCast(ctx)); // aegis: boundary(A019): std.mem.Allocator erases its context; only `allocator` installs it, on a LockedAllocator
         var child = l.child.acquireUncancelable(l.io);
         defer child.deinit(l.io);
         return child.value().rawRemap(memory, alignment, new_len, ret_addr);
     }
 
     fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
-        const l: *LockedAllocator = @ptrCast(@alignCast(ctx)); // aegis: boundary: std.mem.Allocator erases its context; only `allocator` installs it, on a LockedAllocator
+        const l: *LockedAllocator = @ptrCast(@alignCast(ctx)); // aegis: boundary(A019): std.mem.Allocator erases its context; only `allocator` installs it, on a LockedAllocator
         var child = l.child.acquireUncancelable(l.io);
         defer child.deinit(l.io);
         child.value().rawFree(memory, alignment, ret_addr);
@@ -4907,7 +4907,7 @@ const Build = struct {
     /// the budget, and always one. Each is charged its body, the slack a
     /// packed one is inflated with, and its deflated entry's room.
     fn plan(b: *Build, batch: *PackBatch, start: usize) void {
-        // aegis: design: a third of the batch budget, rounded down; aegis Bytes has no division
+        // aegis: design(A004): a third of the batch budget, rounded down; aegis Bytes has no division
         const share = b.options.batch_bytes.raw() / 3;
         var end = start;
         var charged: usize = 0;

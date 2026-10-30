@@ -963,7 +963,7 @@ fn writeValue(w: *Io.Writer, kind: hash.Kind, value: ?Runner.RefUpdate.Value) Io
 fn formatDate(buf: *[64]u8, who: object.Signature) []const u8 {
     const sign: u8 = if (who.offset_minutes < 0) '-' else '+';
     const abs: u32 = @intCast(@abs(who.offset_minutes));
-    // aegis: no-danger: an i64 is at most twenty characters and an i16 offset seven, well under 64
+    // aegis: no-danger(A013): an i64 is at most twenty characters and an i16 offset seven, well under 64
     return std.mem.print(buf, "@{d} {c}{d:0>2}{d:0>2}", .{ who.when_secs, sign, abs / 60, abs % 60 }) catch unreachable;
 }
 

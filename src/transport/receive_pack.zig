@@ -552,7 +552,7 @@ pub const Server = struct {
     /// The indexer's last object read is the pack's end: keepalives are
     /// due from there, as git's index-pack tells its muxer with a NUL.
     fn endOfInput(context: ?*anyopaque, event: progress_mod.Event) void {
-        const s: *Server = @ptrCast(@alignCast(context.?)); // aegis: no-danger: unpack hands this function the server itself
+        const s: *Server = @ptrCast(@alignCast(context.?)); // aegis: no-danger(A019): unpack hands this function the server itself
         switch (event) {
             .indexed => |count| if (count.done == count.total) s.startKeepalive(),
             else => {},

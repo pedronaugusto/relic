@@ -113,7 +113,7 @@ pub const Entry = struct {
     /// index.
     path: []const u8,
     oid: Oid,
-    mode: object.Mode, // aegis: no-danger: an entry's file mode, a value
+    mode: object.Mode,
     /// The mode as the file spelled it, where that is not `mode.raw()`:
     /// git reads an entry's mode as it is (`create_from_disk`) and writes
     /// it back unchanged, where relic takes the mode git's consumers take

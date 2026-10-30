@@ -423,7 +423,7 @@ const Run = struct {
     /// The fork point found: git's `restrict_revision`.
     restrict: ?Oid = null,
     /// Which backend, and so which directory the state is in.
-    backend: Backend = .merge, // aegis: no-danger: chosen when the rebase starts and kept to its end
+    backend: Backend = .merge,
     /// `autosquash`, `update_refs` and `reschedule_failed_exec`, or the
     /// settings behind them, which are read and checked whichever decides.
     autosquash: bool,
@@ -1254,7 +1254,7 @@ fn sheetText(r: *Run, gpa: Allocator, items: []const todo.Item, upstream: Oid, o
     errdefer out.deinit();
     const Shorten = struct {
         fn shorten(context: *anyopaque, oid: Oid, buf: *[hash.max_hex_len]u8) []const u8 {
-            const run: *Run = @ptrCast(@alignCast(context)); // aegis: no-danger: the context handed out with this function is a Run
+            const run: *Run = @ptrCast(@alignCast(context)); // aegis: no-danger(A019): the context handed out with this function is a Run
             return abbrev.unique(run.io, run.repo.objectDatabase(), oid, run.abbrev_len, buf) catch oid.hex(buf);
         }
     };

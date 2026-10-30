@@ -296,7 +296,7 @@ const PushContext = struct {
     previous: ?push_mod.BeforeSend,
     failure: ?Error = null,
     fn run(gpa: Allocator, io: Io, context: *anyopaque, repository: *Repository, input: push_mod.BeforeSendInput) push_mod.BeforeSendError!void {
-        const c: *PushContext = @ptrCast(@alignCast(context)); // aegis: no-danger: the callback context is the PushContext this function was registered with
+        const c: *PushContext = @ptrCast(@alignCast(context)); // aegis: no-danger(A019): the callback context is the PushContext this function was registered with
         if (c.previous) |previous| try previous.run(gpa, io, previous.context, repository, input);
         beforePush(gpa, io, repository, .{ .remote = input.remote, .remote_refs = input.refs, .pushed = input.objects, .reach = c.reach }, c.options) catch |err| {
             c.failure = err;

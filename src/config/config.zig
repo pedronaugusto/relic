@@ -1310,7 +1310,7 @@ pub const Config = struct {
                     line.text[name_end..],
                 });
             };
-            // aegis: no-danger: the name was read from this line and the escaped value closes every quote it opens
+            // aegis: no-danger(A013): the name was read from this line and the escaped value closes every quote it opens
             const parsed = parseVariableLine(replacement) catch unreachable;
             // The line reads back as the variable it replaced, with a value.
             assert(parsed.has_value);
@@ -1338,7 +1338,7 @@ pub const Config = struct {
         writeValue(&text.writer, value) catch return error.OutOfMemory;
         text.writer.writeByte('\n') catch return error.OutOfMemory;
         const new_text = try text.toOwnedSlice();
-        // aegis: no-danger: checkKey passed the name and writeValue closes every quote it opens
+        // aegis: no-danger(A013): checkKey passed the name and writeValue closes every quote it opens
         const parsed = parseVariableLine(new_text) catch unreachable;
         // The line reads back as the variable written, its value running to
         // the newline: writeValue quotes any space it would otherwise lose.

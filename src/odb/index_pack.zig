@@ -667,7 +667,7 @@ const Tee = struct {
     }
 
     fn stream(r: *Io.Reader, w: *Io.Writer, limit: Io.Limit) Io.Reader.StreamError!usize {
-        const t: *Tee = @alignCast(@fieldParentPtr("interface", r)); // aegis: no-danger: this function is installed only on a Tee's interface
+        const t: *Tee = @alignCast(@fieldParentPtr("interface", r));
         const dest = limit.slice(try w.writableSliceGreedy(1));
         const n = t.pull(dest) catch |err| {
             t.err = err;
@@ -1047,7 +1047,7 @@ const Indexer = struct {
     }
 
     fn noteFinding(context: *anyopaque, finding: fsck.Finding) Allocator.Error!void {
-        const x: *Indexer = @ptrCast(@alignCast(context)); // aegis: no-danger: the context is the Indexer the sink was made from
+        const x: *Indexer = @ptrCast(@alignCast(context)); // aegis: no-danger(A019): the context is the Indexer the sink was made from
         var guard = x.shared.acquireUncancelable(x.io);
         defer guard.deinit(x.io);
         try fsck.note(x.options.warnings, finding);
@@ -2332,28 +2332,28 @@ const Peak = struct {
     }
 
     fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
-        const p: *Peak = @ptrCast(@alignCast(ctx)); // aegis: boundary: std.mem.Allocator erases its context; only `allocator` hands this Peak out
+        const p: *Peak = @ptrCast(@alignCast(ctx)); // aegis: boundary(A019): std.mem.Allocator erases its context; only `allocator` hands this Peak out
         const out = p.child.rawAlloc(len, alignment, ret) orelse return null;
         p.note(len, 0);
         return out;
     }
 
     fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, len: usize, ret: usize) bool {
-        const p: *Peak = @ptrCast(@alignCast(ctx)); // aegis: boundary: std.mem.Allocator erases its context; only `allocator` hands this Peak out
+        const p: *Peak = @ptrCast(@alignCast(ctx)); // aegis: boundary(A019): std.mem.Allocator erases its context; only `allocator` hands this Peak out
         if (!p.child.rawResize(memory, alignment, len, ret)) return false;
         p.note(len, memory.len);
         return true;
     }
 
     fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, len: usize, ret: usize) ?[*]u8 {
-        const p: *Peak = @ptrCast(@alignCast(ctx)); // aegis: boundary: std.mem.Allocator erases its context; only `allocator` hands this Peak out
+        const p: *Peak = @ptrCast(@alignCast(ctx)); // aegis: boundary(A019): std.mem.Allocator erases its context; only `allocator` hands this Peak out
         const out = p.child.rawRemap(memory, alignment, len, ret) orelse return null;
         p.note(len, memory.len);
         return out;
     }
 
     fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret: usize) void {
-        const p: *Peak = @ptrCast(@alignCast(ctx)); // aegis: boundary: std.mem.Allocator erases its context; only `allocator` hands this Peak out
+        const p: *Peak = @ptrCast(@alignCast(ctx)); // aegis: boundary(A019): std.mem.Allocator erases its context; only `allocator` hands this Peak out
         p.child.rawFree(memory, alignment, ret);
         p.note(0, memory.len);
     }
@@ -2593,7 +2593,7 @@ const Park = struct {
     /// Armed once every entry is indexed, so that what parks is a read
     /// resolving deltas, not one of the stream's.
     fn arm(context: ?*anyopaque, event: progress_mod.Event) void {
-        const s: *State = @ptrCast(@alignCast(context.?)); // aegis: no-danger: receiveOn hands its layer's state as the context
+        const s: *State = @ptrCast(@alignCast(context.?)); // aegis: no-danger(A019): receiveOn hands its layer's state as the context
         switch (event) {
             .indexed => |n| if (n.done == n.total) s.armed.store(.set, .release),
             else => {},

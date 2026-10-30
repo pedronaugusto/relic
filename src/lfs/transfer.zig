@@ -119,7 +119,7 @@ pub const Result = struct {
     oid: [64]u8,
     size: u64,
     name: []const u8,
-    status: Status, // aegis: no-danger: an object's outcome, every value final; the latest attempt's is kept
+    status: Status,
     /// Why it failed: the server's words, or the transfer's.
     message: ?[]const u8 = null,
 
@@ -1658,7 +1658,7 @@ fn verifyUpload(state: *Run, r: *Result, action: Action, authenticated: bool) Er
 }
 
 fn addBytes(context: *anyopaque, n: u64) void {
-    const state: *Run = @ptrCast(@alignCast(context)); // aegis: no-danger: the context handed out with this function is a Run
+    const state: *Run = @ptrCast(@alignCast(context)); // aegis: no-danger(A019): the context handed out with this function is a Run
     state.say(.{ .bytes = n });
 }
 
@@ -1678,7 +1678,7 @@ const Counting = struct {
     }
 
     fn stream(r: *Io.Reader, w: *Io.Writer, limit: Io.Limit) Io.Reader.StreamError!usize {
-        const c: *Counting = @alignCast(@fieldParentPtr("interface", r)); // aegis: boundary: std.Io vtable: this function is installed only on a Counting's interface
+        const c: *Counting = @alignCast(@fieldParentPtr("interface", r));
         const n = c.inner.stream(w, limit) catch |err| {
             c.flush();
             return err;
@@ -2014,7 +2014,7 @@ const SshData = struct {
     }
 
     fn stream(r: *Io.Reader, w: *Io.Writer, limit: Io.Limit) Io.Reader.StreamError!usize {
-        const d: *SshData = @alignCast(@fieldParentPtr("interface", r)); // aegis: boundary: std.Io vtable: this function is installed only on a SshData's interface
+        const d: *SshData = @alignCast(@fieldParentPtr("interface", r));
         while (d.pending.len == 0) {
             if (d.done) return error.EndOfStream;
             const next = d.conn.nextData(d.operation.io()) catch |err| {
@@ -2145,7 +2145,7 @@ pub const Fetcher = struct {
     fn fetchFn(io: Io, context: *anyopaque, store: *const lfs.Store, settings: *const lfs.Settings, wanted: []const lfs.Wanted) lfs.FetchError!void {
         _ = store;
         _ = settings;
-        const f: *Fetcher = @ptrCast(@alignCast(context)); // aegis: no-danger: the context handed out with this function is a Fetcher
+        const f: *Fetcher = @ptrCast(@alignCast(context)); // aegis: no-danger(A019): the context handed out with this function is a Fetcher
         var objects: std.ArrayList(Object) = .empty;
         defer objects.deinit(f.server.gpa);
         for (wanted) |w| objects.append(f.server.gpa, .of(w.pointer, w.path)) catch return error.OutOfMemory;

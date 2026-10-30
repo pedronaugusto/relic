@@ -821,7 +821,7 @@ pub const StatusProbe = struct {
     }
 
     fn inspect(io: Io, context: *anyopaque, path: []const u8, recorded: Oid) worktree.Error!worktree.SubmoduleState {
-        const p: *StatusProbe = @ptrCast(@alignCast(context)); // aegis: no-danger: the context handed out with this function is a StatusProbe
+        const p: *StatusProbe = @ptrCast(@alignCast(context)); // aegis: no-danger(A019): the context handed out with this function is a StatusProbe
         return p.inspectPath(io, path, recorded) catch |err| return p.fail(path, err);
     }
 
@@ -1651,7 +1651,7 @@ const Promised = struct {
     }
 
     fn fetch(io: Io, context: *anyopaque, oids: []const Oid) (Allocator.Error || Io.Cancelable || error{PromisorFetchFailed})!void {
-        const p: *Promised = @ptrCast(@alignCast(context)); // aegis: no-danger: the context handed out with this function is a Promised
+        const p: *Promised = @ptrCast(@alignCast(context)); // aegis: no-danger(A019): the context handed out with this function is a Promised
         p.transport.fetchPromisedFn.?(p.gpa, io, p.transport.context, p.repo, oids) catch |err| return switch (err) {
             error.TransportFailed => error.PromisorFetchFailed,
             error.OutOfMemory => error.OutOfMemory,
@@ -2470,7 +2470,7 @@ pub const Mover = struct {
     }
 
     fn moveFn(io: Io, context: *anyopaque, request: worktree.SubmoduleMove) worktree.Error!void {
-        const m: *Mover = @ptrCast(@alignCast(context)); // aegis: no-danger: the context handed out with this function is a Mover
+        const m: *Mover = @ptrCast(@alignCast(context)); // aegis: no-danger(A019): the context handed out with this function is a Mover
         m.move(io, request) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Canceled => return error.Canceled,

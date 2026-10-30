@@ -928,10 +928,10 @@ pub const SshAuth = struct {
 pub fn expiresWithin(now_at: Io.Timestamp, in_s: i64, at: time_text.GoTime, margin_s: i64) bool {
     // Go's time.Duration: int64 nanoseconds, wrapping as Go wraps them.
     const in_ns = in_s *% std.time.ns_per_s;
-    // aegis: no-danger: Go's nanoseconds, compared as git-lfs compares them
+    // aegis: no-danger(A011): Go's nanoseconds, compared as git-lfs compares them
     if (in_ns != 0) return in_ns < margin_s * std.time.ns_per_s;
     if (at.isZero()) return false;
-    // aegis: no-danger: Go's nanoseconds since the epoch, compared as git-lfs compares them
+    // aegis: no-danger(A011): Go's nanoseconds since the epoch, compared as git-lfs compares them
     return at.nanoseconds() < @as(i128, now_at.nanoseconds) + margin_s * std.time.ns_per_s;
 }
 
@@ -1357,7 +1357,7 @@ pub const Client = struct {
     /// Close the HTTP clients `transportFor` made.
     fn freeTransports(c: *Client, io: Io) void {
         const handle = c.transports.teardown().* orelse return;
-        const pool: *TransportPool = @ptrCast(@alignCast(handle)); // aegis: no-danger: transportFor installs a TransportPool
+        const pool: *TransportPool = @ptrCast(@alignCast(handle)); // aegis: no-danger(A019): transportFor installs a TransportPool
         for (pool.items.items) |t| {
             t.client.deinit(io);
             t.free(c.gpa);
@@ -1988,7 +1988,7 @@ pub const Client = struct {
     fn exchangeOnce(c: *Client, io: Io, request: Request, url: []const u8, auth_header: ?[]const u8) ErrorNamespace.Error!*Exchange {
         const state = try c.gpa.create(ExchangeState);
         errdefer c.gpa.destroy(state);
-        state.* = .{ .exchange = .{ .client = c, .arena = .init(c.gpa), .wire = @ptrCast(state) } }; // aegis: no-danger: the opaque handle points back to its owning ExchangeState
+        state.* = .{ .exchange = .{ .client = c, .arena = .init(c.gpa), .wire = @ptrCast(state) } }; // aegis: no-danger(A019): the opaque handle points back to its owning ExchangeState
         const ex = &state.exchange;
         errdefer ex.arena.deinit();
         const a = ex.arena.allocator();
@@ -2195,9 +2195,9 @@ pub const Client = struct {
         if (handle.* == null) {
             const pool = try c.gpa.create(TransportPool);
             pool.* = .{};
-            handle.* = @ptrCast(pool); // aegis: no-danger: the opaque handle owns this TransportPool until deinit
+            handle.* = @ptrCast(pool); // aegis: no-danger(A019): the opaque handle owns this TransportPool until deinit
         }
-        const pool: *TransportPool = @ptrCast(@alignCast(handle.*.?)); // aegis: no-danger: the handle above owns a TransportPool
+        const pool: *TransportPool = @ptrCast(@alignCast(handle.*.?)); // aegis: no-danger(A019): the handle above owns a TransportPool
         for (pool.items.items) |t| {
             if (std.mem.eql(u8, t.key, key)) return &t.client;
         }
@@ -2515,7 +2515,7 @@ pub const Exchange = struct {
     body: ?*Io.Reader = null,
 
     fn state(ex: *const Exchange) *ExchangeState {
-        return @ptrCast(@alignCast(ex.wire)); // aegis: no-danger: exchangeOnce pairs every handle with its ExchangeState
+        return @ptrCast(@alignCast(ex.wire)); // aegis: no-danger(A019): exchangeOnce pairs every handle with its ExchangeState
     }
 
     /// The answer's status.

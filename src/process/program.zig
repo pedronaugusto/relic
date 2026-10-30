@@ -92,7 +92,7 @@ pub const Invocation = struct {
     /// git's do; a helper's are the caller's to show. `to_stdout` is the
     /// shell's `2>&1`: wherever standard output goes, one stream with it in
     /// the order the program wrote them.
-    stderr: enum { capture, inherit, ignore, to_stdout } = .capture, // aegis: no-danger: an option
+    stderr: enum { capture, inherit, ignore, to_stdout } = .capture, // aegis: no-danger(A017): an option
     /// Where the program's standard output goes. `to_stderr` is this
     /// process's own standard error, which is where git sends most hooks'
     /// output so that it never mixes with what git itself prints; `inherit`
@@ -478,7 +478,7 @@ const SpawnHooks = struct {
     ended: bool = false,
 
     fn start(gpa: Allocator, io: Io, raw: *anyopaque, options: Child.SpawnOptions) Child.SpawnError!Child {
-        const self: *SpawnHooks = @ptrCast(@alignCast(raw)); // aegis: no-danger: the test hands the hook a *SpawnHooks as its context
+        const self: *SpawnHooks = @ptrCast(@alignCast(raw)); // aegis: no-danger(A019): the test hands the hook a *SpawnHooks as its context
         self.started = true;
         const hooked = options.environ.?.get("RELIC_HOOKED") orelse "";
         self.prepared = std.mem.eql(u8, suite.path(.process_fixture), options.argv[0]) and
@@ -488,7 +488,7 @@ const SpawnHooks = struct {
     }
 
     fn terminate(io: Io, raw: *anyopaque, child: *Child) void {
-        const self: *SpawnHooks = @ptrCast(@alignCast(raw)); // aegis: no-danger: the test hands the hook a *SpawnHooks as its context
+        const self: *SpawnHooks = @ptrCast(@alignCast(raw)); // aegis: no-danger(A019): the test hands the hook a *SpawnHooks as its context
         self.ended = true;
         // glint-ignore: Z026 -- termination cannot fail its caller; a child already gone has nothing left to reap
         _ = child.killWait(io, .fromRaw(0)) catch {};

@@ -559,7 +559,7 @@ pub const Repository = struct {
     state: *anyopaque,
 
     fn data(repo: *const Repository) *RepositoryData {
-        return @ptrCast(@alignCast(repo.state)); // aegis: no-danger: a Repository's state is the RepositoryData its open allocated
+        return @ptrCast(@alignCast(repo.state)); // aegis: no-danger(A019): a Repository's state is the RepositoryData its open allocated
     }
 
     pub fn allocator(repo: *const Repository) Allocator {
@@ -1014,7 +1014,7 @@ pub const Repository = struct {
             .precompose_unicode = repo.data().settings.precompose_unicode,
             .prefer_symlink_refs = repo.data().settings.prefer_symlink_refs,
         });
-        repo.data().refs_state = @ptrCast(store); // aegis: no-danger: the opaque owner retains this allocated Store.
+        repo.data().refs_state = @ptrCast(store); // aegis: no-danger(A019): the opaque owner retains this allocated Store.
         repo.data().odb.replacements = .{
             .lister = .{ .context = repo.data(), .list = listReplacements },
             .enabled = options.replace_objects and repo.data().settings.use_replace_refs,
@@ -1600,7 +1600,7 @@ pub const Repository = struct {
     /// nowhere, replaces with no object, so a read of what it replaces finds
     /// nothing, as git's does.
     fn listReplacements(io: Io, context: *anyopaque, gpa: Allocator, map: *Oid.Map(Oid)) odb_mod.Odb.Replacements.ListError!void {
-        const d: *RepositoryData = @ptrCast(@alignCast(context)); // aegis: no-danger: open installs the RepositoryData as the context
+        const d: *RepositoryData = @ptrCast(@alignCast(context)); // aegis: no-danger(A019): open installs the RepositoryData as the context
         const repo: Repository = .{ .state = d };
         const store = repo.refStore();
         const kind = repo.objectFormat();
@@ -1651,7 +1651,7 @@ pub const Repository = struct {
     /// The repository owns this store; callers borrow it for ref operations.
     /// Its backend and cache cannot be assigned separately.
     pub fn refStore(repo: *const Repository) *refs_mod.Store {
-        return @ptrCast(@alignCast(repo.data().refs_state)); // aegis: no-danger: finish allocates refs_state as an aligned Store.
+        return @ptrCast(@alignCast(repo.data().refs_state)); // aegis: no-danger(A019): finish allocates refs_state as an aligned Store.
     }
 
     /// The last published configuration, borrowed until an edit, a write,
@@ -2531,12 +2531,12 @@ pub const Repository = struct {
     }
 
     fn existsForRefs(io: Io, context: *anyopaque, oid: Oid) bool {
-        const repo: *Repository = @ptrCast(@alignCast(context)); // aegis: no-danger: the context handed out with this function is a Repository
+        const repo: *Repository = @ptrCast(@alignCast(context)); // aegis: no-danger(A019): the context handed out with this function is a Repository
         return repo.data().odb.exists(io, oid) catch false;
     }
 
     fn peelForRefs(io: Io, context: *anyopaque, oid: Oid) ?Oid {
-        const repo: *Repository = @ptrCast(@alignCast(context)); // aegis: no-danger: the context handed out with this function is a Repository
+        const repo: *Repository = @ptrCast(@alignCast(context)); // aegis: no-danger(A019): the context handed out with this function is a Repository
         // A cancel is put back for the task's next cancelation point.
         const header = repo.data().odb.readHeader(io, oid) catch |err| {
             if (err == error.Canceled) io.recancel();

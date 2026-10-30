@@ -140,7 +140,7 @@ pub fn blobs(gpa: Allocator, io: Io, sides: Sides, options: BlobOptions) Self.Bl
     }) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.Canceled => return error.Canceled,
-        // aegis: internal: three sides of max_text_size at most hold fewer bytes and lines than a u32 counts, parallax's limit (checked at comptime below)
+        // aegis: internal(A013): three sides of max_text_size at most hold fewer bytes and lines than a u32 counts, parallax's limit (checked at comptime below)
         error.InputTooLarge => unreachable,
     };
     return .{ .gpa = gpa, .bytes = merged.bytes, .status = if (merged.conflicts == 0) .clean else .conflicted };

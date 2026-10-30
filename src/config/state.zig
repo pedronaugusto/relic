@@ -7,7 +7,7 @@ const Allocator = @import("std").mem.Allocator;
 pub const State = opaque {};
 
 pub fn get(state: *State) *config.Config {
-    return @ptrCast(@alignCast(state)); // aegis: no-danger: create allocates each State as aligned Config.
+    return @ptrCast(@alignCast(state)); // aegis: no-danger(A019): create allocates each State as aligned Config.
 }
 
 /// Takes the configuration on success and failure.
@@ -18,7 +18,7 @@ pub fn create(value: config.Config) Allocator.Error!*State {
         return err;
     };
     owned.* = value;
-    return @ptrCast(owned); // aegis: no-danger: the opaque owner retains the allocated Config pointer.
+    return @ptrCast(owned); // aegis: no-danger(A019): the opaque owner retains the allocated Config pointer.
 }
 
 pub fn destroy(state: *State) void {

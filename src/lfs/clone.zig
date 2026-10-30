@@ -54,7 +54,7 @@ pub const Fetcher = struct {
     }
 
     fn fetchFn(io: Io, context: *anyopaque, store: *const lfs.Store, settings: *const lfs.Settings, wanted: []const lfs.Wanted) lfs.FetchError!void {
-        const f: *Fetcher = @ptrCast(@alignCast(context)); // aegis: no-danger: the context handed out with this function is a Fetcher
+        const f: *Fetcher = @ptrCast(@alignCast(context)); // aegis: no-danger(A019): the context handed out with this function is a Fetcher
         if (f.server == null) {
             f.server = lfsapi.Server.open(f.gpa, io, f.repo, f.remote, f.options) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
@@ -95,7 +95,7 @@ fn loadFilters(gpa: Allocator, io: Io, _: ?*const anyopaque, repository: *repo_m
     };
 }
 fn releaseFetcher(io: Io, context: *anyopaque) void {
-    const fetch: *Fetcher = @ptrCast(@alignCast(context)); // aegis: no-danger: the callback context is the Fetcher this function was registered with
+    const fetch: *Fetcher = @ptrCast(@alignCast(context)); // aegis: no-danger(A019): the callback context is the Fetcher this function was registered with
     const gpa = fetch.gpa;
     fetch.deinit(io);
     gpa.destroy(fetch);

@@ -390,9 +390,9 @@ const Importer = struct {
     rejected: std.ArrayList(Rejected) = .empty,
     next_mark: u64 = 0,
 
-    date_format: DateFormat, // aegis: no-danger: an option, from the command line or a feature line
+    date_format: DateFormat,
     signed_commits: SignMode,
-    signed_tags: SignMode, // aegis: no-danger: an option, from the command line or a feature line
+    signed_tags: SignMode,
     force: bool,
     require_done: bool,
     relative_marks: bool,

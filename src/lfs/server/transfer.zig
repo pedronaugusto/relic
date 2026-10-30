@@ -471,7 +471,7 @@ const DataReader = struct {
     }
 
     fn stream(r: *Io.Reader, w: *Io.Writer, limit: Io.Limit) Io.Reader.StreamError!usize {
-        const d: *DataReader = @alignCast(@fieldParentPtr("interface", r)); // aegis: boundary: std.Io vtable: installed only on a DataReader's interface
+        const d: *DataReader = @alignCast(@fieldParentPtr("interface", r));
         while (true) {
             if (d.pending.len != 0) {
                 const n = limit.minInt(d.pending.len);
@@ -518,7 +518,7 @@ const DataWriter = struct {
     }
 
     fn drain(w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
-        const d: *DataWriter = @alignCast(@fieldParentPtr("interface", w)); // aegis: boundary: std.Io vtable: installed only on a DataWriter's interface
+        const d: *DataWriter = @alignCast(@fieldParentPtr("interface", w));
         try d.packets(w.buffered());
         w.end = 0;
         var n: usize = 0;

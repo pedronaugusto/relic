@@ -701,7 +701,7 @@ pub const Pack = struct {
     /// front of the next block, in that slot's prefix, so the two read as
     /// one run; neither block's own bytes move.
     fn nextBlock(r: *Io.Reader) Io.Reader.Error!void {
-        const p: *Pack = @alignCast(@fieldParentPtr("block_reader", r)); // aegis: no-danger: installed only on a Pack's block_reader
+        const p: *Pack = @alignCast(@fieldParentPtr("block_reader", r));
         const next = std.math.add(u64, p.reader_block, 1) catch return error.EndOfStream;
         const next_at = std.math.mul(u64, next, read_block_bytes) catch return error.EndOfStream;
         if (next_at >= p.size) return error.EndOfStream;
@@ -2165,7 +2165,7 @@ pub const Writer = struct {
         }
 
         fn drain(w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
-            const s: *Sink = @alignCast(@fieldParentPtr("writer", w)); // aegis: no-danger: this function is installed only on a Sink's writer
+            const s: *Sink = @alignCast(@fieldParentPtr("writer", w));
             if (w.end != 0) {
                 try s.emit(w.buffer[0..w.end]);
                 w.end = 0;
@@ -3419,25 +3419,25 @@ const LiveAllocator = struct {
         return .{ .ptr = l, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
     }
     fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
-        const l: *LiveAllocator = @ptrCast(@alignCast(ctx)); // aegis: boundary: std.mem.Allocator erases its context; ctx is the LiveAllocator `allocator` handed out
+        const l: *LiveAllocator = @ptrCast(@alignCast(ctx)); // aegis: boundary(A019): std.mem.Allocator erases its context; ctx is the LiveAllocator `allocator` handed out
         const p = l.child.rawAlloc(len, alignment, ret) orelse return null;
         l.live += len;
         return p;
     }
     fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret: usize) bool {
-        const l: *LiveAllocator = @ptrCast(@alignCast(ctx)); // aegis: boundary: std.mem.Allocator erases its context; ctx is the LiveAllocator `allocator` handed out
+        const l: *LiveAllocator = @ptrCast(@alignCast(ctx)); // aegis: boundary(A019): std.mem.Allocator erases its context; ctx is the LiveAllocator `allocator` handed out
         if (!l.child.rawResize(memory, alignment, new_len, ret)) return false;
         l.live = l.live - memory.len + new_len;
         return true;
     }
     fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret: usize) ?[*]u8 {
-        const l: *LiveAllocator = @ptrCast(@alignCast(ctx)); // aegis: boundary: std.mem.Allocator erases its context; ctx is the LiveAllocator `allocator` handed out
+        const l: *LiveAllocator = @ptrCast(@alignCast(ctx)); // aegis: boundary(A019): std.mem.Allocator erases its context; ctx is the LiveAllocator `allocator` handed out
         const p = l.child.rawRemap(memory, alignment, new_len, ret) orelse return null;
         l.live = l.live - memory.len + new_len;
         return p;
     }
     fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret: usize) void {
-        const l: *LiveAllocator = @ptrCast(@alignCast(ctx)); // aegis: boundary: std.mem.Allocator erases its context; ctx is the LiveAllocator `allocator` handed out
+        const l: *LiveAllocator = @ptrCast(@alignCast(ctx)); // aegis: boundary(A019): std.mem.Allocator erases its context; ctx is the LiveAllocator `allocator` handed out
         l.child.rawFree(memory, alignment, ret);
         l.live -= memory.len;
     }

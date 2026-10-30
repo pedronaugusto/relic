@@ -85,7 +85,7 @@ pub const Painter = struct {
     }
 
     fn write(context: ?*const anyopaque, w: *Io.Writer, line: parallax.Paint.Line) Io.Writer.Error!void {
-        const p: *Painter = @ptrCast(@alignCast(@constCast(context.?))); // aegis: no-danger: `paint` hands its own *Painter
+        const p: *Painter = @ptrCast(@alignCast(@constCast(context.?))); // aegis: no-danger(A019): `paint` hands its own *Painter
         if (p.failed != null) return error.WriteFailed;
         p.take(w, line) catch |err| {
             p.failed = err;

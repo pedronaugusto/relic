@@ -141,7 +141,7 @@ pub fn normalize(gpa: Allocator, text: []const u8, globs: bool) Error!Info {
             // https's own.
         } else {
             if (spanOf(digits, 0, url_digit) < digits.len) return error.InvalidPort;
-            const number: u32 = if (digits.len <= 5) std.fmt.parseInt(u32, digits, 10) catch unreachable else 0; // aegis: no-danger: at most five digits
+            const number: u32 = if (digits.len <= 5) std.fmt.parseInt(u32, digits, 10) catch unreachable else 0; // aegis: no-danger(A013): at most five digits
             if (number == 0 or number > 65535) return error.InvalidPort;
             try norm.append(gpa, ':');
             info.port = .{ .off = norm.items.len, .len = digits.len };

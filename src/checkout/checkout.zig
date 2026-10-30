@@ -958,7 +958,7 @@ pub const StatusEntry = struct {
     /// HEAD against the index.
     staged: Change,
     /// The index against the working tree.
-    unstaged: Change, // aegis: no-danger: a comparison's answer, computed once and read; no lifecycle
+    unstaged: Change,
     /// Set when the path has entries at stages 1 to 3.
     conflicted: bool = false,
     /// Where a `renamed` or `copied` path came from, and how alike the two
@@ -2654,7 +2654,7 @@ fn writeLink(io: Io, wt: Io.Dir, path: safe_path.Checked, target: []const u8, sy
         else => {},
     };
     if (symlinks) {
-        // aegis: design: a link's target is what the link holds, written as git writes it: nothing is opened through it here
+        // aegis: design(A009): a link's target is what the link holds, written as git writes it: nothing is opened through it here
         if (wt.symLink(io, target, path.bytes, .{})) |_| return false else |_| {}
     }
     try writeFile(io, wt, path, .{ .bytes = target }, false);
@@ -3619,7 +3619,7 @@ pub const RacyCheck = struct {
     }
 
     fn changed(node: *const index_mod.WriteOptions.Racy, index: *const Index, entry: index_mod.Entry) bool {
-        const c: *const RacyCheck = @alignCast(@fieldParentPtr("node", node)); // aegis: no-danger: changed is installed only on a RacyCheck's node
+        const c: *const RacyCheck = @alignCast(@fieldParentPtr("node", node));
         return differsFromIndex(c.gpa, c.io, c.wt, .{ .index = index, .entry = entry }, c.rules) catch true;
     }
 };

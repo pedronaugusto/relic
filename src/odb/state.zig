@@ -40,7 +40,7 @@ pub const Data = struct {
 };
 
 pub fn get(state: *State) *Data {
-    return @ptrCast(@alignCast(state)); // aegis: no-danger: create allocates each State as aligned Data.
+    return @ptrCast(@alignCast(state)); // aegis: no-danger(A019): create allocates each State as aligned Data.
 }
 
 pub fn create(gpa: Allocator, kind: Kind, options: odb.Options) Allocator.Error!*State {
@@ -49,7 +49,7 @@ pub fn create(gpa: Allocator, kind: Kind, options: odb.Options) Allocator.Error!
     var cache = try pack.Cache.init(gpa, options.delta_cache_bytes.raw());
     errdefer cache.deinit();
     data.* = .{ .gpa = gpa, .kind = kind, .options = options, .cache = cache };
-    return @ptrCast(data); // aegis: no-danger: the opaque owner retains the allocated Data pointer.
+    return @ptrCast(data); // aegis: no-danger(A019): the opaque owner retains the allocated Data pointer.
 }
 
 /// The pack and the name it was opened under have one owner. Registration

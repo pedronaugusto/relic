@@ -537,12 +537,12 @@ pub const ToWarnings = struct {
     }
 
     fn noteFinding(context: *anyopaque, finding: Finding) Allocator.Error!void {
-        const t: *ToWarnings = @ptrCast(@alignCast(context)); // aegis: no-danger: the context is the ToWarnings the sink was made from
+        const t: *ToWarnings = @ptrCast(@alignCast(context)); // aegis: no-danger(A019): the context is the ToWarnings the sink was made from
         try note(t.warnings, finding);
     }
 
     fn noteUnknown(context: *anyopaque, name: []const u8) Allocator.Error!void {
-        const t: *ToWarnings = @ptrCast(@alignCast(context)); // aegis: no-danger: the context is the ToWarnings the sink was made from
+        const t: *ToWarnings = @ptrCast(@alignCast(context)); // aegis: no-danger(A019): the context is the ToWarnings the sink was made from
         try warning.note(t.warnings, .{ .fsck_unknown_message = name });
     }
 };
@@ -1247,12 +1247,12 @@ const Collected = struct {
     }
 
     fn noteProblem(context: *anyopaque, finding: Finding) Allocator.Error!void {
-        const c: *Collected = @ptrCast(@alignCast(context)); // aegis: no-danger: the context is the Collected the sink was made from
+        const c: *Collected = @ptrCast(@alignCast(context)); // aegis: no-danger(A019): the context is the Collected the sink was made from
         try c.items.append(c.gpa, finding.problem.?);
     }
 
     fn unknownName(context: *anyopaque, name: []const u8) Allocator.Error!void {
-        const c: *Collected = @ptrCast(@alignCast(context)); // aegis: no-danger: the context is the Collected the sink was made from
+        const c: *Collected = @ptrCast(@alignCast(context)); // aegis: no-danger(A019): the context is the Collected the sink was made from
         try c.unknown.append(c.gpa, try c.gpa.dupe(u8, name));
     }
 };

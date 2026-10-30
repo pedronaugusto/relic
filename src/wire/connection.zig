@@ -317,17 +317,17 @@ pub const Process = struct {
     fn nothing() void {}
 
     fn advertisement(context: *anyopaque, _: *Connection) Error!*Io.Reader {
-        const p: *Process = @ptrCast(@alignCast(context)); // aegis: no-danger: this vtable's context, a Process, from start
+        const p: *Process = @ptrCast(@alignCast(context)); // aegis: no-danger(A019): this vtable's context, a Process, from start
         return &p.reader.interface;
     }
 
     fn request(context: *anyopaque, _: *Connection) Error!*Io.Writer {
-        const p: *Process = @ptrCast(@alignCast(context)); // aegis: no-danger: this vtable's context, a Process, from start
+        const p: *Process = @ptrCast(@alignCast(context)); // aegis: no-danger(A019): this vtable's context, a Process, from start
         return &p.writer.interface;
     }
 
     fn response(context: *anyopaque, c: *Connection) Error!*Io.Reader {
-        const p: *Process = @ptrCast(@alignCast(context)); // aegis: no-danger: this vtable's context, a Process, from start
+        const p: *Process = @ptrCast(@alignCast(context)); // aegis: no-danger(A019): this vtable's context, a Process, from start
         p.writer.interface.flush() catch return failure(context, c);
         return &p.reader.interface;
     }
@@ -342,7 +342,7 @@ pub const Process = struct {
     }
 
     fn failure(context: *anyopaque, c: *Connection) Error {
-        const p: *Process = @ptrCast(@alignCast(context)); // aegis: no-danger: this vtable's context, a Process, from start
+        const p: *Process = @ptrCast(@alignCast(context)); // aegis: no-danger(A019): this vtable's context, a Process, from start
         if (p.reader.err) |err| switch (err) {
             error.Canceled => return error.Canceled,
             else => {},
@@ -356,7 +356,7 @@ pub const Process = struct {
     }
 
     fn deinit(io: Io, context: *anyopaque) void {
-        const p: *Process = @ptrCast(@alignCast(context)); // aegis: no-danger: this vtable's context, a Process, from start
+        const p: *Process = @ptrCast(@alignCast(context)); // aegis: no-danger(A019): this vtable's context, a Process, from start
         p.writer.io = io;
         // A cancel that lands while the conversation closes is put back for
         // the caller's next cancelation point once it has closed, where
@@ -416,7 +416,7 @@ pub const Process = struct {
     /// `Process` only when it carries its vtable.
     fn of(c: *Connection) ?*Process {
         if (c.vtable != &vtable) return null;
-        return @ptrCast(@alignCast(c.context)); // aegis: no-danger: the vtable is this type's, which only start installs, beside a Process
+        return @ptrCast(@alignCast(c.context)); // aegis: no-danger(A019): the vtable is this type's, which only start installs, beside a Process
     }
 
     /// Borrow a native process's buffered streams for one exclusive operation.

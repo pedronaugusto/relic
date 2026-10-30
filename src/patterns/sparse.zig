@@ -389,7 +389,7 @@ fn onlyEscapedGlobs(pattern: []const u8) bool {
 }
 
 fn matcher(ptr: *anyopaque) *sets.Matcher {
-    return @ptrCast(@alignCast(ptr)); // aegis: no-danger: the pointer stored in a pattern set is always a sets.Matcher
+    return @ptrCast(@alignCast(ptr)); // aegis: no-danger(A019): the pointer stored in a pattern set is always a sets.Matcher
 }
 
 test "the last matching pattern decides, and nothing is in by default" {

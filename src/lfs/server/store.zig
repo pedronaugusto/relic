@@ -77,7 +77,7 @@ pub const Directory = struct {
     }
 
     fn size(context: *anyopaque, io: Io, repository: []const u8, oid: *const [64]u8) Store.Error!?u64 {
-        const d: *Directory = @ptrCast(@alignCast(context)); // aegis: no-danger: the context is the Directory `store` was made from
+        const d: *Directory = @ptrCast(@alignCast(context)); // aegis: no-danger(A019): the context is the Directory `store` was made from
         var buf: [lfs.Store.max_path]u8 = undefined;
         const path = d.of(repository).objectPath(&buf, oid) catch return null;
         const stat = d.dir.statFile(io, path, .{}) catch |err| switch (err) {
@@ -89,7 +89,7 @@ pub const Directory = struct {
     }
 
     fn read(context: *anyopaque, io: Io, repository: []const u8, pointer: *const lfs.Pointer, w: *Io.Writer) Store.Error!bool {
-        const d: *Directory = @ptrCast(@alignCast(context)); // aegis: no-danger: the context is the Directory `store` was made from
+        const d: *Directory = @ptrCast(@alignCast(context)); // aegis: no-danger(A019): the context is the Directory `store` was made from
         var owned = (d.of(repository).open(io, pointer) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             else => return error.LfsStoreFailed,
@@ -109,7 +109,7 @@ pub const Directory = struct {
     }
 
     fn write(context: *anyopaque, io: Io, repository: []const u8, pointer: *const lfs.Pointer, r: *Io.Reader) Store.Error!void {
-        const d: *Directory = @ptrCast(@alignCast(context)); // aegis: no-danger: the context is the Directory `store` was made from
+        const d: *Directory = @ptrCast(@alignCast(context)); // aegis: no-danger(A019): the context is the Directory `store` was made from
         _ = d.of(repository).install(io, r, pointer) catch |err| switch (err) {
             error.LfsObjectMismatch => return error.LfsObjectMismatch,
             error.Canceled => return error.Canceled,
@@ -181,7 +181,7 @@ pub const S3 = struct {
     }
 
     fn size(context: *anyopaque, io: Io, repository: []const u8, oid: *const [64]u8) Store.Error!?u64 {
-        const s: *S3 = @ptrCast(@alignCast(context)); // aegis: no-danger: the context is the S3 `store` was made from
+        const s: *S3 = @ptrCast(@alignCast(context)); // aegis: no-danger(A019): the context is the S3 `store` was made from
         var arena_state: std.heap.ArenaAllocator = .init(s.gpa);
         defer arena_state.deinit();
         const url = try s.objectUrl(arena_state.allocator(), repository, oid);
@@ -203,7 +203,7 @@ pub const S3 = struct {
     }
 
     fn link(context: *anyopaque, io: Io, arena: Allocator, repository: []const u8, operation: lfsapi.Operation, pointer: *const lfs.Pointer) Store.Error!Link {
-        const s: *S3 = @ptrCast(@alignCast(context)); // aegis: no-danger: the context is the S3 `store` was made from
+        const s: *S3 = @ptrCast(@alignCast(context)); // aegis: no-danger(A019): the context is the S3 `store` was made from
         const url = try s.objectUrl(arena, repository, &pointer.oid);
         const parsed = uplink.wire.url.parse(url) catch return error.LfsStoreFailed;
         var out: Io.Writer.Allocating = .init(arena);

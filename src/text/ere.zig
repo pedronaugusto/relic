@@ -941,7 +941,7 @@ const RParser = struct {
                     '1'...'9' => {
                         // only a group already closed may be referred to
                         const index = e - '0';
-                        if (p.closed & (@as(u16, 1) << @intCast(index)) == 0) return error.InvalidPattern; // aegis: no-danger: index is one to nine
+                        if (p.closed & (@as(u16, 1) << @intCast(index)) == 0) return error.InvalidPattern; // aegis: no-danger(A010): index is one to nine
                         p.backrefs = true;
                         return p.node(.{ .backref = index });
                     },

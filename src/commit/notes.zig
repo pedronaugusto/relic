@@ -929,7 +929,7 @@ pub const TextconvCaches = struct {
     }
 
     fn getFn(context: *anyopaque, a: Allocator, io: Io, key: textconv_mod.Cache.Key) textconv_mod.Error!?[]const u8 {
-        const c: *TextconvCaches = @ptrCast(@alignCast(context)); // aegis: no-danger: the context handed out with this function is a TextconvCaches
+        const c: *TextconvCaches = @ptrCast(@alignCast(context)); // aegis: no-danger(A019): the context handed out with this function is a TextconvCaches
         const entry = c.entryFor(io, key.driver, key.command) catch |err| return cacheError(err);
         const note = (entry.notes.get(io, key.blob) catch |err| return cacheError(err)) orelse return null;
         const found = c.repo.objectDatabase().read(io, note) catch |err| return cacheError(err);
@@ -940,7 +940,7 @@ pub const TextconvCaches = struct {
     /// `notes_cache_put` and `notes_cache_write`, whose failure git passes
     /// over: the repository may be read-only.
     fn putFn(context: *anyopaque, io: Io, key: textconv_mod.Cache.Key, text: []const u8) textconv_mod.Error!void {
-        const c: *TextconvCaches = @ptrCast(@alignCast(context)); // aegis: no-danger: the context handed out with this function is a TextconvCaches
+        const c: *TextconvCaches = @ptrCast(@alignCast(context)); // aegis: no-danger(A019): the context handed out with this function is a TextconvCaches
         c.put(io, key, text) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Canceled => return error.Canceled,

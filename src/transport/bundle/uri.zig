@@ -390,7 +390,7 @@ const Run = struct {
         }
         if (cur >= 0) return false;
         var buf: [20]u8 = undefined;
-        const value = std.mem.print(&buf, "{d}", .{new_max}) catch unreachable; // aegis: no-danger: a u64 is at most twenty digits
+        const value = std.mem.print(&buf, "{d}", .{new_max}) catch unreachable; // aegis: no-danger(A013): a u64 is at most twenty digits
         _ = run.repo.writeConfig(run.io, .local, &.{.{ .set = .{ .name = "fetch.bundleCreationToken", .value = value } }}, .{}) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             error.OutOfMemory => return error.OutOfMemory,

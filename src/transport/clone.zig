@@ -1364,7 +1364,7 @@ pub const SubmoduleTransport = struct {
     }
 
     fn cloneFn(gpa: Allocator, io: Io, context: *anyopaque, request: submodule.CloneRequest) submodule.TransportError!void {
-        const t: *SubmoduleTransport = @ptrCast(@alignCast(context)); // aegis: no-danger: the context handed out with this function is a SubmoduleTransport
+        const t: *SubmoduleTransport = @ptrCast(@alignCast(context)); // aegis: no-danger(A019): the context handed out with this function is a SubmoduleTransport
         t.cloneInto(gpa, io, request) catch |err| return t.failed(io, err);
     }
 
@@ -1416,7 +1416,7 @@ pub const SubmoduleTransport = struct {
     }
 
     fn fetchFn(gpa: Allocator, io: Io, context: *anyopaque, repo: *Repository, remote: []const u8, want: ?Oid) submodule.TransportError!void {
-        const t: *SubmoduleTransport = @ptrCast(@alignCast(context)); // aegis: no-danger: the context handed out with this function is a SubmoduleTransport
+        const t: *SubmoduleTransport = @ptrCast(@alignCast(context)); // aegis: no-danger(A019): the context handed out with this function is a SubmoduleTransport
         t.fetchOnce(gpa, io, repo, remote, &.{}) catch |err| return t.failed(io, err);
         const oid = want orelse return;
         repo.objectDatabase().refresh(io) catch |err| return t.failed(io, err);
@@ -1428,7 +1428,7 @@ pub const SubmoduleTransport = struct {
     }
 
     fn fetchPromisedFn(gpa: Allocator, io: Io, context: *anyopaque, repo: *Repository, oids: []const Oid) submodule.TransportError!void {
-        const t: *SubmoduleTransport = @ptrCast(@alignCast(context)); // aegis: no-danger: the context handed out with this function is a SubmoduleTransport
+        const t: *SubmoduleTransport = @ptrCast(@alignCast(context)); // aegis: no-danger(A019): the context handed out with this function is a SubmoduleTransport
         const o = t.options;
         var lazy: partial.Lazy = .init(gpa, repo, .{ .programs = o.programs, .prompt = o.prompt, .check_objects = o.check_objects });
         defer lazy.deinit();

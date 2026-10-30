@@ -281,7 +281,7 @@ pub const Report = struct {
     }
 
     fn observedMissing(o: *native.Observer, path: []const u8, object: native.Object, declined: bool) Allocator.Error!void {
-        const r: *Report = @alignCast(@fieldParentPtr("observer", o)); // aegis: no-danger: observedMissing is installed only on a Report's observer
+        const r: *Report = @alignCast(@fieldParentPtr("observer", o));
         return r.missing(path, object, declined);
     }
 };

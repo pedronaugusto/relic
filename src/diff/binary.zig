@@ -133,7 +133,7 @@ pub fn deflate(gpa: Allocator, data: []const u8) Allocator.Error![]u8 {
     defer compress.deinit();
     const out = try gpa.alloc(u8, warp.Compressor.bound(data.len, .{}));
     errdefer gpa.free(out);
-    const n = compress.compress(data, out, .{}) catch unreachable; // aegis: no-danger: bound reserves the complete stream
+    const n = compress.compress(data, out, .{}) catch unreachable; // aegis: no-danger(A013): bound reserves the complete stream
     return gpa.realloc(out, n);
 }
 

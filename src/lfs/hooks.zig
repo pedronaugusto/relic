@@ -51,7 +51,7 @@ pub const Native = struct {
 
     fn run(io: Io, context: ?*anyopaque, event: []const u8, args: []const []const u8, input: []const u8) bool {
         _ = input;
-        const n: *Native = @ptrCast(@alignCast(context.?)); // aegis: no-danger: the context handed out with this function is a Native
+        const n: *Native = @ptrCast(@alignCast(context.?)); // aegis: no-danger(A019): the context handed out with this function is a Native
         n.fixed = null;
         n.failure = null;
         n.handle(io, event, args) catch |err| {

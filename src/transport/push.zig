@@ -258,7 +258,7 @@ pub const RefResult = struct {
     old: Oid,
     /// The value pushed, zero for a deletion.
     new: Oid,
-    status: Status, // aegis: no-danger: a ref's report, as git's push_refs sets it: each value an outcome
+    status: Status,
     /// Whether an update that would otherwise be refused was forced.
     forced: bool = false,
     /// The remote's reason, for `rejected_by_remote`, or what it added to
@@ -1894,7 +1894,7 @@ const PrePushSeen = struct {
     allow: bool = true,
     fn run(context: ?*anyopaque, remote: []const u8, url: []const u8, updates: []const PrePushUpdate) bool {
         _ = url;
-        const self: *PrePushSeen = @ptrCast(@alignCast(context.?)); // aegis: no-danger: the context handed out with this function is a PrePushSeen
+        const self: *PrePushSeen = @ptrCast(@alignCast(context.?)); // aegis: no-danger(A019): the context handed out with this function is a PrePushSeen
         self.text.print(testing.allocator, "{s}\n", .{remote}) catch return false;
         for (updates) |u| {
             self.text.print(testing.allocator, "{s} {f} {s} {f}\n", .{ u.local_ref, u.local_oid, u.remote_ref, u.remote_oid }) catch return false;

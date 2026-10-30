@@ -211,7 +211,6 @@ const Named = struct {
 /// null where there is none: where the working tree's `.git` file is, as
 /// `worktree add` wrote it.
 fn readGitdir(arena: Allocator, io: Io, admin: Io.Dir, max_bytes: u64) aegis.own.ReadFileError!?[]u8 {
-    // aegis: internal: the gitdir file this program, or git, wrote into the repository's own directory
     return aegis.own.readFile(io, admin, "gitdir", arena, aegis.units.Bytes(u64).fromRaw(max_bytes)) catch |err| switch (err) {
         error.FileNotFound, error.NotDir, error.IsDir => return null,
         else => |e| return e,

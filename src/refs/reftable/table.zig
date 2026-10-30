@@ -174,7 +174,7 @@ pub const Table = struct {
     version: u8,
     block_size: u32,
     min_update_index: u64,
-    // aegis: no-danger: the two bounds of one range of update indices, of one kind
+    // aegis: no-danger(A016): the two bounds of one range of update indices, of one kind
     max_update_index: u64,
     /// Where the footer begins; no block reaches past it.
     size: usize,
@@ -843,7 +843,7 @@ pub const WriteOptions = struct {
     index_objects: bool = true,
 };
 
-// aegis: no-danger: the two bounds of one range of update indices, of one kind
+// aegis: no-danger(A016): the two bounds of one range of update indices, of one kind
 pub const WriteInputs = struct { min_update_index: u64, max_update_index: u64, refs: []const RefRecord, logs: []const LogRecord };
 
 /// Write one table holding `inputs.refs`, sorted by name, and `inputs.logs`, sorted by
@@ -1049,7 +1049,7 @@ const Writer = struct {
         var state = try warp.Compressor.init(w.gpa, .{ .level = 9, .max_input = .fromRaw(o.next - skip) });
         defer state.deinit();
         const output = compressed.writer.writableSliceGreedy(warp.Compressor.bound(o.next - skip, .{})) catch return error.OutOfMemory;
-        const n = state.compress(w.block[skip..o.next], output, .{}) catch unreachable; // aegis: no-danger: `output` was sized by `Compressor.bound(o.next - skip, .{})`, which holds the complete stream
+        const n = state.compress(w.block[skip..o.next], output, .{}) catch unreachable; // aegis: no-danger(A013): `output` was sized by `Compressor.bound(o.next - skip, .{})`, which holds the complete stream
         compressed.writer.advance(n);
         const bytes = compressed.written();
         // A log block is not bounded by the block size once deflated, and
