@@ -63,11 +63,18 @@ pub fn gitInput(gpa: Allocator, io: Io, dir: Io.Dir, args: []const []const u8, i
 /// `gitInput` with the environment the caller gives rather than the
 /// suite's own. A failure is reported only when `report` says so.
 pub fn gitInputEnv(gpa: Allocator, io: Io, dir: Io.Dir, env: *const Environ.Map, args: []const []const u8, input: []const u8, report: bool) ![]u8 {
+    return gitInputSettings(gpa, io, dir, env, &testgit.default_settings, args, input, report);
+}
+
+/// `gitInputEnv` with `settings` as its `-c` pairs in place of
+/// `testgit.default_settings`: `testgit.settings_with_hooks` for a git
+/// that runs the repository's hooks.
+pub fn gitInputSettings(gpa: Allocator, io: Io, dir: Io.Dir, env: *const Environ.Map, settings: []const []const u8, args: []const []const u8, input: []const u8, report: bool) ![]u8 {
     try testgit.requireGit(gpa, io);
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(gpa);
     try argv.append(gpa, "git");
-    try argv.appendSlice(gpa, &testgit.default_settings);
+    try argv.appendSlice(gpa, settings);
     try argv.appendSlice(gpa, args);
     var outcome = try program.run(gpa, io, .{ .environ = env }, .{
         .argv = argv.items,

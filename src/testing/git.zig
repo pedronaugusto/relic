@@ -280,19 +280,26 @@ pub const Repo = struct {
 
 /// `default_settings` without `core.autocrlf=false`, for a test that sets
 /// it in the repository's own config, where the library reads it.
-pub const settings_without_autocrlf = blk: {
+pub const settings_without_autocrlf = settingsWithout("core.autocrlf=false");
+
+/// `default_settings` without `core.hooksPath=relic-no-hooks`, for a test
+/// whose git runs the repository's own hooks, its submodules' included.
+pub const settings_with_hooks = settingsWithout("core.hooksPath=relic-no-hooks");
+
+/// `default_settings` less the one `-c` pair whose value is `setting`.
+fn settingsWithout(comptime setting: []const u8) [default_settings.len - 2][]const u8 {
     const all = default_settings;
     var out: [all.len - 2][]const u8 = undefined;
     var n: usize = 0;
     var i: usize = 0;
     while (i < all.len) : (i += 2) {
-        if (std.mem.eql(u8, all[i + 1], "core.autocrlf=false")) continue;
+        if (std.mem.eql(u8, all[i + 1], setting)) continue;
         out[n] = all[i];
         out[n + 1] = all[i + 1];
         n += 2;
     }
-    break :blk out;
-};
+    return out;
+}
 
 /// What a `git` that may fail said: its exit code and both streams,
 /// the caller's.

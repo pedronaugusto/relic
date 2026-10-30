@@ -21,6 +21,7 @@ const repo_mod = @import("../repo/repo.zig");
 const worktree = @import("../checkout/checkout.zig");
 const submodule = @import("submodule.zig");
 const gitmodules_mod = @import("../config/gitmodules.zig");
+const hooks_mod = @import("../hooks/hooks.zig");
 const Oid = hash.Oid;
 const Repository = repo_mod.Repository;
 const testing = std.testing;
@@ -1111,6 +1112,120 @@ test "git 2.56, update --merge and --rebase merge the recorded commit into the s
         }
         defer for (outs) |out| for (out) |o| gpa.free(o);
         for (outs[0], outs[1]) |ours, theirs| try testing.expectEqualStrings(theirs, ours);
+    }
+}
+
+test "git 2.56, an update runs each submodule's own post-checkout after its checkout and post-merge after its merge, and a failed post-checkout fails it" {
+    // The hooks are shell scripts, run as files.
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const Case = struct {
+        strategy: gitmodules_mod.Update,
+        flag: []const u8,
+        /// The status the hooks exit with.
+        status: u8 = 0,
+    };
+    const cases = [_]Case{
+        .{ .strategy = .checkout, .flag = "--checkout" },
+        .{ .strategy = .checkout, .flag = "--checkout", .status = 3 },
+        .{ .strategy = .merge, .flag = "--merge" },
+    };
+    for (cases) |case| {
+        var f = try Fixture.init(gpa, io);
+        defer f.deinit();
+        var env = try testgit.datedEnv(gpa, who.when_secs);
+        defer env.deinit();
+        var twins: [2]Clone = undefined;
+        twins[0] = try Clone.init(gpa, io, &f.super, true);
+        defer twins[0].deinit(io);
+        twins[1] = try Clone.init(gpa, io, &f.super, true);
+        defer twins[1].deinit(io);
+
+        // Upstream, lib moves on and the superproject records it.
+        try f.lib.writeFile(io, "u.txt", "upstream\n");
+        try f.lib.exec(io, &.{ "add", "-A" });
+        try f.lib.exec(io, &.{ "commit", "-q", "-m", "upstream" });
+        var super_lib = f.super;
+        super_lib.dir = try f.super.dir.openDir(io, "vendor/lib", .{});
+        defer super_lib.dir.close(io);
+        try super_lib.exec(io, &.{ "pull", "-q", "--no-rebase", "origin" });
+        try f.super.exec(io, &.{ "commit", "-q", "-am", "record lib" });
+
+        // Each twin: the hooks in the submodule's own repository, each
+        // writing its arguments into the submodule's working tree; a
+        // branch to merge into for a merge; then the superproject's new
+        // record pulled with the submodule left be.
+        const script = try gpa.print("#!/bin/sh\necho \"$@\" >> \"$(basename \"$0\").log\"\nexit {d}\n", .{case.status});
+        defer gpa.free(script);
+        for (&twins) |*c| {
+            c.git.environ = &env;
+            c.git.defaults = &testgit.settings_with_hooks;
+            var lib = c.git;
+            lib.dir = try c.git.dir.openDir(io, "vendor/lib", .{});
+            defer lib.dir.close(io);
+            const common = try lib.run(io, &.{ "rev-parse", "--path-format=absolute", "--git-common-dir" });
+            defer gpa.free(common);
+            var hooks_dir = try Io.Dir.cwd().openDir(io, std.mem.trimEnd(u8, common, "\n"), .{});
+            defer hooks_dir.close(io);
+            try hooks_dir.createDirPath(io, "hooks");
+            for ([_][]const u8{ "hooks/post-checkout", "hooks/post-merge" }) |name| {
+                try hooks_dir.writeFile(io, .{ .sub_path = name, .data = script });
+                try hooks_dir.setFilePermissions(io, name, .fromMode(0o755), .{});
+            }
+            if (case.strategy == .merge) try lib.exec(io, &.{ "checkout", "-q", "-b", "work" });
+            try lib.exec(io, &.{ "fetch", "-q", "origin" });
+            try c.git.exec(io, &.{ "pull", "-q", "--no-rebase", "--no-recurse-submodules", "origin" });
+        }
+
+        twins[1].git.report_failures = false;
+        const by_git = twins[1].git.run(io, &.{ "submodule", "update", "-q", case.flag });
+        var repo = try twins[0].open(gpa, io);
+        defer repo.deinit(io);
+        var refusal: submodule.Refusal = .{};
+        var failure: hooks_mod.Failure = .{};
+        const updated = submodule.update(gpa, io, &repo, .{
+            .strategy = case.strategy,
+            .who = who,
+            .merge = .{ .who = who },
+            .programs = .{ .environ = &env },
+            .hooks = .{ .output = .ignore },
+            .hook_failure = &failure,
+            .refusal = &refusal,
+        });
+        if (case.status != 0) {
+            try testing.expectError(error.GitFailed, by_git);
+            try testing.expectError(error.HookRejected, updated);
+            try testing.expectEqualStrings("vendor/lib", refusal.path());
+            try testing.expectEqualStrings("post-checkout", failure.event());
+            try testing.expectEqual(@as(?u32, case.status), failure.status());
+        } else {
+            gpa.free(try by_git);
+            try testing.expectEqual(@as(u32, 1), (try updated).updated);
+        }
+        // The same hooks run with the same arguments, and the same state
+        // left behind.
+        var outs: [2][4][]u8 = undefined;
+        for (&twins, &outs) |*c, *out| {
+            var lib = c.git;
+            lib.dir = try c.git.dir.openDir(io, "vendor/lib", .{});
+            defer lib.dir.close(io);
+            lib.report_failures = false;
+            out[0] = try lib.run(io, &.{ "log", "--format=%H %P %s", "-3", "HEAD" });
+            out[1] = try lib.run(io, &.{ "status", "--porcelain=v2" });
+            out[2] = lib.dir.readFileAlloc(io, "post-checkout.log", gpa, .limited(1 << 10)) catch |err| switch (err) {
+                error.FileNotFound => try gpa.dupe(u8, "(none)"),
+                else => return err,
+            };
+            out[3] = lib.dir.readFileAlloc(io, "post-merge.log", gpa, .limited(1 << 10)) catch |err| switch (err) {
+                error.FileNotFound => try gpa.dupe(u8, "(none)"),
+                else => return err,
+            };
+        }
+        defer for (outs) |out| for (out) |o| gpa.free(o);
+        for (outs[0], outs[1]) |ours, theirs| try testing.expectEqualStrings(theirs, ours);
+        // Each case runs the hook it is about.
+        try testing.expect(!std.mem.eql(u8, outs[0][if (case.strategy == .merge) 3 else 2], "(none)"));
     }
 }
 

@@ -59,6 +59,7 @@ const three_way = @import("../merge/three_way.zig");
 const branch_mod = @import("../commit/branch.zig");
 const merging = @import("../commit/merging.zig");
 const rebase_mod = @import("../rebase/rebase.zig");
+const hooks_mod = @import("../hooks/hooks.zig");
 
 const Oid = hash.Oid;
 const Index = index_mod.Index;
@@ -154,7 +155,10 @@ pub const Error = error{
     NoSuperprojectBranch,
     /// `submodule.fetchJobs` is not a number, or is below zero.
     InvalidFetchJobs,
-} || branch_mod.Error || merging.Error || rebase_mod.Error || pathspec_mod.Error || repo_mod.Error || worktree.Error || gitmodules.ParseError || gitmodules.ResolveError ||
+    /// `UpdateOptions.hooks` without `UpdateOptions.programs`: a hook is
+    /// a program.
+    ProgramsNotGranted,
+} || hooks_mod.InitError || branch_mod.Error || merging.Error || rebase_mod.Error || pathspec_mod.Error || repo_mod.Error || worktree.Error || gitmodules.ParseError || gitmodules.ResolveError ||
     Repository.WriteConfigError || refs_mod.TransactionError || program.Error || gitlink.Error ||
     Io.Dir.RealPathError || Io.Dir.RenameError || Io.Dir.DeleteTreeError;
 
@@ -1732,6 +1736,20 @@ pub const UpdateOptions = struct {
     /// where it says `checkout: moving from <a> to <b>`, and a merge's or a
     /// rebase's lines begin with them.
     reflog_action: ?[]const u8 = null,
+    /// Each submodule's own hooks, run as a `hooks.Runner` made for its
+    /// repository with `programs` and these options runs them, as git's
+    /// `checkout`, `merge` and `rebase` run them inside the submodule: a
+    /// checkout update runs `post-checkout` with the `HEAD` before it, the
+    /// commit and `1`, and a merge or rebase update hands the runner to
+    /// the merge or the rebase as its `hooks`. A failed `post-checkout`
+    /// leaves the submodule checked out and is `error.HookRejected`, with
+    /// how it failed in `hook_failure`, as git's `checkout -q` fails the
+    /// update with the hook's status. The caller of an operation on a
+    /// repository hands it a `*hooks.Runner`; a submodule's repository is
+    /// opened here, so the update makes each one's. `null` runs none.
+    hooks: ?hooks_mod.Options = null,
+    /// Filled in when a hook fails the update: see `hooks`.
+    hook_failure: ?*hooks_mod.Failure = null,
     /// What each submodule's repository is opened with.
     open: Repository.OpenOptions = .{},
     refusal: ?*Refusal = null,
@@ -1842,6 +1860,14 @@ fn updateIn(
         var promised: ?Promised = if (options.transport) |t| .{ .gpa = gpa, .repo = &sub, .transport = t } else null;
         if (promised) |*p| try p.install(arena);
         defer if (promised) |*p| p.uninstall();
+        var runner: ?hooks_mod.Runner = if (options.hooks) |hook_options| try hooks_mod.Runner.init(gpa, io, .{
+            .config = sub.configuration(),
+            .git_dir = sub.gitDirectory(),
+            .common_dir = sub.commonDirectory(),
+            .work_dir = sub.workDirectory(),
+        }, options.programs orelse return error.ProgramsNotGranted, hook_options) else null;
+        defer if (runner) |*r| r.deinit();
+        const hooks: ?*hooks_mod.Runner = if (runner) |*r| r else null;
 
         var strategy: gitmodules.Update = options.strategy orelse item.configured orelse .checkout;
         if (item.just_cloned) switch (strategy) {
@@ -1857,9 +1883,9 @@ fn updateIn(
         if (current == null or !current.?.eql(target) or options.force) {
             try ensureCommit(arena, gpa, io, repo, &sub, item.module, target, display, options);
             switch (strategy) {
-                .checkout => try checkoutCommit(arena, gpa, io, &sub, target, current == null or options.force, display, options),
-                .merge => try mergeCommit(arena, gpa, io, &sub, target, display, options),
-                .rebase => try rebaseOnto(arena, gpa, io, &sub, target, display, options),
+                .checkout => try checkoutCommit(arena, gpa, io, &sub, target, current == null or options.force, display, hooks, options),
+                .merge => try mergeCommit(arena, gpa, io, &sub, target, display, hooks, options),
+                .rebase => try rebaseOnto(arena, gpa, io, &sub, target, display, hooks, options),
                 .command => |command| try runUpdateCommand(arena, gpa, io, &sub, command, target, display, item.update_key, options),
                 .none => {
                     outcome.skipped += 1;
@@ -2126,6 +2152,7 @@ fn checkoutCommit(
     commit: Oid,
     force: bool,
     display: []const u8,
+    hooks: ?*hooks_mod.Runner,
     options: UpdateOptions,
 ) Error!void {
     const work = (sub.workDirectory() orelse return error.BareRepository).get();
@@ -2171,9 +2198,10 @@ fn checkoutCommit(
 
     var hex: [hash.max_hex_len]u8 = undefined;
     var from_hex: [hash.max_hex_len]u8 = undefined;
+    const before = try headOf(gpa, io, sub);
     const from: []const u8 = if (try sub.refStore().currentBranch(arena, io)) |branch|
         branch
-    else if (try headOf(gpa, io, sub)) |old|
+    else if (before) |old|
         try arena.dupe(u8, old.hex(&from_hex))
     else
         "HEAD";
@@ -2188,13 +2216,21 @@ fn checkoutCommit(
         .policy = sub.reflogPolicy(),
     } else null;
     try tx.commit(io, log);
+
+    const runner = hooks orelse return;
+    const ran = try runner.postCheckout(io, before orelse Oid.zero(sub.objectFormat()), commit, .branch);
+    if (ran.failure) |failure| {
+        if (options.hook_failure) |out| out.* = failure;
+        return refuse(options.refusal, display, "post-checkout", error.HookRejected);
+    }
 }
 
 /// `git merge <commit>` inside the submodule, with `UpdateOptions.merge`:
 /// the commit named by its full name, as git names it.
-fn mergeCommit(arena: Allocator, gpa: Allocator, io: Io, sub: *Repository, commit: Oid, display: []const u8, options: UpdateOptions) Error!void {
+fn mergeCommit(arena: Allocator, gpa: Allocator, io: Io, sub: *Repository, commit: Oid, display: []const u8, hooks: ?*hooks_mod.Runner, options: UpdateOptions) Error!void {
     var given = options.merge orelse return refuse(options.refusal, display, "merge", error.UnsupportedUpdate);
     given.reflog_action = options.reflog_action orelse given.reflog_action;
+    given.hooks = hooks orelse given.hooks;
     var hex: [hash.max_hex_len]u8 = undefined;
     const name = try arena.dupe(u8, commit.hex(&hex));
     var outcome = try merging.start(gpa, io, sub, .{ .oid = commit, .name = name, .kind = .commit }, given);
@@ -2205,13 +2241,14 @@ fn mergeCommit(arena: Allocator, gpa: Allocator, io: Io, sub: *Repository, commi
 /// `git rebase <commit>` inside the submodule, with
 /// `UpdateOptions.rebasing`: its `HEAD`, on a branch or detached, onto the
 /// commit, which is its upstream too.
-fn rebaseOnto(arena: Allocator, gpa: Allocator, io: Io, sub: *Repository, commit: Oid, display: []const u8, options: UpdateOptions) Error!void {
+fn rebaseOnto(arena: Allocator, gpa: Allocator, io: Io, sub: *Repository, commit: Oid, display: []const u8, hooks: ?*hooks_mod.Runner, options: UpdateOptions) Error!void {
     var given = options.rebasing orelse return refuse(options.refusal, display, "rebase", error.UnsupportedUpdate);
     given.onto = null;
     given.onto_name = null;
     given.upstream_name = null;
     given.branch = null;
     given.reflog_action = options.reflog_action orelse given.reflog_action;
+    given.hooks = hooks orelse given.hooks;
     var outcome = try rebase_mod.start(gpa, io, sub, commit, given);
     defer outcome.deinit();
     var hex: [hash.max_hex_len]u8 = undefined;

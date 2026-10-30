@@ -66,6 +66,7 @@ const fetch_mod = @import("fetch.zig");
 const reference = @import("clone/reference.zig");
 const alternate_refs = @import("alternate_refs.zig");
 const submodule = @import("../submodule/submodule.zig");
+const hooks_mod = @import("../hooks/hooks.zig");
 const Apart = @import("apart.zig").Apart;
 const aegis = @import("aegis");
 
@@ -186,6 +187,21 @@ pub const Options = struct {
     /// repository's own do. A template git does not copy from
     /// (`Repository.templateUsable`) is not read.
     template: ?Io.Dir = null,
+    /// The new repository's hooks, run as a `hooks.Runner` made for it with
+    /// `programs` and these options runs them, the template's among them:
+    /// `post-checkout` after the checkout, with the null name, `HEAD` and
+    /// `1`, as git's clone runs it, and each submodule's own as
+    /// `submodule.UpdateOptions.hooks` runs them. A failed `post-checkout`
+    /// leaves the clone where it is, its submodules not updated, as git's
+    /// `err |= run_hooks(...)` skips them, and is `error.HookRejected`, with
+    /// how it failed in `hook_failure`. The caller of an operation on a
+    /// repository hands it a `*hooks.Runner`; a clone's repository does not
+    /// exist until the clone makes it, so the clone makes the runner, as
+    /// `receive_pack.Server` makes its own. Without `programs` it is
+    /// `error.ProgramsNotGranted`; `null` runs none.
+    hooks: ?hooks_mod.Options = null,
+    /// Filled in when a hook fails the clone: see `hooks`.
+    hook_failure: ?*hooks_mod.Failure = null,
     /// Check the branch out.
     checkout: bool = true,
     /// Clone into `dir` as the git directory of a working tree that is
@@ -354,6 +370,19 @@ fn updateSubmodules(gpa: Allocator, io: Io, repo: *Repository, settings: ?*const
         .remote = options.remote_submodules,
         .fetch = !options.remote_submodules,
         .jobs = options.submodule_jobs,
+        .hooks = options.hooks,
+        .hook_failure = options.hook_failure,
+        // Each submodule is read with the caller's levels too, as git's
+        // `submodule update` reads every level in it: its filters, its
+        // `core.hooksPath`.
+        .open = .{
+            .system_config = options.user_config.system,
+            .xdg_config = options.user_config.xdg,
+            .global_config = options.user_config.global,
+            .home = options.home,
+            .config_overrides = options.user_config.command,
+            .config_pairs = options.user_config.pairs,
+        },
     }) catch |err| switch (err) {
         error.TransportFailed => {
             var kept = t.take(io);
@@ -524,6 +553,7 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, asked: Option
 
     if (!options.bare and !options.separate_git_dir and options.checkout) if (head_commit) |commit| {
         try checkOutCloned(arena, gpa, io, &repo, &session, commit, send_filter != null, options);
+        if (options.hooks) |hook_options| try postCheckout(gpa, io, &repo, hook_options, options);
         if (options.recurse_submodules != null) try updateSubmodules(gpa, io, &repo, settings, .{ .filter = filter_spec, .single_branch = single_branch }, options);
     };
     return repo;
@@ -1050,6 +1080,25 @@ fn checkOutCloned(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, s
         lazy.prefetchTree(io, try repo.commitTree(io, repo.peel(io, commit) catch commit)) catch |err| return lazyFailed(err);
     }
     try checkOut(gpa, io, repo, commit, options);
+}
+
+/// git's `post-checkout <null> <HEAD> 1` after its checkout, in the
+/// repository the clone made.
+fn postCheckout(gpa: Allocator, io: Io, repo: *Repository, hook_options: hooks_mod.Options, options: Options) Error!void {
+    var runner = try hooks_mod.Runner.init(gpa, io, .{
+        .config = repo.configuration(),
+        .git_dir = repo.gitDirectory(),
+        .common_dir = repo.commonDirectory(),
+        .work_dir = repo.workDirectory(),
+    }, options.programs orelse return error.ProgramsNotGranted, hook_options);
+    defer runner.deinit();
+    const head = (try repo.head(io)) orelse return;
+    defer gpa.free(head.name);
+    const ran = try runner.postCheckout(io, Oid.zero(repo.objectFormat()), head.oid, .branch);
+    if (ran.failure) |failure| {
+        if (options.hook_failure) |out| out.* = failure;
+        return error.HookRejected;
+    }
 }
 
 /// Whether the repository at `path` is shallow, which git clones through
@@ -1881,6 +1930,97 @@ test "a clone copies its template and reads the template's configuration, as git
         const ours = try gitOrEmpty(gpa, io, &env, by_relic.dir.lend().get(), &settings);
         defer gpa.free(ours);
         try testing.expectEqualStrings(theirs, ours);
+    }
+}
+
+test "a clone runs post-checkout from its template after the checkout, as git clone does, and a failed one fails the clone and keeps it" {
+    // The hooks are shell scripts, run as files.
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var env = try testremote.environ(gpa);
+    defer env.deinit();
+    var source = try testremote.historyRepo(gpa, io, 3);
+    defer source.deinit();
+    const source_path = try testremote.absolutePath(gpa, io, source.dir);
+    defer gpa.free(source_path);
+    var root = testing.tmpDir(.{ .iterate = true });
+    defer root.cleanup();
+    const root_path = try testremote.absolutePath(gpa, io, root.dir);
+    defer gpa.free(root_path);
+
+    // A template whose post-checkout writes its arguments where it runs,
+    // and exits as the case says.
+    const Case = struct { status: u8 = 0, bare: bool = false, hooks: bool = true };
+    const cases = [_]Case{
+        .{},
+        .{ .status = 3 },
+        .{ .bare = true },
+        // Without `hooks`, nothing runs; git runs it all the same.
+        .{ .hooks = false },
+    };
+    for (cases, 0..) |case, n| {
+        const template_name = try gpa.print("t{d}", .{n});
+        defer gpa.free(template_name);
+        var template = try root.dir.createDirPathOpen(io, template_name, .{ .open_options = .{ .iterate = true } });
+        defer template.close(io);
+        try template.createDirPath(io, "hooks");
+        const script = try gpa.print("#!/bin/sh\necho \"$@\" > post-checkout.log\nexit {d}\n", .{case.status});
+        defer gpa.free(script);
+        try template.writeFile(io, .{ .sub_path = "hooks/post-checkout", .data = script });
+        try template.setFilePermissions(io, "hooks/post-checkout", .fromMode(0o755), .{});
+
+        var by_git = try Twin.init(gpa, io);
+        defer by_git.deinit(gpa, io);
+        var by_relic = try Twin.init(gpa, io);
+        defer by_relic.deinit(gpa, io);
+        const template_arg = try gpa.print("--template={s}/{s}", .{ root_path, template_name });
+        defer gpa.free(template_arg);
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(gpa);
+        try argv.appendSlice(gpa, &.{ "clone", "-q", template_arg });
+        if (case.bare) try argv.append(gpa, "--bare");
+        try argv.appendSlice(gpa, &.{ source_path, by_git.path });
+        const by_git_out = testremote.gitInputSettings(gpa, io, by_git.tmp.dir, &env, &testgit.settings_with_hooks, argv.items, "", false);
+
+        var failure: hooks_mod.Failure = .{};
+        const cloned = clone(gpa, io, source_path, by_relic.dir.lend().get(), .{
+            .who = test_who,
+            .bare = case.bare,
+            .template = template,
+            .programs = .{ .environ = &env },
+            .hooks = if (case.hooks) .{ .output = .ignore } else null,
+            .hook_failure = &failure,
+        });
+        if (case.status != 0) {
+            try testing.expectError(error.GitFailed, by_git_out);
+            try testing.expectError(error.HookRejected, cloned);
+            try testing.expectEqualStrings("post-checkout", failure.event());
+            try testing.expectEqual(@as(?u32, case.status), failure.status());
+        } else {
+            gpa.free(try by_git_out);
+            var repo = try cloned;
+            repo.deinit(io);
+        }
+        // The hook's arguments, the null name, `HEAD` and `1`; none from a
+        // bare clone, which checks nothing out, nor without `hooks`.
+        var said: [2][]u8 = undefined;
+        for ([_]Io.Dir{ by_git.dir.lend().get(), by_relic.dir.lend().get() }, &said) |dir, *out| {
+            out.* = dir.readFileAlloc(io, "post-checkout.log", gpa, .limited(1 << 10)) catch |err| switch (err) {
+                error.FileNotFound => try gpa.dupe(u8, "(none)"),
+                else => return err,
+            };
+        }
+        defer for (said) |o| gpa.free(o);
+        if (case.hooks) {
+            try testing.expectEqualStrings(said[0], said[1]);
+            try testing.expectEqual(case.bare, std.mem.eql(u8, said[1], "(none)"));
+            // The clone, kept whether the hook failed or not.
+            try expectSameClone(gpa, io, &env, by_git.dir.lend().get(), by_relic.dir.lend().get(), case.bare);
+        } else {
+            try testing.expect(!std.mem.eql(u8, said[0], "(none)"));
+            try testing.expectEqualStrings("(none)", said[1]);
+        }
     }
 }
 

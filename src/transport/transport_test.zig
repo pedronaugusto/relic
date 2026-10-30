@@ -20,6 +20,7 @@ const credential = @import("../wire.zig").credential;
 const repo_mod = @import("../repo/repo.zig");
 const fetch_mod = @import("fetch.zig");
 const clone_mod = @import("clone.zig");
+const hooks_mod = @import("../hooks/hooks.zig");
 const submodule = @import("../submodule/submodule.zig");
 const transport = @import("transport.zig");
 const uplink = @import("uplink");
@@ -2610,6 +2611,79 @@ test "a clone with --recurse-submodules is git's: the pathspecs active, shallow 
         var repo = try made;
         repo.deinit(io);
         try expectSameRecursiveClone(gpa, io, &world);
+    }
+}
+
+test "a clone with --recurse-submodules runs post-checkout in the superproject and in each submodule, as git's does, and a failed one in the superproject leaves the submodules be" {
+    // The hooks are shell scripts, run as files.
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var env = try testremote.environ(gpa);
+    defer env.deinit();
+    for ([_]u8{ 0, 3 }) |status| {
+        var world = try SubmoduleWorld.init(gpa, io);
+        defer world.deinit(gpa);
+        const super_url = try world.url(gpa, "super");
+        defer gpa.free(super_url);
+        // One hooks directory for every repository, by `core.hooksPath`
+        // from the command line, whose post-checkout writes its arguments
+        // where it runs.
+        try world.work.dir.createDirPath(io, "hooks");
+        const script = try gpa.print("#!/bin/sh\necho \"$@\" >> post-checkout.log\nexit {d}\n", .{status});
+        defer gpa.free(script);
+        try world.work.dir.writeFile(io, .{ .sub_path = "hooks/post-checkout", .data = script });
+        try world.work.dir.setFilePermissions(io, "hooks/post-checkout", .fromMode(0o755), .{});
+        const work_path = try testremote.absolutePath(gpa, io, world.work.dir);
+        defer gpa.free(work_path);
+        const hooks_path = try gpa.print("{s}/hooks", .{work_path});
+        defer gpa.free(hooks_path);
+        const setting = try gpa.print("core.hooksPath={s}", .{hooks_path});
+        defer gpa.free(setting);
+
+        var root = try world.work.dir.openDir(io, ".", .{});
+        defer root.close(io);
+        const by_git = testremote.gitInputEnv(gpa, io, root, &env, &.{ "-c", setting, "clone", "-q", "--recurse-submodules", super_url, "by-git" }, "", false);
+
+        try root.createDirPath(io, "by-relic");
+        var dir = try root.openDir(io, "by-relic", .{ .iterate = true });
+        defer dir.close(io);
+        var failure: hooks_mod.Failure = .{};
+        const made = clone_mod.clone(gpa, io, super_url, dir, .{
+            .who = test_who,
+            .recurse_submodules = &.{},
+            .programs = .{ .environ = &env },
+            .user_config = .{ .pairs = &.{.{ .name = "core.hookspath", .value = hooks_path }} },
+            .hooks = .{ .output = .ignore },
+            .hook_failure = &failure,
+        });
+        if (status != 0) {
+            try testing.expectError(error.GitFailed, by_git);
+            try testing.expectError(error.HookRejected, made);
+            try testing.expectEqual(@as(?u32, status), failure.status());
+        } else {
+            gpa.free(try by_git);
+            var repo = try made;
+            repo.deinit(io);
+        }
+        // What each repository's hook was given, or that none ran there.
+        for ([_][]const u8{ "", "lib/", "lib/inner/", "vendor/inner/" }) |at| {
+            var said: [2][]u8 = undefined;
+            for ([_][]const u8{ "by-git", "by-relic" }, &said) |name, *out| {
+                const path = try gpa.print("{s}/{s}post-checkout.log", .{ name, at });
+                defer gpa.free(path);
+                out.* = root.readFileAlloc(io, path, gpa, .limited(1 << 10)) catch |err| switch (err) {
+                    error.FileNotFound => try gpa.dupe(u8, "(none)"),
+                    else => return err,
+                };
+            }
+            defer for (said) |o| gpa.free(o);
+            testing.expectEqualStrings(said[0], said[1]) catch |err| {
+                std.debug.print("status {d}: {s}post-checkout.log\n", .{ status, at });
+                return err;
+            };
+            try testing.expectEqual(status != 0 and at.len != 0, std.mem.eql(u8, said[1], "(none)"));
+        }
     }
 }
 
