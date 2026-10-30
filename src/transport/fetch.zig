@@ -1908,6 +1908,9 @@ fn findNonLocalTags(
 
     for (remote_refs) |ref| {
         if (!std.mem.startsWith(u8, ref.name, "refs/tags/")) continue;
+        // A dumb server's peeled line names the tag before it, whose
+        // `peeled` it is.
+        if (std.mem.endsWith(u8, ref.name, "^{}")) continue;
         if (ref.unborn) continue;
         if (local.names.contains(ref.name)) continue;
         // After the pack, a tag already queued to be written is not taken

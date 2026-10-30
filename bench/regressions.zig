@@ -996,7 +996,15 @@ fn row9() !void {
         defer server.stop();
         var url_buf: [64]u8 = undefined;
         const url = try relic.transport.url.Url.parse(try std.mem.print(&url_buf, "http://127.0.0.1:{d}/repo.git", .{server.port}));
-        const conn = try relic.transport.smart_http.connect(gpa, io, url, .upload_pack, .{ .protocol_v2 = false });
+        var opened = try relic.transport.smart_http.connect(gpa, io, url, .upload_pack, .{ .protocol_v2 = false });
+        const conn = switch (opened) {
+            .smart => |c| c,
+            // The canned server answers as a smart one.
+            .dumb => |*files| {
+                files.deinit(io);
+                return error.UnexpectedDumbServer;
+            },
+        };
         defer conn.deinit(io);
         const Pass = struct {
             conn: *relic.transport.connection.Connection,

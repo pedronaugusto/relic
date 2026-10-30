@@ -4083,9 +4083,15 @@ pub const ObjectStream = struct {
     /// The file time the object is given, seconds past the epoch, or
     /// `null` for now, as `Odb.loosen` sets one.
     time: ?i64 = null,
+    /// The name the object must have, as a download is named before it
+    /// comes: another is `ObjectNameMismatch`, and nothing is written.
+    expected: ?Oid = null,
     finished: bool = false,
+    /// Why `writer` last failed: `error.CorruptLooseObject` for more
+    /// bytes than the stated size, else the write's own error.
+    failure: ?ErrorNamespace.Error = null,
 
-    /// Where the object's bytes go.
+    /// Where the object's bytes go; `failure` names a `WriteFailed`.
     pub fn writer(s: *ObjectStream) *Io.Writer {
         return &s.input_writer;
     }
@@ -4099,10 +4105,19 @@ pub const ObjectStream = struct {
         const pattern = data[data.len - 1];
         const repeated = std.math.mul(usize, pattern.len, splat) catch return error.WriteFailed;
         total = std.math.add(usize, total, repeated) catch return error.WriteFailed;
-        if (total > s.remaining) return error.WriteFailed;
+        if (total > s.remaining) {
+            s.failure = error.CorruptLooseObject;
+            return error.WriteFailed;
+        }
 
-        for (data[0 .. data.len - 1]) |slice| s.write(slice) catch return error.WriteFailed;
-        for (0..splat) |_| s.write(pattern) catch return error.WriteFailed;
+        for (data[0 .. data.len - 1]) |slice| s.write(slice) catch |err| {
+            s.failure = err;
+            return error.WriteFailed;
+        };
+        for (0..splat) |_| s.write(pattern) catch |err| {
+            s.failure = err;
+            return error.WriteFailed;
+        };
         return total;
     }
 
@@ -4127,6 +4142,10 @@ pub const ObjectStream = struct {
 
         const oid = s.hasher.final();
         if (s.hasher.collisionAttack()) return error.CollisionAttack;
+        if (s.expected) |want| if (!want.eql(oid)) {
+            fs.removeLeftover(io, s.dir.get(), s.temp[0..s.temp_len]);
+            return error.ObjectNameMismatch;
+        };
         var hex: [hash.max_hex_len]u8 = undefined;
         const text = oid.hex(&hex);
         var fan_out_made = false;
