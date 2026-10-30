@@ -121,8 +121,9 @@ pub const default_big_file_bytes: u64 = 512 << 20;
 /// when it is added, and through an archive unconverted.
 pub fn bigFileThreshold(config: *const config_mod.Config) config_mod.ValueError!u64 {
     const entry = config.find("core.bigfilethreshold") orelse return default_big_file_bytes;
-    // `git_config_ulong`.
-    return config_mod.parseInteger(c_ulong, entry.value orelse return error.NotAnInteger);
+    // `git_config_ulong`: an `unsigned long`, 32 bits on Windows as git's
+    // is there, widened once it is read.
+    return try config_mod.parseInteger(c_ulong, entry.value orelse return error.NotAnInteger);
 }
 
 /// `core.createObject`'s two ways.
