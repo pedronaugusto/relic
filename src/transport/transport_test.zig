@@ -2614,6 +2614,76 @@ test "a clone with --recurse-submodules is git's: the pathspecs active, shallow 
     }
 }
 
+test "a clone with --recurse-submodules makes each submodule from the default template, as git's submodule clones take init.templateDir, and runs the template's post-checkout in each" {
+    // The hooks are shell scripts, run as files.
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var env = try testremote.environ(gpa);
+    defer env.deinit();
+    for ([_][]const u8{ "1", "2" }) |jobs| {
+        var world = try SubmoduleWorld.init(gpa, io);
+        defer world.deinit(gpa);
+        const super_url = try world.url(gpa, "super");
+        defer gpa.free(super_url);
+        // The template: a description and a post-checkout that writes its
+        // arguments where it runs.
+        try world.work.dir.createDirPath(io, "template/hooks");
+        try world.work.dir.writeFile(io, .{ .sub_path = "template/description", .data = "from the template\n" });
+        try world.work.dir.writeFile(io, .{ .sub_path = "template/hooks/post-checkout", .data = "#!/bin/sh\necho \"$@\" >> post-checkout.log\n" });
+        try world.work.dir.setFilePermissions(io, "template/hooks/post-checkout", .fromMode(0o755), .{});
+        const work_path = try testremote.absolutePath(gpa, io, world.work.dir);
+        defer gpa.free(work_path);
+        const setting = try gpa.print("init.templateDir={s}/template", .{work_path});
+        defer gpa.free(setting);
+
+        var root = try world.work.dir.openDir(io, ".", .{});
+        defer root.close(io);
+        gpa.free(try testremote.gitInputSettings(gpa, io, root, &env, &testgit.settings_with_hooks, &.{ "-c", setting, "clone", "-q", "--recurse-submodules", "--jobs", jobs, super_url, "by-git" }, "", true));
+
+        try root.createDirPath(io, "by-relic");
+        var dir = try root.openDir(io, "by-relic", .{ .iterate = true });
+        defer dir.close(io);
+        var template = try root.openDir(io, "template", .{ .iterate = true });
+        defer template.close(io);
+        var repo = try clone_mod.clone(gpa, io, super_url, dir, .{
+            .who = test_who,
+            .recurse_submodules = &.{},
+            .submodule_jobs = try std.fmt.parseInt(u32, jobs, 10),
+            .programs = .{ .environ = &env },
+            .template = template,
+            .submodule_template = template,
+            .hooks = .{ .output = .ignore },
+        });
+        repo.deinit(io);
+        try expectSameRecursiveClone(gpa, io, &world);
+        // Each repository made from the template, and its hook run there.
+        const Place = struct { work: []const u8, git_dir: []const u8 };
+        for ([_]Place{
+            .{ .work = "", .git_dir = ".git/" },
+            .{ .work = "lib/", .git_dir = ".git/modules/lib/" },
+            .{ .work = "lib/inner/", .git_dir = ".git/modules/lib/modules/inner/" },
+            .{ .work = "vendor/inner/", .git_dir = ".git/modules/vendor/inner/" },
+        }) |place| for ([_][2][]const u8{ .{ place.work, "post-checkout.log" }, .{ place.git_dir, "description" } }) |file| {
+            var said: [2][]u8 = undefined;
+            for ([_][]const u8{ "by-git", "by-relic" }, &said) |name, *out| {
+                const path = try gpa.print("{s}/{s}{s}", .{ name, file[0], file[1] });
+                defer gpa.free(path);
+                out.* = root.readFileAlloc(io, path, gpa, .limited(1 << 10)) catch |err| switch (err) {
+                    error.FileNotFound => try gpa.dupe(u8, "(none)"),
+                    else => return err,
+                };
+            }
+            defer for (said) |o| gpa.free(o);
+            testing.expectEqualStrings(said[0], said[1]) catch |err| {
+                std.debug.print("--jobs {s}: {s}{s}\n", .{ jobs, file[0], file[1] });
+                return err;
+            };
+            try testing.expect(!std.mem.eql(u8, said[1], "(none)"));
+        };
+    }
+}
+
 test "a clone with --recurse-submodules runs post-checkout in the superproject and in each submodule, as git's does, and a failed one in the superproject leaves the submodules be" {
     // The hooks are shell scripts, run as files.
     if (builtin.target.os.tag == .windows) return error.SkipZigTest;

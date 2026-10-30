@@ -1355,7 +1355,14 @@ pub const Repository = struct {
         var shared: fs.Shared = options.shared orelse .umask;
         var logs_set = false;
         if (options.template) |template| {
-            if (try templateUsable(gpa, io, template)) try copyTemplate(gpa, io, template, git_dir, shared);
+            if (try templateUsable(gpa, io, template)) {
+                // Walked through a handle of its own: where a lent handle
+                // stands in its directory is the lender's, and clones
+                // beside each other copy the same template.
+                var from = try template.openDir(io, ".", .{ .iterate = true });
+                defer from.close(io);
+                try copyTemplate(gpa, io, from, git_dir, shared);
+            }
             if (try fs.readFileAlloc(gpa, io, git_dir, "config", 1 << 20)) |text| {
                 defer gpa.free(text);
                 var template_config = try config_mod.Config.parseText(gpa, text, .local);

@@ -187,6 +187,12 @@ pub const Options = struct {
     /// repository's own do. A template git does not copy from
     /// (`Repository.templateUsable`) is not read.
     template: ?Io.Dir = null,
+    /// The template each submodule's repository is made from, with
+    /// `recurse_submodules`: `SubmoduleTransport.Options.template`, the
+    /// default one git's submodule clones take, which the caller resolves.
+    /// Not `template`, which is `--template`'s and the superproject's alone:
+    /// git hands it to none of them.
+    submodule_template: ?Io.Dir = null,
     /// The new repository's hooks, run as a `hooks.Runner` made for it with
     /// `programs` and these options runs them, the template's among them:
     /// `post-checkout` after the checkout, with the null name, `HEAD` and
@@ -359,6 +365,7 @@ fn updateSubmodules(gpa: Allocator, io: Io, repo: *Repository, settings: ?*const
         .filter = if (options.filter_submodules.?) how.filter else null,
         .single_branch = how.single_branch,
         .ref_format = options.ref_format,
+        .template = options.submodule_template,
     });
     defer t.deinit();
     _ = submodule.update(gpa, io, repo, .{
@@ -1237,6 +1244,11 @@ pub const SubmoduleOptions = struct {
     single_branch: ?bool = null,
     /// `--ref-format`, as `Options.ref_format`.
     ref_format: ?refs_mod.Format = null,
+    /// The template each submodule's repository is made from, as
+    /// `Options.template`: the default one git's submodule clones take, from
+    /// `GIT_TEMPLATE_DIR`, `init.templateDir` (`repo.templateDir` reads it)
+    /// or git's installed one, which the caller resolves and opens.
+    template: ?Io.Dir = null,
 };
 
 /// Where a submodule's repository and its missing commits come from: relic's
@@ -1360,6 +1372,7 @@ pub const SubmoduleTransport = struct {
             .filter = o.filter,
             .single_branch = o.single_branch,
             .ref_format = o.ref_format,
+            .template = o.template,
             // A `.gitmodules` names this URL, not the person, as git's
             // `GIT_PROTOCOL_FROM_USER=0` says for a submodule.
             .from_user = false,
