@@ -113,6 +113,9 @@ pub const Warning = union(enum) {
     /// A submodule path whose recorded commits no remote of its own has,
     /// which stops a push.
     submodule_unpushed: []const u8,
+    /// A submodule whose clone failed, tried once more after the others,
+    /// as git's `update_clone` retries it: its path in the index.
+    submodule_clone_retried: []const u8,
     /// A submodule path whose push, made for the superproject's, failed.
     submodule_push_failed: []const u8,
     /// `push.recurseSubmodules=only` in a submodule pushed for its
@@ -178,6 +181,7 @@ pub const Warning = union(enum) {
             .submodule_not_accessible => |t| arena.print("Could not access submodule '{s}' at commit {s}", .{ t.path, t.commit }),
             .alternate_not_added => |t| arena.print("info: Could not add alternate for '{s}': {s}", .{ t.path, t.reason }),
             .submodule_alternate_not_added => |t| arena.print("submodule '{s}' cannot add alternate: {s}", .{ t.name, t.reason }),
+            .submodule_clone_retried => |t| arena.print("Failed to clone '{s}'. Retry scheduled", .{t}),
             .submodule_unpushed => |t| arena.print("submodule path '{s}' contains changes that can not be found on any remote", .{t}),
             .submodule_push_failed => |t| arena.print("Unable to push submodule '{s}'", .{t}),
             .push_recurse_only_on_demand => "recursing into submodule with push.recurseSubmodules=only; using on-demand instead",
@@ -246,6 +250,7 @@ pub const Warnings = struct {
             .submodule_not_accessible => |t| .{ .submodule_not_accessible = .{ .path = try a.dupe(u8, t.path), .commit = try a.dupe(u8, t.commit) } },
             .alternate_not_added => |t| .{ .alternate_not_added = .{ .path = try a.dupe(u8, t.path), .reason = try a.dupe(u8, t.reason) } },
             .submodule_alternate_not_added => |t| .{ .submodule_alternate_not_added = .{ .name = try a.dupe(u8, t.name), .reason = try a.dupe(u8, t.reason) } },
+            .submodule_clone_retried => |t| .{ .submodule_clone_retried = try a.dupe(u8, t) },
             .submodule_unpushed => |t| .{ .submodule_unpushed = try a.dupe(u8, t) },
             .submodule_push_failed => |t| .{ .submodule_push_failed = try a.dupe(u8, t) },
             .push_recurse_only_on_demand => .push_recurse_only_on_demand,

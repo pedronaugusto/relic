@@ -60,6 +60,7 @@ const branch_mod = @import("../commit/branch.zig");
 const merging = @import("../commit/merging.zig");
 const rebase_mod = @import("../rebase/rebase.zig");
 const hooks_mod = @import("../hooks/hooks.zig");
+const warning = @import("../report.zig").warning;
 
 const Oid = hash.Oid;
 const Index = index_mod.Index;
@@ -1715,7 +1716,11 @@ pub const UpdateOptions = struct {
     fetch: bool = true,
     /// `--jobs`: how many submodules are cloned at once, each on its own
     /// handle on the superproject, when the `Io` runs tasks beside each
-    /// other; the checkouts follow one at a time, as git's do. `null`
+    /// other; the checkouts follow one at a time, as git's do. A clone
+    /// that fails is tried once more after the others, with a
+    /// `submodule_clone_retried` warning, and one that fails again is the
+    /// update's error, nothing checked out, as git's `update_clone` does.
+    /// `null`
     /// takes `submodule.fetchJobs`, else one; 0 is one per processor (git
     /// stops on a `--jobs=0` it was handed as a bug).
     jobs: ?u32 = null,
@@ -1750,6 +1755,9 @@ pub const UpdateOptions = struct {
     hooks: ?hooks_mod.Options = null,
     /// Filled in when a hook fails the update: see `hooks`.
     hook_failure: ?*hooks_mod.Failure = null,
+    /// Where what git would print as a warning goes, as values: a
+    /// submodule whose clone is tried again.
+    warnings: ?*warning.Warnings = null,
     /// What each submodule's repository is opened with.
     open: Repository.OpenOptions = .{},
     refusal: ?*Refusal = null,
@@ -1933,14 +1941,46 @@ const Populated = enum { reconnected, cloned };
 /// tasks beside each other, each on its own handle on the superproject.
 /// The first failure in the order listed is the one returned.
 fn populateAll(gpa: Allocator, io: Io, repo: *Repository, pending: []Pending, count: u32, options: UpdateOptions, outcome: *UpdateOutcome) Error!void {
-    var cloning: usize = 0;
-    for (pending) |item| cloning += @intFromBool(item.just_cloned);
-    if (count > 1 and cloning > 1) {
+    var cloning: std.ArrayList(*Pending) = .empty;
+    defer cloning.deinit(gpa);
+    for (pending) |*item| if (item.just_cloned) try cloning.append(gpa, item);
+    // git's `update_clone`: every submodule is cloned once, one whose clone
+    // failed is tried once more after the others, and when one fails a
+    // second time nothing is checked out.
+    try populateRound(gpa, io, repo, cloning.items, count, options);
+    var again: std.ArrayList(*Pending) = .empty;
+    defer again.deinit(gpa);
+    for (cloning.items) |item| {
+        const err = item.beside.failed orelse {
+            tally(outcome, item.beside.populated);
+            continue;
+        };
+        switch (err) {
+            // Not the clone failing: the update was stopped.
+            error.Canceled, error.OutOfMemory => return err,
+            else => {},
+        }
+        try warning.note(options.warnings, .{ .submodule_clone_retried = item.path });
+        item.beside = .{};
+        try again.append(gpa, item);
+    }
+    try populateRound(gpa, io, repo, again.items, count, options);
+    for (again.items) |item| if (item.beside.failed) |err| {
+        if (options.refusal) |r| r.* = item.beside.refusal;
+        return err;
+    };
+    for (again.items) |item| tally(outcome, item.beside.populated);
+}
+
+/// `populate` for each of `items`, `count` at a time on tasks of their
+/// own when there are several, with what each did or why it failed kept
+/// in it.
+fn populateRound(gpa: Allocator, io: Io, repo: *Repository, items: []const *Pending, count: u32, options: UpdateOptions) Io.Cancelable!void {
+    if (count > 1 and items.len > 1) {
         var group: Io.Group = .init;
         defer group.cancel(io);
         var started: usize = 0;
-        for (pending) |*item| {
-            if (!item.just_cloned) continue;
+        for (items) |item| {
             group.concurrent(io, populateBeside, .{ gpa, io, repo, item, options }) catch populateBeside(gpa, io, repo, item, options);
             started += 1;
             if (started == count) {
@@ -1949,18 +1989,9 @@ fn populateAll(gpa: Allocator, io: Io, repo: *Repository, pending: []Pending, co
             }
         }
         try group.await(io);
-        for (pending) |*item| if (item.just_cloned) {
-            if (item.beside.failed) |err| {
-                if (options.refusal) |r| r.* = item.beside.refusal;
-                return err;
-            }
-            tally(outcome, item.beside.populated);
-        };
         return;
     }
-    var arena_instance: std.heap.ArenaAllocator = .init(gpa);
-    defer arena_instance.deinit();
-    for (pending) |*item| if (item.just_cloned) tally(outcome, try populate(arena_instance.allocator(), gpa, io, repo, item, options, false));
+    for (items) |item| populateKept(gpa, io, repo, item, options, false);
 }
 
 fn tally(outcome: *UpdateOutcome, populated: Populated) void {
@@ -1971,18 +2002,24 @@ fn tally(outcome: *UpdateOutcome, populated: Populated) void {
 }
 
 /// `populate` on a task of its own, on a handle of its own on the
-/// superproject, with what it did or why it failed kept in `item`.
+/// superproject.
 fn populateBeside(gpa: Allocator, io: Io, repo: *Repository, item: *Pending, options: UpdateOptions) void {
-    var arena_instance: std.heap.ArenaAllocator = .init(gpa);
-    defer arena_instance.deinit();
     var again = repo.openAgain(io) catch |err| {
         item.beside.failed = err;
         return;
     };
     defer again.deinit(io);
+    populateKept(gpa, io, &again, item, options, true);
+}
+
+/// `populate`, with what it did or why it failed, and its refusal, kept
+/// in `item`.
+fn populateKept(gpa: Allocator, io: Io, repo: *Repository, item: *Pending, options: UpdateOptions, beside: bool) void {
+    var arena_instance: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_instance.deinit();
     var own = options;
     own.refusal = &item.beside.refusal;
-    item.beside.populated = populate(arena_instance.allocator(), gpa, io, &again, item, own, true) catch |err| {
+    item.beside.populated = populate(arena_instance.allocator(), gpa, io, repo, item, own, beside) catch |err| {
         item.beside.failed = err;
         return;
     };

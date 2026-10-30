@@ -224,6 +224,7 @@ pub fn pull(gpa: Allocator, io: Io, repo: *Repository, remote: ?[]const u8, opti
         .programs = options.fetch.programs,
         .rebasing = options.rebasing,
         .reflog_action = plan.reflog_action,
+        .warnings = options.fetch.warnings,
     });
     return outcome;
 }

@@ -189,6 +189,9 @@ pub const HttpServer = struct {
     connections: u32 = 0,
     /// How many 429s were sent.
     rate_limited: u32 = 0,
+    /// The repository whose next `times` requests for `info/refs` are
+    /// answered 500, as a server that fails a clone; `failFirst` sets it.
+    failing: struct { repository: []const u8 = "", times: u32 = 0 } = .{},
     /// One line per request that carried a `Cookie`: its value.
     cookies: std.ArrayList(u8) = .empty,
 
@@ -388,15 +391,40 @@ pub const HttpServer = struct {
         try s.cookies.print(s.gpa, "{s}\n", .{value});
     }
 
-    /// Log a request; whether it is to be answered 429.
-    fn logRequest(s: *HttpServer, method: std.http.Method, target: []const u8, auth: bool, gzip: bool) !bool {
+    /// Answer the next `times` requests for `/<repository>/info/refs` with
+    /// 500, whoever makes them.
+    pub fn failFirst(s: *HttpServer, repository: []const u8, times: u32) void {
+        s.log_mutex.lockUncancelable(s.io);
+        defer s.log_mutex.unlock(s.io);
+        s.failing = .{ .repository = repository, .times = times };
+    }
+
+    /// How a request is answered before anything looks at it.
+    const Refused = enum { no, rate_limited, failed };
+
+    /// Log a request, and say whether it is answered 429 or 500.
+    fn logRequest(s: *HttpServer, method: std.http.Method, target: []const u8, auth: bool, gzip: bool) !Refused {
         s.log_mutex.lockUncancelable(s.io);
         defer s.log_mutex.unlock(s.io);
         try s.log.print(s.gpa, "{s} {s} {s}{s}\n", .{ @tagName(method), target, if (auth) "auth" else "-", if (gzip) " gzip" else "" });
-        const limit = s.options.rate_limit orelse return false;
-        if (s.rate_limited >= limit.times or !std.mem.endsWith(u8, target[0 .. std.mem.findScalar(u8, target, '?') orelse target.len], "/info/refs")) return false;
+        const path = target[0 .. std.mem.findScalar(u8, target, '?') orelse target.len];
+        if (!std.mem.endsWith(u8, path, "/info/refs")) return .no;
+        const repository = path[1 .. path.len - "/info/refs".len];
+        if (s.failing.times != 0 and std.mem.eql(u8, repository, s.failing.repository)) {
+            s.failing.times -= 1;
+            return .failed;
+        }
+        const limit = s.options.rate_limit orelse return .no;
+        if (s.rate_limited >= limit.times) return .no;
         s.rate_limited += 1;
-        return true;
+        return .rate_limited;
+    }
+
+    /// A 429, with the `Retry-After` the options give, or a 500.
+    fn respondRefused(s: *HttpServer, request: *std.http.Server.Request, refused: Refused) !void {
+        if (refused == .failed) return request.respond("", .{ .status = .internal_server_error, .keep_alive = s.options.keep_alive });
+        const after: []const std.http.Header = if (s.options.rate_limit.?.retry_after) |v| &.{.{ .name = "Retry-After", .value = v }} else &.{};
+        return request.respond("", .{ .status = .too_many_requests, .keep_alive = s.options.keep_alive, .extra_headers = after });
     }
 
     fn answer(s: *HttpServer, request: *std.http.Server.Request) !void {
@@ -419,10 +447,8 @@ pub const HttpServer = struct {
             if (std.ascii.eqlIgnoreCase(header.name, "content-encoding")) content_encoding = try arena.dupe(u8, header.value);
             if (std.ascii.eqlIgnoreCase(header.name, "cookie")) try s.logCookie(header.value);
         }
-        if (try s.logRequest(method, target, authorization != null, content_encoding != null)) {
-            const after: []const std.http.Header = if (s.options.rate_limit.?.retry_after) |v| &.{.{ .name = "Retry-After", .value = v }} else &.{};
-            return request.respond("", .{ .status = .too_many_requests, .keep_alive = s.options.keep_alive, .extra_headers = after });
-        }
+        const refused = try s.logRequest(method, target, authorization != null, content_encoding != null);
+        if (refused != .no) return s.respondRefused(request, refused);
 
         const question = std.mem.findScalar(u8, target, '?');
         const path = target[0 .. question orelse target.len];

@@ -2779,7 +2779,7 @@ test "submodule update --remote is git's: each submodule fetched and checked out
     }
 }
 
-test "submodules cloned several at once: one that fails is named and nothing is checked out after it, as git's update_submodules stops; a negative submodule.fetchJobs is refused" {
+test "submodules cloned several at once: one whose clone fails twice is named and nothing is checked out, as git's update_clone stops; a negative submodule.fetchJobs is refused" {
     const gpa = testing.allocator;
     const io = testing.io;
     var env = try testremote.environ(gpa);
@@ -2830,6 +2830,65 @@ test "submodules cloned several at once: one that fails is named and nothing is 
         try testing.expectError(error.FileNotFound, d.access(io, "vendor/inner/.git", .{}));
         try testing.expectError(error.FileNotFound, d.access(io, ".git/modules/vendor/inner/HEAD", .{}));
     }
+}
+
+test "a submodule whose clone fails is cloned again after the others, as git's update_clone retries it once, and one that fails again stops the update with nothing checked out" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var env = try testremote.environ(gpa);
+    defer env.deinit();
+    for ([_]u32{ 1, 2 }) |jobs| for ([_]u32{ 1, 2 }) |failures| {
+        var world = try SubmoduleWorld.init(gpa, io);
+        defer world.deinit(gpa);
+        const super_url = try world.url(gpa, "super");
+        defer gpa.free(super_url);
+        try world.git(gpa, io, ".", &.{ "clone", "-q", super_url, "by-git" });
+        try world.git(gpa, io, "by-git", &.{ "submodule", "init" });
+        try world.copy(gpa, io, "by-git", "by-relic");
+        var by_git_dir = try world.work.dir.openDir(io, "by-git", .{});
+        defer by_git_dir.close(io);
+        var dir = try world.work.dir.openDir(io, "by-relic", .{});
+        defer dir.close(io);
+
+        // The server fails `lib`'s first clone, or its first two, for
+        // each in turn.
+        var jobs_buf: [4]u8 = undefined;
+        const jobs_text = try std.mem.print(&jobs_buf, "{d}", .{jobs});
+        world.server.failFirst("lib.git", failures);
+        const by_git = testremote.gitInputEnv(gpa, io, by_git_dir, &env, &.{ "submodule", "update", "-q", "--recursive", "--jobs", jobs_text }, "", false);
+        world.server.failFirst("lib.git", failures);
+        var repo = try repo_mod.Repository.open(gpa, io, dir, .{});
+        defer repo.deinit(io);
+        var t: clone_mod.SubmoduleTransport = .init(.{ .who = test_who, .programs = .{ .environ = &env } });
+        defer t.deinit();
+        var warnings: warning.Warnings = .init(gpa);
+        defer warnings.deinit();
+        var refusal: submodule.Refusal = .{};
+        const updated = submodule.update(gpa, io, &repo, .{ .recursive = true, .jobs = jobs, .who = test_who, .transport = t.transport(), .warnings = &warnings, .refusal = &refusal });
+        {
+            var kept = t.take(io);
+            kept.auth_failure.deinit();
+        }
+        // git's "Failed to clone 'lib'. Retry scheduled", either way.
+        try testing.expectEqual(@as(usize, 1), warnings.items.items.len);
+        try testing.expectEqualStrings("lib", warnings.items.items[0].submodule_clone_retried);
+        if (failures == 2) {
+            try testing.expectError(error.GitFailed, by_git);
+            try testing.expectError(error.TransportFailed, updated);
+            try testing.expectEqualStrings("lib", refusal.path());
+            // `vendor/inner` cloned, and nothing checked out by either.
+            for ([_]Io.Dir{ by_git_dir, dir }) |d| {
+                try d.access(io, "vendor/inner/.git", .{});
+                try testing.expectError(error.FileNotFound, d.access(io, "vendor/inner/README", .{}));
+                try testing.expectError(error.FileNotFound, d.access(io, "lib/README", .{}));
+            }
+            continue;
+        }
+        gpa.free(try by_git);
+        const outcome = try updated;
+        try testing.expectEqual(@as(u32, 2), outcome.cloned);
+        try expectSameRecursiveClone(gpa, io, &world);
+    };
 }
 
 test "a pull updates the submodules as git's does: checked out after a merge, rebased after a rebase, by --recurse-submodules or submodule.recurse, and a rebase of commits that record one refused" {

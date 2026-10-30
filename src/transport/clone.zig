@@ -372,6 +372,7 @@ fn updateSubmodules(gpa: Allocator, io: Io, repo: *Repository, settings: ?*const
         .jobs = options.submodule_jobs,
         .hooks = options.hooks,
         .hook_failure = options.hook_failure,
+        .warnings = options.warnings,
         // Each submodule is read with the caller's levels too, as git's
         // `submodule update` reads every level in it: its filters, its
         // `core.hooksPath`.
