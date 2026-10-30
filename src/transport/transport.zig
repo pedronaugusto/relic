@@ -35,7 +35,7 @@ const send_pack = @import("../wire.zig").send_pack;
 const local = @import("local.zig");
 const ssh = @import("../wire.zig").ssh;
 const smart_http = @import("../wire.zig").smart_http;
-const dumb_http = @import("../wire/dumb_http.zig");
+const dumb_http = @import("../wire.zig").dumb_http;
 
 const credential = @import("../wire.zig").credential;
 const auth = @import("../wire.zig").auth;
