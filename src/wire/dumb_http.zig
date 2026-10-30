@@ -44,6 +44,8 @@ const Own = error{
     InvalidInfoRefs,
     /// A fetch asked for a depth, a date or an exclusion over dumb HTTP:
     /// git's "dumb http transport does not support shallow capabilities".
+    /// git refuses the first two and fetches everything for an exclusion
+    /// (remote-curl.c:1175); relic refuses all three.
     DumbHttpShallow,
     /// An object the walk needs is under no URL the server names, loose or
     /// packed, at the repository or an alternate: git's "Unable to find

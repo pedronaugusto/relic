@@ -852,9 +852,12 @@ pub const Session = struct {
             },
             .dumb => |remote| {
                 // git's `fetch_dumb`: no depth and no date, and a filter
-                // is never read, so everything comes. A pack is indexed as
-                // git's `index-pack --stdin` indexes it, kept by nothing.
-                if (request.deepen) |d| if (d.depth != null or d.since != null) return error.DumbHttpShallow;
+                // is never read, so everything comes. An exclusion git
+                // drops without a word (remote-curl.c:1175), and a caller
+                // who asked for a shallow clone is told, not handed a
+                // whole one. A pack is indexed as git's `index-pack
+                // --stdin` indexes it, kept by nothing.
+                if (request.deepen) |d| if (d.depth != null or d.since != null or d.not.len != 0) return error.DumbHttpShallow;
                 var receive = options.receive;
                 receive.keep = false;
                 const got = try remote.fetch(io, db, request.wants, request.tips, receive);

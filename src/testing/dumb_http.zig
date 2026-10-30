@@ -352,7 +352,7 @@ fn expectBothRefuse(s: *Served, io: Io, remote: []const u8, tag: []const u8, git
     try testing.expectError(expected, clone_mod.clone(s.gpa, io, remote, dir, opts));
 }
 
-test "dumb HTTP: a corrupt or missing object, a depth or a date, a push and a redirect after the first request are refused as git refuses them; an exclusion and a filter fetch everything, as git's" {
+test "dumb HTTP: a corrupt or missing object, a depth or a date, a push and a redirect after the first request are refused as git refuses them, and an exclusion besides; a filter fetches everything, as git's" {
     const gpa = testing.allocator;
     const io = testing.io;
     const s = try Served.init(gpa, io, .{ .files = true, .redirect_objects = true });
@@ -400,11 +400,17 @@ test "dumb HTTP: a corrupt or missing object, a depth or a date, a push and a re
     try expectBothRefuse(s, io, try s.url("whole.git"), "depth", &(git_follow ++ [_][]const u8{ "--depth", "1" }), .{ .who = who, .config = &follow, .depth = 1 }, error.DumbHttpShallow);
     try expectBothRefuse(s, io, try s.url("whole.git"), "since", &(git_follow ++ [_][]const u8{"--shallow-since=2000-01-01"}), .{ .who = who, .config = &follow, .shallow_since = .fromNanoseconds(946_684_800 * std.time.ns_per_s) }, error.DumbHttpShallow);
 
-    // An exclusion git's `fetch_dumb` does not read: everything comes.
+    // An exclusion, which git's `fetch_dumb` drops without a word
+    // (remote-curl.c:1175), handing back a whole clone: relic refuses it,
+    // a deliberate difference.
     {
-        const made = try cloneBoth(s, io, "whole.git", "exclude", &(git_follow ++ [_][]const u8{"--shallow-exclude=side"}), .{ .who = who, .config = &follow, .shallow_exclude = &.{"side"} });
-        try expectSameClone(s, io, made.theirs, made.ours, false);
-        try testing.expectEqualStrings("false\n", try s.git(io, &.{ "-C", made.ours, "rev-parse", "--is-shallow-repository" }));
+        const theirs = try std.Io.Dir.path.join(s.arena(), &.{ s.out_path, "git-exclude" });
+        _ = try s.git(io, &(git_follow ++ [_][]const u8{ "clone", "-q", "--shallow-exclude=side", try s.url("whole.git"), theirs }));
+        try testing.expectEqualStrings("false\n", try s.git(io, &.{ "-C", theirs, "rev-parse", "--is-shallow-repository" }));
+        const made = try s.target(io, "relic-exclude");
+        var dir = made.dir;
+        defer dir.close(io);
+        try testing.expectError(error.DumbHttpShallow, clone_mod.clone(gpa, io, try s.url("whole.git"), dir, .{ .who = who, .config = &follow, .shallow_exclude = &.{"side"}, .programs = .{ .environ = &s.env } }));
     }
 
     // A filter is never read: everything comes, and what each records of
