@@ -372,7 +372,7 @@ fn decodeQ(a: Allocator, out: *std.ArrayList(u8), in_raw: []const u8, rfc2047: b
             if (i + 1 < in.len) {
                 if (hexVal(in[i])) |hi| {
                     if (hexVal(in[i + 1])) |lo| {
-                        try out.append(a, hi << 4 | lo);
+                        try out.append(a, (hi << 4) | lo);
                         i += 2;
                         continue;
                     }

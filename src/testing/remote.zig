@@ -538,7 +538,7 @@ pub const HttpServer = struct {
         }
 
         if (s.options.upload_pack) |program_path| {
-            if (std.mem.endsWith(u8, path, "/info/refs") and std.mem.eql(u8, query, "service=git-upload-pack") or
+            if ((std.mem.endsWith(u8, path, "/info/refs") and std.mem.eql(u8, query, "service=git-upload-pack")) or
                 std.mem.endsWith(u8, path, "/git-upload-pack"))
             {
                 return s.serveUploadPack(arena, request, program_path, path, body, git_protocol, content_encoding);

@@ -309,7 +309,7 @@ pub fn normalize(a: Allocator, path: []const u8) Error![]u8 {
         try out.append(a, '/');
     }
     // the slash after the last component stays only if the path had one
-    const had_slash = path.len > 0 and path[path.len - 1] == '/' or
+    const had_slash = (path.len > 0 and path[path.len - 1] == '/') or
         std.mem.endsWith(u8, path, "/.") or std.mem.endsWith(u8, path, "/..");
     if (out.items.len > 0 and !had_slash) out.shrinkRetainingCapacity(out.items.len - 1);
     return out.toOwnedSlice(a);

@@ -37,10 +37,10 @@ pub const Error = Allocator.Error || aegis.own.ReadFileError;
 /// there is no such file or it is not a `.git` file. One larger than
 /// `max_bytes` is not one either, as git refuses it.
 pub fn read(gpa: Allocator, io: Io, dir: Io.Dir, sub_path: []const u8) ErrorNamespace.Error!?[]u8 {
-    const text = fs.readFileAlloc(gpa, io, dir, sub_path, max_bytes) catch |err| switch (err) {
+    const text = (fs.readFileAlloc(gpa, io, dir, sub_path, max_bytes) catch |err| switch (err) {
         error.StreamTooLong => return null,
         else => |e| return e,
-    } orelse return null;
+    }) orelse return null;
     defer gpa.free(text);
     const path = target(text) orelse return null;
     return try gpa.dupe(u8, path);

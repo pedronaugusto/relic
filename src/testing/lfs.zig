@@ -533,7 +533,7 @@ pub const Server = struct {
             const spec = if (std.mem.startsWith(u8, r, "bytes=")) r["bytes=".len..] else "";
             const dash = std.mem.findScalar(u8, spec, '-') orelse spec.len;
             const first = std.fmt.parseInt(usize, spec[0..dash], 10) catch bytes.len;
-            const last = if (dash + 1 < spec.len) std.fmt.parseInt(usize, spec[dash + 1 ..], 10) catch bytes.len - 1 else bytes.len - 1;
+            const last = if (dash + 1 < spec.len) std.fmt.parseInt(usize, spec[dash + 1 ..], 10) catch (bytes.len - 1) else bytes.len - 1;
             if (first >= bytes.len or last < first) return request.respond("", .{ .status = .range_not_satisfiable, .keep_alive = false });
             const end = @min(last + 1, bytes.len);
             std.debug.assert(first < end);
