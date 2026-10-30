@@ -502,7 +502,8 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, asked: Option
 
     var remote_refs = try session.listRefs(gpa, io, &.{ "HEAD", "refs/heads/", "refs/tags/" });
     defer remote_refs.deinit();
-    const head = try chooseHead(arena, &remote_refs, options.branch);
+    const default_name = options.default_branch orelse try settingString(settings, "init.defaultbranch") orelse "master";
+    const head = try chooseHead(arena, &remote_refs, options.branch, default_name);
     const initial = if (head.branch) |b|
         (if (std.mem.startsWith(u8, b, "refs/heads/")) b["refs/heads/".len..] else options.default_branch)
     else
@@ -546,6 +547,7 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, asked: Option
         .remote_refs = &remote_refs,
         .chosen = &chosen,
         .head = head,
+        .default_ref = try arena.print("refs/heads/{s}", .{default_name}),
         .detached = received.detached,
         .single_branch = single_branch,
         .recorded = target.recorded,
@@ -572,6 +574,9 @@ const Recording = struct {
     remote_refs: *const protocol.RefList,
     chosen: *const Chosen,
     head: Head,
+    /// `refs/heads/<init.defaultBranch>`, which a remote `HEAD` that names
+    /// no branch is first taken to be.
+    default_ref: []const u8,
     detached: ?Oid,
     single_branch: bool,
     recorded: []const u8,
@@ -588,7 +593,7 @@ fn recordRefs(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, sessi
     const log: refs_mod.LogMessage = .{ .who = options.who, .message = message, .policy = repo.reflogPolicy() };
     const head_commit = try pointHead(arena, io, repo, session, r.remote_refs, r.head.branch, r.detached, log, options);
     if (!options.bare) if (r.remote_refs.find("HEAD")) |remote_head| {
-        try followRemoteHead(arena, io, repo, r.remote_refs, remote_head, r.head.branch, r.single_branch, log, options.origin.?);
+        try followRemoteHead(arena, io, repo, r.remote_refs, remote_head, .{ .head_branch = r.head.branch, .default_ref = r.default_ref }, r.single_branch, log, options.origin.?);
     };
     return head_commit;
 }
@@ -830,7 +835,7 @@ fn takeBundles(
 const Head = struct { branch: ?[]const u8 = null, detached: ?Oid = null };
 
 /// The branch or tag `branch` names, else what the remote's `HEAD` is.
-fn chooseHead(arena: Allocator, remote_refs: *const protocol.RefList, branch: ?[]const u8) Error!Head {
+fn chooseHead(arena: Allocator, remote_refs: *const protocol.RefList, branch: ?[]const u8, default_name: []const u8) Error!Head {
     if (branch) |name| {
         const branch_ref = try arena.print("refs/heads/{s}", .{name});
         const tag_ref = try arena.print("refs/tags/{s}", .{name});
@@ -840,8 +845,23 @@ fn chooseHead(arena: Allocator, remote_refs: *const protocol.RefList, branch: ?[
     }
     const head = remote_refs.find("HEAD") orelse return .{};
     if (head.symref_target) |target| return .{ .branch = try arena.dupe(u8, target) };
-    if (!head.unborn) return .{ .detached = head.oid };
-    return .{};
+    if (head.unborn) return .{};
+    const default_ref = try arena.print("refs/heads/{s}", .{default_name});
+    if (guessedBranch(remote_refs, head, default_ref)) |name| return .{ .branch = try arena.dupe(u8, name) };
+    return .{ .detached = head.oid };
+}
+
+/// git's `guess_remote_head` for a `HEAD` that names no ref, as a dumb
+/// server's does: the branch at its commit, `default_ref` first, then
+/// `master`, then the first listed there.
+fn guessedBranch(remote_refs: *const protocol.RefList, head: protocol.RemoteRef, default_ref: []const u8) ?[]const u8 {
+    for ([_][]const u8{ default_ref, "refs/heads/master" }) |name| {
+        if (remote_refs.find(name)) |ref| if (ref.oid.eql(head.oid)) return ref.name;
+    }
+    for (remote_refs.refs) |ref| {
+        if (std.mem.startsWith(u8, ref.name, "refs/heads/") and ref.oid.eql(head.oid)) return ref.name;
+    }
+    return null;
 }
 
 /// The remote, in the new configuration: its URL, its tags, the refspec
@@ -1044,12 +1064,13 @@ fn followRemoteHead(
     repo: *Repository,
     remote_refs: *const protocol.RefList,
     remote_head: protocol.RemoteRef,
-    head_branch: ?[]const u8,
+    branches: struct { head_branch: ?[]const u8, default_ref: []const u8 },
     single_branch: bool,
     log: refs_mod.LogMessage,
     origin: []const u8,
 ) Error!void {
-    const target = remote_head.symref_target orelse return;
+    const head_branch = branches.head_branch;
+    const target = remote_head.symref_target orelse guessedBranch(remote_refs, remote_head, branches.default_ref) orelse return;
     const fetched_target = !single_branch or (head_branch != null and std.mem.eql(u8, target, head_branch.?));
     if (!std.mem.startsWith(u8, target, "refs/heads/") or remote_refs.find(target) == null or !fetched_target) return;
     var tx = repo.beginRefs();
