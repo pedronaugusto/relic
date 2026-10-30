@@ -34,6 +34,7 @@ const index_pack = @import("../odb/index_pack.zig");
 const send_pack = @import("../wire.zig").send_pack;
 const local = @import("local.zig");
 const ssh = @import("../wire.zig").ssh;
+const daemon = @import("../wire.zig").daemon;
 const smart_http = @import("../wire.zig").smart_http;
 const dumb_http = @import("../wire.zig").dumb_http;
 
@@ -74,8 +75,9 @@ const Service = connection.Service;
 
 /// Errors from opening and using a remote.
 pub const Error = error{
-    /// A transport relic does not have: `git://`, `rsync://`, a remote
-    /// helper's `<helper>::<address>`.
+    /// A transport relic does not have: `rsync://`, a remote helper's
+    /// `<helper>::<address>`, or `git://` straight to its host where relic
+    /// was built without `http`, so without a TCP dialer.
     UnsupportedTransport,
     /// `object-info` asked of a bundle file, a remote helper or a
     /// repository read directly: git's "remote does not support
@@ -95,7 +97,7 @@ pub const Error = error{
     /// A pack the server named by URI does not have the checksum it named:
     /// git's "pack downloaded from <uri> does not match expected hash".
     PackfileUriMismatch,
-} || local.Error || receive_pack.Error || fetch_pack.Error || protocol.Error || program.Error || ssh.Error || smart_http.Error || dumb_http.Error || send_pack.Error || bundle.Error ||
+} || local.Error || receive_pack.Error || fetch_pack.Error || protocol.Error || program.Error || ssh.Error || daemon.Error || smart_http.Error || dumb_http.Error || send_pack.Error || bundle.Error ||
     remote_helper.Error;
 
 /// How a remote is reached.
@@ -435,28 +437,46 @@ pub const Session = struct {
                     else => |e| return e,
                 };
             },
-            .http, .https => {
-                // `error.HttpUnavailable` where relic was built without HTTP.
-                switch (try smart_http.connect(gpa, io, parsed, service, httpOptions(options))) {
-                    .smart => |conn| {
-                        errdefer conn.deinit(io);
-                        return fromConnection(gpa, conn, service, kind);
-                    },
-                    .dumb => |files| {
-                        const environ = if (options.programs) |p| p.environ else null;
-                        const remote = try dumb_http.Remote.open(gpa, io, files, .{
-                            .http = httpOptions(options),
-                            .policy = .{ .config = options.config, .environ = environ, .from_user = options.from_user },
-                            .warnings = options.warnings,
-                        });
-                        errdefer remote.deinit(io);
-                        if (kind) |k| if (k != remote.kind) return error.ObjectFormatMismatch;
-                        return .{ .gpa = gpa, .service = service, .impl = .{ .dumb = remote } };
-                    },
-                }
-            },
-            .git => return error.UnsupportedTransport,
+            .http, .https => return openHttp(gpa, io, parsed, service, kind, options),
+            .git => return openDaemon(gpa, io, remote_url, service, kind, options),
         }
+    }
+
+    /// A session over HTTP: smart where the server answers as git's
+    /// http-backend does, else the dumb listing and files. `error.HttpUnavailable`
+    /// where relic was built without HTTP.
+    fn openHttp(gpa: Allocator, io: Io, parsed: url.Url, service: Service, kind: ?hash.Kind, options: Options) ErrorNamespace.Error!Session {
+        switch (try smart_http.connect(gpa, io, parsed, service, httpOptions(options))) {
+            .smart => |conn| {
+                errdefer conn.deinit(io);
+                return fromConnection(gpa, conn, service, kind);
+            },
+            .dumb => |files| {
+                const environ = if (options.programs) |p| p.environ else null;
+                const remote = try dumb_http.Remote.open(gpa, io, files, .{
+                    .http = httpOptions(options),
+                    .policy = .{ .config = options.config, .environ = environ, .from_user = options.from_user },
+                    .warnings = options.warnings,
+                });
+                errdefer remote.deinit(io);
+                if (kind) |k| if (k != remote.kind) return error.ObjectFormatMismatch;
+                return .{ .gpa = gpa, .service = service, .impl = .{ .dumb = remote } };
+            },
+        }
+    }
+
+    /// A session with a git daemon, over its socket or `core.gitProxy`'s program.
+    fn openDaemon(gpa: Allocator, io: Io, remote_url: []const u8, service: Service, kind: ?hash.Kind, options: Options) ErrorNamespace.Error!Session {
+        var identity = try url.Identity.parse(gpa, remote_url);
+        defer identity.deinit();
+        const conn = try daemon.connect(gpa, io, identity.url, service, .{
+            .programs = options.programs,
+            .config = options.config,
+            .service_program = options.service_program,
+            .protocol_v2 = options.protocol_v2 orelse wantsV2(options.config),
+        });
+        errdefer conn.deinit(io);
+        return fromConnection(gpa, conn, service, kind);
     }
 
     /// What a conversation over HTTP is made with.

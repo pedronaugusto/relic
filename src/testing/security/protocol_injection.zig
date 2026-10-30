@@ -15,7 +15,8 @@ test "CVE-2021-40330, t5570-git-daemon 'client refuses to ask for repo with newl
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     for ([_][]const u8{ "git://example.com/re\npo.git", "git://exa\nmple.com/repo.git", "git://example.com/re%0apo.git" }) |url| {
-        try std.testing.expectError(error.UnsupportedTransport, transport.Session.open(gpa, io, url, .{ .service = .upload_pack, .kind = .sha1 }, .{}));
+        // git's `parse_connect_url` decodes the URL first, so `%0a` is a newline too.
+        try std.testing.expectError(error.NewlineInRequest, transport.Session.open(gpa, io, url, .{ .service = .upload_pack, .kind = .sha1 }, .{}));
     }
     // From a `.gitmodules`, decoded or not, it is a URL fsck refuses.
     for ([_][]const u8{ "git://example.com/re%0apo.git", "git://example.com/re%0Apo.git" }) |url| {

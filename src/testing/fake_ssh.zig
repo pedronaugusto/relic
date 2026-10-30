@@ -30,6 +30,8 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    if (fixture.is("daemon")) return serveDaemon(arena, io, init.environ_map, executable, fixture.message);
+
     const at = commandStart(args) orelse return;
     var line: std.ArrayList(u8) = .empty;
     for (args[at..], 0..) |arg, i| {
@@ -43,9 +45,9 @@ pub fn main(init: std.process.Init) !void {
 }
 
 /// What the test asked of this run, from `<executable>.fixture`: a mode on
-/// the first line, the message to say on the second, and for `refuse-held`
-/// the file that releases its grandchild on the third. No file is the
-/// plain mode.
+/// the first line, the message to say on the second (for `daemon`, the
+/// base path), and for `refuse-held` the file that releases its grandchild
+/// on the third. No file is the plain mode.
 const Fixture = struct {
     mode: []const u8,
     message: []const u8,
@@ -200,6 +202,27 @@ fn run(arena: Allocator, io: Io, environ: *const std.process.Environ.Map, execut
     const term = try child.wait(io);
     if (feeding) |*task| task.await(io);
     switch (term) {
+        .exited => |code| if (code != 0) std.process.exit(code),
+        else => std.process.exit(255),
+    }
+}
+
+/// `daemon`: a `core.gitProxy` program, run with the host and the port,
+/// which serves the conversation on its standard streams with
+/// `git daemon --inetd` under `base`, and ends with its status. What the
+/// daemon logs goes to `<executable>.daemon`, the last run's alone, never
+/// to the test's standard error.
+fn serveDaemon(arena: Allocator, io: Io, environ: *const std.process.Environ.Map, executable: []const u8, base: []const u8) !void {
+    const log = try Io.Dir.cwd().createFile(io, try arena.print("{s}.daemon", .{executable}), .{});
+    defer log.close(io);
+    const git = try testprogram.path(arena, io, environ, "git");
+    var child = try std.process.spawn(io, .{
+        .argv = &.{ git, "daemon", "--inetd", "--verbose", "--export-all", try arena.print("--base-path={s}", .{base}) },
+        .environ_map = environ,
+        .stderr = .{ .file = log },
+    });
+    defer child.kill(io);
+    switch (try child.wait(io)) {
         .exited => |code| if (code != 0) std.process.exit(code),
         else => std.process.exit(255),
     }
