@@ -4087,8 +4087,11 @@ pub const ObjectStream = struct {
     /// comes: another is `ObjectNameMismatch`, and nothing is written.
     expected: ?Oid = null,
     finished: bool = false,
+    /// Why `writer` last failed: `error.CorruptLooseObject` for more
+    /// bytes than the stated size, else the write's own error.
+    failure: ?ErrorNamespace.Error = null,
 
-    /// Where the object's bytes go.
+    /// Where the object's bytes go; `failure` names a `WriteFailed`.
     pub fn writer(s: *ObjectStream) *Io.Writer {
         return &s.input_writer;
     }
@@ -4102,10 +4105,19 @@ pub const ObjectStream = struct {
         const pattern = data[data.len - 1];
         const repeated = std.math.mul(usize, pattern.len, splat) catch return error.WriteFailed;
         total = std.math.add(usize, total, repeated) catch return error.WriteFailed;
-        if (total > s.remaining) return error.WriteFailed;
+        if (total > s.remaining) {
+            s.failure = error.CorruptLooseObject;
+            return error.WriteFailed;
+        }
 
-        for (data[0 .. data.len - 1]) |slice| s.write(slice) catch return error.WriteFailed;
-        for (0..splat) |_| s.write(pattern) catch return error.WriteFailed;
+        for (data[0 .. data.len - 1]) |slice| s.write(slice) catch |err| {
+            s.failure = err;
+            return error.WriteFailed;
+        };
+        for (0..splat) |_| s.write(pattern) catch |err| {
+            s.failure = err;
+            return error.WriteFailed;
+        };
         return total;
     }
 

@@ -71,6 +71,12 @@ const decimal = @import("../text.zig").decimal;
 const date = @import("../text.zig").date;
 const policy = @import("policy.zig");
 const client_cert = @import("client_cert.zig");
+
+/// The most a dumb server's file is read to: the `info/refs` listing,
+/// `HEAD`, `objects/info/packs`, an alternates file or a pack index. git
+/// reads each whole however long it is; past this one is
+/// `DumbHttpFileTooLarge`, the size relic opens a pack index to.
+pub const max_dumb_file_bytes: usize = 1 << 30;
 const authorities = @import("authorities.zig");
 const pinned_key = @import("pinned_key.zig");
 const uplink = @import("uplink");
@@ -98,6 +104,8 @@ pub const Error = error{
     /// A push to a server that speaks git's dumb HTTP protocol, which git
     /// makes over WebDAV (`http-push`): nobody in the family serves one.
     DumbHttpPushUnsupported,
+    /// A dumb server's file past `max_dumb_file_bytes`.
+    DumbHttpFileTooLarge,
     /// The server asked for a client certificate and refused the one it
     /// was sent — or wanted one and was sent none. `Connection.message`
     /// names its TLS alert.
@@ -1182,9 +1190,10 @@ const Http = struct {
             // read whole as git reads it, and every request after it is a
             // download.
             var listing: std.ArrayList(u8) = .empty;
-            res.reader(h.io).appendRemainingUnlimited(h.arena.allocator(), &listing) catch |err| return switch (err) {
+            res.reader(h.io).appendRemaining(h.arena.allocator(), &listing, .limited(max_dumb_file_bytes)) catch |err| return switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
                 error.ReadFailed => h.fail(error.ConnectionFailed, "the body was cut short"),
+                error.StreamTooLong => h.fail(error.DumbHttpFileTooLarge, "the info/refs listing is larger than 1 GiB"),
             };
             h.downloading = true;
             return .{ .dumb = listing.items };

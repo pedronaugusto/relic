@@ -424,13 +424,16 @@ const Walk = struct {
 
 const Self = ErrorNamespace;
 
-/// A body read whole, as git reads these files; a body cut short is the
-/// connection's failure.
+/// A body read whole, as git reads these files, up to
+/// `smart_http.max_dumb_file_bytes`; a body cut short is the connection's
+/// failure.
 fn readWhole(a: Allocator, body: *Io.Reader) Self.Error![]u8 {
     var list: std.ArrayList(u8) = .empty;
-    body.appendRemainingUnlimited(a, &list) catch |err| return switch (err) {
+    errdefer list.deinit(a);
+    body.appendRemaining(a, &list, .limited(smart_http.max_dumb_file_bytes)) catch |err| return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         error.ReadFailed => error.ConnectionFailed,
+        error.StreamTooLong => error.DumbHttpFileTooLarge,
     };
     return list.toOwnedSlice(a);
 }
@@ -506,22 +509,17 @@ fn looseImpl(r: *Remote, io: Io, db: *odb_mod.Odb, i: usize, oid: Oid) Self.Erro
     stream.expected = oid;
     var finished = false;
     defer if (!finished) stream.abort(io) else stream.deinit(io);
-    var remaining = size;
-    while (remaining != 0) {
-        try io.checkCancel();
-        const chunk = in.peekGreedy(1) catch return .corrupt;
-        const n: usize = @intCast(@min(chunk.len, remaining));
-        try stream.write(chunk[0..n]);
-        in.toss(n);
-        remaining -= n;
-    }
-    // Nothing may follow the object in its stream.
-    if (in.takeByte()) |_| return .corrupt else |err| switch (err) {
-        error.EndOfStream => {},
+    // The stream holds the header's size: a byte past it fails the write,
+    // one short of it `finish`.
+    _ = in.streamRemaining(stream.writer()) catch |err| switch (err) {
         error.ReadFailed => return .corrupt,
-    }
+        error.WriteFailed => switch (stream.failure orelse error.CorruptLooseObject) {
+            error.CorruptLooseObject => return .corrupt,
+            else => |e| return e,
+        },
+    };
     _ = stream.finish(io) catch |err| switch (err) {
-        error.ObjectNameMismatch => return .corrupt,
+        error.ObjectNameMismatch, error.CorruptLooseObject => return .corrupt,
         else => |e| return e,
     };
     finished = true;
