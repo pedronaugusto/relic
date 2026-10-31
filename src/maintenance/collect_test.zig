@@ -140,23 +140,45 @@ fn compare(format: testgit.RefFormat, cases: []const Case, configure: ?*const fn
     }
 }
 
-fn runsInFormat(format: testgit.RefFormat) !void {
+// Each gc is several processes of git's and a comparison of what each left, slow to
+// start on macOS and Windows, so a test holds a few.
+fn pruningInFormat(format: testgit.RefFormat) !void {
     const c = clock().clock;
     try compare(format, &.{
         .{ .args = &.{}, .options = .{ .clock = c } },
         .{ .args = &.{"--prune=now"}, .options = .{ .clock = c, .prune = .now } },
         .{ .args = &.{"--no-prune"}, .options = .{ .clock = c, .prune = .never } },
         .{ .args = &.{"--no-cruft"}, .options = .{ .clock = c, .cruft = false } },
+    }, null);
+}
+
+test "gc packs the refs, expires the logs, repacks and prunes what git's does, in both ref formats: by default, pruning now and never, and no cruft pack" {
+    try testgit.eachRefFormat(pruningInFormat);
+}
+
+fn packingInFormat(format: testgit.RefFormat) !void {
+    const c = clock().clock;
+    try compare(format, &.{
         .{ .args = &.{"--aggressive"}, .options = .{ .clock = c, .aggressive = true } },
         .{ .args = &.{"--keep-largest-pack"}, .options = .{ .clock = c, .keep_largest_pack = true } },
         .{ .args = &.{}, .options = .{ .clock = c }, .config = &.{ .{ "gc.bigPackThreshold", "1" }, .{ "gc.pruneExpire", "now" } } },
+    }, null);
+}
+
+test "gc packs the refs, expires the logs, repacks and prunes what git's does, in both ref formats: aggressive, the largest pack kept, and by gc.bigPackThreshold" {
+    try testgit.eachRefFormat(packingInFormat);
+}
+
+fn settingsInFormat(format: testgit.RefFormat) !void {
+    const c = clock().clock;
+    try compare(format, &.{
         .{ .args = &.{}, .options = .{ .clock = c }, .config = &.{ .{ "gc.packRefs", "false" }, .{ "gc.reflogExpire", "never" }, .{ "gc.reflogExpireUnreachable", "never" } } },
         .{ .args = &.{}, .options = .{ .clock = c }, .config = &.{.{ "gc.writeCommitGraph", "false" }} },
     }, null);
 }
 
-test "gc packs the refs, expires the logs, repacks and prunes what git's does, in both ref formats" {
-    try testgit.eachRefFormat(runsInFormat);
+test "gc packs the refs, expires the logs, repacks and prunes what git's does, in both ref formats: no refs packed, no logs expired and no commit-graph written, as set" {
+    try testgit.eachRefFormat(settingsInFormat);
 }
 
 /// Blobs whose names begin `17`, loose, a day old: what `gc --auto`

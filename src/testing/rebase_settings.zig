@@ -59,22 +59,18 @@ fn expectSame(pair: *Pair, io: Io) !void {
     }
 }
 
-test "the fork point leaves out what the upstream dropped: by default for the branch's own upstream, when asked, and not when rebase.forkPoint is false" {
+/// A rebase by git and by relic of a fresh pair, as `args` and `options` ask.
+const ForkRebase = struct { args: []const []const u8, config: ?[]const u8 = null, options: rebase.Options, script: *const fn (Io, *testgit.Repo) anyerror!void = forkScript };
+
+/// `cases` against git's in each ref format git writes, each in a pair of its own. A
+/// pair is several processes of git's, slow to start on macOS and Windows, so a test
+/// holds a few.
+fn expectForkPoints(comptime cases: []const ForkRebase) !void {
     try testgit.requireGitVersion(std.testing.allocator, std.testing.io, 2, 55);
     try testgit.eachRefFormat(struct {
         fn f(format: testgit.RefFormat) !void {
             const gpa = std.testing.allocator;
             const io = std.testing.io;
-            const cases = [_]struct { args: []const []const u8, config: ?[]const u8 = null, options: rebase.Options, script: *const fn (Io, *testgit.Repo) anyerror!void = forkScript }{
-                .{ .args = &.{"rebase"}, .options = .{ .who = who, .default_upstream = true, .upstream_name = "refs/heads/upstream", .onto_name = "refs/heads/upstream" }, .script = droppedScript },
-                .{ .args = &.{ "rebase", "upstream" }, .options = .{ .who = who, .upstream_name = "upstream", .onto_name = "upstream" }, .script = droppedScript },
-                .{ .args = &.{"rebase"}, .options = .{ .who = who, .default_upstream = true, .upstream_name = "refs/heads/upstream", .onto_name = "refs/heads/upstream" } },
-                .{ .args = &.{ "rebase", "--no-fork-point" }, .options = .{ .who = who, .fork_point = false, .default_upstream = true, .upstream_name = "refs/heads/upstream", .onto_name = "refs/heads/upstream" } },
-                .{ .args = &.{"rebase"}, .config = "false", .options = .{ .who = who, .default_upstream = true, .upstream_name = "refs/heads/upstream", .onto_name = "refs/heads/upstream" } },
-                .{ .args = &.{ "rebase", "upstream" }, .options = .{ .who = who, .upstream_name = "upstream", .onto_name = "upstream" } },
-                .{ .args = &.{ "rebase", "--fork-point", "upstream" }, .options = .{ .who = who, .fork_point = true, .upstream_name = "upstream", .onto_name = "upstream" } },
-                .{ .args = &.{ "rebase", "-i", "--fork-point", "upstream" }, .options = .{ .who = who, .fork_point = true, .interactive = true, .upstream_name = "upstream", .onto_name = "upstream" } },
-            };
             for (cases) |case| {
                 var pair: Pair = undefined;
                 try Pair.init(gpa, io, &pair, format, case.script);
@@ -92,6 +88,24 @@ test "the fork point leaves out what the upstream dropped: by default for the br
             }
         }
     }.f);
+}
+
+test "the fork point leaves out what the upstream dropped: by default for the branch's own upstream, and not by --no-fork-point or rebase.forkPoint false" {
+    try expectForkPoints(&.{
+        .{ .args = &.{"rebase"}, .options = .{ .who = who, .default_upstream = true, .upstream_name = "refs/heads/upstream", .onto_name = "refs/heads/upstream" }, .script = droppedScript },
+        .{ .args = &.{ "rebase", "upstream" }, .options = .{ .who = who, .upstream_name = "upstream", .onto_name = "upstream" }, .script = droppedScript },
+        .{ .args = &.{"rebase"}, .options = .{ .who = who, .default_upstream = true, .upstream_name = "refs/heads/upstream", .onto_name = "refs/heads/upstream" } },
+        .{ .args = &.{ "rebase", "--no-fork-point" }, .options = .{ .who = who, .fork_point = false, .default_upstream = true, .upstream_name = "refs/heads/upstream", .onto_name = "refs/heads/upstream" } },
+        .{ .args = &.{"rebase"}, .config = "false", .options = .{ .who = who, .default_upstream = true, .upstream_name = "refs/heads/upstream", .onto_name = "refs/heads/upstream" } },
+    });
+}
+
+test "the fork point leaves out what the upstream dropped: not for an upstream named unless asked, and when asked, interactive too" {
+    try expectForkPoints(&.{
+        .{ .args = &.{ "rebase", "upstream" }, .options = .{ .who = who, .upstream_name = "upstream", .onto_name = "upstream" } },
+        .{ .args = &.{ "rebase", "--fork-point", "upstream" }, .options = .{ .who = who, .fork_point = true, .upstream_name = "upstream", .onto_name = "upstream" } },
+        .{ .args = &.{ "rebase", "-i", "--fork-point", "upstream" }, .options = .{ .who = who, .fork_point = true, .interactive = true, .upstream_name = "upstream", .onto_name = "upstream" } },
+    });
 }
 
 const suite = @import("helpers.zig");

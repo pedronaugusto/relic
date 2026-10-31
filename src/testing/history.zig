@@ -1190,31 +1190,14 @@ test "merge.log lists the merged commits as git's fmt-merge-msg does" {
     }.inFormat);
 }
 
-test "a merge message setting git dies on refuses every merge" {
+/// Settings git's merge dies on, given as values or as bare names in the config file.
+const DyingSetting = struct { settings: []const [2][]const u8, bare: ?[]const u8 = null, err: anyerror };
+
+/// Each of `cases` against git's, each in a pair of its own. A pair is several
+/// processes of git's, slow to start on macOS and Windows, so a test holds a few.
+fn expectMergesRefused(cases: []const DyingSetting) !void {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    const Case = struct { settings: []const [2][]const u8, bare: ?[]const u8 = null, err: anyerror };
-    const cases = [_]Case{
-        .{ .settings = &.{.{ "merge.branchdesc", "maybe" }}, .err = error.InvalidMergeSetting },
-        .{ .settings = &.{ .{ "merge.branchdesc", "maybe" }, .{ "merge.branchdesc", "true" } }, .err = error.InvalidMergeSetting },
-        .{ .settings = &.{}, .bare = "suppressDest", .err = error.InvalidMergeSetting },
-        // merge-ort's own reading, the last value of each.
-        .{ .settings = &.{.{ "merge.verbosity", "x" }}, .err = error.InvalidMergeSetting },
-        .{ .settings = &.{}, .bare = "verbosity", .err = error.InvalidMergeSetting },
-        .{ .settings = &.{.{ "merge.renamelimit", "x" }}, .err = error.InvalidMergeSetting },
-        .{ .settings = &.{}, .bare = "renamelimit", .err = error.InvalidMergeSetting },
-        .{ .settings = &.{.{ "merge.renamelimit", "-2" }}, .err = error.InvalidMergeSetting },
-        .{ .settings = &.{.{ "diff.renamelimit", "3000000000" }}, .err = error.InvalidMergeSetting },
-        .{ .settings = &.{.{ "merge.renormalize", "x" }}, .err = error.InvalidMergeSetting },
-        .{ .settings = &.{.{ "merge.renames", "x" }}, .err = error.InvalidMergeSetting },
-        .{ .settings = &.{}, .bare = "renames", .err = error.InvalidMergeSetting },
-        .{ .settings = &.{}, .bare = "directoryrenames", .err = error.InvalidMergeSetting },
-        // `git merge`'s diff settings, every value.
-        .{ .settings = &.{ .{ "diff.renames", "maybe" }, .{ "diff.renames", "true" } }, .err = error.InvalidMergeSetting },
-        .{ .settings = &.{ .{ "diff.renamelimit", "x" }, .{ "diff.renamelimit", "5" } }, .err = error.InvalidMergeSetting },
-        // A bare description dies only where it is read: listed, local, last.
-        .{ .settings = &.{ .{ "merge.branchdesc", "true" }, .{ "merge.log", "true" } }, .bare = "description", .err = error.InvalidBranchDescription },
-    };
     for (cases) |case| {
         var pair: Pair = undefined;
         try Pair.init(gpa, io, &pair, .files, shortlogScript);
@@ -1243,6 +1226,40 @@ test "a merge message setting git dies on refuses every merge" {
         }
         try expectSameState(&pair, io, &merge_state, &main_logs);
     }
+}
+
+test "a merge setting git dies on refuses every merge: the message's, merge.branchdesc, merge.suppressDest and a bare branch description" {
+    try expectMergesRefused(&.{
+        .{ .settings = &.{.{ "merge.branchdesc", "maybe" }}, .err = error.InvalidMergeSetting },
+        .{ .settings = &.{ .{ "merge.branchdesc", "maybe" }, .{ "merge.branchdesc", "true" } }, .err = error.InvalidMergeSetting },
+        .{ .settings = &.{}, .bare = "suppressDest", .err = error.InvalidMergeSetting },
+        // A bare description dies only where it is read: listed, local, last.
+        .{ .settings = &.{ .{ "merge.branchdesc", "true" }, .{ "merge.log", "true" } }, .bare = "description", .err = error.InvalidBranchDescription },
+    });
+}
+
+test "a merge setting git dies on refuses every merge: merge.verbosity and the rename limits" {
+    try expectMergesRefused(&.{
+        // merge-ort's own reading, the last value of each.
+        .{ .settings = &.{.{ "merge.verbosity", "x" }}, .err = error.InvalidMergeSetting },
+        .{ .settings = &.{}, .bare = "verbosity", .err = error.InvalidMergeSetting },
+        .{ .settings = &.{.{ "merge.renamelimit", "x" }}, .err = error.InvalidMergeSetting },
+        .{ .settings = &.{}, .bare = "renamelimit", .err = error.InvalidMergeSetting },
+        .{ .settings = &.{.{ "merge.renamelimit", "-2" }}, .err = error.InvalidMergeSetting },
+        .{ .settings = &.{.{ "diff.renamelimit", "3000000000" }}, .err = error.InvalidMergeSetting },
+    });
+}
+
+test "a merge setting git dies on refuses every merge: merge.renormalize, the renames, and git merge's diff settings" {
+    try expectMergesRefused(&.{
+        .{ .settings = &.{.{ "merge.renormalize", "x" }}, .err = error.InvalidMergeSetting },
+        .{ .settings = &.{.{ "merge.renames", "x" }}, .err = error.InvalidMergeSetting },
+        .{ .settings = &.{}, .bare = "renames", .err = error.InvalidMergeSetting },
+        .{ .settings = &.{}, .bare = "directoryrenames", .err = error.InvalidMergeSetting },
+        // `git merge`'s diff settings, every value.
+        .{ .settings = &.{ .{ "diff.renames", "maybe" }, .{ "diff.renames", "true" } }, .err = error.InvalidMergeSetting },
+        .{ .settings = &.{ .{ "diff.renamelimit", "x" }, .{ "diff.renamelimit", "5" } }, .err = error.InvalidMergeSetting },
+    });
 }
 
 test "a cherry-pick and a rebase refuse what git's sequencer dies on as it begins, and read diff.renames only as the merge does" {

@@ -169,7 +169,9 @@ fn compare(format: testgit.RefFormat, cases: []const Case) !void {
     }
 }
 
-fn runsInFormat(format: testgit.RefFormat) !void {
+// Each run is several processes of git's and a comparison of what each left, slow to
+// start on macOS and Windows, so a test holds a few.
+fn strategiesInFormat(format: testgit.RefFormat) !void {
     const c: @import("../text.zig").date.Context = .{ .now = Io.Clock.real.now(io) };
     try compare(format, &.{
         // The geometric strategy, git 2.55's default for a manual run.
@@ -177,18 +179,38 @@ fn runsInFormat(format: testgit.RefFormat) !void {
         .{ .args = &.{}, .options = .{ .clock = c }, .config = &.{.{ "maintenance.strategy", "gc" }} },
         .{ .args = &.{}, .options = .{ .clock = c }, .config = &.{.{ "maintenance.strategy", "incremental" }} },
         .{ .args = &.{}, .options = .{ .clock = c }, .config = &.{ .{ "maintenance.commit-graph.enabled", "false" }, .{ "maintenance.loose-objects.enabled", "true" } } },
+    });
+}
+
+test "maintenance run runs the tasks git's does and leaves what git's leaves, in both ref formats: each strategy, and tasks enabled and disabled" {
+    try testgit.eachRefFormat(strategiesInFormat);
+}
+
+fn tasksInFormat(format: testgit.RefFormat) !void {
+    const c: @import("../text.zig").date.Context = .{ .now = Io.Clock.real.now(io) };
+    try compare(format, &.{
         .{ .args = &.{"--task=loose-objects"}, .options = .{ .clock = c, .tasks = &.{.loose_objects} } },
         .{ .args = &.{"--task=incremental-repack"}, .options = .{ .clock = c, .tasks = &.{.incremental_repack} } },
         .{ .args = &.{ "--task=pack-refs", "--task=gc" }, .options = .{ .clock = c, .tasks = &.{ .pack_refs, .gc } } },
         .{ .args = &.{"--task=geometric-repack"}, .options = .{ .clock = c, .tasks = &.{.geometric_repack} }, .config = &.{.{ "maintenance.geometric-repack.splitFactor", "3" }} },
+    });
+}
+
+test "maintenance run runs the tasks git's does and leaves what git's leaves, in both ref formats: the tasks named" {
+    try testgit.eachRefFormat(tasksInFormat);
+}
+
+fn schedulesInFormat(format: testgit.RefFormat) !void {
+    const c: @import("../text.zig").date.Context = .{ .now = Io.Clock.real.now(io) };
+    try compare(format, &.{
         .{ .args = &.{"--schedule=daily"}, .options = .{ .clock = c, .schedule = .daily }, .config = &.{ .{ "maintenance.strategy", "incremental" }, .{ "maintenance.prefetch.enabled", "false" } } },
         .{ .args = &.{"--schedule=weekly"}, .options = .{ .clock = c, .schedule = .weekly }, .config = &.{ .{ "maintenance.strategy", "incremental" }, .{ "maintenance.prefetch.enabled", "false" } } },
         .{ .args = &.{"--schedule=hourly"}, .options = .{ .clock = c, .schedule = .hourly } },
     });
 }
 
-test "maintenance run runs the tasks git's does and leaves what git's leaves, in both ref formats" {
-    try testgit.eachRefFormat(runsInFormat);
+test "maintenance run runs the tasks git's does and leaves what git's leaves, in both ref formats: each schedule" {
+    try testgit.eachRefFormat(schedulesInFormat);
 }
 
 fn autoInFormat(format: testgit.RefFormat) !void {
@@ -200,9 +222,18 @@ fn autoInFormat(format: testgit.RefFormat) !void {
         .{ .args = &.{ "--auto", "--task=loose-objects", "--task=incremental-repack" }, .options = .{ .clock = c, .auto = true, .tasks = &.{ .loose_objects, .incremental_repack } }, .config = &.{ .{ "maintenance.loose-objects.auto", "5" }, .{ "maintenance.incremental-repack.auto", "2" } } },
         .{ .args = &.{ "--auto", "--task=worktree-prune", "--task=rerere-gc" }, .options = .{ .clock = c, .auto = true, .tasks = &.{ .worktree_prune, .rerere_gc } } },
     });
+}
+
+test "maintenance run --auto runs the tasks whose conditions git's would, in both ref formats" {
+    try testgit.eachRefFormat(autoInFormat);
+}
+
+fn thresholdsInFormat(format: testgit.RefFormat) !void {
+    const c: @import("../text.zig").date.Context = .{ .now = Io.Clock.real.now(io) };
+    if (!try testgit.gitAtLeast(gpa, io, 2, 56)) return error.SkipZigTest;
     // Loose objects past git 2.55's threshold for the geometric task and
     // short of git 2.56's, `gc --auto`'s; then past the one set.
-    if (try testgit.gitAtLeast(gpa, io, 2, 56)) try compare(format, &.{
+    try compare(format, &.{
         .{ .args = &.{ "--auto", "--task=geometric-repack" }, .options = .{ .clock = c, .auto = true, .tasks = &.{.geometric_repack} }, .loose_in_17 = 3 },
         .{ .args = &.{ "--auto", "--task=geometric-repack" }, .options = .{ .clock = c, .auto = true, .tasks = &.{.geometric_repack} }, .loose_in_17 = 3, .config = &.{.{ "maintenance.geometric-repack.auto", "300" }} },
         // rerere-gc: fresh records only, too few stale ones for the 512
@@ -214,8 +245,8 @@ fn autoInFormat(format: testgit.RefFormat) !void {
     });
 }
 
-test "maintenance run --auto runs the tasks whose conditions git's would, in both ref formats" {
-    try testgit.eachRefFormat(autoInFormat);
+test "maintenance run --auto runs geometric-repack and rerere-gc past git 2.56's thresholds and the ones set, in both ref formats" {
+    try testgit.eachRefFormat(thresholdsInFormat);
 }
 
 test "the tasks a run takes, as git's initialize_task_config chooses them" {

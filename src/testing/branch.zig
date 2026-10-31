@@ -377,99 +377,11 @@ fn sortedLines(gpa: std.mem.Allocator, lines: [][]const u8) ![]const u8 {
     return out.toOwnedSlice(gpa);
 }
 
-test "delete-merged deletes the branches git 2.56's does, with what it says, and clears what it clears" {
+/// `cases` against git 2.56's in each ref format git writes, each case in a pair of its
+/// own. A pair and each run are several processes of git's, slow to start on macOS and
+/// Windows, so a test holds a few.
+fn expectDeletedMerged(comptime cases: []const MergedCase) !void {
     try testgit.requireGitVersion(std.testing.allocator, std.testing.io, 2, 56);
-    const cases = [_]MergedCase{
-        .{
-            .what = "a cloned main pushes to its upstream",
-            .setup = &.{&.{ "checkout", "-q", "--detach" }},
-            .runs = &.{.{ .upstreams = &.{"*/*"} }},
-        },
-        .{
-            .what = "only the selected merged branches",
-            .merged = &.{ "also-merged", "merged" },
-            .setup = &.{
-                &.{ "checkout", "-q", "-b", "unmerged", "--track", "origin/next" },
-                &.{ "commit", "-q", "--allow-empty", "-m", "unmerged work" },
-                &.{ "checkout", "-q", "-b", "tracks-other", "--track", "other/main" },
-            },
-            .runs = &.{
-                .{ .upstreams = &.{"origin/next"}, .branches = &.{"merged"}, .dry_run = true },
-                .{ .upstreams = &.{"origin/next"}, .branches = &.{"merged"} },
-            },
-        },
-        .{
-            .what = "main kept despite another push remote; a branch checked out, one whose upstream is gone",
-            .merged = &.{ "on-next", "checked-out", "upstream-gone" },
-            .setup = &.{
-                &.{ "config", "remote.pushDefault", "fork" },
-                &.{ "checkout", "-q", "-b", "local-to-delete", "--track", "main" },
-                &.{ "config", "branch.upstream-gone.merge", "refs/heads/topic" },
-                &.{ "checkout", "-q", "-b", "tracks-other", "--track", "other/main" },
-                &.{ "checkout", "-q", "checked-out" },
-            },
-            .runs = &.{.{ .upstreams = &.{ "origin/*", "main" } }},
-        },
-        .{
-            .what = "push refspecs mapped to the upstream",
-            .setup = &.{
-                &.{ "checkout", "-q", "-b", "topic" },
-                &.{ "config", "remote.origin.push", "refs/heads/topic:refs/heads/published" },
-                &.{ "push", "-q", "origin" },
-                &.{ "branch", "-q", "--set-upstream-to=origin/published", "topic" },
-                &.{ "checkout", "-q", "-b", "other-topic", "--track", "origin/published" },
-                &.{ "checkout", "-q", "--detach" },
-            },
-            .runs = &.{.{ .upstreams = &.{"origin/published"} }},
-        },
-        .{
-            .what = "the upstream of a branch that stays stays",
-            .merged = &.{"feature"},
-            .setup = &.{
-                &.{ "checkout", "-q", "-b", "topic", "--track", "feature" },
-                &.{ "commit", "-q", "--allow-empty", "-m", "topic work" },
-            },
-            .runs = &.{
-                .{ .upstreams = &.{"origin/next"}, .dry_run = true },
-                .{ .upstreams = &.{"origin/next"} },
-            },
-        },
-        .{
-            .what = "a kept base loses the upstream that went",
-            .setup = &.{
-                &.{ "branch", "-q", "--track", "lower", "origin/next" },
-                &.{ "branch", "-q", "--track", "mid", "lower" },
-                &.{ "checkout", "-q", "-b", "tip", "--track", "mid" },
-                &.{ "commit", "-q", "--allow-empty", "-m", "tip work" },
-            },
-            .runs = &.{
-                .{ .upstreams = &.{ "origin/next", "lower" }, .dry_run = true },
-                .{ .upstreams = &.{ "origin/next", "lower" } },
-            },
-        },
-        .{
-            .what = "stacked branches whatever their names sort as",
-            .setup = &.{
-                &.{ "branch", "-q", "--track", "c-lower", "origin/next" },
-                &.{ "branch", "-q", "--track", "b-mid", "c-lower" },
-                &.{ "checkout", "-q", "-b", "a-tip", "--track", "b-mid" },
-                &.{ "commit", "-q", "--allow-empty", "-m", "tip work" },
-            },
-            .runs = &.{
-                .{ .upstreams = &.{ "origin/next", "c-*" } },
-                .{ .upstreams = &.{ "origin/next", "c-*" } },
-            },
-        },
-        .{
-            .what = "branch.<name>.deleteMerged=false",
-            .merged = &.{ "deleted", "kept" },
-            .setup = &.{
-                &.{ "config", "branch.kept.deleteMerged", "false" },
-                &.{ "checkout", "-q", "--detach" },
-            },
-            .runs = &.{.{ .upstreams = &.{"origin/next"} }},
-        },
-    };
     try testgit.eachRefFormat(struct {
         fn f(format: testgit.RefFormat) !void {
             const gpa = std.testing.allocator;
@@ -527,6 +439,105 @@ test "delete-merged deletes the branches git 2.56's does, with what it says, and
             }
         }
     }.f);
+}
+
+test "delete-merged deletes the branches git 2.56's does, with what it says, and clears what it clears: a cloned main, only the branches selected, main kept beside another push remote, and push refspecs" {
+    try expectDeletedMerged(&.{
+        .{
+            .what = "a cloned main pushes to its upstream",
+            .setup = &.{&.{ "checkout", "-q", "--detach" }},
+            .runs = &.{.{ .upstreams = &.{"*/*"} }},
+        },
+        .{
+            .what = "only the selected merged branches",
+            .merged = &.{ "also-merged", "merged" },
+            .setup = &.{
+                &.{ "checkout", "-q", "-b", "unmerged", "--track", "origin/next" },
+                &.{ "commit", "-q", "--allow-empty", "-m", "unmerged work" },
+                &.{ "checkout", "-q", "-b", "tracks-other", "--track", "other/main" },
+            },
+            .runs = &.{
+                .{ .upstreams = &.{"origin/next"}, .branches = &.{"merged"}, .dry_run = true },
+                .{ .upstreams = &.{"origin/next"}, .branches = &.{"merged"} },
+            },
+        },
+        .{
+            .what = "main kept despite another push remote; a branch checked out, one whose upstream is gone",
+            .merged = &.{ "on-next", "checked-out", "upstream-gone" },
+            .setup = &.{
+                &.{ "config", "remote.pushDefault", "fork" },
+                &.{ "checkout", "-q", "-b", "local-to-delete", "--track", "main" },
+                &.{ "config", "branch.upstream-gone.merge", "refs/heads/topic" },
+                &.{ "checkout", "-q", "-b", "tracks-other", "--track", "other/main" },
+                &.{ "checkout", "-q", "checked-out" },
+            },
+            .runs = &.{.{ .upstreams = &.{ "origin/*", "main" } }},
+        },
+        .{
+            .what = "push refspecs mapped to the upstream",
+            .setup = &.{
+                &.{ "checkout", "-q", "-b", "topic" },
+                &.{ "config", "remote.origin.push", "refs/heads/topic:refs/heads/published" },
+                &.{ "push", "-q", "origin" },
+                &.{ "branch", "-q", "--set-upstream-to=origin/published", "topic" },
+                &.{ "checkout", "-q", "-b", "other-topic", "--track", "origin/published" },
+                &.{ "checkout", "-q", "--detach" },
+            },
+            .runs = &.{.{ .upstreams = &.{"origin/published"} }},
+        },
+    });
+}
+
+test "delete-merged deletes the branches git 2.56's does, with what it says, and clears what it clears: the upstreams of branches that stay, stacked branches, and branch.<name>.deleteMerged" {
+    try expectDeletedMerged(&.{
+        .{
+            .what = "the upstream of a branch that stays stays",
+            .merged = &.{"feature"},
+            .setup = &.{
+                &.{ "checkout", "-q", "-b", "topic", "--track", "feature" },
+                &.{ "commit", "-q", "--allow-empty", "-m", "topic work" },
+            },
+            .runs = &.{
+                .{ .upstreams = &.{"origin/next"}, .dry_run = true },
+                .{ .upstreams = &.{"origin/next"} },
+            },
+        },
+        .{
+            .what = "a kept base loses the upstream that went",
+            .setup = &.{
+                &.{ "branch", "-q", "--track", "lower", "origin/next" },
+                &.{ "branch", "-q", "--track", "mid", "lower" },
+                &.{ "checkout", "-q", "-b", "tip", "--track", "mid" },
+                &.{ "commit", "-q", "--allow-empty", "-m", "tip work" },
+            },
+            .runs = &.{
+                .{ .upstreams = &.{ "origin/next", "lower" }, .dry_run = true },
+                .{ .upstreams = &.{ "origin/next", "lower" } },
+            },
+        },
+        .{
+            .what = "stacked branches whatever their names sort as",
+            .setup = &.{
+                &.{ "branch", "-q", "--track", "c-lower", "origin/next" },
+                &.{ "branch", "-q", "--track", "b-mid", "c-lower" },
+                &.{ "checkout", "-q", "-b", "a-tip", "--track", "b-mid" },
+                &.{ "commit", "-q", "--allow-empty", "-m", "tip work" },
+            },
+            .runs = &.{
+                .{ .upstreams = &.{ "origin/next", "c-*" } },
+                .{ .upstreams = &.{ "origin/next", "c-*" } },
+            },
+        },
+        .{
+            .what = "branch.<name>.deleteMerged=false",
+            .merged = &.{ "deleted", "kept" },
+            .setup = &.{
+                &.{ "config", "branch.kept.deleteMerged", "false" },
+                &.{ "checkout", "-q", "--detach" },
+            },
+            .runs = &.{.{ .upstreams = &.{"origin/next"} }},
+        },
+    });
 }
 
 test "delete-merged refuses a pattern that names no branch, as git 2.56's does" {

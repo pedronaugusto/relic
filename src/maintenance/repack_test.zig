@@ -278,16 +278,27 @@ fn dates(now: i64, buf: *[2][48]u8) ![2][]const u8 {
     };
 }
 
-fn modesInFormat(format: testgit.RefFormat) !void {
-    const now = std.Io.Clock.real.now(io).toSeconds();
-    var buf: [2][48]u8 = undefined;
-    const unpack_arg, const expiration_arg = try dates(now, &buf);
+// Each repack is several processes of git's and a comparison of what each left, slow
+// to start on macOS and Windows, so a test holds a few.
+fn packingModesInFormat(format: testgit.RefFormat) !void {
     try compare(format, &.{
         .{ .args = &.{}, .options = .{} },
         .{ .args = &.{"-d"}, .options = .{ .delete = true } },
         .{ .args = &.{ "-a", "-d" }, .options = .{ .mode = .all, .delete = true } },
         .{ .args = &.{"-a"}, .options = .{ .mode = .all } },
         .{ .args = &.{ "-a", "-d", "-k" }, .options = .{ .mode = .all, .delete = true, .keep_unreachable = true } },
+    }, null);
+}
+
+test "repack keeps, loosens, packs and drops what git's does, in both ref formats: incremental and all, deleting the old packs or not, and keeping the unreachable" {
+    try testgit.eachRefFormat(packingModesInFormat);
+}
+
+fn loosenedModesInFormat(format: testgit.RefFormat) !void {
+    const now = std.Io.Clock.real.now(io).toSeconds();
+    var buf: [2][48]u8 = undefined;
+    const unpack_arg, const expiration_arg = try dates(now, &buf);
+    try compare(format, &.{
         .{ .args = &.{ "-A", "-d" }, .options = .{ .mode = .all_loosen, .delete = true } },
         .{ .args = &.{ "-A", "-d", unpack_arg }, .options = .{ .mode = .all_loosen, .delete = true, .unpack_unreachable = .fromRaw(now - 14 * day) } },
         .{ .args = &.{ "--cruft", "-d" }, .options = .{ .mode = .cruft, .delete = true } },
@@ -296,8 +307,8 @@ fn modesInFormat(format: testgit.RefFormat) !void {
     }, null);
 }
 
-test "repack keeps, loosens, packs and drops what git's does, in every mode and both ref formats" {
-    try testgit.eachRefFormat(modesInFormat);
+test "repack keeps, loosens, packs and drops what git's does, in both ref formats: the unreachable loosened, cruft packs, both by their dates, and local objects alone" {
+    try testgit.eachRefFormat(loosenedModesInFormat);
 }
 
 fn hook(repo: *testgit.Repo, now: i64) !void {
@@ -479,9 +490,6 @@ test "a bare repository's -a carries a bitmap, as git's" {
 }
 
 fn geometricInFormat(format: testgit.RefFormat) !void {
-    const now = std.Io.Clock.real.now(io).toSeconds();
-    var buf: [2][48]u8 = undefined;
-    _, const expiration_arg = try dates(now, &buf);
     // The fixture's packs hold 1 (kept), 3 and 7 objects: a factor of 2
     // rolls up only the loose objects, 3 every pack.
     try compare(format, &.{
@@ -489,6 +497,18 @@ fn geometricInFormat(format: testgit.RefFormat) !void {
         .{ .args = &.{ "--geometric=2", "-d" }, .options = .{ .geometric = 2, .delete = true } },
         .{ .args = &.{ "--geometric=3", "-d" }, .options = .{ .geometric = 3, .delete = true } },
         .{ .args = &.{ "--geometric=3", "-d", "--pack-kept-objects" }, .options = .{ .geometric = 3, .delete = true, .pack_kept_objects = true } },
+    }, null);
+}
+
+test "--geometric rolls up the packs git's does, by its factor, deleting the old packs or not, and with the kept objects" {
+    try testgit.eachRefFormat(geometricInFormat);
+}
+
+fn midxInFormat(format: testgit.RefFormat) !void {
+    const now = std.Io.Clock.real.now(io).toSeconds();
+    var buf: [2][48]u8 = undefined;
+    _, const expiration_arg = try dates(now, &buf);
+    try compare(format, &.{
         .{ .args = &.{ "--geometric=2", "-d", "--write-midx" }, .options = .{ .geometric = 2, .delete = true, .write_midx = true } },
         .{ .args = &.{ "--geometric=3", "-d", "--write-midx", "-b" }, .options = .{ .geometric = 3, .delete = true, .write_midx = true, .write_bitmaps = true } },
         .{ .args = &.{ "-d", "--write-midx" }, .options = .{ .delete = true, .write_midx = true } },
@@ -497,8 +517,8 @@ fn geometricInFormat(format: testgit.RefFormat) !void {
     }, null);
 }
 
-test "--geometric rolls up the packs git's does, and --write-midx indexes the packs git's does" {
-    try testgit.eachRefFormat(geometricInFormat);
+test "--write-midx indexes the packs git's does: geometric, with bitmaps, incremental, all and cruft" {
+    try testgit.eachRefFormat(midxInFormat);
 }
 
 /// The fixture's pack of 3 unreachable objects a promisor pack, and a

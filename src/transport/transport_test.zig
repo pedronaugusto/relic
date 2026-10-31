@@ -2147,7 +2147,13 @@ fn havesHeard(gpa: Allocator, io: Io, trace_path: []const u8) ![]u8 {
     return out.toOwnedSlice(gpa);
 }
 
-test "a fetch offers the haves git's negotiators offer: consecutive, skipping and noop, restricted and included, in v2 and v0" {
+/// A fetch's protocol version and the settings that choose what it offers.
+const Negotiation = struct { version: []const u8, settings: []const [2][]const u8 = &.{} };
+
+/// Each of `cases` fetched by git and by relic from one remote over ssh, the haves
+/// each offered compared. A fetch is several processes of git's, slow to start on
+/// macOS and Windows, so a test holds a few.
+fn expectHavesOffered(cases: []const Negotiation) !void {
     const gpa = testing.allocator;
     const io = testing.io;
     var tools = testing.tmpDir(.{ .iterate = true });
@@ -2165,20 +2171,6 @@ test "a fetch offers the haves git's negotiators offer: consecutive, skipping an
     const url = try gpa.print("example.invalid:{s}", .{source_path});
     defer gpa.free(url);
 
-    const Case = struct { version: []const u8, settings: []const [2][]const u8 = &.{} };
-    const cases = [_]Case{
-        .{ .version = "2" },
-        .{ .version = "0" },
-        .{ .version = "2", .settings = &.{.{ "fetch.negotiationAlgorithm", "skipping" }} },
-        .{ .version = "0", .settings = &.{.{ "fetch.negotiationAlgorithm", "skipping" }} },
-        .{ .version = "2", .settings = &.{.{ "feature.experimental", "true" }} },
-        .{ .version = "2", .settings = &.{.{ "fetch.negotiationAlgorithm", "noop" }} },
-        .{ .version = "0", .settings = &.{.{ "fetch.negotiationAlgorithm", "noop" }} },
-        .{ .version = "2", .settings = &.{.{ "remote.origin.negotiationRestrict", "refs/heads/other" }} },
-        .{ .version = "0", .settings = &.{.{ "remote.origin.negotiationRestrict", "heads/o*" }} },
-        .{ .version = "2", .settings = &.{ .{ "remote.origin.negotiationInclude", "refs/heads/other" }, .{ "fetch.negotiationAlgorithm", "skipping" } } },
-        .{ .version = "0", .settings = &.{.{ "remote.origin.negotiationInclude", "refs/heads/other" }} },
-    };
     for (cases, 0..) |case, n| {
         var heard: [2][]u8 = undefined;
         for (0..2) |i| {
@@ -2216,6 +2208,32 @@ test "a fetch offers the haves git's negotiators offer: consecutive, skipping an
             return err;
         };
     }
+}
+
+test "a fetch offers the haves git's negotiators offer: consecutive and skipping, in v2 and v0, and by feature.experimental" {
+    try expectHavesOffered(&.{
+        .{ .version = "2" },
+        .{ .version = "0" },
+        .{ .version = "2", .settings = &.{.{ "fetch.negotiationAlgorithm", "skipping" }} },
+        .{ .version = "0", .settings = &.{.{ "fetch.negotiationAlgorithm", "skipping" }} },
+        .{ .version = "2", .settings = &.{.{ "feature.experimental", "true" }} },
+    });
+}
+
+test "a fetch offers the haves git's negotiators offer: noop, and restricted to some refs, in v2 and v0" {
+    try expectHavesOffered(&.{
+        .{ .version = "2", .settings = &.{.{ "fetch.negotiationAlgorithm", "noop" }} },
+        .{ .version = "0", .settings = &.{.{ "fetch.negotiationAlgorithm", "noop" }} },
+        .{ .version = "2", .settings = &.{.{ "remote.origin.negotiationRestrict", "refs/heads/other" }} },
+        .{ .version = "0", .settings = &.{.{ "remote.origin.negotiationRestrict", "heads/o*" }} },
+    });
+}
+
+test "a fetch offers the haves git's negotiators offer: the refs included, in v2 and v0" {
+    try expectHavesOffered(&.{
+        .{ .version = "2", .settings = &.{ .{ "remote.origin.negotiationInclude", "refs/heads/other" }, .{ "fetch.negotiationAlgorithm", "skipping" } } },
+        .{ .version = "0", .settings = &.{.{ "remote.origin.negotiationInclude", "refs/heads/other" }} },
+    });
 }
 
 test "several remotes are fetched as git fetches them: fetch.all and skipFetchAll, a group, several names, and fetch.parallel" {
@@ -2531,34 +2549,26 @@ fn expectSameRecursiveClone(gpa: Allocator, io: Io, world: *SubmoduleWorld) !voi
     try testing.expectEqualStrings(statuses[0], statuses[1]);
 }
 
-test "a clone with --recurse-submodules is git's: the pathspecs active, shallow and filtered submodules, and the lenders' own lending to them" {
+/// A recursive clone by git and by relic of `SubmoduleWorld`, as git's options and relic's ask.
+const RecursiveClone = struct {
+    git_args: []const []const u8,
+    options: clone_mod.Options,
+    /// A recursive clone by git, at `lender`, borrowed from.
+    lender: bool = false,
+    config: []const config_mod.Sources.Pair = &.{},
+    refused: ?anyerror = null,
+    /// `inner` moved on past what the gitlinks record, first.
+    advanced: bool = false,
+};
+
+/// Each of `cases` against git's, each in a world of its own. A clone with its
+/// submodules is several processes of git's and a comparison of every
+/// repository, slow to start on macOS and Windows, so a test holds a few.
+fn expectRecursiveClones(cases: []const RecursiveClone) !void {
     const gpa = testing.allocator;
     const io = testing.io;
     var env = try testremote.environ(gpa);
     defer env.deinit();
-    const Case = struct {
-        git_args: []const []const u8,
-        options: clone_mod.Options,
-        /// A recursive clone by git, at `lender`, borrowed from.
-        lender: bool = false,
-        config: []const config_mod.Sources.Pair = &.{},
-        refused: ?anyerror = null,
-        /// `inner` moved on past what the gitlinks record, first.
-        advanced: bool = false,
-    };
-    const lender_ref = [_]clone_mod.Reference{.{ .path = "LENDER" }};
-    const cases = [_]Case{
-        .{ .git_args = &.{"--recurse-submodules"}, .options = .{ .who = test_who, .recurse_submodules = &.{} } },
-        .{ .git_args = &.{"--recurse-submodules=lib"}, .options = .{ .who = test_who, .recurse_submodules = &.{"lib"} } },
-        .{ .git_args = &.{ "--recurse-submodules", "--shallow-submodules" }, .options = .{ .who = test_who, .recurse_submodules = &.{}, .shallow_submodules = true } },
-        .{ .git_args = &.{ "--recurse-submodules", "--filter=blob:none", "--also-filter-submodules" }, .options = .{ .who = test_who, .recurse_submodules = &.{}, .filter = "blob:none", .filter_submodules = true } },
-        .{ .git_args = &.{ "-c", "clone.filterSubmodules=true", "--recurse-submodules", "--filter=blob:none" }, .options = .{ .who = test_who, .recurse_submodules = &.{}, .filter = "blob:none" }, .config = &.{.{ .name = "clone.filterSubmodules", .value = "true" }} },
-        .{ .git_args = &.{ "--recurse-submodules", "--reference", "LENDER" }, .options = .{ .who = test_who, .recurse_submodules = &.{}, .reference = &lender_ref }, .lender = true },
-        .{ .git_args = &.{ "--recurse-submodules", "--also-filter-submodules" }, .options = .{ .who = test_who, .recurse_submodules = &.{}, .filter_submodules = true }, .refused = error.FilterSubmodulesAlone },
-        .{ .git_args = &.{ "--recurse-submodules", "--remote-submodules" }, .options = .{ .who = test_who, .recurse_submodules = &.{}, .remote_submodules = true }, .advanced = true },
-        .{ .git_args = &.{"--remote-submodules"}, .options = .{ .who = test_who, .remote_submodules = true }, .advanced = true },
-        .{ .git_args = &.{ "--recurse-submodules", "--jobs", "2" }, .options = .{ .who = test_who, .recurse_submodules = &.{}, .submodule_jobs = 2 }, .advanced = true },
-    };
     for (cases) |case| {
         var world = try SubmoduleWorld.init(gpa, io);
         defer world.deinit(gpa);
@@ -2612,6 +2622,33 @@ test "a clone with --recurse-submodules is git's: the pathspecs active, shallow 
         repo.deinit(io);
         try expectSameRecursiveClone(gpa, io, &world);
     }
+}
+
+const lender_ref = [_]clone_mod.Reference{.{ .path = "LENDER" }};
+
+test "a clone with --recurse-submodules is git's: every submodule, the pathspecs active, and shallow submodules" {
+    try expectRecursiveClones(&.{
+        .{ .git_args = &.{"--recurse-submodules"}, .options = .{ .who = test_who, .recurse_submodules = &.{} } },
+        .{ .git_args = &.{"--recurse-submodules=lib"}, .options = .{ .who = test_who, .recurse_submodules = &.{"lib"} } },
+        .{ .git_args = &.{ "--recurse-submodules", "--shallow-submodules" }, .options = .{ .who = test_who, .recurse_submodules = &.{}, .shallow_submodules = true } },
+    });
+}
+
+test "a clone with --recurse-submodules is git's: filtered submodules, by the option and by clone.filterSubmodules, refused alone, and the lenders' own lending to them" {
+    try expectRecursiveClones(&.{
+        .{ .git_args = &.{ "--recurse-submodules", "--filter=blob:none", "--also-filter-submodules" }, .options = .{ .who = test_who, .recurse_submodules = &.{}, .filter = "blob:none", .filter_submodules = true } },
+        .{ .git_args = &.{ "-c", "clone.filterSubmodules=true", "--recurse-submodules", "--filter=blob:none" }, .options = .{ .who = test_who, .recurse_submodules = &.{}, .filter = "blob:none" }, .config = &.{.{ .name = "clone.filterSubmodules", .value = "true" }} },
+        .{ .git_args = &.{ "--recurse-submodules", "--reference", "LENDER" }, .options = .{ .who = test_who, .recurse_submodules = &.{}, .reference = &lender_ref }, .lender = true },
+        .{ .git_args = &.{ "--recurse-submodules", "--also-filter-submodules" }, .options = .{ .who = test_who, .recurse_submodules = &.{}, .filter_submodules = true }, .refused = error.FilterSubmodulesAlone },
+    });
+}
+
+test "a clone with --recurse-submodules is git's: submodules at their remote-tracking branches, with and without recursing, and cloned two at a time" {
+    try expectRecursiveClones(&.{
+        .{ .git_args = &.{ "--recurse-submodules", "--remote-submodules" }, .options = .{ .who = test_who, .recurse_submodules = &.{}, .remote_submodules = true }, .advanced = true },
+        .{ .git_args = &.{"--remote-submodules"}, .options = .{ .who = test_who, .remote_submodules = true }, .advanced = true },
+        .{ .git_args = &.{ "--recurse-submodules", "--jobs", "2" }, .options = .{ .who = test_who, .recurse_submodules = &.{}, .submodule_jobs = 2 }, .advanced = true },
+    });
 }
 
 test "a clone with --recurse-submodules makes each submodule from the default template, as git's submodule clones take init.templateDir, and runs the template's post-checkout in each" {
@@ -2757,40 +2794,34 @@ test "a clone with --recurse-submodules runs post-checkout in the superproject a
     }
 }
 
-test "submodule update --remote is git's: each submodule fetched and checked out at its remote-tracking branch, by its branch setting, the superproject's own, without a fetch, and refused where git dies" {
+/// A `submodule update --remote` in twins of `SubmoduleWorld`'s superproject, by git and by relic.
+const RemoteUpdate = struct {
+    /// Where `inner`'s new commit goes.
+    ref: []const u8 = "refs/heads/main",
+    config: []const [2][]const u8 = &.{},
+    /// Written into each twin's `.gitmodules`.
+    gitmodules: []const [2][]const u8 = &.{},
+    git_args: []const []const u8 = &.{},
+    recursive: bool = false,
+    fetch: bool = true,
+    /// `vendor/inner` fetched once `inner` has moved, and `inner`
+    /// moved again: a remote-tracking branch behind the remote's.
+    prefetch: bool = false,
+    /// The superproject's `HEAD` detached first.
+    detached: bool = false,
+    refused: ?anyerror = null,
+    /// What the refusal names.
+    setting: []const u8 = "",
+};
+
+/// Each of `cases` against git's, in one world, its twins made again for each. An
+/// update fetches in each submodule, several processes of git's, slow to start on
+/// macOS and Windows, so a test holds a few.
+fn expectRemoteUpdates(cases: []const RemoteUpdate) !void {
     const gpa = testing.allocator;
     const io = testing.io;
     var env = try testremote.environ(gpa);
     defer env.deinit();
-    const Case = struct {
-        /// Where `inner`'s new commit goes.
-        ref: []const u8 = "refs/heads/main",
-        config: []const [2][]const u8 = &.{},
-        /// Written into each twin's `.gitmodules`.
-        gitmodules: []const [2][]const u8 = &.{},
-        git_args: []const []const u8 = &.{},
-        recursive: bool = false,
-        fetch: bool = true,
-        /// `vendor/inner` fetched once `inner` has moved, and `inner`
-        /// moved again: a remote-tracking branch behind the remote's.
-        prefetch: bool = false,
-        /// The superproject's `HEAD` detached first.
-        detached: bool = false,
-        refused: ?anyerror = null,
-        /// What the refusal names.
-        setting: []const u8 = "",
-    };
-    const cases = [_]Case{
-        .{},
-        .{ .git_args = &.{"--recursive"}, .recursive = true },
-        .{ .ref = "refs/heads/side", .config = &.{.{ "submodule.vendor/inner.branch", "side" }} },
-        .{ .ref = "refs/heads/side", .gitmodules = &.{.{ "submodule.vendor/inner.branch", "side" }} },
-        .{ .config = &.{.{ "submodule.vendor/inner.branch", "." }} },
-        .{ .prefetch = true },
-        .{ .git_args = &.{"--no-fetch"}, .fetch = false, .prefetch = true },
-        .{ .config = &.{.{ "submodule.vendor/inner.branch", "." }}, .detached = true, .refused = error.NoSuperprojectBranch, .setting = "HEAD" },
-        .{ .config = &.{.{ "submodule.vendor/inner.branch", "gone" }}, .refused = error.NoRemoteRevision, .setting = "refs/remotes/origin/gone" },
-    };
     const twins = [_][]const u8{ "by-git", "by-relic" };
     var world = try SubmoduleWorld.init(gpa, io);
     defer world.deinit(gpa);
@@ -2847,6 +2878,25 @@ test "submodule update --remote is git's: each submodule fetched and checked out
         _ = try updated;
         try expectSameRecursiveClone(gpa, io, &world);
     }
+}
+
+test "submodule update --remote is git's: each submodule fetched and checked out at its remote-tracking branch, recursively, by its branch setting in the config or .gitmodules, and the superproject's own" {
+    try expectRemoteUpdates(&.{
+        .{},
+        .{ .git_args = &.{"--recursive"}, .recursive = true },
+        .{ .ref = "refs/heads/side", .config = &.{.{ "submodule.vendor/inner.branch", "side" }} },
+        .{ .ref = "refs/heads/side", .gitmodules = &.{.{ "submodule.vendor/inner.branch", "side" }} },
+        .{ .config = &.{.{ "submodule.vendor/inner.branch", "." }} },
+    });
+}
+
+test "submodule update --remote is git's: a remote-tracking branch behind the remote's, without a fetch, and refused where git dies" {
+    try expectRemoteUpdates(&.{
+        .{ .prefetch = true },
+        .{ .git_args = &.{"--no-fetch"}, .fetch = false, .prefetch = true },
+        .{ .config = &.{.{ "submodule.vendor/inner.branch", "." }}, .detached = true, .refused = error.NoSuperprojectBranch, .setting = "HEAD" },
+        .{ .config = &.{.{ "submodule.vendor/inner.branch", "gone" }}, .refused = error.NoRemoteRevision, .setting = "refs/remotes/origin/gone" },
+    });
 }
 
 test "submodules cloned several at once: one whose clone fails twice is named and nothing is checked out, as git's update_clone stops; a negative submodule.fetchJobs is refused" {
@@ -3023,31 +3073,27 @@ test "an update goes on past submodules whose checkout git refuses and fails at 
     try expectSameRecursiveClone(gpa, io, &world);
 }
 
-test "a pull updates the submodules as git's does: checked out after a merge, rebased after a rebase, by --recurse-submodules or submodule.recurse, and a rebase of commits that record one refused" {
+/// A pull into a twin of `SubmoduleWorld`'s superproject, by git and by relic, as git's options and relic's ask.
+const SubmodulePull = struct {
+    git_args: []const []const u8,
+    mode: ?pull_mod.Mode = null,
+    recurse: ?@import("../submodule/changes.zig").Recurse = null,
+    config: []const [2][]const u8 = &.{},
+    /// The pull updates the submodules.
+    updates: bool = true,
+    /// A commit of the twin's own records `vendor/inner` elsewhere.
+    local_record: bool = false,
+    refused: ?anyerror = null,
+};
+
+/// Each of `cases` against git's, in one world, its twins made again for each. A
+/// pull with its submodules is several processes of git's, slow to start on macOS
+/// and Windows, so a test holds a few.
+fn expectSubmodulePulls(cases: []const SubmodulePull) !void {
     const gpa = testing.allocator;
     const io = testing.io;
     var env = try testremote.environ(gpa);
     defer env.deinit();
-    const Case = struct {
-        git_args: []const []const u8,
-        mode: ?pull_mod.Mode = null,
-        recurse: ?@import("../submodule/changes.zig").Recurse = null,
-        config: []const [2][]const u8 = &.{},
-        /// The pull updates the submodules.
-        updates: bool = true,
-        /// A commit of the twin's own records `vendor/inner` elsewhere.
-        local_record: bool = false,
-        refused: ?anyerror = null,
-    };
-    const cases = [_]Case{
-        .{ .git_args = &.{"--recurse-submodules"}, .recurse = .on },
-        .{ .git_args = &.{ "--rebase", "--recurse-submodules" }, .mode = .rebase, .recurse = .on },
-        .{ .git_args = &.{"--recurse-submodules=on-demand"}, .recurse = .on_demand },
-        .{ .git_args = &.{}, .config = &.{.{ "submodule.recurse", "true" }} },
-        .{ .git_args = &.{"--no-recurse-submodules"}, .recurse = .off, .config = &.{.{ "submodule.recurse", "true" }}, .updates = false },
-        .{ .git_args = &.{"--rebase"}, .mode = .rebase, .updates = false },
-        .{ .git_args = &.{ "--rebase", "--recurse-submodules" }, .mode = .rebase, .recurse = .on, .local_record = true, .refused = error.LocallyRecordedSubmoduleChanges },
-    };
     const twins = [_][]const u8{ "by-git", "by-relic" };
     var world = try SubmoduleWorld.init(gpa, io);
     defer world.deinit(gpa);
@@ -3119,6 +3165,23 @@ test "a pull updates the submodules as git's does: checked out after a merge, re
     }
 }
 
+test "a pull updates the submodules as git's does: checked out after a merge, rebased after a rebase, by --recurse-submodules and on demand" {
+    try expectSubmodulePulls(&.{
+        .{ .git_args = &.{"--recurse-submodules"}, .recurse = .on },
+        .{ .git_args = &.{ "--rebase", "--recurse-submodules" }, .mode = .rebase, .recurse = .on },
+        .{ .git_args = &.{"--recurse-submodules=on-demand"}, .recurse = .on_demand },
+    });
+}
+
+test "a pull updates the submodules as git's does: by submodule.recurse, not with --no-recurse-submodules or without asking, and a rebase of commits that record one refused" {
+    try expectSubmodulePulls(&.{
+        .{ .git_args = &.{}, .config = &.{.{ "submodule.recurse", "true" }} },
+        .{ .git_args = &.{"--no-recurse-submodules"}, .recurse = .off, .config = &.{.{ "submodule.recurse", "true" }}, .updates = false },
+        .{ .git_args = &.{"--rebase"}, .mode = .rebase, .updates = false },
+        .{ .git_args = &.{ "--rebase", "--recurse-submodules" }, .mode = .rebase, .recurse = .on, .local_record = true, .refused = error.LocallyRecordedSubmoduleChanges },
+    });
+}
+
 /// `world`'s twin, with every repository's pushes going to its bare
 /// repository, and a new commit on the branch of `inner` (within `lib`),
 /// of `lib` and of the superproject, each recording the one below.
@@ -3139,27 +3202,24 @@ fn changeUnderTwin(gpa: Allocator, io: Io, world: *SubmoduleWorld) !void {
     }
 }
 
-test "a push goes into the submodules as git's transport_push does: check refuses, on-demand pushes them first, only pushes them alone, a submodule's only is on-demand" {
+/// A push from `twin` with changes under it, by git and by relic, as git's options and relic's ask.
+const SubmodulePush = struct {
+    git_args: []const []const u8,
+    options: push_mod.Options,
+    /// Settings in the superproject, and in `lib`.
+    config: []const [2][]const u8 = &.{},
+    lib_config: []const [2][]const u8 = &.{},
+    refused: ?anyerror = null,
+};
+
+/// Each of `cases` against git's, each in two worlds of its own. A push into the
+/// submodules is several processes of git's and a listing of every upstream, slow
+/// to start on macOS and Windows, so a test holds a few.
+fn expectSubmodulePushes(cases: []const SubmodulePush) !void {
     const gpa = testing.allocator;
     const io = testing.io;
     var env = try testremote.environ(gpa);
     defer env.deinit();
-    const Case = struct {
-        git_args: []const []const u8,
-        options: push_mod.Options,
-        /// Settings in the superproject, and in `lib`.
-        config: []const [2][]const u8 = &.{},
-        lib_config: []const [2][]const u8 = &.{},
-        refused: ?anyerror = null,
-    };
-    const cases = [_]Case{
-        .{ .git_args = &.{"--recurse-submodules=check"}, .options = .{ .who = test_who, .recurse_submodules = .check }, .refused = error.UnpushedSubmodules },
-        .{ .git_args = &.{"--recurse-submodules=on-demand"}, .options = .{ .who = test_who, .recurse_submodules = .on_demand } },
-        .{ .git_args = &.{"--recurse-submodules=only"}, .options = .{ .who = test_who, .recurse_submodules = .only } },
-        .{ .git_args = &.{}, .options = .{ .who = test_who }, .config = &.{.{ "push.recurseSubmodules", "on-demand" }}, .lib_config = &.{.{ "push.recurseSubmodules", "only" }} },
-        .{ .git_args = &.{}, .options = .{ .who = test_who }, .config = &.{.{ "submodule.recurse", "true" }} },
-        .{ .git_args = &.{"--no-recurse-submodules"}, .options = .{ .who = test_who, .recurse_submodules = .no }, .config = &.{.{ "push.recurseSubmodules", "check" }} },
-    };
     for (cases) |case| {
         var worlds: [2]SubmoduleWorld = .{ try SubmoduleWorld.init(gpa, io), try SubmoduleWorld.init(gpa, io) };
         defer for (&worlds) |*w| w.deinit(gpa);
@@ -3209,6 +3269,27 @@ test "a push goes into the submodules as git's transport_push does: check refuse
             try testing.expectEqualStrings(listed[0], listed[1]);
         }
     }
+}
+
+test "a push goes into the submodules as git's transport_push does: check refuses, on-demand pushes them first" {
+    try expectSubmodulePushes(&.{
+        .{ .git_args = &.{"--recurse-submodules=check"}, .options = .{ .who = test_who, .recurse_submodules = .check }, .refused = error.UnpushedSubmodules },
+        .{ .git_args = &.{"--recurse-submodules=on-demand"}, .options = .{ .who = test_who, .recurse_submodules = .on_demand } },
+    });
+}
+
+test "a push goes into the submodules as git's transport_push does: only pushes them alone, and a submodule's only is on-demand" {
+    try expectSubmodulePushes(&.{
+        .{ .git_args = &.{"--recurse-submodules=only"}, .options = .{ .who = test_who, .recurse_submodules = .only } },
+        .{ .git_args = &.{}, .options = .{ .who = test_who }, .config = &.{.{ "push.recurseSubmodules", "on-demand" }}, .lib_config = &.{.{ "push.recurseSubmodules", "only" }} },
+    });
+}
+
+test "a push goes into the submodules as git's transport_push does: by submodule.recurse, and not with --no-recurse-submodules over push.recurseSubmodules" {
+    try expectSubmodulePushes(&.{
+        .{ .git_args = &.{}, .options = .{ .who = test_who }, .config = &.{.{ "submodule.recurse", "true" }} },
+        .{ .git_args = &.{"--no-recurse-submodules"}, .options = .{ .who = test_who, .recurse_submodules = .no }, .config = &.{.{ "push.recurseSubmodules", "check" }} },
+    });
 }
 
 test "a push to a remote group pushes each of its remotes in turn, as git 2.55's push_multiple does, and refuses --atomic across them" {
