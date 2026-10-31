@@ -45,8 +45,9 @@ test "CVE-2017-1000117, t5813-proto-disable-ssh 'hostnames starting with dash ar
         }));
     }
     // t5532-fetch-proxy 'funny hostnames are rejected before running
-    // proxy': relic has no git:// client, so no proxy runs at all.
-    try std.testing.expectError(error.UnsupportedTransport, transport.Session.open(gpa, io, "git://-remote/repo.git", .{ .service = .upload_pack, .kind = .sha1 }, .{
+    // proxy': the proxy would read the host as an option.
+    try env.put("GIT_PROXY_COMMAND", ssh);
+    try std.testing.expectError(error.SuspiciousHostname, transport.Session.open(gpa, io, "git://-remote/repo.git", .{ .service = .upload_pack, .kind = .sha1 }, .{
         .programs = .{ .environ = &env },
     }));
     try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "ran", .{}));
