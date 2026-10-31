@@ -415,6 +415,35 @@ pub fn dev(b: *std.Build, tools: type) void {
     // The installer runs only on a hosted runner; its version reading is
     // proved everywhere.
     b.step("check-ci-setup", "Test the hosted tool installer").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = setup.root_module })).step);
+
+    // The encodings' deltas (designs/relic.md §14): the generator runs
+    // Apple's libiconv, so on macOS, and reads glibc's from its source.
+    const host_xenoglyph = p.dependency("xenoglyph", .{ .target = b.graph.host, .optimize = .safe }).module("xenoglyph");
+    const encodings = b.addExecutable(.{ .name = "encodings", .root_module = b.createModule(.{
+        .root_source_file = p.path("tools/encodings.zig"),
+        .target = b.graph.host,
+        .optimize = .safe,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "xenoglyph", .module = host_xenoglyph },
+            .{ .name = "legacy", .module = b.createModule(.{
+                .root_source_file = p.path("src/text/legacy.zig"),
+                .target = b.graph.host,
+                .optimize = .safe,
+                .imports = &.{.{ .name = "xenoglyph", .module = host_xenoglyph }},
+            }) },
+        },
+    }) });
+    if (b.graph.host.result.os.tag == .macos) {
+        encodings.root_module.linkSystemLibrary("iconv", .{});
+        check_step.dependOn(&encodings.step);
+    }
+    const measure = b.addRunArtifact(encodings);
+    measure.setCwd(p.path("."));
+    if (b.option([]const u8, "glibc-source", "glibc's source, for the encodings step")) |source| measure.addArg(source);
+    measure.addArg("src/text/legacy/tables.zig");
+    measure.has_side_effects = true;
+    b.step("encodings", "Write src/text/legacy/tables.zig from Apple's libiconv and glibc's source (-Dglibc-source)").dependOn(&measure.step);
 }
 
 /// What fetching and pushing over HTTP and Git LFS need, fetched only while

@@ -22,6 +22,8 @@ const object = @import("../object/object.zig");
 const message = @import("../object/message.zig");
 const ft = @import("../checkout/filter_test.zig");
 const encoding = @import("../text.zig").encoding;
+const legacy = @import("../text/legacy.zig");
+const legacy_tables = @import("../text/legacy/tables.zig");
 
 const testing = std.testing;
 
@@ -290,15 +292,6 @@ test "commits in Latin-1 and UTF-8 are written as git log, git shortlog and git 
     }
 }
 
-/// One spelling of each single-byte encoding `encoding.Charset` takes from
-/// the standard, and some of the others.
-const single_byte_names = [_][]const u8{
-    "IBM866",     "ISO-8859-2",   "latin3",       "ISO-8859-4",  "cyrillic",     "ISO-8859-6",  "greek",        "ISO-8859-8",
-    "ISO-8859-9", "ISO-8859-10",  "ISO-8859-11",  "ISO-8859-13", "ISO-8859-14",  "ISO-8859-15", "ISO-8859-16",  "KOI8-R",
-    "KOI8-U",     "macintosh",    "TIS-620",      "windows-874", "windows-1250", "CP1251",      "windows-1252", "windows-1253",
-    "cp1254",     "windows-1256", "windows-1257",
-};
-
 /// A commit of `body` under `header_encoding` (none when null) on an empty tree.
 fn commitOf(a: std.mem.Allocator, io: Io, r: *testgit.Repo, header_encoding: ?[]const u8, body: []const u8) ![]u8 {
     const empty = try hashObject(a, io, r, "tree", "");
@@ -323,7 +316,7 @@ fn expectLoggedAlike(a: std.mem.Allocator, io: Io, r: *testgit.Repo, hex: []cons
     };
 }
 
-test "each single-byte encoding is converted as git log converts it: every byte both iconvs define, every character both map, and a byte or character neither has kept as it was" {
+test "each encoding is converted as git log converts it: every sequence both iconvs read, every character both write, and a byte or character neither has kept as it was" {
     const gpa = testing.allocator;
     const io = testing.io;
     var r = try testgit.Repo.init(gpa, io, &.{});
@@ -331,45 +324,105 @@ test "each single-byte encoding is converted as git log converts it: every byte 
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
-    for (single_byte_names) |name| {
-        const table = (encoding.Charset.fromName(name) orelse return error.TestUnexpectedResult).single.table();
-        // Every byte past ASCII the encoding defines, sixteen to a line, in a
-        // commit that names the encoding, read out in UTF-8.
-        var bytes: std.ArrayList(u8) = .empty;
-        var chars: std.ArrayList(u8) = .empty;
-        var refused: ?u8 = null;
-        for (table, 0..) |entry, i| {
-            if (i < 0xa0) continue;
-            const byte: u8 = @intCast(i);
-            const cp = entry orelse {
-                refused = refused orelse byte;
-                continue;
-            };
-            try bytes.append(a, byte);
-            var buf: [4]u8 = undefined;
-            try chars.appendSlice(a, buf[0..try std.unicode.utf8Encode(cp, &buf)]);
-            if (bytes.items.len % 16 == 0) {
-                try bytes.append(a, '\n');
-                try chars.append(a, '\n');
+    var seen: std.AutoHashMapUnmanaged(*const legacy.Legacy, void) = .empty;
+    for (legacy_tables.names) |entry| {
+        const name, const l = entry;
+        if ((try seen.getOrPut(a, l)).found_existing) continue;
+        // Every sequence past ASCII relic reads, and the ASCII it reads
+        // otherwise, each after a space so that none composes with the one
+        // before, in a commit that names the encoding, read out in UTF-8.
+        var bytes: Writing = .{};
+        var chars: Writing = .{};
+        var b: [4]u8 = undefined;
+        for (0x21..0x100) |b0| {
+            b[0] = @intCast(b0);
+            const alone = try readOne(a, l, b[0..1], &bytes, &chars);
+            // two bytes: a lead and its trail, or a letter and the mark it
+            // composes with
+            if (alone and l.longest == 1) continue;
+            for (0x21..0x100) |b1| {
+                b[1] = @intCast(b1);
+                if (try readOne(a, l, b[0..2], &bytes, &chars) or alone) continue;
+                for (0xa1..0xff) |b2| {
+                    if (l.encoding != .euc_jp) break;
+                    b[2] = @intCast(b2);
+                    _ = try readOne(a, l, b[0..3], &bytes, &chars);
+                }
+                // GB18030's four bytes, one in 61 of them
+                for (0x81..0xff) |b2| for (0x30..0x3a) |b3| {
+                    if (l.encoding != .gb18030 or b1 > 0x39) break;
+                    if ((b0 * 7 + b1 * 3 + b2 * 5 + b3) % 61 != 0) continue;
+                    b[2] = @intCast(b2);
+                    b[3] = @intCast(b3);
+                    _ = try readOne(a, l, b[0..4], &bytes, &chars);
+                };
             }
         }
-        const subject = try a.print("every byte of {s}\n\n", .{name});
-        try expectLoggedAlike(a, io, &r, try commitOf(a, io, &r, name, try a.print("{s}{s}\n", .{ subject, bytes.items })), null, name);
-        // The same characters in a UTF-8 commit, read out in the encoding.
-        try expectLoggedAlike(a, io, &r, try commitOf(a, io, &r, null, try a.print("{s}{s}\n", .{ subject, chars.items })), name, name);
-        // A byte the encoding refuses, and a character none of these maps
-        // and Apple's iconv has no transliteration for (U+1F600; U+4E00 it
-        // writes as "gal." in ISO-8859-2): git keeps the message as it was.
-        // Where Apple's iconv decodes a byte glibc's does not (windows-874's
-        // 0xDB to 0xDE and 0xFC to 0xFF, TIS-620's 0x80 to 0xA0, macintosh's
-        // three), relic refuses it and the Mac's git converts it: no byte
-        // there is one both refuse.
-        const apple_decodes_more = for ([_][]const u8{ "windows-874", "TIS-620", "macintosh" }) |n| {
-            if (std.mem.eql(u8, n, name)) break true;
-        } else false;
-        if (!apple_decodes_more) if (refused) |byte| try expectLoggedAlike(a, io, &r, try commitOf(a, io, &r, name, try a.print("refused {x:0>2}: {c}\n", .{ byte, byte })), null, name);
+        const subject = try a.print("every sequence of {s}\n\n", .{name});
+        try expectLoggedAlike(a, io, &r, try commitOf(a, io, &r, name, try a.print("{s}{s}\n", .{ subject, bytes.list.items })), null, name);
+        // Every character relic writes, one in 31 past the Basic
+        // Multilingual Plane, in a UTF-8 commit read out in the encoding.
+        var written: Writing = .{};
+        var cp: u21 = 0x21;
+        while (cp <= 0x10ffff) : (cp += 1) {
+            if (cp >= 0xd800 and cp <= 0xdfff) continue;
+            if (cp > 0xffff and cp % 31 != 0) continue;
+            var i: usize = 0;
+            var out: [4]u8 = undefined;
+            _ = legacy.encodeAt(l, &.{cp}, &i, &out) orelse continue;
+            var utf8: [4]u8 = undefined;
+            try written.add(a, utf8[0..try std.unicode.utf8Encode(cp, &utf8)]);
+        }
+        try expectLoggedAlike(a, io, &r, try commitOf(a, io, &r, null, try a.print("{s}{s}\n", .{ subject, written.list.items })), name, name);
+        // A byte no sequence begins with, and a character none of these
+        // writes that Apple's iconv has no transliteration for (U+1F600;
+        // U+4E00 it writes as "gal." in ISO-8859-2): git keeps the message
+        // as it was. Not a byte Apple's iconv reads and glibc's does not,
+        // which relic refuses and the Mac's git converts: windows-874's
+        // 0xFF, and every byte glibc's KOI-8 lacks, which Apple's reads as
+        // KOI8-R's.
+        var refused: ?u8 = null;
+        if (!std.mem.eql(u8, name, "koi8")) for ([_]u8{ 0xff, 0x81, 0xa0, 0x80 }) |byte| {
+            if (byte == 0xff and std.mem.eql(u8, name, "windows-874")) continue;
+            var i: usize = 0;
+            var cps: [2]u21 = undefined;
+            if (legacy.decodeAt(l, &.{ byte, 0x20 }, &i, &cps) == null) {
+                refused = byte;
+                break;
+            }
+        };
+        if (refused) |byte| try expectLoggedAlike(a, io, &r, try commitOf(a, io, &r, name, try a.print("refused {x:0>2}: {c}\n", .{ byte, byte })), null, name);
         try expectLoggedAlike(a, io, &r, try commitOf(a, io, &r, null, "unmappable \xf0\x9f\x98\x80\n"), name, name);
     }
+}
+
+/// Text built a piece at a time, each after a space, sixteen to a line.
+const Writing = struct {
+    list: std.ArrayList(u8) = .empty,
+    count: usize = 0,
+
+    fn add(w: *Writing, a: std.mem.Allocator, piece: []const u8) !void {
+        try w.list.append(a, if (w.count % 16 == 15) '\n' else ' ');
+        try w.list.appendSlice(a, piece);
+        w.count += 1;
+    }
+};
+
+/// Whether relic reads `seq` as one sequence; if so it and its characters
+/// are added.
+fn readOne(a: std.mem.Allocator, l: *const legacy.Legacy, seq: []const u8, bytes: *Writing, chars: *Writing) !bool {
+    var i: usize = 0;
+    var cps: [2]u21 = undefined;
+    const n = legacy.decodeAt(l, seq, &i, &cps) orelse return false;
+    if (i != seq.len) return false;
+    // ASCII read as itself is the commit's own text.
+    if (seq.len == 1 and seq[0] < 0x80 and n == 1 and cps[0] == seq[0]) return true;
+    var utf8: [8]u8 = undefined;
+    var len: usize = 0;
+    for (cps[0..n]) |cp| len += try std.unicode.utf8Encode(cp, utf8[len..]);
+    try bytes.add(a, seq);
+    try chars.add(a, utf8[0..len]);
+    return true;
 }
 
 test "a picked commit and a new one are in i18n.commitEncoding, as git's are" {
