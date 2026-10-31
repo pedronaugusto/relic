@@ -437,6 +437,7 @@ const example_sources = [_][]const u8{
 };
 
 /// `-Dhttp`, as `dev` read it, passed on to relic.
+// aegis: no-danger(A007): the build runner configures on one thread; `dev` sets it before anything reads it, and preflight's bench imports callback takes no value to carry it
 var http_option: bool = true;
 
 /// relic as the development build has it: the package, with the option passed on.
