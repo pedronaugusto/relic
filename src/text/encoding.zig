@@ -21,7 +21,9 @@
 //! Text: a commit's message in its `encoding`, log output in
 //! `i18n.logOutputEncoding`, a mail in its `charset` (`reencode`, git's
 //! `reencode_string_len`, and `same`, its `same_encoding`), for the
-//! character sets `Charset` names.
+//! character sets `Charset` names: UTF-8, ASCII, Latin-1 and the WHATWG
+//! standard's single-byte encodings (xenoglyph's), each as both of git's
+//! iconvs read it, Apple's libiconv and glibc's (designs/relic.md §14).
 //!
 //! Names: on macOS, under `core.precomposeUnicode`, a name read from a
 //! directory in its decomposed spelling, composed as git's `readdir`
@@ -102,19 +104,22 @@ pub fn same(x: ?[]const u8, y: ?[]const u8) bool {
 
 /// The character sets commit messages, log output and mail are converted
 /// between, as git converts them with iconv (`reencode_string_len`): text
-/// in which every ASCII byte is itself. Another name is one this package
-/// does not convert, which `reencode` refuses rather than leave the text
-/// unconverted where git would convert it.
-pub const Charset = enum {
+/// in which every ASCII byte is itself. Each is what Apple's libiconv and
+/// glibc's both make of its name; a name either refuses, or whose table
+/// they disagree on, is one this package does not convert, which `reencode`
+/// refuses rather than leave the text unconverted where git would convert it.
+pub const Charset = union(enum) {
     utf8,
     ascii,
     latin1,
+    /// One of the standard's single-byte encodings.
+    single: Single,
 
-    /// The spellings iconv takes for each, compared ignoring case; any
+    /// The spellings both iconvs take for each, compared ignoring case; any
     /// `utf` name `isUtf8` says is UTF-8 is UTF-8 too, as git's
     /// `fallback_encoding` makes it.
     const ascii_names = [_][]const u8{ "US-ASCII", "ASCII", "ANSI_X3.4-1968", "ISO646-US", "US", "CSASCII", "ISO-IR-6", "IBM367", "CP367" };
-    const latin1_names = [_][]const u8{ "ISO-8859-1", "ISO8859-1", "ISO_8859-1", "ISO_8859-1:1987", "LATIN1", "LATIN-1", "L1", "CP819", "IBM819", "ISO-IR-100", "CSISOLATIN1" };
+    const latin1_names = [_][]const u8{ "ISO-8859-1", "ISO8859-1", "ISO_8859-1", "ISO_8859-1:1987", "LATIN1", "L1", "CP819", "IBM819", "ISO-IR-100", "CSISOLATIN1" };
 
     /// The character set `name` is, or `null` for one this does not
     /// convert.
@@ -122,8 +127,107 @@ pub const Charset = enum {
         if (isUtf8(name)) return .utf8;
         for (ascii_names) |n| if (std.ascii.eqlIgnoreCase(name, n)) return .ascii;
         for (latin1_names) |n| if (std.ascii.eqlIgnoreCase(name, n)) return .latin1;
+        for (singles) |entry| for (entry.names) |n| if (std.ascii.eqlIgnoreCase(name, n)) return .{ .single = entry.single };
         return null;
     }
+};
+
+/// A single-byte encoding of the WHATWG standard's (xenoglyph's), and what
+/// makes its table the one both iconvs have.
+pub const Single = struct {
+    encoding: xenoglyph.encoding.Encoding,
+    narrowing: Narrowing = .exact,
+
+    /// Each byte's character, `null` for a byte the encoding refuses.
+    pub fn table(s: Single) [256]?u21 {
+        var t: [256]?u21 = undefined;
+        for (&t, 0..) |*entry, i| {
+            const byte: u8 = @intCast(i);
+            entry.* = standardChar(s.encoding, byte);
+            switch (s.narrowing) {
+                .exact => {},
+                .c1_refused => if (byte >= 0x80 and byte <= 0x9f and entry.* == byte) {
+                    entry.* = null;
+                },
+                .c1_identity => if (byte >= 0x80 and byte <= 0x9f) {
+                    entry.* = byte;
+                },
+                .tis620 => if (byte >= 0x80 and byte <= 0xa0) {
+                    entry.* = null;
+                },
+                .macintosh => if (byte == 0x7f or byte == 0xc6 or byte == 0xf0) {
+                    entry.* = null;
+                },
+                .koi8u => switch (byte) {
+                    0xae => entry.* = 0x255d,
+                    0xbe => entry.* = 0x256c,
+                    else => {},
+                },
+            }
+        }
+        return t;
+    }
+};
+
+/// How a standard single-byte table is made both iconvs' (designs/relic.md §14).
+pub const Narrowing = enum {
+    /// The standard's table as it is.
+    exact,
+    /// Each byte the standard decodes as the C1 control of its own value,
+    /// a slot the code page leaves unassigned, refused; that control is
+    /// unmappable.
+    c1_refused,
+    /// 0x80 to 0x9F as U+0080 to U+009F both ways: the ISO-8859 table the
+    /// standard reads as its Windows superset.
+    c1_identity,
+    /// 0x80 to 0xA0 refused: TIS-620 from windows-874.
+    tis620,
+    /// 0x7F, 0xC6 and 0xF0 refused, where the two iconvs disagree.
+    macintosh,
+    /// 0xAE and 0xBE as U+255D and U+256C, KOI8-R's, where the standard
+    /// has the KOI8-RU letters.
+    koi8u,
+};
+
+/// The standard's character for `byte` in `e`, or `null`.
+fn standardChar(e: xenoglyph.encoding.Encoding, byte: u8) ?u21 {
+    var out: [4]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&out);
+    _ = xenoglyph.encoding.decode(e, &.{byte}, &w, .{ .mode = .fatal, .bom = .none }) catch return null;
+    var at: usize = 0;
+    return decodeOne(.utf8, &@splat(null), w.buffered(), &at);
+}
+
+/// The names both iconvs take for each single-byte encoding, measured
+/// against Apple's libiconv and glibc 2.44 (designs/relic.md §14).
+const singles = [_]struct { single: Single, names: []const []const u8 }{
+    .{ .single = .{ .encoding = .ibm866 }, .names = &.{ "866", "cp866", "csibm866", "ibm866" } },
+    .{ .single = .{ .encoding = .iso_8859_2 }, .names = &.{ "csisolatin2", "iso-8859-2", "iso-ir-101", "iso8859-2", "iso_8859-2", "iso_8859-2:1987", "l2", "latin2" } },
+    .{ .single = .{ .encoding = .iso_8859_3 }, .names = &.{ "csisolatin3", "iso-8859-3", "iso-ir-109", "iso8859-3", "iso_8859-3", "iso_8859-3:1988", "l3", "latin3" } },
+    .{ .single = .{ .encoding = .iso_8859_4 }, .names = &.{ "csisolatin4", "iso-8859-4", "iso-ir-110", "iso8859-4", "iso_8859-4", "iso_8859-4:1988", "l4", "latin4" } },
+    .{ .single = .{ .encoding = .iso_8859_5 }, .names = &.{ "csisolatincyrillic", "cyrillic", "iso-8859-5", "iso-ir-144", "iso8859-5", "iso_8859-5", "iso_8859-5:1988" } },
+    .{ .single = .{ .encoding = .iso_8859_6 }, .names = &.{ "arabic", "asmo-708", "csisolatinarabic", "ecma-114", "iso-8859-6", "iso-ir-127", "iso8859-6", "iso_8859-6", "iso_8859-6:1987" } },
+    .{ .single = .{ .encoding = .iso_8859_7 }, .names = &.{ "csisolatingreek", "ecma-118", "elot_928", "greek", "greek8", "iso-8859-7", "iso-ir-126", "iso8859-7", "iso_8859-7", "iso_8859-7:1987" } },
+    .{ .single = .{ .encoding = .iso_8859_8 }, .names = &.{ "csisolatinhebrew", "hebrew", "iso-8859-8", "iso-ir-138", "iso8859-8", "iso_8859-8", "iso_8859-8:1988" } },
+    .{ .single = .{ .encoding = .windows_1254, .narrowing = .c1_identity }, .names = &.{ "csisolatin5", "iso-8859-9", "iso-ir-148", "iso8859-9", "iso_8859-9", "iso_8859-9:1989", "l5", "latin5" } },
+    .{ .single = .{ .encoding = .iso_8859_10 }, .names = &.{ "csisolatin6", "iso-8859-10", "iso-ir-157", "iso8859-10", "l6", "latin6" } },
+    .{ .single = .{ .encoding = .windows_874, .narrowing = .c1_identity }, .names = &.{ "iso-8859-11", "iso8859-11" } },
+    .{ .single = .{ .encoding = .iso_8859_13 }, .names = &.{ "iso-8859-13", "iso8859-13" } },
+    .{ .single = .{ .encoding = .iso_8859_14 }, .names = &.{ "iso-8859-14", "iso8859-14" } },
+    .{ .single = .{ .encoding = .iso_8859_15 }, .names = &.{ "iso-8859-15", "iso8859-15", "iso_8859-15" } },
+    .{ .single = .{ .encoding = .iso_8859_16 }, .names = &.{"iso-8859-16"} },
+    .{ .single = .{ .encoding = .koi8_r }, .names = &.{ "cskoi8r", "koi8-r" } },
+    .{ .single = .{ .encoding = .koi8_u, .narrowing = .koi8u }, .names = &.{"koi8-u"} },
+    .{ .single = .{ .encoding = .macintosh, .narrowing = .macintosh }, .names = &.{ "csmacintosh", "mac", "macintosh" } },
+    .{ .single = .{ .encoding = .windows_874, .narrowing = .tis620 }, .names = &.{"tis-620"} },
+    .{ .single = .{ .encoding = .windows_874, .narrowing = .c1_refused }, .names = &.{"windows-874"} },
+    .{ .single = .{ .encoding = .windows_1250, .narrowing = .c1_refused }, .names = &.{ "cp1250", "windows-1250" } },
+    .{ .single = .{ .encoding = .windows_1251, .narrowing = .c1_refused }, .names = &.{ "cp1251", "windows-1251" } },
+    .{ .single = .{ .encoding = .windows_1252, .narrowing = .c1_refused }, .names = &.{ "cp1252", "windows-1252" } },
+    .{ .single = .{ .encoding = .windows_1253, .narrowing = .c1_refused }, .names = &.{ "cp1253", "windows-1253" } },
+    .{ .single = .{ .encoding = .windows_1254, .narrowing = .c1_refused }, .names = &.{ "cp1254", "windows-1254" } },
+    .{ .single = .{ .encoding = .windows_1256 }, .names = &.{ "cp1256", "windows-1256" } },
+    .{ .single = .{ .encoding = .windows_1257, .narrowing = .c1_refused }, .names = &.{ "cp1257", "windows-1257" } },
 };
 
 /// Why `reencode` converts nothing.
@@ -140,11 +244,13 @@ pub const ReencodeError = error{
 pub fn reencode(a: Allocator, src: []const u8, to: []const u8, from: []const u8) ReencodeError!?[]u8 {
     const in = Charset.fromName(from) orelse return error.UnsupportedEncoding;
     const out_set = Charset.fromName(to) orelse return error.UnsupportedEncoding;
+    const in_table: [256]?u21 = if (in == .single) in.single.table() else @splat(null);
+    const out_table: [256]?u21 = if (out_set == .single) out_set.single.table() else @splat(null);
     var out: std.ArrayList(u8) = try .initCapacity(a, src.len + src.len / 2);
     defer out.deinit(a);
     var i: usize = 0;
     while (i < src.len) {
-        const cp = decodeOne(in, src, &i) orelse return null;
+        const cp = decodeOne(in, &in_table, src, &i) orelse return null;
         switch (out_set) {
             .ascii => {
                 if (cp >= 0x80) return null;
@@ -160,6 +266,7 @@ pub fn reencode(a: Allocator, src: []const u8, to: []const u8, from: []const u8)
                 const encoded = encodeUtf8(cp, &buf) orelse unreachable;
                 try out.appendSlice(a, encoded);
             },
+            .single => try out.append(a, byteOf(&out_table, cp) orelse return null),
         }
     }
     return try out.toOwnedSlice(a);
@@ -280,11 +387,22 @@ fn encodeUtf8(cp: u21, buf: *[4]u8) ?[]const u8 {
     return if (n <= buf.len) buf[0..n] else null;
 }
 
+/// The byte `cp` is in a single-byte `table`, or `null` where it has none.
+fn byteOf(table: *const [256]?u21, cp: u21) ?u8 {
+    for (table, 0..) |entry, i| if (entry == cp) return @intCast(i);
+    return null;
+}
+
 /// The character at `src[i.*]` in `set`, `i` moved past it; `null` for
-/// bytes that are not one.
-fn decodeOne(set: Charset, src: []const u8, i: *usize) ?u21 {
+/// bytes that are not one; `table` is a single-byte set's.
+fn decodeOne(set: Charset, table: *const [256]?u21, src: []const u8, i: *usize) ?u21 {
     const b = src[i.*];
     switch (set) {
+        .single => {
+            const cp = table[b] orelse return null;
+            i.* += 1;
+            return cp;
+        },
         .ascii, .latin1 => {
             if (set == .ascii and b >= 0x80) return null;
             i.* += 1;
@@ -522,6 +640,44 @@ test "text is reencoded as iconv converts it, and stops where iconv stops" {
     try testing.expectError(error.UnsupportedEncoding, reencode(a, "x", "UTF-16", "UTF-8"));
     try testing.expect(same(null, "utf8") and same("UTF-8", "utf-8") and same("latin1", "LATIN1"));
     try testing.expect(!same("latin1", "ISO-8859-1") and !same(null, "ISO-8859-1"));
+}
+
+test "a name both iconvs take is a single-byte encoding as both read it, and a name either refuses is none" {
+    for (singles) |entry| for (entry.names) |n| try testing.expect(Charset.fromName(n).? == .single);
+    try testing.expect(Charset.fromName("LATIN2").? == .single);
+    // Refused by one iconv or both, or a table they disagree on, or not yet built.
+    for ([_][]const u8{ "LATIN-1", "x-cp1252", "iso88592", "l9", "csisolatin9", "koi8", "koi8-ru", "windows-1255", "windows-1258", "shift_jis", "euc-kr", "gbk", " latin2" }) |n| {
+        try testing.expect(Charset.fromName(n) == null);
+    }
+    const cp1252 = Charset.fromName("cp1252").?.single.table();
+    try testing.expectEqual(@as(?u21, 0x20ac), cp1252[0x80]);
+    try testing.expectEqual(@as(?u21, null), cp1252[0x81]);
+    const latin5 = Charset.fromName("latin5").?.single.table();
+    try testing.expectEqual(@as(?u21, 0x80), latin5[0x80]);
+    try testing.expectEqual(@as(?u21, 0x11e), latin5[0xd0]);
+    const thai = Charset.fromName("iso-8859-11").?.single.table();
+    try testing.expectEqual(@as(?u21, 0x85), thai[0x85]);
+    try testing.expectEqual(@as(?u21, null), thai[0xdb]);
+    const tis = Charset.fromName("tis-620").?.single.table();
+    try testing.expectEqual(@as(?u21, null), tis[0xa0]);
+    try testing.expectEqual(@as(?u21, 0xe01), tis[0xa1]);
+    const mac = Charset.fromName("mac").?.single.table();
+    try testing.expectEqual(@as(?u21, null), mac[0xf0]);
+    try testing.expectEqual(@as(?u21, null), mac[0x7f]);
+    const koi8u = Charset.fromName("koi8-u").?.single.table();
+    try testing.expectEqual(@as(?u21, 0x255d), koi8u[0xae]);
+    try testing.expectEqual(@as(?u21, 0x256c), koi8u[0xbe]);
+
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try testing.expectEqualStrings("\xd0", (try reencode(a, "\xc4\x9e", "ISO-8859-9", "UTF-8")).?);
+    try testing.expectEqualStrings("\xc4\x9e", (try reencode(a, "\xd0", "UTF-8", "latin5")).?);
+    try testing.expectEqualStrings("\xdb", (try reencode(a, "\xe8", "KOI8-R", "ISO-8859-5")).?);
+    try testing.expect(try reencode(a, "\xe2\x82\xac", "ISO-8859-9", "UTF-8") == null);
+    try testing.expect(try reencode(a, "\x81", "UTF-8", "windows-1252") == null);
+    try testing.expect(try reencode(a, "\xc2\x81", "windows-1252", "UTF-8") == null);
+    try testing.expect(try reencode(a, "\xd1\x9e", "KOI8-U", "UTF-8") == null);
 }
 
 test "ensureUtf8 takes what is not UTF-8 as Latin-1, as git's commit_tree does" {

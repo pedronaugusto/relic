@@ -3,7 +3,9 @@
 //! the blobs and the files on the disk compared. Commits in Latin-1 and
 //! UTF-8: what `git log`, `git shortlog` and `git format-patch` write of
 //! them in each `i18n.logOutputEncoding`, and the commits a cherry-pick and
-//! `git commit-tree` make under `i18n.commitEncoding`.
+//! `git commit-tree` make under `i18n.commitEncoding`. Each single-byte
+//! encoding of the standard's that relic converts, byte by byte and
+//! character by character, as `git log` converts it.
 
 const std = @import("std");
 const Io = std.Io;
@@ -285,6 +287,88 @@ test "commits in Latin-1 and UTF-8 are written as git log, git shortlog and git 
                 return err;
             };
         }
+    }
+}
+
+/// One spelling of each single-byte encoding `encoding.Charset` takes from
+/// the standard, and some of the others.
+const single_byte_names = [_][]const u8{
+    "IBM866",     "ISO-8859-2",   "latin3",       "ISO-8859-4",  "cyrillic",     "ISO-8859-6",  "greek",        "ISO-8859-8",
+    "ISO-8859-9", "ISO-8859-10",  "ISO-8859-11",  "ISO-8859-13", "ISO-8859-14",  "ISO-8859-15", "ISO-8859-16",  "KOI8-R",
+    "KOI8-U",     "macintosh",    "TIS-620",      "windows-874", "windows-1250", "CP1251",      "windows-1252", "windows-1253",
+    "cp1254",     "windows-1256", "windows-1257",
+};
+
+/// A commit of `body` under `header_encoding` (none when null) on an empty tree.
+fn commitOf(a: std.mem.Allocator, io: Io, r: *testgit.Repo, header_encoding: ?[]const u8, body: []const u8) ![]u8 {
+    const empty = try hashObject(a, io, r, "tree", "");
+    const people = "author Fixture <fixture@example.com> 1700000000 +0000\ncommitter Fixture <fixture@example.com> 1700000000 +0000\n";
+    const header = if (header_encoding) |e| try a.print("encoding {s}\n", .{e}) else "";
+    return hashObject(a, io, r, "commit", try a.print("tree {s}\n{s}{s}\n{s}", .{ empty, people, header, body }));
+}
+
+/// `git log -1 --format=%B` of `hex` in `out_encoding` (UTF-8 when null), and relic's.
+fn expectLoggedAlike(a: std.mem.Allocator, io: Io, r: *testgit.Repo, hex: []const u8, out_encoding: ?[]const u8, what: []const u8) !void {
+    try setLogEncoding(io, r, out_encoding);
+    const theirs = try r.run(io, &.{ "log", "-1", "--format=%B", hex });
+    defer r.gpa.free(theirs);
+    var repo = try repo_mod.Repository.open(r.gpa, io, r.dir, .{});
+    defer repo.deinit(io);
+    var ours: std.ArrayList(u8) = .empty;
+    try pretty.formatCommit(a, io, .{ .db = repo.objectDatabase(), .oid = try hash.Oid.parse(.sha1, hex), .format = "%B" }, &ours, .{ .output_encoding = try message.logOutputEncoding(repo.configuration()) });
+    try ours.append(a, '\n');
+    testing.expectEqualStrings(theirs, ours.items) catch |err| {
+        std.debug.print("{s} in {?s}\n", .{ what, out_encoding });
+        return err;
+    };
+}
+
+test "each single-byte encoding is converted as git log converts it: every byte both iconvs define, every character both map, and a byte or character neither has kept as it was" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var r = try testgit.Repo.init(gpa, io, &.{});
+    defer r.deinit();
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for (single_byte_names) |name| {
+        const table = (encoding.Charset.fromName(name) orelse return error.TestUnexpectedResult).single.table();
+        // Every byte past ASCII the encoding defines, sixteen to a line, in a
+        // commit that names the encoding, read out in UTF-8.
+        var bytes: std.ArrayList(u8) = .empty;
+        var chars: std.ArrayList(u8) = .empty;
+        var refused: ?u8 = null;
+        for (table, 0..) |entry, i| {
+            if (i < 0xa0) continue;
+            const byte: u8 = @intCast(i);
+            const cp = entry orelse {
+                refused = refused orelse byte;
+                continue;
+            };
+            try bytes.append(a, byte);
+            var buf: [4]u8 = undefined;
+            try chars.appendSlice(a, buf[0..try std.unicode.utf8Encode(cp, &buf)]);
+            if (bytes.items.len % 16 == 0) {
+                try bytes.append(a, '\n');
+                try chars.append(a, '\n');
+            }
+        }
+        const subject = try a.print("every byte of {s}\n\n", .{name});
+        try expectLoggedAlike(a, io, &r, try commitOf(a, io, &r, name, try a.print("{s}{s}\n", .{ subject, bytes.items })), null, name);
+        // The same characters in a UTF-8 commit, read out in the encoding.
+        try expectLoggedAlike(a, io, &r, try commitOf(a, io, &r, null, try a.print("{s}{s}\n", .{ subject, chars.items })), name, name);
+        // A byte the encoding refuses, and a character none of these maps
+        // and Apple's iconv has no transliteration for (U+1F600; U+4E00 it
+        // writes as "gal." in ISO-8859-2): git keeps the message as it was.
+        // Where Apple's iconv decodes a byte glibc's does not (windows-874's
+        // 0xDB to 0xDE and 0xFC to 0xFF, TIS-620's 0x80 to 0xA0, macintosh's
+        // three), relic refuses it and the Mac's git converts it: no byte
+        // there is one both refuse.
+        const apple_decodes_more = for ([_][]const u8{ "windows-874", "TIS-620", "macintosh" }) |n| {
+            if (std.mem.eql(u8, n, name)) break true;
+        } else false;
+        if (!apple_decodes_more) if (refused) |byte| try expectLoggedAlike(a, io, &r, try commitOf(a, io, &r, name, try a.print("refused {x:0>2}: {c}\n", .{ byte, byte })), null, name);
+        try expectLoggedAlike(a, io, &r, try commitOf(a, io, &r, null, "unmappable \xf0\x9f\x98\x80\n"), name, name);
     }
 }
 
