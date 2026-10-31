@@ -258,7 +258,11 @@ fn requireBackfill(io: Io) !void {
     try testgit.requireGitVersion(testing.allocator, io, 2, 55);
 }
 
-test "backfill fetches what git's does, in git's batches: HEAD, ranges with and without their edges, all branches, the first parent" {
+/// `cases` against git in each ref format git writes, each format from a
+/// server of its own. A test is a few comparisons: each one runs git's
+/// backfill, two clones and a listing of every pack, and those processes
+/// are slow to start on macOS and Windows.
+fn eachFormat(comptime cases: []const Case) !void {
     try requireBackfill(testing.io);
     try testgit.eachRefFormat(struct {
         fn f(format: testgit.RefFormat) !void {
@@ -266,25 +270,39 @@ test "backfill fetches what git's does, in git's batches: HEAD, ranges with and 
             const io = testing.io;
             var server = try served(gpa, io);
             defer server.deinit(gpa);
-            for ([_]Case{
-                .{},
-                .{ .args = &.{"--min-batch-size=5"}, .options = .{ .min_batch_size = 5 } },
-                .{ .args = &.{ "--min-batch-size=1", "main~3..main" }, .inputs = .{ .include = &.{"main"}, .exclude = &.{"main~3"} }, .options = .{ .min_batch_size = 1 } },
-                .{ .args = &.{ "--no-include-edges", "main~3..main" }, .inputs = .{ .include = &.{"main"}, .exclude = &.{"main~3"} }, .options = .{ .include_edges = false } },
-                .{ .args = &.{ "--min-batch-size=1", "origin/other", "^main" }, .inputs = .{ .include = &.{"origin/other"}, .exclude = &.{"main"} }, .options = .{ .min_batch_size = 1 } },
-                .{ .args = &.{ "--min-batch-size=1", "main", "^origin/side" }, .inputs = .{ .include = &.{"main"}, .exclude = &.{"origin/side"} }, .options = .{ .min_batch_size = 1 } },
-                .{ .args = &.{ "--min-batch-size=3", "main", "origin/side", "origin/other" }, .inputs = .{ .include = &.{ "main", "origin/side", "origin/other" } }, .options = .{ .min_batch_size = 3 } },
-                .{ .args = &.{ "--first-parent", "--min-batch-size=1", "main" }, .inputs = .{ .include = &.{"main"} }, .options = .{ .first_parent = true, .min_batch_size = 1 } },
-                .{ .args = &.{ "--first-parent", "--min-batch-size=1", "main", "^main~4" }, .inputs = .{ .include = &.{"main"}, .exclude = &.{"main~4"} }, .options = .{ .first_parent = true, .min_batch_size = 1 } },
-                // Dates: the fixture's commits are a minute apart from
-                // `dated_from`; the fifth is at +300.
-                .{ .args = &.{ "--min-batch-size=1", "--since=@1700000300", "main" }, .inputs = .{ .include = &.{"main"} }, .options = .{ .min_batch_size = 1, .max_age = dated_from + 300 } },
-                .{ .args = &.{ "--min-batch-size=1", "--until=@1700000300", "main" }, .inputs = .{ .include = &.{"main"} }, .options = .{ .min_batch_size = 1, .min_age = dated_from + 300 } },
-                .{ .args = &.{ "--min-batch-size=1", "--since=@1700000300", "main", "^main~6" }, .inputs = .{ .include = &.{"main"}, .exclude = &.{"main~6"} }, .options = .{ .min_batch_size = 1, .max_age = dated_from + 300 } },
-                .{ .args = &.{ "--min-batch-size=1", "--since-as-filter=@1700000300", "main" }, .inputs = .{ .include = &.{"main"} }, .options = .{ .min_batch_size = 1, .max_age_as_filter = dated_from + 300 } },
-            }) |case| try run(gpa, io, &server, format, case);
+            for (cases) |case| try run(gpa, io, &server, format, case);
         }
     }.f);
+}
+
+test "backfill fetches what git's does, in git's batches: HEAD, ranges with and without their edges" {
+    try eachFormat(&.{
+        .{},
+        .{ .args = &.{"--min-batch-size=5"}, .options = .{ .min_batch_size = 5 } },
+        .{ .args = &.{ "--min-batch-size=1", "main~3..main" }, .inputs = .{ .include = &.{"main"}, .exclude = &.{"main~3"} }, .options = .{ .min_batch_size = 1 } },
+        .{ .args = &.{ "--no-include-edges", "main~3..main" }, .inputs = .{ .include = &.{"main"}, .exclude = &.{"main~3"} }, .options = .{ .include_edges = false } },
+    });
+}
+
+test "backfill fetches what git's does from several tips, all branches and the first parent" {
+    try eachFormat(&.{
+        .{ .args = &.{ "--min-batch-size=1", "origin/other", "^main" }, .inputs = .{ .include = &.{"origin/other"}, .exclude = &.{"main"} }, .options = .{ .min_batch_size = 1 } },
+        .{ .args = &.{ "--min-batch-size=1", "main", "^origin/side" }, .inputs = .{ .include = &.{"main"}, .exclude = &.{"origin/side"} }, .options = .{ .min_batch_size = 1 } },
+        .{ .args = &.{ "--min-batch-size=3", "main", "origin/side", "origin/other" }, .inputs = .{ .include = &.{ "main", "origin/side", "origin/other" } }, .options = .{ .min_batch_size = 3 } },
+        .{ .args = &.{ "--first-parent", "--min-batch-size=1", "main" }, .inputs = .{ .include = &.{"main"} }, .options = .{ .first_parent = true, .min_batch_size = 1 } },
+        .{ .args = &.{ "--first-parent", "--min-batch-size=1", "main", "^main~4" }, .inputs = .{ .include = &.{"main"}, .exclude = &.{"main~4"} }, .options = .{ .first_parent = true, .min_batch_size = 1 } },
+    });
+}
+
+test "backfill limited by date fetches what git's does: --since, --until and --since-as-filter" {
+    // The fixture's commits are a minute apart from `dated_from`; the
+    // fifth is at +300.
+    try eachFormat(&.{
+        .{ .args = &.{ "--min-batch-size=1", "--since=@1700000300", "main" }, .inputs = .{ .include = &.{"main"} }, .options = .{ .min_batch_size = 1, .max_age = dated_from + 300 } },
+        .{ .args = &.{ "--min-batch-size=1", "--until=@1700000300", "main" }, .inputs = .{ .include = &.{"main"} }, .options = .{ .min_batch_size = 1, .min_age = dated_from + 300 } },
+        .{ .args = &.{ "--min-batch-size=1", "--since=@1700000300", "main", "^main~6" }, .inputs = .{ .include = &.{"main"}, .exclude = &.{"main~6"} }, .options = .{ .min_batch_size = 1, .max_age = dated_from + 300 } },
+        .{ .args = &.{ "--min-batch-size=1", "--since-as-filter=@1700000300", "main" }, .inputs = .{ .include = &.{"main"} }, .options = .{ .min_batch_size = 1, .max_age_as_filter = dated_from + 300 } },
+    });
 }
 
 test "backfill under a pathspec walks the commits and the paths git's does, plain paths compared as git compares them" {
