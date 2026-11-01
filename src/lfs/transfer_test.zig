@@ -2207,7 +2207,7 @@ test "a cancel that stops any read or write of an upload or a download is Cancel
         }
     };
     const move: Move = .{ .fx = fx, .ours = ours, .theirs = theirs, .object = .{ .oid = testlfs.sha256Hex(content), .size = content.len, .name = "a.bin" } };
-    for ([_]shakedown.IoCall{ .net_read, .fileReadPositional }) |call| {
+    for ([_]shakedown.IoCall{ .net_read, .net_write, .fileReadPositional }) |call| {
         try testing_io.eachCallCanceled(gpa, io, &move, call);
     }
 }

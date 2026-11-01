@@ -23,8 +23,8 @@
         },
 
         .uplink = .{
-            .url = "git+https://github.com/pedronaugusto/uplink?ref=v0.9.3#227329ec470fb0e75aeb0c22a6283b9178873eb4",
-            .hash = "uplink-0.9.3-0eVSJtmHFgA-y2XYhATXaZbnqR3k5OBeFIt-7JptyR2M",
+            .url = "git+https://github.com/pedronaugusto/uplink#628fc3ffd30ecd8287368eabc5afbd8c16f650e6",
+            .hash = "uplink-0.10.2-0eVSJiytFwCbsFGyuLuttw0cerw4ZkLQbuyx6BTnIHPj",
             .lazy = true,
         },
 

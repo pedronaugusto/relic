@@ -135,14 +135,14 @@ fn proxyCommand(environ: ?*const std.process.Environ.Map, config: ?*const config
 }
 
 /// A TCP connection to `host` on `port`, through the family's dialer,
-/// with keepalive on as git's `enable_keepalive` turns it on (two hours
-/// idle, the systems' own default).
+/// with keepalive on as git's `enable_keepalive` turns it on, its timings
+/// the system's own.
 fn dial(gpa: Allocator, io: Io, host: []const u8, port: u16) Self.Error!*Connection {
     if (comptime !http_enabled) return error.UnsupportedTransport;
     // A host that cannot be reached is `ConnectionFailed`, however the dial
     // failed, as smart HTTP names it.
-    const dialed = uplink.net.dial.dial(io, host, port, .{ .keepalive = .literal("7200s") }) catch |err| switch (err) {
-        error.InvalidHostName, error.NameNotResolved, error.ConnectionFailed, error.TimedOut, error.ConcurrencyUnavailable => return error.ConnectionFailed,
+    const dialed = uplink.net.dial.dial(io, host, port, .{ .socket = .{ .nodelay = true, .keepalive = .{ .on = .{} } } }) catch |err| switch (err) {
+        error.InvalidHostName, error.NameNotResolved, error.ConnectionFailed, error.OptionUnsupported, error.AccessDenied, error.AddressFamilyMismatch, error.TimedOut, error.ConcurrencyUnavailable => return error.ConnectionFailed,
         error.Canceled => return error.Canceled,
     };
     var stream = fs.OwnedStream.init(dialed.stream);

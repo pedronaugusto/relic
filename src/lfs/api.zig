@@ -2112,6 +2112,7 @@ pub const Client = struct {
             error.ConnectionFailed => c.fail("the connection failed ({t}): {s}", io, .{ diagnostics.stage, where }, error.ConnectionFailed),
             error.NameNotResolved => c.fail("no such host: {s}", io, .{where}, error.ConnectionFailed),
             error.ConcurrencyUnavailable => c.fail("no task to look the host up with: {s}", io, .{where}, error.ConnectionFailed),
+            error.AccessDenied, error.OptionUnsupported, error.AddressFamilyMismatch => |named| c.fail("the connection failed ({s}): {s}", io, .{ @errorName(named), where }, error.ConnectionFailed),
             error.TimedOut => c.fail("timed out: {s}", io, .{where}, error.ConnectionFailed),
             error.BodyIncomplete, error.BodyTooLong => c.fail("upload cut short: {s}", io, .{where}, error.ConnectionFailed),
             error.TlsFailed => c.fail("TLS: {s}: {s}", io, .{ if (diagnostics.tls_error) |e| @errorName(e) else "handshake failed", where }, error.ConnectionFailed),
