@@ -472,16 +472,17 @@ test "merged split layers are marked at the write time before an older expiry cu
     var db = try odb.Odb.open(gpa, io, dir, .sha1, .{});
     defer db.deinit(io);
     const head = try tip(&repo, .sha1);
-    _ = try ops.writeCommitGraph(gpa, io, &db, &.{head}, .{ .split = .replace, .expire_time = .fromNanoseconds(std.time.ns_per_s) });
+    _ = try ops.writeCommitGraph(gpa, io, &db, &.{head}, .{ .split = .replace, .expire_time = .fromNanoseconds(std.time.ns_per_s), .now = .fromNanoseconds(100 * std.time.ns_per_s) });
     try repo.dir.access(io, path, .{});
-    const native_time = (try repo.dir.statFile(io, path, .{})).mtime.toSeconds();
-    try std.testing.expect(native_time > 1);
-    // Git marks the layer too, so an older cutoff preserves it.
+    try std.testing.expectEqual(100, (try repo.dir.statFile(io, path, .{})).mtime.toSeconds());
+    // Git marks the layer too, at its own time, so an older cutoff preserves
+    // it. A cutoff of `@1` with no zone is approxidate's, the 1st of this
+    // month at this time of day: on the 1st, no older than git's mark.
     try fs.setTimestamps(io, repo.dir, path, .{ .modify_timestamp = .{ .new = .{ .nanoseconds = 0 } } });
     // the chain is read-only, as git leaves it
     try repo.dir.deleteFile(io, ".git/objects/info/commit-graphs/commit-graph-chain");
     try repo.writeFile(io, ".git/objects/info/commit-graphs/commit-graph-chain", chain);
-    try repo.exec(io, &.{ "commit-graph", "write", "--reachable", "--split=replace", "--expire-time=@1" });
+    try repo.exec(io, &.{ "commit-graph", "write", "--reachable", "--split=replace", "--expire-time=@1 +0000" });
     try repo.dir.access(io, path, .{});
     try std.testing.expect((try repo.dir.statFile(io, path, .{})).mtime.toSeconds() > 1);
 }

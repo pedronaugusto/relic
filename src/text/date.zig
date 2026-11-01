@@ -1434,6 +1434,9 @@ test "approximate dates read as git's t0006 reads them" {
         .{ .text = "2009-12-01", .want = "2009-12-01 19:20:00" },
         .{ .text = "2000 +0000", .want = "2000-08-30 19:20:00" },
         .{ .text = "@2000 +0000", .want = "1970-01-01 00:33:20" },
+        // With no zone, `@1` is no epoch second: approxidate reads the 1, the
+        // 1st of this month.
+        .{ .text = "@1", .want = "2009-08-01 19:20:00" },
     };
     for (cases) |case| {
         const got = approximate(case.text, .{ .now = timestamp(now + case.shift) }) orelse {

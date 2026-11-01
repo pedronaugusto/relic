@@ -32,6 +32,9 @@ pub const CommitGraphOptions = struct {
     max_commits: u32 = 0,
     /// Inactive layers at or before this time expire; null uses git's default, now.
     expire_time: ?Io.Timestamp = null,
+    /// The time this write marks merged-out layers at, and expires from by
+    /// default; `null` reads the real clock, as git reads `time(NULL)`.
+    now: ?Io.Timestamp = null,
     generations: bool = true,
     changed_paths: ?graph_mod.bloom.Settings = null,
     /// `--max-new-filters`, `commitGraph.maxNewFilters`: at most this many
@@ -287,7 +290,7 @@ fn computeGenerations(arena: Allocator, nodes: []GraphNode, by_name: *const Oid.
 fn expireLayers(arena: Allocator, io: Io, dir: Io.Dir, old: ?*const graph_mod.Graph, bases: []const Oid, checksum: Oid, options: CommitGraphOptions) Self.Error!void {
     // Git marks merged-out layers at this write's time, then expires
     // inactive layers no newer than expire_time. Keep future-dated files.
-    const now = date.seconds(Io.Clock.real.now(io));
+    const now = date.seconds(options.now orelse Io.Clock.real.now(io));
     const expiry = if (options.expire_time) |t| date.seconds(t) else now;
     const graph_dir = dir.openDir(io, "info/commit-graphs", .{ .iterate = true }) catch |err| switch (err) {
         error.FileNotFound => return,
