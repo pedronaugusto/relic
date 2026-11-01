@@ -503,7 +503,7 @@ test "credential-cache's daemon run in process answers git's client as git's dae
     var daemons: cache_daemon.InProcess = .init(gpa, io);
     defer daemons.deinit();
     const starter = daemons.starter();
-    try starter.start(starter.context, io, ours);
+    try starter.start(io, ours);
     // git's starts with the first store; it ends with `exit` either way.
     defer gpa.free(gitCache(gpa, io, tmp.dir, &env, theirs, &.{"exit"}, "") catch &.{});
 
@@ -585,7 +585,7 @@ test "credential-cache's daemon takes a request of the most a request may be, pa
     var daemons: cache_daemon.InProcess = .init(gpa, io);
     defer daemons.deinit();
     const starter = daemons.starter();
-    try starter.start(starter.context, io, socket);
+    try starter.start(io, socket);
 
     var stored = (try cache.request(gpa, io, socket, .{
         .action = .store,

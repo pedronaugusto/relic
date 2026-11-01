@@ -1583,9 +1583,10 @@ test "a fetch cancelled while its ssh never answers stops and reaps the ssh" {
         reaped: bool = false,
         read_canceled: bool = false,
         failure: ?anyerror = null,
+        hook: program.SpawnHook = .{ .vtable = &.{ .start = start, .terminate = terminate } },
 
-        fn start(allocator: Allocator, task_io: Io, raw: *anyopaque, options: Child.SpawnOptions) Child.SpawnError!Child {
-            const state: *Self = @ptrCast(@alignCast(raw)); // safe: the test's spawn hook carries its Self state
+        fn start(hook: *program.SpawnHook, allocator: Allocator, task_io: Io, options: Child.SpawnOptions) Child.SpawnError!Child {
+            const state: *Self = @fieldParentPtr("hook", hook);
             const child = try Child.spawn(allocator, task_io, options);
             for (options.argv) |arg| if (std.mem.eql(u8, arg, "-G")) return child;
             state.child = child;
@@ -1593,8 +1594,8 @@ test "a fetch cancelled while its ssh never answers stops and reaps the ssh" {
             return child;
         }
 
-        fn terminate(task_io: Io, raw: *anyopaque, child: *Child) void {
-            const state: *Self = @ptrCast(@alignCast(raw)); // safe: the test's spawn hook carries its Self state
+        fn terminate(hook: *program.SpawnHook, task_io: Io, child: *Child) void {
+            const state: *Self = @fieldParentPtr("hook", hook);
             const tracked = state.child != null and state.child.?.processId() == child.processId();
             _ = child.killWait(task_io, .fromRaw(0)) catch return;
             if (tracked) state.reaped = true;
@@ -1619,7 +1620,7 @@ test "a fetch cancelled while its ssh never answers stops and reaps the ssh" {
         fn fetch(allocator: Allocator, task_io: Io, repo: *repo_mod.Repository, env: *const std.process.Environ.Map, state: *Self) void {
             var outcome = fetch_mod.fetch(allocator, task_io, repo, "origin", .{
                 .who = test_who,
-                .programs = .{ .environ = env, .spawn = .{ .context = state, .start = start, .terminate = terminate } },
+                .programs = .{ .environ = env, .spawn = &state.hook },
             }) catch |err| {
                 state.failure = err;
                 return;

@@ -53,25 +53,49 @@ pub const Verdict = union(enum) {
     deny,
 };
 
-/// What the caller decides, and knows, that relic does not.
+/// What the caller decides, and knows, that relic does not: a node its
+/// owner embeds, found again from the node by `@fieldParentPtr`.
 pub const Caller = struct {
-    context: ?*anyopaque = null,
-    /// Whether this connection may do what `access` names to the
-    /// repository at `repository` (the path under the root), and as whom:
-    /// ssh has authenticated it before the program starts.
-    authorize: *const fn (context: ?*anyopaque, repository: []const u8, access: server.Access) Verdict,
-    /// Seconds since the Unix epoch, when a lock is taken.
-    now: *const fn (context: ?*anyopaque) i64,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        /// Whether this connection may do what `access` names to the
+        /// repository at `repository` (the path under the root), and as
+        /// whom: ssh has authenticated it before the program starts.
+        authorize: *const fn (caller: *Caller, repository: []const u8, access: server.Access) Verdict,
+        /// Seconds since the Unix epoch, when a lock is taken.
+        now: *const fn (caller: *Caller) i64,
+    };
+
+    pub fn authorize(c: *Caller, repository: []const u8, access: server.Access) Verdict {
+        return c.vtable.authorize(c, repository, access);
+    }
+
+    pub fn now(c: *Caller) i64 {
+        return c.vtable.now(c);
+    }
 };
 
 /// The id and token an action carries, which the client sends back with
-/// `get-object`, `put-object` and `verify-object`.
+/// `get-object`, `put-object` and `verify-object`: a node its owner
+/// embeds, found again from the node by `@fieldParentPtr`.
 pub const Tokens = struct {
-    context: ?*anyopaque = null,
-    /// The id, token and lifetime for `oid`'s action, in `arena`.
-    issue: *const fn (context: ?*anyopaque, arena: Allocator, oid: []const u8) Allocator.Error!Token,
-    /// Whether `id` and `token`, as the client sent them, are `oid`'s.
-    check: *const fn (context: ?*anyopaque, oid: []const u8, id: ?[]const u8, token: ?[]const u8) bool,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        /// The id, token and lifetime for `oid`'s action, in `arena`.
+        issue: *const fn (tokens: *Tokens, arena: Allocator, oid: []const u8) Allocator.Error!Token,
+        /// Whether `id` and `token`, as the client sent them, are `oid`'s.
+        check: *const fn (tokens: *Tokens, oid: []const u8, id: ?[]const u8, token: ?[]const u8) bool,
+    };
+
+    pub fn issue(t: *Tokens, arena: Allocator, oid: []const u8) Allocator.Error!Token {
+        return t.vtable.issue(t, arena, oid);
+    }
+
+    pub fn check(t: *Tokens, oid: []const u8, id: ?[]const u8, token: ?[]const u8) bool {
+        return t.vtable.check(t, oid, id, token);
+    }
 };
 
 pub const Token = struct {
@@ -84,9 +108,9 @@ pub const Token = struct {
 /// How the connection is served.
 pub const Options = struct {
     store: server.Store,
-    caller: Caller,
+    caller: *Caller,
     /// `null` gives actions no id or token, and asks for none back.
-    tokens: ?Tokens = null,
+    tokens: ?*Tokens = null,
     /// The most locks a page of a listing holds when the client names no
     /// limit.
     lock_page: u32 = 100,
@@ -209,7 +233,7 @@ pub const Session = struct {
     /// Who the connection is, when it may do what `access` names; `null`
     /// once a 403 is answered.
     fn allowed(s: *Session, access: server.Access) Error!?Who {
-        return switch (s.options.caller.authorize(s.options.caller.context, s.repository, access)) {
+        return switch (s.options.caller.authorize(s.repository, access)) {
             .allow => |name| .{ .name = name },
             .deny => {
                 try s.status(403, &.{}, &.{"forbidden"});
@@ -242,7 +266,7 @@ pub const Session = struct {
             var line_out: std.ArrayList(u8) = .empty;
             try line_out.print(arena, "{s} {s} {s}", .{ oid, size_text, name });
             if (s.options.tokens) |tokens| {
-                const t = try tokens.issue(tokens.context, arena, oid);
+                const t = try tokens.issue(arena, oid);
                 try line_out.print(arena, " id={s} token={s}", .{ t.id, t.token });
                 if (t.expires_in) |secs| try line_out.print(arena, " expires-in={d}", .{secs});
             }
@@ -255,7 +279,7 @@ pub const Session = struct {
     /// carry anything.
     fn tokenOk(s: *Session, req: Request, oid: []const u8) bool {
         const tokens = s.options.tokens orelse return true;
-        return tokens.check(tokens.context, oid, req.arg("id"), req.arg("token"));
+        return tokens.check(oid, req.arg("id"), req.arg("token"));
     }
 
     fn getObject(s: *Session, req: Request, oid: []const u8) Error!void {
@@ -332,7 +356,7 @@ pub const Session = struct {
             .id = try arena.print("{x}", .{&raw}),
             .path = path,
             .owner = user.name,
-            .locked_at = .{ .unix = s.options.caller.now(s.options.caller.context) },
+            .locked_at = .{ .unix = s.options.caller.now() },
         };
         try table.save(try std.mem.concat(arena, locks.Lock, &.{ table.list, &.{taken} }));
         try s.status(201, try lockArgs(arena, taken), null);
@@ -611,13 +635,14 @@ test "a connection is served whole: an object up, checked and down, a lock taken
     try pkt_line.flush(w);
 
     const Who = struct {
-        fn authorize(_: ?*anyopaque, _: []const u8, _: server.Access) Verdict {
+        fn authorize(_: *Caller, _: []const u8, _: server.Access) Verdict {
             return .{ .allow = "ada" };
         }
-        fn now(_: ?*anyopaque) i64 {
+        fn now(_: *Caller) i64 {
             return 1790244000;
         }
     };
+    var caller: Caller = .{ .vtable = &.{ .authorize = Who.authorize, .now = Who.now } };
     var in: Io.Reader = .fixed(asked.written());
     var in_buffer: [pkt_line.max_line]u8 = undefined;
     var limited = in.limited(.unlimited, &in_buffer);
@@ -625,7 +650,7 @@ test "a connection is served whole: an object up, checked and down, a lock taken
     defer answered.deinit();
     try testing.expect(try serve(gpa, io, .{ .root = root, .path = "/repo.git", .operation = .upload, .in = &limited.interface, .out = &answered.writer }, .{
         .store = directory.store(),
-        .caller = .{ .authorize = Who.authorize, .now = Who.now },
+        .caller = &caller,
     }));
 
     // Every answer, its status lines in order and what it carried.
@@ -709,10 +734,10 @@ test "a cancel that stops a read of an object coming up is its reader's to say, 
         dir: Io.Dir,
         root: []const u8,
         store: server.Store,
-        fn authorize(_: ?*anyopaque, _: []const u8, _: server.Access) Verdict {
+        fn authorize(_: *Caller, _: []const u8, _: server.Access) Verdict {
             return .{ .allow = "ada" };
         }
-        fn now(_: ?*anyopaque) i64 {
+        fn now(_: *Caller) i64 {
             return 1790244000;
         }
         // The caller owns the reader, and says why it failed.
@@ -723,9 +748,10 @@ test "a cancel that stops a read of an object coming up is its reader's to say, 
             var in = file.readerStreaming(run_io, &in_buffer);
             var answered: Io.Writer.Allocating = .init(gpa);
             defer answered.deinit();
+            var caller: Caller = .{ .vtable = &.{ .authorize = authorize, .now = now } };
             _ = serve(gpa, run_io, .{ .root = u.root, .path = "/repo.git", .operation = .upload, .in = &in.interface, .out = &answered.writer }, .{
                 .store = u.store,
-                .caller = .{ .authorize = authorize, .now = now },
+                .caller = &caller,
             }) catch |err| return if (err == error.ReadFailed) in.err.? else err;
         }
     };

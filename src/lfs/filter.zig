@@ -13,7 +13,11 @@ const repo = @import("../repo/repo.zig");
 const lfs = @import("lfs.zig");
 const testing = std.testing;
 pub const Error = native.Error || repo.Repository.LoadFiltersError;
-pub const Options = struct { fetch: ?lfs.Fetcher = null, skip_smudge: bool = false };
+pub const Options = struct {
+    fetch: ?*lfs.Fetcher = null,
+    skip_smudge: bool = false,
+    interface: native.Provider = .{ .vtable = &.{ .load = loadDriver } },
+};
 
 /// Load native LFS and configured program filters for one operation. The
 /// fetcher and repository directories remain borrowed until driver deinit.
@@ -27,13 +31,13 @@ pub fn load(gpa: Allocator, io: Io, repository: *repo.Repository, options: Optio
     });
 }
 
-/// Context is borrowed only during loading. The returned driver copies it.
-pub fn provider(options: *const Options) native.Provider {
-    return .{ .context = options, .load_fn = loadDriver };
+/// `options` is borrowed only during loading. The returned driver copies it.
+pub fn provider(options: *const Options) *const native.Provider {
+    return &options.interface;
 }
 
-fn loadDriver(gpa: Allocator, io: Io, context: ?*const anyopaque, configuration: *const config.Config, options: native.LoadOptions) native.Error!native.Driver {
-    const with: *const Options = @ptrCast(@alignCast(context.?)); // aegis: no-danger: the provider context is the Options passed to provider
+fn loadDriver(p: *const native.Provider, gpa: Allocator, io: Io, configuration: *const config.Config, options: native.LoadOptions) native.Error!native.Driver {
+    const with: *const Options = @fieldParentPtr("interface", p);
     const backend = try gpa.create(Backend);
     errdefer gpa.destroy(backend);
     var commands: native.Commands = .{};
@@ -57,7 +61,7 @@ fn loadDriver(gpa: Allocator, io: Io, context: ?*const anyopaque, configuration:
 const Backend = struct {
     gpa: Allocator,
     lfs: lfs.Lfs,
-    fetch: ?lfs.Fetcher,
+    fetch: ?*lfs.Fetcher,
     const vtable: native.Driver.VTable = .{ .accepts = accepts, .open = open, .retarget = retarget, .deinit = releaseContext };
     fn accepts(_: *const anyopaque, commands: native.Commands) bool {
         return isGitLfs(commands);
@@ -342,8 +346,9 @@ test "native LFS batches delayed files once and isolates session state" {
     const Fetch = struct {
         const Self = @This();
         calls: usize = 0,
-        fn fetch(io_: Io, context: *anyopaque, store: *const lfs.Store, _: *const lfs.Settings, wanted: []const lfs.Wanted) lfs.FetchError!void {
-            const f: *Self = @ptrCast(@alignCast(context));
+        interface: lfs.Fetcher = .{ .vtable = &.{ .fetch = fetch } },
+        fn fetch(seam: *lfs.Fetcher, io_: Io, store: *const lfs.Store, _: *const lfs.Settings, wanted: []const lfs.Wanted) lfs.FetchError!void {
+            const f: *Self = @fieldParentPtr("interface", seam);
             f.calls += 1;
             if (wanted.len != 2) return error.LfsFetchFailed;
             for (wanted) |w| {
@@ -353,7 +358,7 @@ test "native LFS batches delayed files once and isolates session state" {
         }
     };
     var fetch: Fetch = .{};
-    const options: Options = .{ .fetch = .{ .context = &fetch, .fetchFn = Fetch.fetch } };
+    const options: Options = .{ .fetch = &fetch.interface };
     var drivers = try filter.Drivers.load(gpa, io, &cfg, .{ .common = tmp.dir, .work = tmp.dir, .shared = .umask }, .{ .native_provider = provider(&options) });
     defer drivers.deinit(io);
     const session = try drivers.native_driver.?.open(gpa, io, .{ .wt = tmp.dir });
@@ -388,14 +393,15 @@ test "native LFS propagates batched cancellation and releases pending state" {
     const Fetch = struct {
         const Self = @This();
         calls: usize = 0,
-        fn fetch(_: Io, context: *anyopaque, _: *const lfs.Store, _: *const lfs.Settings, _: []const lfs.Wanted) lfs.FetchError!void {
-            const f: *Self = @ptrCast(@alignCast(context));
+        interface: lfs.Fetcher = .{ .vtable = &.{ .fetch = fetch } },
+        fn fetch(seam: *lfs.Fetcher, _: Io, _: *const lfs.Store, _: *const lfs.Settings, _: []const lfs.Wanted) lfs.FetchError!void {
+            const f: *Self = @fieldParentPtr("interface", seam);
             f.calls += 1;
             return error.Canceled;
         }
     };
     var fetch: Fetch = .{};
-    const options: Options = .{ .fetch = .{ .context = &fetch, .fetchFn = Fetch.fetch } };
+    const options: Options = .{ .fetch = &fetch.interface };
     var drivers = try filter.Drivers.load(gpa, io, &cfg, .{ .common = tmp.dir, .work = tmp.dir, .shared = .umask }, .{ .native_provider = provider(&options) });
     defer drivers.deinit(io);
     const session = try drivers.native_driver.?.open(gpa, io, .{ .wt = tmp.dir });
@@ -420,10 +426,10 @@ test "native LFS allocator failures release driver and pending delivery" {
     try testing.checkAllAllocationFailures(no_resize.allocator(), struct {
         fn exercise(gpa: Allocator, dir: Io.Dir, configuration: *const config.Config) !void {
             const fetch = struct {
-                fn run(_: Io, _: *anyopaque, _: *const lfs.Store, _: *const lfs.Settings, _: []const lfs.Wanted) lfs.FetchError!void {}
+                fn run(_: *lfs.Fetcher, _: Io, _: *const lfs.Store, _: *const lfs.Settings, _: []const lfs.Wanted) lfs.FetchError!void {}
             };
-            var context: u8 = 0;
-            const options: Options = .{ .fetch = .{ .context = &context, .fetchFn = fetch.run } };
+            var fetcher: lfs.Fetcher = .{ .vtable = &.{ .fetch = fetch.run } };
+            const options: Options = .{ .fetch = &fetcher };
             var drivers = try filter.Drivers.load(gpa, testing.io, configuration, .{ .common = dir, .work = dir, .shared = .umask }, .{ .native_provider = provider(&options) });
             defer drivers.deinit(testing.io);
             const session = try drivers.native_driver.?.open(gpa, testing.io, .{ .wt = dir });

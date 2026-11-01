@@ -292,10 +292,11 @@ test "--textconv searches the text a driver's program writes, in the working tre
 /// A `-P` stand-in that finds its patterns as fixed text.
 const FixedMatcher = struct {
     patterns: []const []const u8,
+    interface: grep_mod.Matcher = .{ .vtable = &.{ .find = find } },
 
-    fn find(context: *anyopaque, index: usize, line: []const u8, not_bol: bool) error{MatchFailed}!?grep_mod.Match {
+    fn find(matcher: *const grep_mod.Matcher, index: usize, line: []const u8, not_bol: bool) error{MatchFailed}!?grep_mod.Match {
         _ = not_bol;
-        const m: *FixedMatcher = @ptrCast(@alignCast(context)); // safe: the context is always a FixedMatcher
+        const m: *const FixedMatcher = @fieldParentPtr("interface", matcher);
         const at = std.mem.find(u8, line, m.patterns[index]) orelse return null;
         return .{ .start = at, .end = at + m.patterns[index].len };
     }
@@ -310,7 +311,7 @@ test "-P matches through the caller's matcher, and without one is refused by nam
     var repo = try Repository.open(gpa, io, git.dir, .{});
     defer repo.deinit(io);
     var matcher: FixedMatcher = .{ .patterns = &.{ "count", "x *" } };
-    const perl: grep_mod.Matcher = .{ .context = &matcher, .find = FixedMatcher.find };
+    const perl = &matcher.interface;
     try compare(gpa, io, &git, &repo, &.{ "-F", "-n", "-o", "-e", "count", "-e", "x *" }, .{ .patterns = matcher.patterns, .syntax = .perl, .perl = perl, .line_number = true, .only_matching = true });
     try compare(gpa, io, &git, &repo, &.{ "-F", "-w", "-c", "-e", "count", "--and", "--not", "-e", "x *" }, .{ .expression = &.{ .{ .pattern = "count" }, .@"and", .not, .{ .pattern = "x *" } }, .syntax = .perl, .perl = perl, .word = true, .show = .count });
     var out: Io.Writer.Allocating = .init(gpa);

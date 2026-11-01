@@ -300,14 +300,15 @@ const Feed = struct {
     answers: bool = true,
     asked_with: [16]u8 = undefined,
     asked_len: usize = 0,
+    interface: fsmonitor.ChangeSource = .{ .vtable = &.{ .query = query } },
 
     fn source(f: *Feed) fsmonitor.Source {
-        return .{ .changes = .{ .context = f, .queryFn = query } };
+        return .{ .changes = &f.interface };
     }
 
-    fn query(arena: Allocator, context: *anyopaque, since: []const u8) Allocator.Error!?fsmonitor.Changes {
+    fn query(changes: *fsmonitor.ChangeSource, arena: Allocator, since: []const u8) Allocator.Error!?fsmonitor.Changes {
         _ = arena;
-        const f: *Feed = @ptrCast(@alignCast(context));
+        const f: *Feed = @fieldParentPtr("interface", changes);
         f.asked_len = @min(since.len, f.asked_with.len);
         @memcpy(f.asked_with[0..f.asked_len], since[0..f.asked_len]);
         if (!f.answers) return null;

@@ -786,7 +786,7 @@ pub const Store = struct {
             }
             if (at < listing.entries.len and std.mem.eql(u8, listing.entries[at].name, ref.name)) at += 1;
             const oid = ref.target.direct;
-            merged.appendAssumeCapacity(.{ .name = ref.name, .oid = oid, .peeled = options.objects.peel(io, options.objects.context, oid) });
+            merged.appendAssumeCapacity(.{ .name = ref.name, .oid = oid, .peeled = options.objects.peel(io, oid) });
         }
         merged.appendSliceAssumeCapacity(listing.entries[at..]);
         try store.writePackedLocked(io, &lock, merged.items);
@@ -806,7 +806,7 @@ pub const Store = struct {
                 .direct => |oid| oid,
                 .symbolic => continue,
             };
-            if (options.objects.exists) |exists| if (!exists(io, options.objects.context, oid)) continue;
+            if (!options.objects.exists(io, oid)) continue;
             if (try anyMatches(arena, options.exclude, ref.name)) continue;
             if (!try anyMatches(arena, options.include, ref.name)) continue;
             try kept.append(arena, ref);
@@ -1786,7 +1786,7 @@ pub const Transaction = struct {
     packed_announced: bool = false,
     /// Peels a new value that is an annotated tag, for a reftable to record
     /// beside it. `null` records the tag alone, which git reads as well.
-    peeler: ?Peeler = null,
+    peeler: ?*Peeler = null,
     /// What `prepare` took in a reftable repository.
     reftable: ?*stack_engine.Pending = null,
     /// `packed-refs.lock`, held from `prepare` to the end when a deletion

@@ -123,14 +123,18 @@ pub const Driver = struct {
     }
 };
 
-/// A native provider selected by the caller before loading a collection.
-/// The optional context is borrowed only for `load`, never by the result.
+/// A native provider selected by the caller before loading a collection: a
+/// node its owner embeds, found again from the node by `@fieldParentPtr`.
+/// It is borrowed only for `load`, never by the result.
 pub const Provider = struct {
-    context: ?*const anyopaque = null,
-    load_fn: *const fn (Allocator, Io, ?*const anyopaque, *const config.Config, LoadOptions) Self.Error!Driver,
+    vtable: *const VTable,
 
-    pub fn load(p: Provider, gpa: Allocator, io: Io, settings: *const config.Config, options: LoadOptions) Self.Error!Driver {
-        return p.load_fn(gpa, io, p.context, settings, options);
+    pub const VTable = struct {
+        load: *const fn (provider: *const Provider, gpa: Allocator, io: Io, settings: *const config.Config, options: LoadOptions) Self.Error!Driver,
+    };
+
+    pub fn load(p: *const Provider, gpa: Allocator, io: Io, settings: *const config.Config, options: LoadOptions) Self.Error!Driver {
+        return p.vtable.load(p, gpa, io, settings, options);
     }
 };
 

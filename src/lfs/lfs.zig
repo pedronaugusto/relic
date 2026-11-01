@@ -561,20 +561,18 @@ pub const FetchError = error{LfsFetchFailed} || Allocator.Error || Io.Cancelable
 /// Where the network plugs in: a caller that can fetch objects hands one to
 /// checkout, which calls it once with every object it found missing and then
 /// looks in the store again. A fetcher puts what it gets with
-/// `Store.install`, naming the pointer it expected.
+/// `Store.install`, naming the pointer it expected. A node its owner
+/// embeds, found again from the node by `@fieldParentPtr`.
 pub const Fetcher = struct {
-    context: *anyopaque,
-    fetchFn: *const fn (
-        io: Io,
-        context: *anyopaque,
-        store: *const Store,
-        settings: *const Settings,
-        wanted: []const Wanted,
-    ) FetchError!void,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        fetch: *const fn (fetcher: *Fetcher, io: Io, store: *const Store, settings: *const Settings, wanted: []const Wanted) FetchError!void,
+    };
 
     /// Ask for `wanted`.
-    pub fn fetch(f: Fetcher, io: Io, store: *const Store, settings: *const Settings, wanted: []const Wanted) Self.FetchError!void {
-        return f.fetchFn(io, f.context, store, settings, wanted);
+    pub fn fetch(f: *Fetcher, io: Io, store: *const Store, settings: *const Settings, wanted: []const Wanted) Self.FetchError!void {
+        return f.vtable.fetch(f, io, store, settings, wanted);
     }
 };
 

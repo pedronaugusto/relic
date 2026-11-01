@@ -37,7 +37,7 @@ pub const Run = struct {
     programs: ?program.Programs = null,
     report: ?*filter.Report = null,
     native_lfs: bool = true,
-    fetch: ?lfs.Fetcher = null,
+    fetch: ?*lfs.Fetcher = null,
 };
 
 /// Stage the working tree with relic, as `git add -A` does, write the index

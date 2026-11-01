@@ -2294,8 +2294,9 @@ test "the messages a person would edit come from the caller, and land as an edit
 
                 seen: [4]rebase.MessageKind = undefined,
                 count: usize = 0,
-                fn edit(context: *anyopaque, kind: rebase.MessageKind, proposed: []const u8) ?[]const u8 {
-                    const self: *Self = @ptrCast(@alignCast(context)); // safe: the context is the Self this function was installed with
+                interface: rebase.Messages = .{ .vtable = &.{ .edit = edit } },
+                fn edit(messages: *rebase.Messages, kind: rebase.MessageKind, proposed: []const u8) ?[]const u8 {
+                    const self: *Self = @fieldParentPtr("interface", messages);
                     std.debug.assert(proposed.len != 0);
                     self.seen[self.count] = kind;
                     self.count += 1;
@@ -2310,7 +2311,7 @@ test "the messages a person would edit come from the caller, and land as an edit
                     .who = who,
                     .onto_name = "main",
                     .todo = sheet,
-                    .messages = .{ .context = &editor, .editFn = Editor.edit },
+                    .messages = &editor.interface,
                 });
                 defer outcome.deinit();
                 try std.testing.expectEqual(rebase.Outcome.Result.done, outcome.result);

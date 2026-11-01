@@ -50,20 +50,30 @@ pub const Programs = struct {
     /// Override process creation for every program relic runs. The hook
     /// receives the fully prepared argv, environment, cwd and streams.
     /// Supply `terminate` as well when a timeout must end descendants.
-    spawn: ?SpawnHook = null,
+    spawn: ?*SpawnHook = null,
 };
 
-/// A caller-owned process launcher, used for hooks, filters and helpers.
+/// A caller-owned process launcher, used for hooks, filters and helpers: a
+/// node its owner embeds, found again from the node by `@fieldParentPtr`.
 pub const SpawnHook = struct {
-    context: *anyopaque,
-    /// `options` borrows the prepared command and environment for this call;
-    /// spawn the child before returning rather than retaining them.
-    start: *const fn (Allocator, Io, *anyopaque, Child.SpawnOptions) Child.SpawnError!Child,
-    /// Called on cleanup after normal completion too, as well as on timeout
-    /// and error paths. It must reap or kill the child; when absent, relic
-    /// ends it through conduit. In `run` the child is already reaped by then:
-    /// on a timeout conduit has killed it, and the hook ends what it left.
-    terminate: ?*const fn (Io, *anyopaque, *Child) void = null,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        /// `options` borrows the prepared command and environment for this
+        /// call; spawn the child before returning rather than retaining
+        /// them.
+        start: *const fn (hook: *SpawnHook, gpa: Allocator, io: Io, options: Child.SpawnOptions) Child.SpawnError!Child,
+        /// Called on cleanup after normal completion too, as well as on
+        /// timeout and error paths. It must reap or kill the child; when
+        /// absent, relic ends it through conduit. In `run` the child is
+        /// already reaped by then: on a timeout conduit has killed it, and
+        /// the hook ends what it left.
+        terminate: ?*const fn (hook: *SpawnHook, io: Io, child: *Child) void = null,
+    };
+
+    pub fn start(hook: *SpawnHook, gpa: Allocator, io: Io, options: Child.SpawnOptions) Child.SpawnError!Child {
+        return hook.vtable.start(hook, gpa, io, options);
+    }
 };
 
 /// One variable set for a program on top of the environment it starts
@@ -208,7 +218,7 @@ pub const Running = struct {
     pub const Error = ErrorNamespace.Error;
 
     child: Child,
-    spawn: ?SpawnHook,
+    spawn: ?*SpawnHook,
     terminated: bool = false,
     environ: Environ.Map,
     line: CommandLine,
@@ -228,8 +238,8 @@ pub const Running = struct {
         const protection = io.swapCancelProtection(.blocked);
         defer _ = io.swapCancelProtection(protection);
         if (running.spawn) |hook| {
-            if (hook.terminate) |terminate| {
-                terminate(io, hook.context, &running.child);
+            if (hook.vtable.terminate) |terminate| {
+                terminate(hook, io, &running.child);
                 return;
             }
         }
@@ -308,7 +318,7 @@ pub fn start(gpa: Allocator, io: Io, programs: Programs, invocation: Invocation)
             },
         } },
     };
-    const child = if (programs.spawn) |hook| try hook.start(gpa, io, hook.context, options) else try Child.spawn(gpa, io, options);
+    const child = if (programs.spawn) |hook| try hook.start(gpa, io, options) else try Child.spawn(gpa, io, options);
     return .{ .child = child, .spawn = programs.spawn, .environ = environ, .line = line, .gpa = gpa };
 }
 
@@ -476,9 +486,10 @@ const SpawnHooks = struct {
     /// The options carried the program, its argument and the variable set.
     prepared: bool = false,
     ended: bool = false,
+    interface: SpawnHook = .{ .vtable = &.{ .start = startChild, .terminate = endChild } },
 
-    fn start(gpa: Allocator, io: Io, raw: *anyopaque, options: Child.SpawnOptions) Child.SpawnError!Child {
-        const self: *SpawnHooks = @ptrCast(@alignCast(raw)); // aegis: no-danger: the test hands the hook a *SpawnHooks as its context
+    fn startChild(hook: *SpawnHook, gpa: Allocator, io: Io, options: Child.SpawnOptions) Child.SpawnError!Child {
+        const self: *SpawnHooks = @fieldParentPtr("interface", hook);
         self.started = true;
         const hooked = options.environ.?.get("RELIC_HOOKED") orelse "";
         self.prepared = std.mem.eql(u8, suite.path(.process_fixture), options.argv[0]) and
@@ -487,8 +498,8 @@ const SpawnHooks = struct {
         return Child.spawn(gpa, io, options);
     }
 
-    fn terminate(io: Io, raw: *anyopaque, child: *Child) void {
-        const self: *SpawnHooks = @ptrCast(@alignCast(raw)); // aegis: no-danger: the test hands the hook a *SpawnHooks as its context
+    fn endChild(hook: *SpawnHook, io: Io, child: *Child) void {
+        const self: *SpawnHooks = @fieldParentPtr("interface", hook);
         self.ended = true;
         // glint-ignore: Z026 -- termination cannot fail its caller; a child already gone has nothing left to reap
         _ = child.killWait(io, .fromRaw(0)) catch {};
@@ -499,11 +510,7 @@ test "Programs spawn hook receives prepared options and owns termination" {
     var env = try testEnviron();
     defer env.deinit();
     var hooks: SpawnHooks = .{};
-    var outcome = try run(testing.allocator, testing.io, .{ .environ = &env, .spawn = .{
-        .context = &hooks,
-        .start = SpawnHooks.start,
-        .terminate = SpawnHooks.terminate,
-    } }, .{
+    var outcome = try run(testing.allocator, testing.io, .{ .environ = &env, .spawn = &hooks.interface }, .{
         .argv = &.{ suite.path(.process_fixture), "copy" },
         .set = &.{.{ .name = "RELIC_HOOKED", .value = "hooked" }},
     }, .{

@@ -49,6 +49,7 @@ pub const DiffWriter = struct {
     /// What a commit's subject is written in: the superproject's
     /// `i18n.logOutputEncoding`, as git's `get_log_output_encoding` is.
     log_encoding: []const u8,
+    interface: diff.SubmoduleWriter = .{ .vtable = &.{ .write = writeFn } },
 
     /// A writer for `repo`'s submodules, running `programs` where an
     /// inline diff asks.
@@ -57,12 +58,12 @@ pub const DiffWriter = struct {
     }
 
     /// What `diff.unified` writes the gitlink changes through.
-    pub fn writer(d: *DiffWriter) diff.SubmoduleWriter {
-        return .{ .context = d, .writeFn = writeFn };
+    pub fn writer(d: *DiffWriter) *diff.SubmoduleWriter {
+        return &d.interface;
     }
 
-    fn writeFn(io: Io, context: *anyopaque, w: *Io.Writer, change: diff.SubmoduleChange) diff.SubmoduleWriter.Error!void {
-        const d: *DiffWriter = @ptrCast(@alignCast(context)); // aegis: no-danger: `writer` makes the context from a DiffWriter
+    fn writeFn(seam: *diff.SubmoduleWriter, io: Io, w: *Io.Writer, change: diff.SubmoduleChange) diff.SubmoduleWriter.Error!void {
+        const d: *DiffWriter = @fieldParentPtr("interface", seam);
         var arena_instance: std.heap.ArenaAllocator = .init(d.gpa);
         defer arena_instance.deinit();
         return d.write(arena_instance.allocator(), io, w, change);

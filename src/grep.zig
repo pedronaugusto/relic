@@ -91,10 +91,18 @@ pub const Match = struct { start: usize, end: usize };
 /// are given — in `line`, which holds no newline; `not_bol` says the
 /// start of `line` is not the start of a line, as when a search resumes
 /// after a match. `-i` is the matcher's to apply. It is called from
-/// several tasks at once.
+/// several tasks at once. A node its owner embeds, found again from the
+/// node by `@fieldParentPtr`.
 pub const Matcher = struct {
-    context: *anyopaque,
-    find: *const fn (context: *anyopaque, index: usize, line: []const u8, not_bol: bool) error{MatchFailed}!?Match,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        find: *const fn (matcher: *const Matcher, index: usize, line: []const u8, not_bol: bool) error{MatchFailed}!?Match,
+    };
+
+    pub fn find(m: *const Matcher, index: usize, line: []const u8, not_bol: bool) error{MatchFailed}!?Match {
+        return m.vtable.find(m, index, line, not_bol);
+    }
 };
 
 /// One word of a pattern expression, as git's command line has them.
@@ -158,7 +166,7 @@ pub const Options = struct {
     /// basic without them.
     syntax: ?Syntax = null,
     /// What matches under `-P`.
-    perl: ?Matcher = null,
+    perl: ?*const Matcher = null,
     ignore_case: bool = false,
     /// `-w`.
     word: bool = false,
@@ -282,7 +290,7 @@ const Searcher = struct {
     /// `--column`, under which git evaluates every term, for the earliest
     /// column.
     column: bool,
-    perl: ?Matcher,
+    perl: ?*const Matcher,
 
     fn deinit(s: *Searcher) void {
         for (s.pats) |*p| switch (p.kind) {
@@ -504,7 +512,7 @@ fn patmatch(s: *const Searcher, p: *const Pat, vm: ?*ere.Vm, line: []const u8, n
             return .{ .start = m.start, .end = m.end };
         },
         .perl => |index| {
-            const m = s.perl.?.find(s.perl.?.context, index, line, not_bol) catch return error.PerlMatchFailed;
+            const m = s.perl.?.find(index, line, not_bol) catch return error.PerlMatchFailed;
             return m;
         },
     }

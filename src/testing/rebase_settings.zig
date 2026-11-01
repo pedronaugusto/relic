@@ -325,7 +325,7 @@ fn chainSheet(gpa: std.mem.Allocator, io: Io, repo: *testgit.Repo, lines: []cons
 const edited_text = "Edited by hand\n\n# a comment the cleanup takes away\nwith a body\n";
 
 const Editor = struct {
-    fn edit(_: *anyopaque, _: rebase.MessageKind, _: []const u8) ?[]const u8 {
+    fn edit(_: *rebase.Messages, _: rebase.MessageKind, _: []const u8) ?[]const u8 {
         return edited_text;
     }
 };
@@ -358,19 +358,18 @@ test "a fixup or squash that fails and is skipped leaves the chain as git 2.56's
         try pair.env.put("GIT_EDITOR", editor);
         try history.gitRebaseInteractive(io, &pair.git, sheet, &.{"main"});
         try history.gitMayFail(io, &pair.git, &.{ "rebase", "--skip" });
-        var unused: u8 = 0;
-        const messages: rebase.Messages = .{ .context = &unused, .editFn = Editor.edit };
+        var messages: rebase.Messages = .{ .vtable = &.{ .edit = Editor.edit } };
         {
             var repo = try pair.open(io);
             defer repo.deinit(io);
-            var outcome = try rebase.start(gpa, io, &repo, try history.oidOf(gpa, io, &pair.ours, "main"), .{ .who = who, .onto_name = "main", .todo = sheet, .messages = messages });
+            var outcome = try rebase.start(gpa, io, &repo, try history.oidOf(gpa, io, &pair.ours, "main"), .{ .who = who, .onto_name = "main", .todo = sheet, .messages = &messages });
             defer outcome.deinit();
             try std.testing.expectEqual(rebase.Stop.conflict, outcome.stopped.?);
         }
         {
             var repo = try pair.open(io);
             defer repo.deinit(io);
-            var outcome = try rebase.skip(gpa, io, &repo, .{ .who = who, .messages = messages });
+            var outcome = try rebase.skip(gpa, io, &repo, .{ .who = who, .messages = &messages });
             defer outcome.deinit();
         }
         try expectSame(&pair, io);

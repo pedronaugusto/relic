@@ -160,12 +160,20 @@ pub const MessageKind = enum {
     merge,
 };
 
-/// Where the messages a person would edit go. `editFn` returns the message
-/// to use, which is cleaned of comments as an edited one is, or `null` to
-/// take the proposed one as an editor left untouched would.
+/// Where the messages a person would edit go: a node its owner embeds,
+/// found again from the node by `@fieldParentPtr`. `edit` returns the
+/// message to use, which is cleaned of comments as an edited one is, or
+/// `null` to take the proposed one as an editor left untouched would.
 pub const Messages = struct {
-    context: *anyopaque,
-    editFn: *const fn (context: *anyopaque, kind: MessageKind, proposed: []const u8) ?[]const u8,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        edit: *const fn (messages: *Messages, kind: MessageKind, proposed: []const u8) ?[]const u8,
+    };
+
+    pub fn edit(m: *Messages, kind: MessageKind, proposed: []const u8) ?[]const u8 {
+        return m.vtable.edit(m, kind, proposed);
+    }
 };
 
 /// What becomes of a commit that ends up changing nothing.
@@ -277,7 +285,7 @@ pub const Options = struct {
     /// The permission to run `exec` lines, and the filters' programs.
     programs: ?program.Programs = null,
     /// Where messages a person would edit go.
-    messages: ?Messages = null,
+    messages: ?*Messages = null,
     /// Where a refusal writes the path that caused it.
     blocked: ?*three_way.Blocked = null,
     /// The text the reflog lines begin with, before ` (start)`, ` (pick)`
@@ -2204,7 +2212,7 @@ fn firstLine(text: []const u8) []const u8 {
 fn edited(r: *Run, kind: MessageKind, proposed: []const u8) Error![]const u8 {
     var text = proposed;
     if (r.options.messages) |m| {
-        if (m.editFn(m.context, kind, proposed)) |given| text = given;
+        if (m.edit(kind, proposed)) |given| text = given;
     }
     const cleaned = try message.cleanup(r.arena, text, try editedCleanup(r), r.comment);
     if (cleaned.len == 0) return error.EmptyMessage;
@@ -3386,7 +3394,7 @@ fn amendFinalFixup(r: *Run, h: head_mod.Head, final: FinalFixup) Error!void {
     }
     var text = shown;
     if (final.edit) if (r.options.messages) |m| {
-        if (m.editFn(m.context, .squash, shown)) |given| text = given;
+        if (m.edit(.squash, shown)) |given| text = given;
     };
     const cleaned = try message.cleanup(r.arena, text, .strip, r.comment);
     if (final.edit and cleaned.len == 0) return error.EmptyMessage;

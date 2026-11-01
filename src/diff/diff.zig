@@ -1272,16 +1272,20 @@ pub const SubmoduleChange = struct {
 
 /// What writes a submodule's log or diff for `Options.submodule`. This
 /// layer cannot open another repository, so the change goes through here:
-/// `submodule.DiffWriter` writes it as git does.
+/// `submodule.DiffWriter` writes it as git does. A node its owner embeds,
+/// found again from the node by `@fieldParentPtr`.
 pub const SubmoduleWriter = struct {
     pub const Error = Io.Writer.Error || Allocator.Error;
 
-    context: *anyopaque,
-    writeFn: *const fn (io: Io, context: *anyopaque, w: *Io.Writer, change: SubmoduleChange) SubmoduleWriter.Error!void,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        write: *const fn (writer: *SubmoduleWriter, io: Io, w: *Io.Writer, change: SubmoduleChange) SubmoduleWriter.Error!void,
+    };
 
     /// Write `change` to `w`.
-    pub fn write(s: SubmoduleWriter, io: Io, w: *Io.Writer, change: SubmoduleChange) SubmoduleWriter.Error!void {
-        return s.writeFn(io, s.context, w, change);
+    pub fn write(s: *SubmoduleWriter, io: Io, w: *Io.Writer, change: SubmoduleChange) SubmoduleWriter.Error!void {
+        return s.vtable.write(s, io, w, change);
     }
 };
 
@@ -1308,7 +1312,7 @@ pub const UnifiedInputs = struct {
     external: ?*const external_mod.External = null,
     /// What writes a gitlink's change where `Options.submodule` is `log`
     /// or `diff`.
-    submodules: ?SubmoduleWriter = null,
+    submodules: ?*SubmoduleWriter = null,
     /// Lines a path's patch carries among its headers, after any rename
     /// lines and before its `index` line: git's `additional_path_headers`,
     /// which `git log --remerge-diff` fills with the conflicts its merge

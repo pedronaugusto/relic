@@ -45,9 +45,11 @@ fn userOf(request: *uplink.server.Request) ?[]const u8 {
 
 const Policy = struct {
     asked: std.atomic.Value(u32) = .init(0),
+    lfs: server.Caller = .{ .vtable = &.{ .authorize = authorize, .now = now } },
+    git: http_backend.Caller = .{ .vtable = &.{ .user = gitUser, .now = gitNow } },
 
-    fn authorize(context: ?*anyopaque, request: *uplink.server.Request, repository: []const u8, access: server.Access) server.Verdict {
-        const p: *Policy = @ptrCast(@alignCast(context.?));
+    fn authorize(caller: *server.Caller, request: *uplink.server.Request, repository: []const u8, access: server.Access) server.Verdict {
+        const p: *Policy = @fieldParentPtr("lfs", caller);
         _ = p.asked.fetchAdd(1, .monotonic);
         std.debug.assert(std.mem.eql(u8, repository, "repo.git"));
         const who = userOf(request);
@@ -60,11 +62,15 @@ const Policy = struct {
         };
     }
 
-    fn now(_: ?*anyopaque) i64 {
+    fn now(_: *server.Caller) i64 {
         return 1_700_000_000;
     }
 
-    fn gitUser(_: ?*anyopaque, request: *uplink.server.Request) ?[]const u8 {
+    fn gitNow(_: *http_backend.Caller) i64 {
+        return 1_700_000_000;
+    }
+
+    fn gitUser(_: *http_backend.Caller, request: *uplink.server.Request) ?[]const u8 {
         return userOf(request);
     }
 };
@@ -182,11 +188,11 @@ const World = struct {
     /// Start serving, the objects in `store`.
     fn serve(w: *World, store: server.Store) !void {
         const gpa = w.gpa;
-        w.git_backend = .init(gpa, w.served_path, .{ .export_all = true, .caller = .{ .user = Policy.gitUser, .now = Policy.now } });
+        w.git_backend = .init(gpa, w.served_path, .{ .export_all = true, .caller = &w.policy.git });
         w.backend = .init(gpa, w.served_path, .{
             .export_all = true,
             .store = store,
-            .caller = .{ .context = &w.policy, .authorize = Policy.authorize, .now = Policy.now },
+            .caller = &w.policy.lfs,
             .git = &w.git_backend,
         });
         w.http_server = uplink.Server.init(gpa, .{}, w.backend.handler());

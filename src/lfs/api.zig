@@ -1232,7 +1232,7 @@ pub const Client = struct {
     options: Options,
     /// One HTTP client for each set of connection settings the operation's
     /// URLs need: `transportFor`.
-    transports: aegis.BlockingGuarded(?*Transports) = .init(null),
+    transports: aegis.BlockingGuarded(?*TransportPool) = .init(null),
     /// What the operation's tasks learn and keep between requests.
     shared: aegis.BlockingGuarded(Shared),
     /// What the server or the program last said about a failure.
@@ -1356,8 +1356,7 @@ pub const Client = struct {
 
     /// Close the HTTP clients `transportFor` made.
     fn freeTransports(c: *Client, io: Io) void {
-        const handle = c.transports.teardown().* orelse return;
-        const pool: *TransportPool = @ptrCast(@alignCast(handle)); // aegis: no-danger: transportFor installs a TransportPool
+        const pool = c.transports.teardown().* orelse return;
         for (pool.items.items) |t| {
             t.client.deinit(io);
             t.free(c.gpa);
@@ -1702,7 +1701,7 @@ pub const Client = struct {
         /// The `Accept-Encoding` an object's download sends.
         accept: Accept = .default,
         /// Told of every chunk of an `object` body as it goes out.
-        on_bytes: ?BytesSent = null,
+        on_bytes: ?*BytesSent = null,
         /// Where the bytes of an `object` body sent so far are counted, so a
         /// caller can take them back off its progress when the request
         /// fails.
@@ -1722,10 +1721,18 @@ pub const Client = struct {
         zstd,
     };
 
-    /// A callback for the bytes of a body as they go out.
+    /// What is told of the bytes of a body as they go out: a node its
+    /// owner embeds, found again from the node by `@fieldParentPtr`.
     pub const BytesSent = struct {
-        context: *anyopaque,
-        add: *const fn (context: *anyopaque, n: u64) void,
+        vtable: *const VTable,
+
+        pub const VTable = struct {
+            add: *const fn (sent: *BytesSent, n: u64) void,
+        };
+
+        pub fn add(sent: *BytesSent, n: u64) void {
+            sent.vtable.add(sent, n);
+        }
     };
 
     /// What a request sends.
@@ -1988,7 +1995,7 @@ pub const Client = struct {
     fn exchangeOnce(c: *Client, io: Io, request: Request, url: []const u8, auth_header: ?[]const u8) ErrorNamespace.Error!*Exchange {
         const state = try c.gpa.create(ExchangeState);
         errdefer c.gpa.destroy(state);
-        state.* = .{ .exchange = .{ .client = c, .arena = .init(c.gpa), .wire = @ptrCast(state) } }; // aegis: no-danger: the opaque handle points back to its owning ExchangeState
+        state.* = .{ .exchange = .{ .client = c, .arena = .init(c.gpa) } };
         const ex = &state.exchange;
         errdefer ex.arena.deinit();
         const a = ex.arena.allocator();
@@ -2069,7 +2076,7 @@ pub const Client = struct {
                     outgoing.writer().writeAll(chunk[0..n]) catch return c.uploadBroke(io, ex, &outgoing, request_url);
                     left -= n;
                     if (request.sent) |count| count.* += n;
-                    if (request.on_bytes) |cb| cb.add(cb.context, n);
+                    if (request.on_bytes) |cb| cb.add(n);
                 }
                 ex.state().response = outgoing.finish(io) catch |err| return c.clientFailed(io, &ex.state().diagnostics, err, request_url);
             },
@@ -2207,9 +2214,9 @@ pub const Client = struct {
         if (handle.* == null) {
             const pool = try c.gpa.create(TransportPool);
             pool.* = .{};
-            handle.* = @ptrCast(pool); // aegis: no-danger: the opaque handle owns this TransportPool until deinit
+            handle.* = pool;
         }
-        const pool: *TransportPool = @ptrCast(@alignCast(handle.*.?)); // aegis: no-danger: the handle above owns a TransportPool
+        const pool = handle.*.?;
         for (pool.items.items) |t| {
             if (std.mem.eql(u8, t.key, key)) return &t.client;
         }
@@ -2497,12 +2504,10 @@ const Transport = struct {
     }
 };
 
-const Transports = opaque {};
 const TransportPool = struct {
     items: std.ArrayList(*Transport) = .empty,
 };
 
-const Wire = opaque {};
 const ExchangeState = struct {
     exchange: Exchange,
     diagnostics: uplink.Diagnostics = .{},
@@ -2513,9 +2518,9 @@ const ExchangeState = struct {
 pub const Exchange = struct {
     pub const Error = ErrorNamespace.Error;
 
+    /// Owned with its network state in one allocation, an `ExchangeState`'s
+    /// `exchange`.
     client: *Client,
-    /// Private: the network state, owned with this exchange in one allocation.
-    wire: *Wire,
     arena: std.heap.ArenaAllocator,
     /// Where the request went, without a credential, in the exchange's
     /// arena.
@@ -2526,22 +2531,26 @@ pub const Exchange = struct {
     decompress_buffer: []u8 = &.{},
     body: ?*Io.Reader = null,
 
-    fn state(ex: *const Exchange) *ExchangeState {
-        return @ptrCast(@alignCast(ex.wire)); // aegis: no-danger: exchangeOnce pairs every handle with its ExchangeState
+    fn state(ex: *Exchange) *ExchangeState {
+        return @fieldParentPtr("exchange", ex);
+    }
+
+    fn held(ex: *const Exchange) *const ExchangeState {
+        return @fieldParentPtr("exchange", ex);
     }
 
     /// The answer's status.
     pub fn status(ex: *const Exchange) http.Status {
-        return ex.state().response.status;
+        return ex.held().response.status;
     }
 
     /// A header of the answer, or `null`.
     pub fn header(ex: *const Exchange, name: []const u8) ?[]const u8 {
-        return ex.state().response.headers.get(name);
+        return ex.held().response.headers.get(name);
     }
 
     fn location(ex: *const Exchange) ?[]const u8 {
-        return ex.state().response.headers.get("location");
+        return ex.held().response.headers.get("location");
     }
 
     const Offers = struct { basic: bool = false, other: bool = false };
@@ -2551,7 +2560,7 @@ pub const Exchange = struct {
     fn challenges(ex: *const Exchange, a: Allocator) Allocator.Error![]const []const u8 {
         var out: std.ArrayList([]const u8) = .empty;
         for ([_][]const u8{ "lfs-authenticate", "www-authenticate" }) |name| {
-            var it = ex.state().response.headers.iterator();
+            var it = ex.held().response.headers.iterator();
             while (it.next()) |h| {
                 if (std.ascii.eqlIgnoreCase(h.name, name)) try out.append(a, try a.dupe(u8, h.value));
             }
@@ -2573,7 +2582,7 @@ pub const Exchange = struct {
 
     fn authenticateOffers(ex: *const Exchange) Offers {
         var offers: Offers = .{};
-        var it = ex.state().response.headers.iterator();
+        var it = ex.held().response.headers.iterator();
         while (it.next()) |h| {
             if (!std.ascii.eqlIgnoreCase(h.name, "www-authenticate") and !std.ascii.eqlIgnoreCase(h.name, "lfs-authenticate")) continue;
             const value = std.mem.trim(u8, h.value, " \t");
@@ -2660,12 +2669,12 @@ pub const Exchange = struct {
 
     /// Whether the last read of the body failed for a cancel.
     pub fn canceled(ex: *const Exchange) bool {
-        return ex.state().response.failure() == error.Canceled;
+        return ex.held().response.failure() == error.Canceled;
     }
 
     /// The reason a read of the body failed.
     pub fn bodyError(ex: *const Exchange) []const u8 {
-        return switch (ex.state().response.failure()) {
+        return switch (ex.held().response.failure()) {
             error.TimedOut => "timed out",
             else => |err| @errorName(err),
         };

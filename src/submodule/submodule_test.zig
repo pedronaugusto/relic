@@ -1234,13 +1234,14 @@ test "git 2.56, an update runs each submodule's own post-checkout after its chec
 const GitTransport = struct {
     git: *testgit.Repo,
     clones: u32 = 0,
+    interface: submodule.Transport = .{ .vtable = &.{ .clone = clone, .fetch = fetch } },
 
-    fn transport(t: *GitTransport) submodule.Transport {
-        return .{ .context = t, .cloneFn = clone, .fetchFn = fetch };
+    fn transport(t: *GitTransport) *submodule.Transport {
+        return &t.interface;
     }
 
-    fn clone(gpa: Allocator, io: Io, context: *anyopaque, request: submodule.CloneRequest) submodule.TransportError!void {
-        const t: *GitTransport = @ptrCast(@alignCast(context));
+    fn clone(seam: *submodule.Transport, gpa: Allocator, io: Io, request: submodule.CloneRequest) submodule.TransportError!void {
+        const t: *GitTransport = @fieldParentPtr("interface", seam);
         const target = absolute(gpa, io, request.git_dir) catch return error.TransportFailed;
         defer gpa.free(target);
         t.git.exec(io, &.{ "clone", "-q", "--bare", request.url, target }) catch return error.TransportFailed;
@@ -1248,13 +1249,11 @@ const GitTransport = struct {
         t.clones += 1;
     }
 
-    fn fetch(gpa: Allocator, io: Io, context: *anyopaque, repo: *Repository, remote: []const u8, want: ?Oid) submodule.TransportError!void {
+    fn fetch(seam: *submodule.Transport, gpa: Allocator, io: Io, request: submodule.FetchRequest) submodule.TransportError!void {
+        _ = seam;
         _ = gpa;
         _ = io;
-        _ = context;
-        _ = repo;
-        _ = remote;
-        _ = want;
+        _ = request;
         return error.TransportFailed;
     }
 };

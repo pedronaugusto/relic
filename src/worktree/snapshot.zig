@@ -55,7 +55,7 @@ pub const CaptureOptions = struct {
     /// Permission to run the source's configured filter programs.
     programs: ?program.Programs = null,
     filter_report: ?*filter.Report = null,
-    native_provider: ?filter.native.Provider = null,
+    native_provider: ?*const filter.native.Provider = null,
     refusal: ?*worktree.Refusal = null,
 };
 

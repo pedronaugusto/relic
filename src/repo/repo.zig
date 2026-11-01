@@ -298,6 +298,10 @@ const RepositoryData = struct {
     replace_objects: bool = true,
     /// `OpenOptions.replace_ref_base`, owned.
     replace_ref_base: []u8 = &.{},
+    /// What the ref store asks of the objects: `Repository.refObjects`.
+    ref_objects: refs_mod.Peeler = .{ .vtable = &.{ .peel = Repository.peelForRefs, .exists = Repository.existsForRefs } },
+    /// What lists the replace refs for the object database.
+    replacement_lister: odb_mod.Odb.Replacements.Lister = .{ .vtable = &.{ .list = Repository.listReplacements } },
 
     fn closeDirectories(d: *RepositoryData, io: Io) void {
         if (d.common_dir) |*common| common.deinit(io);
@@ -1016,7 +1020,7 @@ pub const Repository = struct {
         });
         repo.data().refs_state = @ptrCast(store); // aegis: no-danger: the opaque owner retains this allocated Store.
         repo.data().odb.replacements = .{
-            .lister = .{ .context = repo.data(), .list = listReplacements },
+            .lister = &repo.data().replacement_lister,
             .enabled = options.replace_objects and repo.data().settings.use_replace_refs,
         };
         return repo;
@@ -1599,8 +1603,8 @@ pub const Repository = struct {
     /// where git warns of it; a broken one, or a symbolic one that leads
     /// nowhere, replaces with no object, so a read of what it replaces finds
     /// nothing, as git's does.
-    fn listReplacements(io: Io, context: *anyopaque, gpa: Allocator, map: *Oid.Map(Oid)) odb_mod.Odb.Replacements.ListError!void {
-        const d: *RepositoryData = @ptrCast(@alignCast(context)); // aegis: no-danger: open installs the RepositoryData as the context
+    fn listReplacements(lister: *odb_mod.Odb.Replacements.Lister, io: Io, gpa: Allocator, map: *Oid.Map(Oid)) odb_mod.Odb.Replacements.ListError!void {
+        const d: *RepositoryData = @alignCast(@fieldParentPtr("replacement_lister", lister)); // aegis: no-danger: this function is installed only on a RepositoryData's replacement_lister
         const repo: Repository = .{ .state = d };
         const store = repo.refStore();
         const kind = repo.objectFormat();
@@ -2526,17 +2530,18 @@ pub const Repository = struct {
     /// What the ref store asks of this repository's objects: what an
     /// annotated tag peels to, and whether an object exists. The
     /// repository must outlive it.
-    pub fn refObjects(repo: *Repository) refs_mod.Peeler {
-        return .{ .context = repo, .peel = peelForRefs, .exists = existsForRefs };
+    pub fn refObjects(repo: *Repository) *refs_mod.Peeler {
+        return &repo.data().ref_objects;
     }
 
-    fn existsForRefs(io: Io, context: *anyopaque, oid: Oid) bool {
-        const repo: *Repository = @ptrCast(@alignCast(context)); // aegis: no-danger: the context handed out with this function is a Repository
-        return repo.data().odb.exists(io, oid) catch false;
+    fn existsForRefs(peeler: *refs_mod.Peeler, io: Io, oid: Oid) bool {
+        const d: *RepositoryData = @alignCast(@fieldParentPtr("ref_objects", peeler)); // aegis: no-danger: this function is installed only on a RepositoryData's ref_objects
+        return d.odb.exists(io, oid) catch false;
     }
 
-    fn peelForRefs(io: Io, context: *anyopaque, oid: Oid) ?Oid {
-        const repo: *Repository = @ptrCast(@alignCast(context)); // aegis: no-danger: the context handed out with this function is a Repository
+    fn peelForRefs(peeler: *refs_mod.Peeler, io: Io, oid: Oid) ?Oid {
+        const d: *RepositoryData = @alignCast(@fieldParentPtr("ref_objects", peeler)); // aegis: no-danger: this function is installed only on a RepositoryData's ref_objects
+        var repo: Repository = .{ .state = d };
         // A cancel is put back for the task's next cancelation point.
         const header = repo.data().odb.readHeader(io, oid) catch |err| {
             if (err == error.Canceled) io.recancel();

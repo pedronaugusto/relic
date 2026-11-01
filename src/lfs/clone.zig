@@ -34,10 +34,12 @@ pub const Fetcher = struct {
     inner: ?lfstransfer.Fetcher = null,
     /// Why the server could not be opened, when it could not.
     open_error: ?lfsapi.Server.OpenError = null,
+    held: clone_mod.Filters.Held = .{ .vtable = &.{ .release = releaseFetcher } },
+    interface: lfs.Fetcher = .{ .vtable = &.{ .fetch = fetchFn } },
 
     /// The `lfs.Fetcher` a checkout is handed.
-    pub fn fetcher(f: *Fetcher) lfs.Fetcher {
-        return .{ .context = f, .fetchFn = fetchFn };
+    pub fn fetcher(f: *Fetcher) *lfs.Fetcher {
+        return &f.interface;
     }
 
     /// The last fetch's outcome, when there was one.
@@ -53,8 +55,8 @@ pub const Fetcher = struct {
         f.* = undefined;
     }
 
-    fn fetchFn(io: Io, context: *anyopaque, store: *const lfs.Store, settings: *const lfs.Settings, wanted: []const lfs.Wanted) lfs.FetchError!void {
-        const f: *Fetcher = @ptrCast(@alignCast(context)); // aegis: no-danger: the context handed out with this function is a Fetcher
+    fn fetchFn(seam: *lfs.Fetcher, io: Io, store: *const lfs.Store, settings: *const lfs.Settings, wanted: []const lfs.Wanted) lfs.FetchError!void {
+        const f: *Fetcher = @alignCast(@fieldParentPtr("interface", seam)); // aegis: no-danger: this function is installed only on a Fetcher's interface
         if (f.server == null) {
             f.server = lfsapi.Server.open(f.gpa, io, f.repo, f.remote, f.options) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
@@ -75,10 +77,11 @@ pub const Fetcher = struct {
 pub const Error = clone_mod.Error;
 pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, options: clone_mod.Options) Error!repo_mod.Repository {
     var with = options;
-    if (with.native_filters == null) with.native_filters = .{ .load_fn = loadFilters };
+    if (with.native_filters == null) with.native_filters = &loader;
     return clone_mod.clone(gpa, io, url, dir, with);
 }
-fn loadFilters(gpa: Allocator, io: Io, _: ?*const anyopaque, repository: *repo_mod.Repository, options: clone_mod.FilterOptions) repo_mod.Repository.LoadFiltersError!clone_mod.Filters {
+const loader: clone_mod.FilterLoader = .{ .vtable = &.{ .load = loadFilters } };
+fn loadFilters(_: *const clone_mod.FilterLoader, gpa: Allocator, io: Io, repository: *repo_mod.Repository, options: clone_mod.FilterOptions) repo_mod.Repository.LoadFiltersError!clone_mod.Filters {
     const fetch = try gpa.create(Fetcher);
     errdefer gpa.destroy(fetch);
     fetch.* = .{
@@ -90,12 +93,11 @@ fn loadFilters(gpa: Allocator, io: Io, _: ?*const anyopaque, repository: *repo_m
     const configured = repository.configuration().get("filter.lfs.process") != null or repository.configuration().get("filter.lfs.smudge") != null;
     return .{
         .drivers = try filter.load(gpa, io, repository, .{ .fetch = if (configured) fetch.fetcher() else null, .skip_smudge = options.skip_smudge }),
-        .context = fetch,
-        .release_fn = releaseFetcher,
+        .held = &fetch.held,
     };
 }
-fn releaseFetcher(io: Io, context: *anyopaque) void {
-    const fetch: *Fetcher = @ptrCast(@alignCast(context)); // aegis: no-danger: the callback context is the Fetcher this function was registered with
+fn releaseFetcher(held: *clone_mod.Filters.Held, io: Io) void {
+    const fetch: *Fetcher = @alignCast(@fieldParentPtr("held", held)); // aegis: no-danger: this function is installed only on a Fetcher's held
     const gpa = fetch.gpa;
     fetch.deinit(io);
     gpa.destroy(fetch);

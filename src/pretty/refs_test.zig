@@ -21,12 +21,12 @@ const Oid = hash.Oid;
 const now: i64 = testgit.fixture_date + 400 * 86400;
 
 const Utc = struct {
-    fn at(_: *anyopaque, _: i64) gitdate.LocalTime {
+    fn at(_: *const gitdate.LocalZone, _: i64) gitdate.LocalTime {
         return .{ .offset_minutes = 0, .name = "UTC" };
     }
 };
-var utc_context: u8 = 0;
-const clock: gitdate.Clock = .{ .now = gitdate.timestamp(now), .local = .{ .context = &utc_context, .at = Utc.at } };
+const utc: gitdate.LocalZone = .{ .vtable = &.{ .at = Utc.at } };
+const clock: gitdate.Clock = .{ .now = gitdate.timestamp(now), .local = &utc };
 
 fn oidOf(gpa: Allocator, io: Io, git: *testgit.Repo, rev: []const u8) !Oid {
     _ = gpa;

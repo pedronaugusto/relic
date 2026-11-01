@@ -44,6 +44,7 @@ const Io = std.Io;
 
 const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
+const odb = @import("../odb/odb.zig");
 const fs = @import("../fs/fs.zig");
 const safe_path = @import("../names.zig").path;
 const index_mod = @import("../index/index.zig");
@@ -1609,26 +1610,39 @@ fn connectAt(gpa: Allocator, io: Io, repo: *Repository, wt: Io.Dir, path: []cons
 /// What `update` asks for when a submodule's repository or commit is not on
 /// the disk. The wire protocol is not this module's; a caller that has one
 /// hands it in here.
+///
+/// A node its owner embeds, found again from the node by `@fieldParentPtr`.
 pub const Transport = struct {
-    context: *anyopaque,
-    /// Fill `request.git_dir`, an empty directory, with the repository at
-    /// `request.url`, the way `git clone --no-checkout --separate-git-dir`
-    /// leaves one: a non-bare repository with its objects, its refs, `HEAD`
-    /// on the default branch, and `remote.origin` configured. `update`
-    /// writes the `.git` file and `core.worktree` itself, and checks out
-    /// the commit.
-    cloneFn: *const fn (gpa: Allocator, io: Io, context: *anyopaque, request: CloneRequest) TransportError!void,
-    /// Fetch into `repo`, a submodule's repository, from `remote` what its
-    /// configured refspecs name, as git's `fetch` inside the submodule
-    /// does; and then `want`, when one is given and still missing, asked
-    /// for by name.
-    fetchFn: *const fn (gpa: Allocator, io: Io, context: *anyopaque, repo: *Repository, remote: []const u8, want: ?Oid) TransportError!void,
-    /// Bring `oids`, which `repo` -- a submodule's repository that is a
-    /// partial clone -- was promised, from its promisor remotes: what git's
-    /// lazy fetch does when a checkout reads one. `update` has every read
-    /// of a missing object in such a submodule ask; `null` leaves it
-    /// missing.
-    fetchPromisedFn: ?*const fn (gpa: Allocator, io: Io, context: *anyopaque, repo: *Repository, oids: []const Oid) TransportError!void = null,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        /// Fill `request.git_dir`, an empty directory, with the repository
+        /// at `request.url`, the way `git clone --no-checkout
+        /// --separate-git-dir` leaves one: a non-bare repository with its
+        /// objects, its refs, `HEAD` on the default branch, and
+        /// `remote.origin` configured. `update` writes the `.git` file and
+        /// `core.worktree` itself, and checks out the commit.
+        clone: *const fn (transport: *Transport, gpa: Allocator, io: Io, request: CloneRequest) TransportError!void,
+        /// Fetch into `request.repo`, a submodule's repository, from
+        /// `request.remote` what its configured refspecs name, as git's
+        /// `fetch` inside the submodule does; and then `request.want`, when
+        /// one is given and still missing, asked for by name.
+        fetch: *const fn (transport: *Transport, gpa: Allocator, io: Io, request: FetchRequest) TransportError!void,
+        /// Bring `oids`, which `repo` -- a submodule's repository that is a
+        /// partial clone -- was promised, from its promisor remotes: what
+        /// git's lazy fetch does when a checkout reads one. `update` has
+        /// every read of a missing object in such a submodule ask; `null`
+        /// leaves it missing.
+        fetchPromised: ?*const fn (transport: *Transport, gpa: Allocator, io: Io, repo: *Repository, oids: []const Oid) TransportError!void = null,
+    };
+
+    pub fn clone(t: *Transport, gpa: Allocator, io: Io, request: CloneRequest) TransportError!void {
+        return t.vtable.clone(t, gpa, io, request);
+    }
+
+    pub fn fetch(t: *Transport, gpa: Allocator, io: Io, request: FetchRequest) TransportError!void {
+        return t.vtable.fetch(t, gpa, io, request);
+    }
 };
 
 /// A submodule's reads of what it was promised, sent to the transport
@@ -1636,25 +1650,26 @@ pub const Transport = struct {
 const Promised = struct {
     gpa: Allocator,
     repo: *Repository,
-    transport: Transport,
+    transport: *Transport,
+    interface: odb.Odb.Lazy = .{ .vtable = &.{ .fetch = fetch } },
 
     /// Install on `repo` when it is a partial clone and `transport` fetches
     /// what is promised.
     fn install(p: *Promised, arena: Allocator) Allocator.Error!void {
-        if (p.transport.fetchPromisedFn == null) return;
+        if (p.transport.vtable.fetchPromised == null) return;
         if ((try promisors.remotes(arena, p.repo.configuration())).len == 0) return;
-        p.repo.objectDatabase().lazy = .{ .context = p, .fetch = fetch };
+        p.repo.objectDatabase().lazy = &p.interface;
     }
 
     fn uninstall(p: *Promised) void {
-        if (p.repo.objectDatabase().lazy) |lazy| if (lazy.context == @as(*anyopaque, p)) {
+        if (p.repo.objectDatabase().lazy) |lazy| if (lazy == &p.interface) {
             p.repo.objectDatabase().lazy = null;
         };
     }
 
-    fn fetch(io: Io, context: *anyopaque, oids: []const Oid) (Allocator.Error || Io.Cancelable || error{PromisorFetchFailed})!void {
-        const p: *Promised = @ptrCast(@alignCast(context)); // aegis: no-danger: the context handed out with this function is a Promised
-        p.transport.fetchPromisedFn.?(p.gpa, io, p.transport.context, p.repo, oids) catch |err| return switch (err) {
+    fn fetch(lazy: *odb.Odb.Lazy, io: Io, oids: []const Oid) odb.Odb.Lazy.FetchError!void {
+        const p: *Promised = @fieldParentPtr("interface", lazy);
+        p.transport.vtable.fetchPromised.?(p.transport, p.gpa, io, p.repo, oids) catch |err| return switch (err) {
             error.TransportFailed => error.PromisorFetchFailed,
             error.OutOfMemory => error.OutOfMemory,
             error.Canceled => error.Canceled,
@@ -1662,7 +1677,7 @@ const Promised = struct {
     }
 };
 
-/// What `Transport.cloneFn` is asked to clone.
+/// What `Transport.VTable.clone` is asked to clone.
 pub const CloneRequest = struct {
     url: []const u8,
     git_dir: Io.Dir,
@@ -1677,6 +1692,13 @@ pub const CloneRequest = struct {
     beside: bool = false,
 
     pub const Within = struct { name: []const u8, superproject: *Repository };
+};
+
+/// What `Transport.VTable.fetch` is asked to fetch.
+pub const FetchRequest = struct {
+    repo: *Repository,
+    remote: []const u8,
+    want: ?Oid = null,
 };
 
 /// Errors a `Transport` may give. Its own detail is its to keep.
@@ -1703,7 +1725,7 @@ pub const UpdateOptions = struct {
     who: ?object.Signature = null,
     /// Where a missing repository or commit comes from. Without one they
     /// are `error.NotCloned` and `error.CommitMissing`.
-    transport: ?Transport = null,
+    transport: ?*Transport = null,
     /// `--remote`: each submodule brought to its remote-tracking branch,
     /// `refs/remotes/<remote>/<branch>`, in place of the commit its
     /// superproject records: the remote git's `get_default_remote_submodule`
@@ -2139,7 +2161,7 @@ fn populate(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, item: *
         try fs.makeDirs(io, where.base, target, repo.sharedPermissions());
         const dir = try where.base.openDir(io, target, .{ .iterate = true });
         errdefer dir.close(io);
-        transport.cloneFn(gpa, io, transport.context, .{ .url = url, .git_dir = dir, .within = .{ .name = item.module.name, .superproject = repo }, .beside = beside }) catch |err| switch (err) {
+        transport.clone(gpa, io, .{ .url = url, .git_dir = dir, .within = .{ .name = item.module.name, .superproject = repo }, .beside = beside }) catch |err| switch (err) {
             error.TransportFailed => return refuse(options.refusal, display, url, error.TransportFailed),
             else => |e| return e,
         };
@@ -2166,7 +2188,7 @@ fn remoteTip(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, sub: *
     if (options.fetch) {
         const transport = options.transport orelse return refuse(options.refusal, item.display, ref, error.NotFetched);
         const from = try defaultRemote(arena, io, sub);
-        transport.fetchFn(gpa, io, transport.context, sub, from, null) catch |err| switch (err) {
+        transport.fetch(gpa, io, .{ .repo = sub, .remote = from }) catch |err| switch (err) {
             error.TransportFailed => return refuse(options.refusal, item.display, from, error.TransportFailed),
             else => |e| return e,
         };
@@ -2249,7 +2271,7 @@ fn ensureCommit(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, sub
     var hex: [hash.max_hex_len]u8 = undefined;
     const transport = (if (options.fetch) options.transport else null) orelse return refuse(options.refusal, display, commit.hex(&hex), error.CommitMissing);
     const remote = try moduleRemote(arena, io, repo, sub, module);
-    transport.fetchFn(gpa, io, transport.context, sub, remote, commit) catch |err| switch (err) {
+    transport.fetch(gpa, io, .{ .repo = sub, .remote = remote, .want = commit }) catch |err| switch (err) {
         error.TransportFailed => return refuse(options.refusal, display, remote, error.TransportFailed),
         else => |e| return e,
     };

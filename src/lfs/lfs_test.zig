@@ -167,20 +167,21 @@ const MemoryFetcher = struct {
     content: []const u8,
     calls: u32 = 0,
     asked: usize = 0,
+    interface: lfs.Fetcher = .{ .vtable = &.{ .fetch = fetch } },
 
-    fn fetcher(m: *MemoryFetcher) lfs.Fetcher {
-        return .{ .context = m, .fetchFn = fetch };
+    fn fetcher(m: *MemoryFetcher) *lfs.Fetcher {
+        return &m.interface;
     }
 
     fn fetch(
+        seam: *lfs.Fetcher,
         io: Io,
-        context: *anyopaque,
         store: *const lfs.Store,
         settings: *const lfs.Settings,
         wanted: []const lfs.Wanted,
     ) lfs.FetchError!void {
         _ = settings;
-        const m: *MemoryFetcher = @ptrCast(@alignCast(context));
+        const m: *MemoryFetcher = @fieldParentPtr("interface", seam);
         m.calls += 1;
         m.asked += wanted.len;
         for (wanted) |w| {

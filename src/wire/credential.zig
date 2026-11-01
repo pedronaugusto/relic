@@ -133,7 +133,7 @@ pub const Options = struct {
     /// and finds none listening. `null` starts git's, `git
     /// credential-cache--daemon`, through `programs`, as git does; a caller
     /// with no git hands relic's own (`credential_cache_daemon.InProcess`).
-    cache_daemon: ?cache.Starter = null,
+    cache_daemon: ?*cache.Starter = null,
 };
 
 /// The parts of a credential a caller names itself, rather than through a
@@ -790,7 +790,7 @@ pub const Session = struct {
         arena: Allocator,
         io: Io,
         programs: program.Programs,
-        cache_daemon: ?cache.Starter,
+        cache_daemon: ?*cache.Starter,
         helper: []const u8,
         operation: Operation,
     ) ErrorNamespace.Error!Outcome {
@@ -876,7 +876,7 @@ pub const Session = struct {
         arena: Allocator,
         io: Io,
         programs: program.Programs,
-        cache_daemon: ?cache.Starter,
+        cache_daemon: ?*cache.Starter,
         helper: CacheHelper,
         operation: Operation,
     ) ErrorNamespace.Error!Outcome {
@@ -897,7 +897,7 @@ pub const Session = struct {
 
     /// `question` relayed to the daemon, started as `runCache` says when a
     /// `store` finds none.
-    fn askCache(s: *Session, io: Io, programs: program.Programs, cache_daemon: ?cache.Starter, question: CacheQuestion) ErrorNamespace.Error!Outcome {
+    fn askCache(s: *Session, io: Io, programs: program.Programs, cache_daemon: ?*cache.Starter, question: CacheQuestion) ErrorNamespace.Error!Outcome {
         const failed: Outcome = .{ .failed = true, .any = false };
         const socket = question.socket;
         const req = question.request;
@@ -907,7 +907,7 @@ pub const Session = struct {
         var got = answered orelse retry: {
             if (action != .store) return .{ .failed = false, .any = false };
             if (cache_daemon) |starter| {
-                starter.start(starter.context, io, socket) catch |err| switch (err) {
+                starter.start(io, socket) catch |err| switch (err) {
                     error.Canceled => return error.Canceled,
                     error.CacheDaemonNotStarted => return failed,
                 };

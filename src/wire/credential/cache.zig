@@ -32,12 +32,20 @@ pub const Error = error{
 /// How a daemon starts where a `store` finds none listening. git runs
 /// `git credential-cache--daemon <socket>` and waits until it listens;
 /// relic leaves it to the caller, which may run `cache/daemon.zig`'s `Daemon`
-/// on a task of its own (its `InProcess`) or start a process.
+/// on a task of its own (its `InProcess`) or start a process. A node its
+/// owner embeds, found again from the node by `@fieldParentPtr`.
 pub const Starter = struct {
-    context: ?*anyopaque = null,
-    /// Start a daemon at `socket`, an absolute path, returning once it
-    /// listens.
-    start: *const fn (context: ?*anyopaque, io: Io, socket: []const u8) StartError!void,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        /// Start a daemon at `socket`, an absolute path, returning once it
+        /// listens.
+        start: *const fn (starter: *Starter, io: Io, socket: []const u8) StartError!void,
+    };
+
+    pub fn start(starter: *Starter, io: Io, socket: []const u8) StartError!void {
+        return starter.vtable.start(starter, io, socket);
+    }
 };
 
 pub const StartError = error{

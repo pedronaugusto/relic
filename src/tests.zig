@@ -40,11 +40,10 @@ test "the plumbing is relic's own: no public name reaches it" {
     try std.testing.expect(!@hasDecl(api_mod, "timeoutsFor"));
     try std.testing.expect(!@hasField(api_mod.Exchange, "response"));
     try std.testing.expect(!@hasField(api_mod.Exchange, "diagnostics"));
-    const wire = @typeInfo(@FieldType(api_mod.Exchange, "wire")).pointer.child;
-    try std.testing.expect(@typeInfo(wire) == .@"opaque");
-    const guarded = @typeInfo(@typeInfo(@TypeOf(@FieldType(api_mod.Client, "transports").Guard.value)).@"fn".return_type.?).pointer.child;
-    const pool = @typeInfo(guarded).optional.child;
-    try std.testing.expect(@typeInfo(@typeInfo(pool).pointer.child) == .@"opaque");
+    // An exchange's network state and the client's transports are the
+    // module's own types, named by no public declaration.
+    try std.testing.expect(!@hasDecl(api_mod, "ExchangeState"));
+    try std.testing.expect(!@hasDecl(api_mod, "TransportPool"));
 }
 
 test {

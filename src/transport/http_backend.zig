@@ -48,14 +48,26 @@ const Response = uplink.server.Response;
 pub const Error = upload_pack.Error || receive_pack.Error || Response.Error || pkt_line.WriteError;
 
 /// Who sent a request, and the time, which the caller knows and relic
-/// does not read.
+/// does not read: a node its owner embeds, found again from the node by
+/// `@fieldParentPtr`.
 pub const Caller = struct {
-    context: ?*anyopaque = null,
-    /// git's `REMOTE_USER`: the name the server authenticated `request`
-    /// as, or `null` for none.
-    user: *const fn (context: ?*anyopaque, request: *Request) ?[]const u8,
-    /// Seconds since the Unix epoch, for a push's ref logs.
-    now: *const fn (context: ?*anyopaque) i64,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        /// git's `REMOTE_USER`: the name the server authenticated
+        /// `request` as, or `null` for none.
+        user: *const fn (caller: *Caller, request: *Request) ?[]const u8,
+        /// Seconds since the Unix epoch, for a push's ref logs.
+        now: *const fn (caller: *Caller) i64,
+    };
+
+    pub fn user(c: *Caller, request: *Request) ?[]const u8 {
+        return c.vtable.user(c, request);
+    }
+
+    pub fn now(c: *Caller) i64 {
+        return c.vtable.now(c);
+    }
 };
 
 /// What is served, and to whom.
@@ -66,7 +78,7 @@ pub const Options = struct {
     /// Permission to run a repository's hooks when it is pushed to.
     /// Without it a repository with hooks refuses a push.
     programs: ?program.Programs = null,
-    caller: Caller,
+    caller: *Caller,
 };
 
 /// The repositories under one root, served.
@@ -110,7 +122,7 @@ pub const Backend = struct {
             .upload_pack => .upload_pack,
             .receive_pack => .receive_pack,
         };
-        const user = b.options.caller.user(b.options.caller.context, request);
+        const user = b.options.caller.user(request);
         if (!try service.enabled(&remote, user)) return forbidden(io, response);
 
         const version = versionAsked(request);
@@ -185,7 +197,7 @@ pub const Backend = struct {
                 return sendFile(io, arena, remote, file, "text/plain", response);
             },
             .loose, .pack, .idx => {
-                const now = b.options.caller.now(b.options.caller.context);
+                const now = b.options.caller.now();
                 try response.header("Date", try rfc2822(arena, now));
                 try response.header("Expires", try rfc2822(arena, now + 31536000));
                 try response.header("Cache-Control", "public, max-age=31536000");
@@ -232,7 +244,7 @@ pub const Backend = struct {
                 }
             },
             .receive_pack => {
-                var who: object.Signature = .{ .name = "", .email = "", .when_secs = b.options.caller.now(b.options.caller.context), .offset_minutes = 0 };
+                var who: object.Signature = .{ .name = "", .email = "", .when_secs = b.options.caller.now(), .offset_minutes = 0 };
                 var email_buf: [256]u8 = undefined;
                 if (user) |name| {
                     who.name = name;

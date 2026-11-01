@@ -57,12 +57,20 @@ pub const Changes = struct {
     paths: ?[]const []const u8,
 };
 
-/// A caller's own monitor, asked as git asks its hook.
+/// A caller's own monitor, asked as git asks its hook: a node its owner
+/// embeds, found again from the node by `@fieldParentPtr`.
 pub const ChangeSource = struct {
-    context: *anyopaque,
-    /// What changed since `token`, or `null` for no answer, which makes
-    /// every file be looked at. The answer may live in `arena`.
-    queryFn: *const fn (arena: Allocator, context: *anyopaque, token: []const u8) Allocator.Error!?Changes,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        /// What changed since `token`, or `null` for no answer, which makes
+        /// every file be looked at. The answer may live in `arena`.
+        query: *const fn (source: *ChangeSource, arena: Allocator, token: []const u8) Allocator.Error!?Changes,
+    };
+
+    pub fn query(source: *ChangeSource, arena: Allocator, token: []const u8) Allocator.Error!?Changes {
+        return source.vtable.query(source, arena, token);
+    }
 };
 
 /// git's hook: `core.fsmonitor` and `core.fsmonitorHookVersion`.
@@ -101,7 +109,7 @@ pub const Dirs = struct {
 pub const Source = union(enum) {
     hook: Hook,
     daemon: Daemon,
-    changes: ChangeSource,
+    changes: *ChangeSource,
 };
 
 /// The monitor the configuration names, or `null` when there is none, as
@@ -253,7 +261,7 @@ pub fn refresh(gpa: Allocator, io: Io, wt: Io.Dir, index: *Index, source: Source
     const since = index.fsmonitor_token.?;
 
     const answer: ?Changes = switch (source) {
-        .changes => |c| try c.queryFn(arena, c.context, since),
+        .changes => |c| try c.query(arena, since),
         .hook => |h| try askHook(arena, io, wt, h, since, now),
         .daemon => |d| try askDaemon(arena, io, d, since),
     };

@@ -105,11 +105,26 @@ pub const Filters = struct {
     pub const Error = ErrorNamespace.Error;
 
     drivers: filter.Drivers,
-    context: ?*anyopaque = null,
-    release_fn: ?*const fn (Io, *anyopaque) void = null,
+    /// What the drivers borrow, released after them.
+    held: ?*Held = null,
+
+    /// A resource the loader made for the drivers: a node its owner
+    /// embeds, found again from the node by `@fieldParentPtr`.
+    pub const Held = struct {
+        vtable: *const VTable,
+
+        pub const VTable = struct {
+            release: *const fn (held: *Held, io: Io) void,
+        };
+
+        pub fn release(h: *Held, io: Io) void {
+            h.vtable.release(h, io);
+        }
+    };
+
     pub fn deinit(f: *Filters, io: Io) void {
         f.drivers.deinit(io);
-        if (f.release_fn) |release| release(io, f.context.?);
+        if (f.held) |held| held.release(io);
         f.* = undefined;
     }
 };
@@ -120,9 +135,18 @@ pub const FilterOptions = struct {
     auth_failure: ?*auth.Failure,
     skip_smudge: bool,
 };
+/// What loads a clone's filters: a node its owner embeds, found again from
+/// the node by `@fieldParentPtr`.
 pub const FilterLoader = struct {
-    context: ?*const anyopaque = null,
-    load_fn: *const fn (Allocator, Io, ?*const anyopaque, *Repository, FilterOptions) Repository.LoadFiltersError!Filters,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        load: *const fn (loader: *const FilterLoader, gpa: Allocator, io: Io, repo: *Repository, options: FilterOptions) Repository.LoadFiltersError!Filters,
+    };
+
+    pub fn load(l: *const FilterLoader, gpa: Allocator, io: Io, repo: *Repository, options: FilterOptions) Repository.LoadFiltersError!Filters {
+        return l.vtable.load(l, gpa, io, repo, options);
+    }
 };
 
 /// A `--reference` or `--reference-if-able`: see `clone/reference.zig`.
@@ -160,7 +184,7 @@ pub const Options = struct {
     /// `submodule.UpdateOptions.jobs`; `null` takes `submodule.fetchJobs`.
     submodule_jobs: ?u32 = null,
     /// Optional native filters supplied by the operation owner.
-    native_filters: ?FilterLoader = null,
+    native_filters: ?*const FilterLoader = null,
     /// The remote's name in the new configuration: git's `--origin`.
     /// `null` takes `clone.defaultRemoteName`, else `origin`.
     origin: ?[]const u8 = null,
@@ -1200,7 +1224,7 @@ fn checkOut(gpa: Allocator, io: Io, repo: *Repository, commit: Oid, options: Opt
     else
         false;
     var filters = if (options.native_filters) |loader|
-        try loader.load_fn(gpa, io, loader.context, repo, .{
+        try loader.load(gpa, io, repo, .{
             .remote = options.origin.?,
             .programs = programs,
             .prompt = options.prompt,
@@ -1295,6 +1319,7 @@ pub const SubmoduleTransport = struct {
     pub const Error = ErrorNamespace.Error || fetch_mod.Error || odb_mod.Error || partial.Error;
     options: SubmoduleOptions,
     kept: aegis.BlockingGuarded(Kept) = .init(.{}),
+    interface: submodule.Transport = .{ .vtable = &.{ .clone = cloneFn, .fetch = fetchFn, .fetchPromised = fetchPromisedFn } },
 
     /// What the clones and fetches left.
     pub const Kept = struct {
@@ -1346,8 +1371,8 @@ pub const SubmoduleTransport = struct {
 
     /// The seam `submodule.UpdateOptions.transport` takes. `t` must
     /// outlive the update.
-    pub fn transport(t: *SubmoduleTransport) submodule.Transport {
-        return .{ .context = t, .cloneFn = cloneFn, .fetchFn = fetchFn, .fetchPromisedFn = fetchPromisedFn };
+    pub fn transport(t: *SubmoduleTransport) *submodule.Transport {
+        return &t.interface;
     }
 
     fn failed(t: *SubmoduleTransport, io: Io, err: SubmoduleTransport.Error) submodule.TransportError {
@@ -1363,8 +1388,8 @@ pub const SubmoduleTransport = struct {
         };
     }
 
-    fn cloneFn(gpa: Allocator, io: Io, context: *anyopaque, request: submodule.CloneRequest) submodule.TransportError!void {
-        const t: *SubmoduleTransport = @ptrCast(@alignCast(context)); // aegis: no-danger: the context handed out with this function is a SubmoduleTransport
+    fn cloneFn(seam: *submodule.Transport, gpa: Allocator, io: Io, request: submodule.CloneRequest) submodule.TransportError!void {
+        const t: *SubmoduleTransport = @fieldParentPtr("interface", seam);
         t.cloneInto(gpa, io, request) catch |err| return t.failed(io, err);
     }
 
@@ -1415,10 +1440,12 @@ pub const SubmoduleTransport = struct {
         if (edits.items.len != 0) _ = try repo.writeConfig(io, .local, edits.items, .{});
     }
 
-    fn fetchFn(gpa: Allocator, io: Io, context: *anyopaque, repo: *Repository, remote: []const u8, want: ?Oid) submodule.TransportError!void {
-        const t: *SubmoduleTransport = @ptrCast(@alignCast(context)); // aegis: no-danger: the context handed out with this function is a SubmoduleTransport
+    fn fetchFn(seam: *submodule.Transport, gpa: Allocator, io: Io, request: submodule.FetchRequest) submodule.TransportError!void {
+        const t: *SubmoduleTransport = @fieldParentPtr("interface", seam);
+        const repo = request.repo;
+        const remote = request.remote;
         t.fetchOnce(gpa, io, repo, remote, &.{}) catch |err| return t.failed(io, err);
-        const oid = want orelse return;
+        const oid = request.want orelse return;
         repo.objectDatabase().refresh(io) catch |err| return t.failed(io, err);
         if (repo.objectDatabase().exists(io, oid) catch |err| return t.failed(io, err)) return;
         // Not on any branch the remote advertises: asked for by name, as
@@ -1427,8 +1454,8 @@ pub const SubmoduleTransport = struct {
         t.fetchOnce(gpa, io, repo, remote, &.{oid.hex(&hex)}) catch |err| return t.failed(io, err);
     }
 
-    fn fetchPromisedFn(gpa: Allocator, io: Io, context: *anyopaque, repo: *Repository, oids: []const Oid) submodule.TransportError!void {
-        const t: *SubmoduleTransport = @ptrCast(@alignCast(context)); // aegis: no-danger: the context handed out with this function is a SubmoduleTransport
+    fn fetchPromisedFn(seam: *submodule.Transport, gpa: Allocator, io: Io, repo: *Repository, oids: []const Oid) submodule.TransportError!void {
+        const t: *SubmoduleTransport = @fieldParentPtr("interface", seam);
         const o = t.options;
         var lazy: partial.Lazy = .init(gpa, repo, .{ .programs = o.programs, .prompt = o.prompt, .check_objects = o.check_objects });
         defer lazy.deinit();
@@ -2284,7 +2311,7 @@ test "a submodule URL naming a repository on this machine is refused unless prot
     defer refused_dir.close(io);
     var refused: SubmoduleTransport = .init(.{ .who = test_who });
     defer refused.deinit();
-    try testing.expectError(error.TransportFailed, SubmoduleTransport.cloneFn(gpa, io, &refused, .{ .url = source_path, .git_dir = refused_dir }));
+    try testing.expectError(error.TransportFailed, refused.transport().clone(gpa, io, .{ .url = source_path, .git_dir = refused_dir }));
     var kept = refused.take(io);
     defer kept.auth_failure.deinit();
     try testing.expectEqual(@as(?SubmoduleTransport.Error, error.TransportNotAllowed), kept.failure);
@@ -2297,7 +2324,7 @@ test "a submodule URL naming a repository on this machine is refused unless prot
     defer allowed_dir.close(io);
     var allowed: SubmoduleTransport = .init(.{ .who = test_who, .config = &config });
     defer allowed.deinit();
-    try SubmoduleTransport.cloneFn(gpa, io, &allowed, .{ .url = source_path, .git_dir = allowed_dir });
+    try allowed.transport().clone(gpa, io, .{ .url = source_path, .git_dir = allowed_dir });
     try testing.expectEqual(@as(u32, 1), allowed.take(io).clones);
 }
 

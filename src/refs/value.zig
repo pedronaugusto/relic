@@ -90,16 +90,29 @@ pub const Format = enum {
 
 /// Peels an object name for a ref about to be written, so that a reftable
 /// can record what an annotated tag points at beside it, as git's does.
-/// `Repository.beginRefs` supplies one.
+/// `Repository.beginRefs` supplies one: a node its owner embeds, found
+/// again from the node by `@fieldParentPtr`.
 pub const Peeler = struct {
-    context: *anyopaque,
-    /// The object `oid` peels to when it is an annotated tag, or `null`
-    /// when it is not one or cannot be read.
-    peel: *const fn (io: Io, context: *anyopaque, oid: Oid) ?Oid,
-    /// Whether the database holds `oid`; `null` takes every object as
-    /// held. `Store.pack` leaves a ref whose object is missing loose, as
-    /// git's `ref_resolves_to_object` does.
-    exists: ?*const fn (io: Io, context: *anyopaque, oid: Oid) bool = null,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        /// The object `oid` peels to when it is an annotated tag, or
+        /// `null` when it is not one or cannot be read.
+        peel: *const fn (peeler: *Peeler, io: Io, oid: Oid) ?Oid,
+        /// Whether the database holds `oid`; `null` takes every object as
+        /// held. `Store.pack` leaves a ref whose object is missing loose,
+        /// as git's `ref_resolves_to_object` does.
+        exists: ?*const fn (peeler: *Peeler, io: Io, oid: Oid) bool = null,
+    };
+
+    pub fn peel(p: *Peeler, io: Io, oid: Oid) ?Oid {
+        return p.vtable.peel(p, io, oid);
+    }
+
+    pub fn exists(p: *Peeler, io: Io, oid: Oid) bool {
+        const held = p.vtable.exists orelse return true;
+        return held(p, io, oid);
+    }
 };
 
 /// Which refs `Store.pack` packs, and what becomes of their loose files:
@@ -119,7 +132,7 @@ pub const PackOptions = struct {
     /// git's geometric rule asks.
     auto: bool = false,
     /// Peels what a packed tag points at, and says which objects exist.
-    objects: Peeler,
+    objects: *Peeler,
 };
 
 /// What a ref points at.

@@ -2761,13 +2761,14 @@ pub const Prefetcher = struct {
     gpa: Allocator,
     options: Options,
     failure: ?Self.Error = null,
+    interface: maintenance_mod.Prefetch = .{ .vtable = &.{ .fetch = run } },
 
-    pub fn maintenance(p: *Prefetcher) maintenance_mod.Prefetch {
-        return .{ .context = p, .fetch = run };
+    pub fn maintenance(p: *Prefetcher) *maintenance_mod.Prefetch {
+        return &p.interface;
     }
 
-    fn run(context: *anyopaque, io: Io, repo: *Repository) error{PrefetchFailed}!void {
-        const p: *Prefetcher = @ptrCast(@alignCast(context)); // aegis: no-danger: the context handed out with this function is a Prefetcher
+    fn run(prefetch: *maintenance_mod.Prefetch, io: Io, repo: *Repository) error{PrefetchFailed}!void {
+        const p: *Prefetcher = @alignCast(@fieldParentPtr("interface", prefetch)); // aegis: no-danger: this function is installed only on a Prefetcher's interface
         prefetchAll(p.gpa, io, repo, p.options) catch |err| {
             p.failure = err;
             return error.PrefetchFailed;

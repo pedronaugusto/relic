@@ -124,7 +124,7 @@ pub const Options = struct {
     rebasing: rebase.Options,
     /// Where a submodule's repository or commit comes from when the pull
     /// updates the submodules; see `submodule.UpdateOptions.transport`.
-    submodule_transport: ?submodule.Transport = null,
+    submodule_transport: ?*submodule.Transport = null,
 };
 
 /// What a pull did.

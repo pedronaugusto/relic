@@ -162,6 +162,7 @@ pub const Lazy = struct {
     /// How many fetches it made, and for how many objects.
     fetches: u32 = 0,
     objects: u32 = 0,
+    interface: odb_mod.Odb.Lazy = .{ .vtable = &.{ .fetch = fetchFn } },
 
     /// What the fetches are made with.
     pub const Options = struct {
@@ -191,18 +192,18 @@ pub const Lazy = struct {
 
     /// Have every read of a missing object in the repository ask.
     pub fn install(l: *Lazy) void {
-        l.repo.objectDatabase().lazy = .{ .context = l, .fetch = fetchFn };
+        l.repo.objectDatabase().lazy = &l.interface;
     }
 
     /// Stop asking.
     pub fn uninstall(l: *Lazy) void {
         if (l.repo.objectDatabase().lazy) |lazy| {
-            if (lazy.context == @as(*anyopaque, l)) l.repo.objectDatabase().lazy = null;
+            if (lazy == &l.interface) l.repo.objectDatabase().lazy = null;
         }
     }
 
-    fn fetchFn(io: Io, context: *anyopaque, oids: []const Oid) (Allocator.Error || Io.Cancelable || error{PromisorFetchFailed})!void {
-        const l: *Lazy = @ptrCast(@alignCast(context)); // aegis: no-danger: the context handed out with this function is a Lazy
+    fn fetchFn(lazy: *odb_mod.Odb.Lazy, io: Io, oids: []const Oid) odb_mod.Odb.Lazy.FetchError!void {
+        const l: *Lazy = @fieldParentPtr("interface", lazy);
         l.fetch(io, oids) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Canceled => return error.Canceled,

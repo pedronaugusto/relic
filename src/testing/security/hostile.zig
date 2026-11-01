@@ -15,7 +15,6 @@ const index_mod = @import("../../index/index.zig");
 const worktree = @import("../../checkout/checkout.zig");
 const ignore = @import("../../patterns.zig").ignore;
 const attributes = @import("../../patterns.zig").attributes;
-const repo_mod = @import("../../repo/repo.zig");
 const submodule = @import("../../submodule/submodule.zig");
 
 const Oid = hash.Oid;
@@ -114,13 +113,14 @@ pub fn treeBytes(gpa: Allocator, entries: []const Entry) ![]u8 {
 pub const GitClone = struct {
     git: *testgit.Repo,
     clones: u32 = 0,
+    interface: submodule.Transport = .{ .vtable = &.{ .clone = clone, .fetch = fetch } },
 
-    pub fn seam(t: *GitClone) submodule.Transport {
-        return .{ .context = t, .cloneFn = clone, .fetchFn = fetch };
+    pub fn seam(t: *GitClone) *submodule.Transport {
+        return &t.interface;
     }
 
-    fn clone(gpa: std.mem.Allocator, io: Io, context: *anyopaque, request: submodule.CloneRequest) submodule.TransportError!void {
-        const t: *GitClone = @ptrCast(@alignCast(context)); // safe: the context handed out with this function is a GitClone
+    fn clone(transport: *submodule.Transport, gpa: std.mem.Allocator, io: Io, request: submodule.CloneRequest) submodule.TransportError!void {
+        const t: *GitClone = @fieldParentPtr("interface", transport);
         const target = request.git_dir.realPathFileAlloc(io, ".", gpa) catch return error.TransportFailed;
         defer gpa.free(target);
         t.git.exec(io, &.{ "clone", "-q", "--bare", request.url, target }) catch return error.TransportFailed;
@@ -128,7 +128,7 @@ pub const GitClone = struct {
         t.clones += 1;
     }
 
-    fn fetch(_: std.mem.Allocator, _: Io, _: *anyopaque, _: *repo_mod.Repository, _: []const u8, _: ?Oid) submodule.TransportError!void {
+    fn fetch(_: *submodule.Transport, _: std.mem.Allocator, _: Io, _: submodule.FetchRequest) submodule.TransportError!void {
         return error.TransportFailed;
     }
 };

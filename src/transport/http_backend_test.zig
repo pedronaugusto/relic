@@ -33,11 +33,13 @@ const Served = struct {
         return s.backend.serve(io, request, response);
     }
 
-    fn user(_: ?*anyopaque, _: *uplink.server.Request) ?[]const u8 {
+    const calls: http_backend.Caller.VTable = .{ .user = user, .now = now };
+
+    fn user(_: *http_backend.Caller, _: *uplink.server.Request) ?[]const u8 {
         return "pusher";
     }
 
-    fn now(_: ?*anyopaque) i64 {
+    fn now(_: *http_backend.Caller) i64 {
         return 1_700_000_000;
     }
 };
@@ -71,7 +73,8 @@ test "git clones, fetches and pushes over HTTP against relic's server, in v2 and
     try git(gpa, io, served_dir, &env, &.{ "config", "core.logAllRefUpdates", "true" });
     try served_dir.writeFile(io, .{ .sub_path = "git-daemon-export-ok", .data = "" });
 
-    var served: Served = .{ .backend = .init(gpa, root_path, .{ .caller = .{ .user = Served.user, .now = Served.now } }) };
+    var caller: http_backend.Caller = .{ .vtable = &Served.calls };
+    var served: Served = .{ .backend = .init(gpa, root_path, .{ .caller = &caller }) };
     var server = uplink.Server.init(gpa, .{}, .init(&served, Served.serve));
     defer server.deinit(io);
     const address = try Io.net.IpAddress.parse("127.0.0.1", 0);
@@ -162,7 +165,8 @@ test "under http.version=HTTP/2 git and relic ask relic's server to upgrade a pl
     defer served_dir.close(io);
     try served_dir.writeFile(io, .{ .sub_path = "git-daemon-export-ok", .data = "" });
 
-    var served: Served = .{ .backend = .init(gpa, root_path, .{ .caller = .{ .user = Served.user, .now = Served.now } }) };
+    var caller: http_backend.Caller = .{ .vtable = &Served.calls };
+    var served: Served = .{ .backend = .init(gpa, root_path, .{ .caller = &caller }) };
     var server = uplink.Server.init(gpa, .{ .h2c = .alongside_http1 }, .init(&served, Served.serve));
     defer server.deinit(io);
     const address = try Io.net.IpAddress.parse("127.0.0.1", 0);
@@ -255,7 +259,8 @@ test "git clones and fetches over the dumb protocol from relic's server, its pac
     defer served_dir.close(io);
     try served_dir.writeFile(io, .{ .sub_path = "git-daemon-export-ok", .data = "" });
 
-    var served: Served = .{ .backend = .init(gpa, root_path, .{ .caller = .{ .user = Served.user, .now = Served.now } }) };
+    var caller: http_backend.Caller = .{ .vtable = &Served.calls };
+    var served: Served = .{ .backend = .init(gpa, root_path, .{ .caller = &caller }) };
     var server = uplink.Server.init(gpa, .{}, .init(&served, Served.serve));
     defer server.deinit(io);
     const address = try Io.net.IpAddress.parse("127.0.0.1", 0);

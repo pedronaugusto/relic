@@ -89,14 +89,26 @@ pub const Verdict = union(enum) {
     deny,
 };
 
-/// What the caller decides, and knows, that relic does not.
+/// What the caller decides, and knows, that relic does not: a node its
+/// owner embeds, found again from the node by `@fieldParentPtr`.
 pub const Caller = struct {
-    context: ?*anyopaque = null,
-    /// Whether `request` may do what `access` names to the repository at
-    /// `repository` (the path under the root), and as whom.
-    authorize: *const fn (context: ?*anyopaque, request: *Request, repository: []const u8, access: Access) Verdict,
-    /// Seconds since the Unix epoch, when a lock is taken.
-    now: *const fn (context: ?*anyopaque) i64,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        /// Whether `request` may do what `access` names to the repository
+        /// at `repository` (the path under the root), and as whom.
+        authorize: *const fn (caller: *Caller, request: *Request, repository: []const u8, access: Access) Verdict,
+        /// Seconds since the Unix epoch, when a lock is taken.
+        now: *const fn (caller: *Caller) i64,
+    };
+
+    pub fn authorize(c: *Caller, request: *Request, repository: []const u8, access: Access) Verdict {
+        return c.vtable.authorize(c, request, repository, access);
+    }
+
+    pub fn now(c: *Caller) i64 {
+        return c.vtable.now(c);
+    }
 };
 
 /// What is served, and to whom.
@@ -105,7 +117,7 @@ pub const Options = struct {
     /// otherwise only one with `git-daemon-export-ok`.
     export_all: bool = false,
     store: Store,
-    caller: Caller,
+    caller: *Caller,
     /// git's requests, for every path that is not under `info/lfs`: one
     /// server is then the whole remote. `null` answers them 404.
     git: ?*http_backend.Backend = null,
@@ -237,7 +249,7 @@ const Call = struct {
     /// refusal.
     fn allowed(c: *Call, access: Access) ErrorNamespace.Error!bool {
         const caller = c.b.options.caller;
-        switch (caller.authorize(caller.context, c.request, c.repository, access)) {
+        switch (caller.authorize(c.request, c.repository, access)) {
             .allow => |who| {
                 if (who) |name| c.user = try c.arena.dupe(u8, name);
                 return true;
@@ -413,7 +425,7 @@ const Call = struct {
             .id = try c.arena.print("{x}", .{&raw}),
             .path = asked.path,
             .owner = c.user,
-            .locked_at = .{ .unix = c.b.options.caller.now(c.b.options.caller.context) },
+            .locked_at = .{ .unix = c.b.options.caller.now() },
         };
         try table.save(try std.mem.concat(c.arena, locks.Lock, &.{ table.list, &.{taken} }));
         return c.lockAnswer(.created, taken, null);

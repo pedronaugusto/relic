@@ -201,10 +201,18 @@ pub fn selectTasks(repo: *Repository, given: []const Task, schedule: ?Schedule) 
 /// Fetching the remotes for the prefetch task, which maintenance, below
 /// the transport, cannot do itself: git's `fetch <remote> --prefetch
 /// --prune --no-tags --no-write-fetch-head --recurse-submodules=no` for
-/// each remote not `skipDefaultUpdate`. `transport.prefetch` is one.
+/// each remote not `skipDefaultUpdate`. `transport.prefetch` is one. A
+/// node its owner embeds, found again from the node by `@fieldParentPtr`.
 pub const Prefetch = struct {
-    context: *anyopaque,
-    fetch: *const fn (context: *anyopaque, io: Io, repo: *Repository) error{PrefetchFailed}!void,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        fetch: *const fn (prefetch: *Prefetch, io: Io, repo: *Repository) error{PrefetchFailed}!void,
+    };
+
+    pub fn fetch(p: *Prefetch, io: Io, repo: *Repository) error{PrefetchFailed}!void {
+        return p.vtable.fetch(p, io, repo);
+    }
 };
 
 /// What `run` is asked: git's `maintenance run` options.
@@ -218,7 +226,7 @@ pub const RunOptions = struct {
     schedule: ?Schedule = null,
     /// `--task=<task>`, each once.
     tasks: []const Task = &.{},
-    prefetch: ?Prefetch = null,
+    prefetch: ?*Prefetch = null,
     /// The `pre-auto-gc` hook's runner, for the gc task.
     hooks: ?*hooks_mod.Runner = null,
     /// What runs `gc.recentObjectsHook`.
@@ -458,7 +466,7 @@ fn runTask(gpa: Allocator, io: Io, repo: *Repository, task: Task, phase: Phase, 
     switch (task) {
         .prefetch => {
             const prefetch = options.prefetch orelse return error.PrefetchFailed;
-            try prefetch.fetch(prefetch.context, io, repo);
+            try prefetch.fetch(io, repo);
         },
         .gc => switch (phase) {
             .foreground => try collect.foreground(gpa, io, repo, options.clock, options.auto),

@@ -141,13 +141,21 @@ pub const PrePushUpdate = struct {
 };
 
 /// The point where a `pre-push` hook runs. relic runs no hook itself; a
-/// caller that does — through its own hooks support — plugs it in here.
+/// caller that does — through its own hooks support — plugs it in here: a
+/// node its owner embeds, found again from the node by `@fieldParentPtr`.
 pub const PrePush = struct {
-    context: ?*anyopaque = null,
-    /// Called with the remote's name — its URL when it has none — the URL,
-    /// and every update about to be sent. Returning false stops the push
-    /// before anything is sent.
-    run: *const fn (context: ?*anyopaque, remote: []const u8, url: []const u8, updates: []const PrePushUpdate) bool,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        /// Called with the remote's name — its URL when it has none — the
+        /// URL, and every update about to be sent. Returning false stops
+        /// the push before anything is sent.
+        run: *const fn (hook: *PrePush, remote: []const u8, url: []const u8, updates: []const PrePushUpdate) bool,
+    };
+
+    pub fn run(hook: *PrePush, remote: []const u8, url: []const u8, updates: []const PrePushUpdate) bool {
+        return hook.vtable.run(hook, remote, url, updates);
+    }
 };
 
 /// `--force-with-lease=<ref>[:<expect>]`.
@@ -161,9 +169,18 @@ pub const Lease = struct {
 };
 
 pub const BeforeSendError = Allocator.Error || Io.Cancelable || error{BeforeSendFailed};
+/// Content preparation before any ref is sent: a node its owner embeds,
+/// found again from the node by `@fieldParentPtr`.
 pub const BeforeSend = struct {
-    context: *anyopaque,
-    run: *const fn (Allocator, Io, *anyopaque, *Repository, BeforeSendInput) BeforeSendError!void,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        run: *const fn (prepare: *BeforeSend, gpa: Allocator, io: Io, repo: *Repository, input: BeforeSendInput) BeforeSendError!void,
+    };
+
+    pub fn run(prepare: *BeforeSend, gpa: Allocator, io: Io, repo: *Repository, input: BeforeSendInput) BeforeSendError!void {
+        return prepare.vtable.run(prepare, gpa, io, repo, input);
+    }
 };
 pub const BeforeSendInput = struct {
     remote: []const u8,
@@ -221,9 +238,9 @@ pub const Options = struct {
     signed: ?send_pack.PushCert = null,
     /// Who the remote-tracking refs' log entries are written as, and when.
     who: object.Signature,
-    pre_push: ?PrePush = null,
+    pre_push: ?*PrePush = null,
     /// Content preparation by an operation owner, before any ref is sent.
-    before_send: ?BeforeSend = null,
+    before_send: ?*BeforeSend = null,
     programs: ?program.Programs = null,
     /// The proxy for an HTTP remote, over the one the configuration and
     /// the environment choose.
@@ -930,7 +947,7 @@ fn judgeAll(
 /// Show the pre-push hook point what git's pre-push hook is shown: every
 /// update not already refused or up to date. `error.PrePushRefused` when
 /// it says no.
-fn runPrePush(arena: Allocator, hook: PrePush, remote_name: []const u8, url: []const u8, results: []const RefResult) Error!void {
+fn runPrePush(arena: Allocator, hook: *PrePush, remote_name: []const u8, url: []const u8, results: []const RefResult) Error!void {
     var lines: std.ArrayList(PrePushUpdate) = .empty;
     for (results) |r| {
         switch (r.status) {
@@ -944,7 +961,7 @@ fn runPrePush(arena: Allocator, hook: PrePush, remote_name: []const u8, url: []c
             .remote_oid = r.old,
         });
     }
-    if (lines.items.len != 0 and !hook.run(hook.context, remote_name, url, lines.items)) {
+    if (lines.items.len != 0 and !hook.run(remote_name, url, lines.items)) {
         return error.PrePushRefused;
     }
 }
@@ -986,7 +1003,7 @@ fn send(
     for (request.commands) |c| {
         if (!c.new.isZero()) try remote_refs_pushed.append(arena, c.name);
     }
-    if (options.before_send) |prepare| try prepare.run(gpa, io, prepare.context, repo, .{
+    if (options.before_send) |prepare| try prepare.run(gpa, io, repo, .{
         .remote = remote_name,
         .refs = remote_refs_pushed.items,
         .objects = objects.entries,
@@ -1892,9 +1909,10 @@ fn tagTarget(gpa: Allocator, io: Io, dir: Io.Dir, name: []const u8) !Oid {
 const PrePushSeen = struct {
     text: std.ArrayList(u8) = .empty,
     allow: bool = true,
-    fn run(context: ?*anyopaque, remote: []const u8, url: []const u8, updates: []const PrePushUpdate) bool {
+    interface: PrePush = .{ .vtable = &.{ .run = run } },
+    fn run(hook: *PrePush, remote: []const u8, url: []const u8, updates: []const PrePushUpdate) bool {
         _ = url;
-        const self: *PrePushSeen = @ptrCast(@alignCast(context.?)); // aegis: no-danger: the context handed out with this function is a PrePushSeen
+        const self: *PrePushSeen = @fieldParentPtr("interface", hook);
         self.text.print(testing.allocator, "{s}\n", .{remote}) catch return false;
         for (updates) |u| {
             self.text.print(testing.allocator, "{s} {f} {s} {f}\n", .{ u.local_ref, u.local_oid, u.remote_ref, u.remote_oid }) catch return false;
@@ -1924,7 +1942,7 @@ test "the pre-push hook point is shown what git's pre-push hook is shown, and ca
     var outcome = try twins.pushBoth(&.{ "origin", "main", "feature" }, .{
         .who = test_who,
         .refspecs = &.{ "main", "feature" },
-        .pre_push = .{ .context = &seen, .run = PrePushSeen.run },
+        .pre_push = &seen.interface,
     });
     outcome.deinit();
     const theirs = try twins.root.dir.readFileAlloc(io, "pre-push.log", gpa, .unlimited);
@@ -1940,7 +1958,7 @@ test "the pre-push hook point is shown what git's pre-push hook is shown, and ca
     try testing.expectError(error.PrePushRefused, push(gpa, io, &repo, "origin", .{
         .who = test_who,
         .refspecs = &.{"v2"},
-        .pre_push = .{ .context = &seen, .run = PrePushSeen.run },
+        .pre_push = &seen.interface,
     }));
     var remote = try twins.root.dir.openDir(io, "remote-relic.git", .{});
     defer remote.close(io);

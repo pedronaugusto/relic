@@ -371,6 +371,7 @@ pub const InProcess = struct {
     io: Io,
     group: Io.Group = .init,
     daemons: Daemons = Daemons.init(.empty),
+    interface: cache.Starter = .{ .vtable = &.{ .start = start } },
 
     const Daemons = aegis.BlockingGuarded(std.ArrayList(*Daemon));
 
@@ -390,12 +391,12 @@ pub const InProcess = struct {
         p.* = undefined;
     }
 
-    pub fn starter(p: *InProcess) cache.Starter {
-        return .{ .context = p, .start = start };
+    pub fn starter(p: *InProcess) *cache.Starter {
+        return &p.interface;
     }
 
-    fn start(context: ?*anyopaque, io: Io, socket: []const u8) cache.StartError!void {
-        const p: *InProcess = @ptrCast(@alignCast(context.?)); // aegis: no-danger: the context `starter` hands out is this `InProcess`
+    fn start(seam: *cache.Starter, io: Io, socket: []const u8) cache.StartError!void {
+        const p: *InProcess = @fieldParentPtr("interface", seam);
         const d = p.gpa.create(Daemon) catch return error.CacheDaemonNotStarted;
         d.* = Daemon.listen(p.gpa, io, socket) catch |err| {
             p.gpa.destroy(d);

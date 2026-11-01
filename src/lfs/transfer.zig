@@ -549,6 +549,8 @@ const Run = struct {
     done_bytes: u64 = 0,
     done_objects: u64 = 0,
     total_objects: u64 = 0,
+    /// Told of an upload's bytes as they go out.
+    bytes_sent: lfsapi.Client.BytesSent = .{ .vtable = &.{ .add = addBytes } },
 
     fn io(r: *const Run) Io {
         return r.operation_io;
@@ -1594,7 +1596,7 @@ fn attemptUpload(state: *Run, r: *Result, action: Action, verify: ?Action, authe
         .body = .{ .object = .{ .store = server.store(), .pointer = .{ .oid = r.oid, .size = r.size } } },
         .authenticated = authenticated,
         .access_url = accessUrl(action.href, &r.oid),
-        .on_bytes = .{ .context = state, .add = addBytes },
+        .on_bytes = &state.bytes_sent,
         .sent = &sent,
     }) catch |err| switch (err) {
         // Nothing answered, as for a download.
@@ -1659,8 +1661,8 @@ fn verifyUpload(state: *Run, r: *Result, action: Action, authenticated: bool) Er
     return .{ .fail = try state.dupe(last) };
 }
 
-fn addBytes(context: *anyopaque, n: u64) void {
-    const state: *Run = @ptrCast(@alignCast(context)); // aegis: no-danger: the context handed out with this function is a Run
+fn addBytes(sent: *lfsapi.Client.BytesSent, n: u64) void {
+    const state: *Run = @fieldParentPtr("bytes_sent", sent);
     state.say(.{ .bytes = n });
 }
 
@@ -2132,10 +2134,11 @@ pub const Fetcher = struct {
     /// The last fetch's outcome, kept until the fetcher is deinitialised,
     /// so a caller can say which objects did not come and why.
     last: ?Outcome = null,
+    interface: lfs.Fetcher = .{ .vtable = &.{ .fetch = fetchFn } },
 
     /// The `lfs.Fetcher` checkout is handed.
-    pub fn fetcher(f: *Fetcher) lfs.Fetcher {
-        return .{ .context = f, .fetchFn = fetchFn };
+    pub fn fetcher(f: *Fetcher) *lfs.Fetcher {
+        return &f.interface;
     }
 
     /// Release the last outcome.
@@ -2144,10 +2147,10 @@ pub const Fetcher = struct {
         f.* = undefined;
     }
 
-    fn fetchFn(io: Io, context: *anyopaque, store: *const lfs.Store, settings: *const lfs.Settings, wanted: []const lfs.Wanted) lfs.FetchError!void {
+    fn fetchFn(seam: *lfs.Fetcher, io: Io, store: *const lfs.Store, settings: *const lfs.Settings, wanted: []const lfs.Wanted) lfs.FetchError!void {
         _ = store;
         _ = settings;
-        const f: *Fetcher = @ptrCast(@alignCast(context)); // aegis: no-danger: the context handed out with this function is a Fetcher
+        const f: *Fetcher = @fieldParentPtr("interface", seam);
         var objects: std.ArrayList(Object) = .empty;
         defer objects.deinit(f.server.gpa);
         for (wanted) |w| objects.append(f.server.gpa, .of(w.pointer, w.path)) catch return error.OutOfMemory;

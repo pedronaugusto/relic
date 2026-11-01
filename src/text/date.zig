@@ -930,10 +930,18 @@ pub const LocalTime = struct {
     name: []const u8 = "",
 };
 
-/// The machine's zone, which the caller knows and this does not.
+/// The machine's zone, which the caller knows and this does not: a node
+/// its owner embeds, found again from the node by `@fieldParentPtr`.
 pub const LocalZone = struct {
-    context: *anyopaque,
-    at: *const fn (context: *anyopaque, secs: i64) LocalTime,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        at: *const fn (zone: *const LocalZone, secs: i64) LocalTime,
+    };
+
+    pub fn at(zone: *const LocalZone, secs: i64) LocalTime {
+        return zone.vtable.at(zone, secs);
+    }
 };
 
 /// What showing a date may need from the machine: the time now for
@@ -941,7 +949,7 @@ pub const LocalZone = struct {
 /// the C locale's year width for `%x` (which varies between C libraries).
 pub const Clock = struct {
     now: ?std.Io.Timestamp = null,
-    local: ?LocalZone = null,
+    local: ?*const LocalZone = null,
     /// Whether `%x` uses a four-digit year; `%D` always uses two digits.
     locale_date_full_year: bool = false,
 };
@@ -1038,13 +1046,13 @@ pub fn show(w: *std.Io.Writer, secs: i64, tz_in: i32, mode: Mode, clock: Clock) 
     if (mode.kind == .human) {
         const now = seconds(clock.now orelse return error.DateNeedsClock);
         const zone = clock.local orelse return error.DateNeedsClock;
-        const now_tz = tzInt(zone.at(zone.context, now).offset_minutes);
+        const now_tz = tzInt(zone.at(now).offset_minutes);
         human = if (calendarIn(now, now_tz)) |cal| .{ .cal = cal, .tz = now_tz } else .{ .cal = calendarOf(0), .tz = 0 };
     }
     var zone_name: []const u8 = "";
     if (mode.local) {
         const zone = clock.local orelse return error.DateNeedsClock;
-        const local = zone.at(zone.context, secs);
+        const local = zone.at(secs);
         tz = tzInt(local.offset_minutes);
         zone_name = local.name;
     }

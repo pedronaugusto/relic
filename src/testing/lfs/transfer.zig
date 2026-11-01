@@ -69,6 +69,7 @@ pub fn main(init: std.process.Init) !void {
     var remote = try relic.transport.local.Remote.open(gpa, io, location, .{});
     defer remote.deinit(io);
     var who: Who = .{ .user = options.user };
+    var tokens: Transfer.Tokens = .{ .vtable = &.{ .issue = issue, .check = check } };
     var session: Transfer.Session = .{
         .gpa = gpa,
         .io = io,
@@ -77,8 +78,8 @@ pub fn main(init: std.process.Init) !void {
         .operation = Transfer.Operation.named(options.operation) orelse return error.Usage,
         .options = .{
             .store = directory.store(),
-            .caller = .{ .context = &who, .authorize = Who.authorize, .now = Who.now },
-            .tokens = .{ .issue = issue, .check = check },
+            .caller = &who.interface,
+            .tokens = &tokens,
         },
         .in = &in.interface,
         .out = &out.interface,
@@ -114,24 +115,25 @@ pub fn main(init: std.process.Init) !void {
 /// The connection's user, allowed everything.
 const Who = struct {
     user: []const u8,
+    interface: Transfer.Caller = .{ .vtable = &.{ .authorize = authorize, .now = now } },
 
-    fn authorize(context: ?*anyopaque, _: []const u8, _: server.Access) Transfer.Verdict {
-        const w: *Who = @ptrCast(@alignCast(context.?)); // safe: main hands its Who
+    fn authorize(caller: *Transfer.Caller, _: []const u8, _: server.Access) Transfer.Verdict {
+        const w: *Who = @fieldParentPtr("interface", caller);
         return .{ .allow = w.user };
     }
 
-    fn now(_: ?*anyopaque) i64 {
+    fn now(_: *Transfer.Caller) i64 {
         return locked_at_unix;
     }
 };
 
 /// `id` the oid's first eight digits, `token` `tok-` and the same.
-fn issue(_: ?*anyopaque, arena: Allocator, oid: []const u8) Allocator.Error!Transfer.Token {
+fn issue(_: *Transfer.Tokens, arena: Allocator, oid: []const u8) Allocator.Error!Transfer.Token {
     const short = oid[0..@min(oid.len, 8)];
     return .{ .id = try arena.dupe(u8, short), .token = try arena.print("tok-{s}", .{short}), .expires_in = 3600 };
 }
 
-fn check(_: ?*anyopaque, oid: []const u8, id: ?[]const u8, token: ?[]const u8) bool {
+fn check(_: *Transfer.Tokens, oid: []const u8, id: ?[]const u8, token: ?[]const u8) bool {
     const short = oid[0..@min(oid.len, 8)];
     const i = id orelse return false;
     const t = token orelse return false;

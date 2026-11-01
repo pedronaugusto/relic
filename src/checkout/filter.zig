@@ -62,7 +62,7 @@ pub const Drivers = struct {
 
     pub const Options = struct {
         /// The operation owner selects a native format implementation.
-        native_provider: ?native.Provider = null,
+        native_provider: ?*const native.Provider = null,
         skip_smudge: bool = false,
         /// Format configuration found by the repository owner.
         config_text: ?[]const u8 = null,

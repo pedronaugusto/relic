@@ -74,7 +74,7 @@ test "CVE-2015-7545, t5815-submodule-protos: a .gitmodules URL is not the person
         var t = clone_mod.SubmoduleTransport.init(.{ .who = who, .programs = .{ .environ = &env } });
         defer t.deinit();
         const seam = t.transport();
-        try std.testing.expectError(error.TransportFailed, seam.cloneFn(gpa, io, seam.context, .{ .url = url, .git_dir = tmp.dir }));
+        try std.testing.expectError(error.TransportFailed, seam.clone(gpa, io, .{ .url = url, .git_dir = tmp.dir }));
         var kept = t.take(io);
         defer kept.auth_failure.deinit();
         try std.testing.expectEqual(error.TransportNotAllowed, kept.failure.?);

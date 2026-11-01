@@ -17,6 +17,7 @@ const delta = @import("../codec.zig").delta;
 const std = @import("std");
 const ctype = @import("../text.zig").ctype;
 const policy_mod = @import("policy.zig");
+const database = @import("database.zig");
 const islands_mod = @import("islands.zig");
 const indexpack_mod = @import("index_pack.zig");
 const aegis = @import("aegis");
@@ -176,20 +177,22 @@ pub const Odb = struct {
     /// database does not have, when a read meets one. `null` — the default,
     /// and the case in every repository that is not a partial clone — and a
     /// miss is `error.ObjectNotFound`.
-    lazy: ?Lazy = null,
+    lazy: ?*Lazy = null,
     /// git's replace refs: the objects read in place of others. `read`,
     /// `readInto`, `stream`, `readOrStream`, `readHeader` and `placement`
     /// take an object's replacement, and its replacement's, while they are
     /// enabled; the empty tree and `exists` are never replaced, as git's
     /// are not.
     replacements: Replacements = .{},
+    /// What `index_pack` reads this database's objects through.
+    reception: database.Source = .{ .vtable = &.{ .read = receptionRead, .header = receptionHeader, .exists = receptionExists, .same = receptionSame } },
 
     /// What reads take in place of what.
     pub const Replacements = struct {
         /// Lists the replacements at the first read that asks:
         /// `Repository.open` installs the one over its replace refs.
         /// `null` replaces nothing.
-        lister: ?Lister = null,
+        lister: ?*Lister = null,
         /// Off under `core.useReplaceRefs=false` or the caller's
         /// `GIT_NO_REPLACE_OBJECTS`, and while an operation git runs with
         /// replace refs off runs (`pauseReplacements`).
@@ -198,11 +201,20 @@ pub const Odb = struct {
         /// listed them.
         map: ?Oid.Map(Oid) = null,
 
+        /// What lists them: a node its owner embeds, found again from the
+        /// node by `@fieldParentPtr`.
         pub const Lister = struct {
-            context: *anyopaque,
-            /// Put each replaced object and its replacement in `map`, which
-            /// allocates with `gpa`.
-            list: *const fn (io: Io, context: *anyopaque, gpa: Allocator, map: *Oid.Map(Oid)) Replacements.ListError!void,
+            vtable: *const VTable,
+
+            pub const VTable = struct {
+                /// Put each replaced object and its replacement in `map`,
+                /// which allocates with `gpa`.
+                list: *const fn (lister: *Lister, io: Io, gpa: Allocator, map: *Oid.Map(Oid)) Replacements.ListError!void,
+            };
+
+            pub fn list(l: *Lister, io: Io, gpa: Allocator, map: *Oid.Map(Oid)) Replacements.ListError!void {
+                return l.vtable.list(l, io, gpa, map);
+            }
         };
 
         pub const ListError = Allocator.Error || Io.Cancelable || error{ ReplaceRefsUnreadable, DuplicateReplaceRef };
@@ -231,7 +243,7 @@ pub const Odb = struct {
             const gpa = odb.backendData().gpa;
             var map: Oid.Map(Oid) = .empty;
             errdefer map.deinit(gpa);
-            try lister.list(io, lister.context, gpa, &map);
+            try lister.list(io, gpa, &map);
             r.map = map;
         }
         return if (r.map.?.count() == 0) null else &r.map.?;
@@ -242,6 +254,44 @@ pub const Odb = struct {
     /// records are the replaced commits' own.
     pub fn replacing(odb: *Odb, io: Io) ErrorNamespace.Error!bool {
         return try odb.replaceMap(io) != null;
+    }
+
+    fn receptionRead(source: *database.Source, io: Io, oid: Oid) policy_mod.Error!database.Read {
+        const odb: *Odb = @fieldParentPtr("reception", source);
+        const result = try odb.read(io, oid);
+        return .{ .type = result.type, .bytes = result.bytes };
+    }
+
+    fn receptionHeader(source: *database.Source, io: Io, oid: Oid) policy_mod.Error!object.Header {
+        const odb: *Odb = @fieldParentPtr("reception", source);
+        return odb.readHeader(io, oid);
+    }
+
+    fn receptionExists(source: *database.Source, io: Io, oid: Oid) policy_mod.Error!bool {
+        const odb: *Odb = @fieldParentPtr("reception", source);
+        return odb.exists(io, oid);
+    }
+
+    fn receptionSame(source: *database.Source, io: Io, oid: Oid, ours: *Io.Reader, size: u64) policy_mod.Error!bool {
+        const odb: *Odb = @fieldParentPtr("reception", source);
+        const theirs = try odb.stream(io, oid);
+        defer theirs.close(io);
+        if (theirs.size != size) return false;
+        var held: [16 * 1024]u8 = undefined;
+        var given: [16 * 1024]u8 = undefined;
+        var left = size;
+        while (left != 0) {
+            const n: usize = @intCast(@min(@as(u64, held.len), left));
+            theirs.reader().readSliceAll(held[0..n]) catch |err| return switch (err) {
+                error.ReadFailed => theirs.err() orelse error.ReadFailed,
+                error.EndOfStream => error.CorruptLooseObject,
+            };
+            // The caller's reader failing is the caller's to name.
+            ours.readSliceAll(given[0..n]) catch return error.ReadFailed;
+            if (!std.mem.eql(u8, held[0..n], given[0..n])) return false;
+            left -= n;
+        }
+        return true;
     }
 
     /// Read every object as stored until `resumeReplacements` is given what
@@ -373,13 +423,23 @@ pub const Odb = struct {
         data.bitmap_checked = false;
     }
 
-    /// A fetch of missing objects, installed by the caller: `partial.zig`
-    /// makes one.
+    /// A fetch of missing objects, installed by the caller: a node its
+    /// owner embeds, found again from the node by `@fieldParentPtr`.
+    /// `partial.zig` makes one.
     pub const Lazy = struct {
-        context: *anyopaque,
-        /// Bring `oids` into the database. Called with `lazy` unset, so a
-        /// read it makes cannot ask again.
-        fetch: *const fn (io: Io, context: *anyopaque, oids: []const Oid) (Allocator.Error || Io.Cancelable || error{PromisorFetchFailed})!void,
+        vtable: *const VTable,
+
+        pub const FetchError = Allocator.Error || Io.Cancelable || error{PromisorFetchFailed};
+
+        pub const VTable = struct {
+            /// Bring `oids` into the database. Called with `lazy` unset, so
+            /// a read it makes cannot ask again.
+            fetch: *const fn (lazy: *Lazy, io: Io, oids: []const Oid) FetchError!void,
+        };
+
+        pub fn fetch(lazy: *Lazy, io: Io, oids: []const Oid) FetchError!void {
+            return lazy.vtable.fetch(lazy, io, oids);
+        }
     };
 
     /// Ask the promisor remote for `oids`, then look again.
@@ -387,7 +447,7 @@ pub const Odb = struct {
         const lazy = odb.lazy orelse return error.ObjectNotFound;
         odb.lazy = null;
         defer odb.lazy = lazy;
-        try lazy.fetch(io, lazy.context, oids);
+        try lazy.fetch(io, oids);
         try odb.refresh(io);
     }
 
