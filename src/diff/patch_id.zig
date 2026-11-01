@@ -189,7 +189,7 @@ fn hashChange(gpa: Allocator, io: Io, db: *odb_mod.Odb, h: *hash.Hasher, change:
     var scratch: std.ArrayList(u8) = .empty;
     defer scratch.deinit(gpa);
     var hunks = d.hunks(.{});
-    while (hunks.next()) |hunk| {
+    while (hunks.next(.{})) |hunk| {
         var old_at = hunk.old_start;
         var new_at = hunk.new_start;
         for (hunk.changes) |c| {

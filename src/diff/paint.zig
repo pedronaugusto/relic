@@ -181,10 +181,6 @@ pub const Painter = struct {
         return p;
     }
 
-    pub fn paint(p: *Painter) parallax.Paint {
-        return .{ .context = p, .write = write };
-    }
-
     fn prefix(p: *const Painter) []const u8 {
         return if (p.of_patches != null) DiffOfPatches.prefix else "";
     }
@@ -194,8 +190,8 @@ pub const Painter = struct {
         return if (p.of_patches) |o| o.dual_color else false;
     }
 
-    fn write(context: ?*const anyopaque, w: *Io.Writer, line: parallax.Paint.Line) Io.Writer.Error!void {
-        const p: *Painter = @ptrCast(@alignCast(@constCast(context.?))); // aegis: no-danger: `paint` hands its own *Painter
+    /// Write one line of the patch, as git's `emit_diff_symbol` does.
+    pub fn write(p: *Painter, w: *Io.Writer, line: parallax.UnifiedLine) Io.Writer.Error!void {
         const c = p.colors;
         const reset = p.reset;
         if (p.recorder) |r| switch (line.kind) {
@@ -274,7 +270,7 @@ pub const Painter = struct {
 
     /// A removed or added line recorded for moved lines, written once
     /// they are marked.
-    fn replay(p: *Painter, w: *Io.Writer, line: parallax.Paint.Line, flags: moved.Flags, blank_at_eof: bool) Io.Writer.Error!void {
+    fn replay(p: *Painter, w: *Io.Writer, line: parallax.UnifiedLine, flags: moved.Flags, blank_at_eof: bool) Io.Writer.Error!void {
         try w.writeAll(p.prefix());
         try p.content(w, line, flags, blank_at_eof);
     }
@@ -282,7 +278,7 @@ pub const Painter = struct {
     /// A removed or added line, as git's `emit_diff_symbol_from_struct`
     /// paints `DIFF_SYMBOL_MINUS` and `_PLUS`: in its moved colour where
     /// `flags` marks it moved; under dual colour painted by both its signs.
-    fn content(p: *Painter, w: *Io.Writer, line: parallax.Paint.Line, flags: moved.Flags, blank_at_eof: bool) Io.Writer.Error!void {
+    fn content(p: *Painter, w: *Io.Writer, line: parallax.UnifiedLine, flags: moved.Flags, blank_at_eof: bool) Io.Writer.Error!void {
         const c = p.colors;
         if (line.kind == .old) {
             const base: *const Color = if (!flags.moved) &c.old else if (flags.alternative)
@@ -314,7 +310,7 @@ pub const Painter = struct {
     /// git's `emit_line_ws_markup`: the sign in `set_sign`, reversed, where
     /// a line has two colours, else all in `set`; whitespace errors marked
     /// where `highlighted`.
-    fn markup(p: *Painter, w: *Io.Writer, set_sign: ?[]const u8, set: []const u8, line: parallax.Paint.Line, highlighted: bool, blank_at_eof: bool) Io.Writer.Error!void {
+    fn markup(p: *Painter, w: *Io.Writer, set_sign: ?[]const u8, set: []const u8, line: parallax.UnifiedLine, highlighted: bool, blank_at_eof: bool) Io.Writer.Error!void {
         const ws: ?[]const u8 = if (highlighted and !p.colors.whitespace.isNone()) p.colors.whitespace.bytes() else null;
         const text = line.text;
         // reverse is written only where there are colours, as git's
@@ -398,7 +394,7 @@ pub const Recorder = struct {
 
     /// A removed or added line, in place of writing it. A failure is the
     /// allocator's, as the painted writer's are.
-    fn record(r: *Recorder, painter: u32, line: parallax.Paint.Line, blank_at_eof: bool) Io.Writer.Error!void {
+    fn record(r: *Recorder, painter: u32, line: parallax.UnifiedLine, blank_at_eof: bool) Io.Writer.Error!void {
         const complete = line.text.len != 0 and line.text[line.text.len - 1] == '\n';
         const start_at = r.texts.items.len;
         r.texts.appendSlice(r.gpa, line.text) catch return error.WriteFailed;

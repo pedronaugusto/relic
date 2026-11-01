@@ -919,13 +919,32 @@ pub const Prefixes = struct {
 /// `--color-words` turn colour on as well, which is `Options.colors`.
 pub const WordDiff = words.Style;
 
-/// A caller's rule for the text after a hunk's `@@`: given a line without
-/// its newline, the part to show when the line starts a function, as a
-/// driver's `funcname` pattern gives its first group, or `null`. git cuts
-/// what it gives at eighty bytes and drops its trailing whitespace.
-pub const FunctionLine = struct {
-    context: ?*const anyopaque = null,
-    find: *const fn (context: ?*const anyopaque, line: []const u8) ?[]const u8,
+/// A rule for the text after a hunk's `@@` in place of git's default: given
+/// a line without its newline, the part to show when the line starts a
+/// function, or `null`. git cuts what it gives at eighty bytes and drops
+/// its trailing whitespace.
+pub const FunctionLine = union(enum) {
+    /// The pair's diff driver's `funcname` or `xfuncname` pattern, as
+    /// `FilePair.functionLine` finds it, giving its first group.
+    driver: *FilePair,
+    /// git's `section_headers` driver, for the diff of two patches:
+    /// ` ## <section> ##` and `@@ <hunk>`, with at most one character before
+    /// the `@@`.
+    section_headers,
+
+    pub fn find(rule: FunctionLine, line: []const u8) ?[]const u8 {
+        return switch (rule) {
+            .driver => |pair| pair.findFunction(line),
+            .section_headers => sectionHeader(line),
+        };
+    }
+
+    fn sectionHeader(line: []const u8) ?[]const u8 {
+        if (line.len >= 7 and std.mem.startsWith(u8, line, " ## ") and std.mem.endsWith(u8, line, " ##")) return line[4 .. line.len - 3];
+        if (std.mem.startsWith(u8, line, "@@ ")) return line[3..];
+        if (line.len >= 4 and std.mem.startsWith(u8, line[1..], "@@ ")) return line[4..];
+        return null;
+    }
 };
 
 /// Errors from reading the diff settings out of a configuration.
@@ -1669,7 +1688,7 @@ pub const FilePair = struct {
                 rule.deinit();
             } else return null;
         }
-        return .{ .context = pair, .find = findFunction };
+        return .{ .driver = pair };
     }
 
     /// The word regex of the drivers: the old side's, else the new side's
@@ -1685,8 +1704,9 @@ pub const FilePair = struct {
         if (pair.failed) return error.PatternTooComplex;
     }
 
-    fn findFunction(context: ?*const anyopaque, line: []const u8) ?[]const u8 {
-        const pair: *FilePair = @ptrCast(@alignCast(@constCast(context.?))); // aegis: no-danger: functionLine hands out its own FilePair, which is not const, as the context
+    /// A match past the matcher's budget shows no text, and `finish`
+    /// reports it.
+    fn findFunction(pair: *FilePair, line: []const u8) ?[]const u8 {
         return pair.rule.?.heading(line) catch {
             pair.failed = true;
             return null;
@@ -1906,13 +1926,6 @@ fn writeBody(comptime words_allowed: bool, gpa: Allocator, io: Io, w: *Io.Writer
     defer differ.deinit();
     try checkTextSize(texts.old, texts.new);
     const diff = try differ.lines(texts.old, texts.new, options.lines(io));
-    // The rule lives in `options` for as long as the writer reads it.
-    const heading: ?parallax.Heading = if (!options.function_context_names)
-        null
-    else if (options.function_line) |*rule|
-        .{ .context = rule, .find = findByRule }
-    else
-        .c_function;
     const word_diff = words_allowed and options.word_diff != .none;
     var own_painter: ?paint.Painter = if (options.colors != null or options.diff_of_patches != null or word_diff)
         .init(options.colors, options.whitespace_rule, options.ws_error_highlight, options.diff_of_patches, texts.old, texts.new)
@@ -1934,20 +1947,72 @@ fn writeBody(comptime words_allowed: bool, gpa: Allocator, io: Io, w: *Io.Writer
     };
     const unified_options: parallax.UnifiedOptions = .{
         .hunks = .{ .context = options.context, .inter_hunk_context = options.inter_hunk_context },
-        .heading = heading,
+        .function_names = options.function_context_names,
         .files = if (files != null) .{ .old = names[0], .new = names[1] } else null,
         .suppress_blank_empty = options.suppress_blank_empty,
-        .paint = if (painter) |p| p.paint() else null,
     };
     if (words_allowed) {
-        if (word_diff) return writeWords(gpa, io, w, diff, unified_options, options, extras.word_regex);
+        if (word_diff) return writeWords(gpa, io, w, .{ .diff = diff, .options = unified_options, .rule = options.function_line, .painter = painter.? }, options, extras.word_regex);
     }
-    try parallax.writeUnified(w, diff, unified_options);
+    try parallax.writeUnified(w, diff, unified_options, Lines{ .rule = options.function_line, .painter = painter });
 }
 
-/// The hunks as a word diff: the file and hunk lines by `unified_options`'
-/// painter, the content lines' words by `words.Painter`.
-fn writeWords(gpa: Allocator, io: Io, w: *Io.Writer, diff: parallax.Diff, unified_options: parallax.UnifiedOptions, options: Options, word_regex: ?[]const u8) WordDiffError!void {
+/// `paint.Painter`, named where a `paint` method would hide the module.
+const PatchPainter = paint.Painter;
+
+/// What parallax's unified writer asks of each line: the function lines by
+/// the caller's rule, git's default where there is none, and the lines
+/// through the painter where there is one.
+const Lines = struct {
+    rule: ?FunctionLine,
+    painter: ?*PatchPainter,
+
+    pub fn heading(l: Lines, line: []const u8) ?[]const u8 {
+        return functionHeading(l.rule, line);
+    }
+
+    pub fn paint(l: Lines, w: *Io.Writer, line: parallax.UnifiedLine) Io.Writer.Error!void {
+        if (l.painter) |p| return p.write(w, line);
+        return parallax.writeLine(w, line);
+    }
+};
+
+/// The unified writer's lines under a word diff: the content lines' words
+/// through `words.Painter`, which hands it the rest.
+const WordLines = struct {
+    rule: ?FunctionLine,
+    painter: *words.Painter,
+
+    pub fn heading(l: WordLines, line: []const u8) ?[]const u8 {
+        return functionHeading(l.rule, line);
+    }
+
+    pub fn paint(l: WordLines, w: *Io.Writer, line: parallax.UnifiedLine) words.Error!void {
+        return l.painter.write(w, line);
+    }
+};
+
+/// The text a hunk shows of the function `line` starts: by `rule`, asked of
+/// the line as git's `ff_regexp` asks a driver's pattern, without its
+/// ending, carriage return included; else git's default rule.
+fn functionHeading(rule: ?FunctionLine, line: []const u8) ?[]const u8 {
+    const r = rule orelse return parallax.cFunction(line);
+    const bare = if (std.mem.endsWith(u8, line, "\r")) line[0 .. line.len - 1] else line;
+    return r.find(bare);
+}
+
+/// A diff to write as a word diff, and how: the unified writer's options,
+/// the function line rule, and the painter of the file and hunk lines.
+const WordBody = struct {
+    diff: parallax.Diff,
+    options: parallax.UnifiedOptions,
+    rule: ?FunctionLine,
+    painter: *paint.Painter,
+};
+
+/// The hunks as a word diff: the file and hunk lines by `body`'s painter,
+/// the content lines' words by `words.Painter`.
+fn writeWords(gpa: Allocator, io: Io, w: *Io.Writer, body: WordBody, options: Options, word_regex: ?[]const u8) WordDiffError!void {
     var regex: ?ere.Regex = if (word_regex) |text|
         ere.Regex.compile(gpa, text, .{ .syntax = .extended, .newline = true }) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
@@ -1962,24 +2027,11 @@ fn writeWords(gpa: Allocator, io: Io, w: *Io.Writer, diff: parallax.Diff, unifie
         .style = options.word_diff,
         .regex = if (regex) |*re| re else null,
         .colors = options.colors,
-        .inner = unified_options.paint.?,
+        .inner = body.painter,
     };
     defer painter.deinit();
-    var with_words = unified_options;
-    with_words.paint = painter.paint();
-    parallax.writeUnified(w, diff, with_words) catch |err| {
-        if (painter.failed) |failed| return failed;
-        return err;
-    };
+    try parallax.writeUnified(w, body.diff, body.options, WordLines{ .rule = body.rule, .painter = &painter });
     try painter.finish(w);
-}
-
-/// A caller's `FunctionLine` asked of a line, as git's `ff_regexp` asks a
-/// driver's pattern: without the line's ending, carriage return included.
-fn findByRule(context: ?*const anyopaque, line: []const u8) ?[]const u8 {
-    const rule: *const FunctionLine = @ptrCast(@alignCast(context.?)); // aegis: no-danger: unifiedBody hands its own *const FunctionLine as the context
-    const bare = if (std.mem.endsWith(u8, line, "\r")) line[0 .. line.len - 1] else line;
-    return rule.find(rule.context, bare);
 }
 
 test "a unified body matches the shape git prints" {

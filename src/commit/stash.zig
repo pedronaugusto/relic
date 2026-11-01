@@ -1074,7 +1074,7 @@ fn patchApplies(gpa: Allocator, io: Io, db: *odb_mod.Odb, base: Oid, current: Oi
         defer moved.deinit();
         const old_len = patch.diff.old.len();
         var hunks = patch.diff.hunks(.{});
-        while (hunks.next()) |h| {
+        while (hunks.next(.{})) |h| {
             const start = h.old_start;
             const end = h.old_start + h.old_len;
             for (moved.diff.changes) |m| {

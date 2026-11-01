@@ -539,7 +539,7 @@ fn diffSize(differ: *parallax.Differ, io: Io, a: []const u8, b: []const u8) diff
     const d = try differ.lines(a, b, .{ .indent_heuristic = false, .io = io });
     var count: usize = 0;
     var hunks = d.hunks(.{ .context = 3 });
-    while (hunks.next()) |hunk| {
+    while (hunks.next(.{})) |hunk| {
         var added: usize = 0;
         for (hunk.changes) |change| added += change.new_len;
         count += 1 + hunk.old_len + added;
@@ -892,15 +892,6 @@ const Writer = struct {
     }
 };
 
-/// The `section_headers` driver git gives the diff of two patches: ` ## <section> ##`
-/// and `@@ <hunk>`, with at most one character before the `@@`.
-fn sectionHeader(_: ?*const anyopaque, line: []const u8) ?[]const u8 {
-    if (line.len >= 7 and std.mem.startsWith(u8, line, " ## ") and std.mem.endsWith(u8, line, " ##")) return line[4 .. line.len - 3];
-    if (std.mem.startsWith(u8, line, "@@ ")) return line[3..];
-    if (line.len >= 4 and std.mem.startsWith(u8, line[1..], "@@ ")) return line[4..];
-    return null;
-}
-
 /// `output`: in the order of the new range, an old commit with no partner
 /// shown once every old commit before it has been.
 fn output(gpa: Allocator, io: Io, repo: *Repository, result: *RangeDiff, options: Options, w: *Io.Writer) Error!void {
@@ -908,7 +899,7 @@ fn output(gpa: Allocator, io: Io, repo: *Repository, result: *RangeDiff, options
     defer arena.deinit();
     const config = repo.configuration();
     var diff_options = options.diff orelse try diff.configured(config, .{});
-    diff_options.function_line = .{ .find = sectionHeader };
+    diff_options.function_line = .section_headers;
     diff_options.colors = options.colors;
     diff_options.diff_of_patches = .{ .dual_color = options.dual_color };
     const old = result.old;

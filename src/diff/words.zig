@@ -53,7 +53,7 @@ fn marksOf(style: Style, colors: ?*const paint_mod.Colors) Marks {
 
 /// A painter that writes a patch's content lines as a word diff, handing
 /// the file and hunk lines to `inner`. `finish` writes what is gathered at
-/// the end and reports what went wrong on the way. It must not move once
+/// the end. It must not move once
 /// painting.
 pub const Painter = struct {
     gpa: Allocator,
@@ -63,10 +63,9 @@ pub const Painter = struct {
     /// `null` cuts words at spaces.
     regex: ?*const ere.Regex,
     colors: ?*const paint_mod.Colors,
-    inner: parallax.Paint,
+    inner: *paint_mod.Painter,
     minus: std.ArrayList(u8) = .empty,
     plus: std.ArrayList(u8) = .empty,
-    failed: ?Self.Error = null,
 
     pub fn deinit(p: *Painter) void {
         p.minus.deinit(p.gpa);
@@ -74,35 +73,21 @@ pub const Painter = struct {
         p.* = undefined;
     }
 
-    pub fn paint(p: *Painter) parallax.Paint {
-        return .{ .context = p, .write = write };
-    }
-
     /// Write what is still gathered, as git's `free_diff_words_data` does.
     pub fn finish(p: *Painter, w: *Io.Writer) Self.Error!void {
-        if (p.failed) |err| return err;
         try p.show(w);
-    }
-
-    fn write(context: ?*const anyopaque, w: *Io.Writer, line: parallax.Paint.Line) Io.Writer.Error!void {
-        const p: *Painter = @ptrCast(@alignCast(@constCast(context.?))); // aegis: no-danger: `paint` hands its own *Painter
-        if (p.failed != null) return error.WriteFailed;
-        p.take(w, line) catch |err| {
-            p.failed = err;
-            return error.WriteFailed;
-        };
     }
 
     /// git's `fn_out_consume` under a word diff. xdiff hands each content
     /// line on with a newline, the last line of a file without one too,
     /// its marker after it.
-    fn take(p: *Painter, w: *Io.Writer, line: parallax.Paint.Line) Self.Error!void {
+    pub fn write(p: *Painter, w: *Io.Writer, line: parallax.UnifiedLine) Self.Error!void {
         const ended = line.text.len != 0 and line.text[line.text.len - 1] == '\n';
         switch (line.kind) {
-            .old_file, .new_file => try p.inner.write(p.inner.context, w, line),
+            .old_file, .new_file => try p.inner.write(w, line),
             .hunk => {
                 try p.show(w);
-                try p.inner.write(p.inner.context, w, line);
+                try p.inner.write(w, line);
             },
             .old, .new => {
                 const side = if (line.kind == .old) &p.minus else &p.plus;
@@ -154,7 +139,7 @@ pub const Painter = struct {
         const diff = try differ.lines(old_list, new_list, .{ .algorithm = .myers, .indent_heuristic = false, .io = p.io });
         var hunks = diff.hunks(.{ .context = 0, .inter_hunk_context = 0 });
         var current: usize = 0;
-        while (hunks.next()) |h| {
+        while (hunks.next(.{})) |h| {
             // git's `fn_out_diff_words_aux`, the words numbered from one
             // after the empty word at zero.
             const minus_at = old.span(h.old_start, h.old_len);
