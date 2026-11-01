@@ -437,15 +437,16 @@ test "named helpers run as git runs them: Git Credential Manager, and git's own 
         defer repo.deinit(io);
         defer locations.deinit();
         const Asker = struct {
-            fn ask(_: ?*anyopaque, field: credential.Field, _: []const u8, answer: *std.Io.Writer) (Allocator.Error || std.Io.Writer.Error)!bool {
+            fn ask(_: *credential.Asker, field: credential.Field, _: []const u8, answer: *std.Io.Writer) credential.Asker.Error!bool {
                 try answer.writeAll(if (field == .username) "ada" else "secret");
                 return true;
             }
         };
+        var asker: credential.Asker = .{ .vtable = &.{ .ask = Asker.ask } };
         var first = try fetch_mod.fetch(gpa, io, &repo, "origin", .{
             .who = test_who,
             .programs = .{ .environ = &person.env },
-            .prompt = .{ .ask = Asker.ask },
+            .prompt = .{ .asker = &asker },
         });
         first.deinit();
         const question = try gpa.print("url={s}\n\n", .{url});

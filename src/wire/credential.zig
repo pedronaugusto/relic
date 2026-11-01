@@ -87,21 +87,36 @@ pub const Field = enum { username, password };
 /// asks the person anything. Without one, a credential no helper has is
 /// `error.CredentialsUnavailable`, and no window or question appears.
 pub const Prompt = struct {
-    context: ?*anyopaque = null,
     /// Run the person's askpass program first — `GIT_ASKPASS`, then
     /// `core.askPass`, then `SSH_ASKPASS` — as git does before it falls
     /// back to the terminal. Off, askpass is never run: an askpass is a
     /// window in front of the person, and only the caller knows whether
     /// one is welcome.
     askpass: bool = false,
-    /// Answer `field` for the prompt text git would show —
-    /// `Username for 'https://example.com': ` — by writing it to `answer`
-    /// and returning true, or decline with false. `answer` keeps what it is
-    /// given in storage that is wiped when it grows and when it is let go,
-    /// so a password written straight to it is held nowhere else; it fails
-    /// only for want of memory, as the caller may. `null` here asks nothing
-    /// beyond askpass.
-    ask: ?*const fn (context: ?*anyopaque, field: Field, prompt: []const u8, answer: *std.Io.Writer) (Allocator.Error || std.Io.Writer.Error)!bool = null,
+    /// Who answers the prompt; `null` asks nothing beyond askpass.
+    asker: ?*Asker = null,
+};
+
+/// The caller's answerer of prompts: a node its owner embeds, found again
+/// from the node by `@fieldParentPtr`.
+pub const Asker = struct {
+    vtable: *const VTable,
+
+    pub const Error = Allocator.Error || std.Io.Writer.Error;
+    pub const VTable = struct {
+        /// Answer `field` for the prompt text git would show —
+        /// `Username for 'https://example.com': ` — by writing it to
+        /// `answer` and returning true, or decline with false. `answer`
+        /// keeps what it is given in storage that is wiped when it grows
+        /// and when it is let go, so a password written straight to it is
+        /// held nowhere else; it fails only for want of memory, as the
+        /// caller may.
+        ask: *const fn (asker: *Asker, field: Field, prompt: []const u8, answer: *std.Io.Writer) Asker.Error!bool,
+    };
+
+    pub fn ask(asker: *Asker, field: Field, prompt: []const u8, answer: *std.Io.Writer) Asker.Error!bool {
+        return asker.vtable.ask(asker, field, prompt, answer);
+    }
 };
 
 /// What `fill` needs besides the URL.
@@ -1041,13 +1056,13 @@ pub const Session = struct {
         if (p.askpass) {
             if (try s.askpass(io, opts, prompt)) |answer| return answer;
         }
-        const ask_fn = p.ask orelse return error.CredentialsUnavailable;
+        const asker = p.asker orelse return error.CredentialsUnavailable;
         s.prompted = true;
         var answer = try SecretBytes.init(s.gpa, 0);
         errdefer answer.deinit();
         var into = SecretBytes.Writer.init(&answer);
         // The writer fails only for want of memory.
-        const answered = ask_fn(p.context, field, prompt, &into.interface) catch return error.OutOfMemory;
+        const answered = asker.ask(field, prompt, &into.interface) catch return error.OutOfMemory;
         into.interface.flush() catch return error.OutOfMemory;
         if (!answered) {
             answer.deinit();

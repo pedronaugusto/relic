@@ -17,10 +17,11 @@ const progress = @import("../../report.zig").progress;
 
 /// The prompts a fill showed, one after another.
 const Prompts = struct {
+    interface: credential.Asker = .{ .vtable = &.{ .ask = ask } },
     text: std.ArrayList(u8) = .empty,
 
-    fn ask(context: ?*anyopaque, field: credential.Field, prompt: []const u8, answer: *std.Io.Writer) (std.mem.Allocator.Error || std.Io.Writer.Error)!bool {
-        const p: *Prompts = @ptrCast(@alignCast(context.?)); // safe: the context handed out with this function is a Prompts
+    fn ask(asker: *credential.Asker, field: credential.Field, prompt: []const u8, answer: *std.Io.Writer) credential.Asker.Error!bool {
+        const p: *Prompts = @fieldParentPtr("interface", asker);
         try p.text.appendSlice(std.testing.allocator, prompt);
         try p.text.append(std.testing.allocator, '\n');
         try answer.writeAll(if (field == .password) "askpass-password" else "user");
@@ -35,7 +36,7 @@ fn prompted(gpa: std.mem.Allocator, io: Io, config_text: []const u8) ![]u8 {
     errdefer prompts.text.deinit(std.testing.allocator);
     var session: credential.Session = .{ .gpa = gpa, .url = try url_mod.Url.parse("https://%07latrix%20Lestrange@example.org/r.git") };
     defer session.deinit();
-    try std.testing.expect(try session.fill(io, .{ .config = &config, .prompt = .{ .context = &prompts, .ask = Prompts.ask } }));
+    try std.testing.expect(try session.fill(io, .{ .config = &config, .prompt = .{ .asker = &prompts.interface } }));
     return prompts.text.toOwnedSlice(std.testing.allocator);
 }
 

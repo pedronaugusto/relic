@@ -455,9 +455,10 @@ test "credentials in the URL, from askpass and from the caller's prompt are what
     // The caller's prompt, where no askpass is set.
     const Asked = struct {
         const Self = @This();
+        interface: credential.Asker = .{ .vtable = &.{ .ask = ask } },
         prompts: std.ArrayList(u8) = .empty,
-        fn ask(context: ?*anyopaque, field: credential.Field, prompt: []const u8, answer: *std.Io.Writer) (Allocator.Error || std.Io.Writer.Error)!bool {
-            const self_: *Self = @ptrCast(@alignCast(context.?));
+        fn ask(asker: *credential.Asker, field: credential.Field, prompt: []const u8, answer: *std.Io.Writer) credential.Asker.Error!bool {
+            const self_: *Self = @fieldParentPtr("interface", asker);
             try self_.prompts.appendSlice(testing.allocator, prompt);
             try self_.prompts.append(testing.allocator, '\n');
             try answer.writeAll(switch (field) {
@@ -470,7 +471,7 @@ test "credentials in the URL, from askpass and from the caller's prompt are what
     var asked: Asked = .{};
     defer asked.prompts.deinit(gpa);
     {
-        var session = try transport.Session.open(gpa, io, url, .{ .service = .upload_pack, .kind = .sha1 }, .{ .prompt = .{ .context = &asked, .ask = Asked.ask } });
+        var session = try transport.Session.open(gpa, io, url, .{ .service = .upload_pack, .kind = .sha1 }, .{ .prompt = .{ .asker = &asked.interface } });
         session.deinit(io);
     }
     try testing.expectEqualStrings(theirs, asked.prompts.items);
