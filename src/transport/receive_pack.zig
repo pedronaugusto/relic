@@ -267,6 +267,8 @@ pub const Server = struct {
     runner: ?hooks.Runner = null,
     /// What the client asked for, once it has.
     asked: Asked = .{},
+    /// Hears the indexer's progress for `endOfInput`.
+    end_of_input: progress_mod.Reporter = .{ .vtable = &.{ .report = endOfInput } },
     /// Where the report and the messages go, written by the push and by
     /// the tasks beside it one at a time.
     channel: aegis.BlockingGuarded(Channel) = .init(.{}),
@@ -473,7 +475,7 @@ pub const Server = struct {
             const loose = count < s.settings.unpack_limit;
             q = try Quarantine.begin(s.gpa, s.io, s.db(), .incoming);
             var diagnostic: index_pack.Diagnostic = .{};
-            received = s.unpack(in, &q.?, &diagnostic, .{ .context = s, .report = endOfInput }) catch |err| switch (err) {
+            received = s.unpack(in, &q.?, &diagnostic, .{ .reporter = &s.end_of_input }) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.Canceled => return error.Canceled,
                 else => blk: {
@@ -551,8 +553,8 @@ pub const Server = struct {
 
     /// The indexer's last object read is the pack's end: keepalives are
     /// due from there, as git's index-pack tells its muxer with a NUL.
-    fn endOfInput(context: ?*anyopaque, event: progress_mod.Event) void {
-        const s: *Server = @ptrCast(@alignCast(context.?)); // aegis: no-danger: unpack hands this function the server itself
+    fn endOfInput(reporter: *progress_mod.Reporter, event: progress_mod.Event) void {
+        const s: *Server = @alignCast(@fieldParentPtr("end_of_input", reporter)); // aegis: no-danger: this function is installed only on a Server's end_of_input
         switch (event) {
             .indexed => |count| if (count.done == count.total) s.startKeepalive(),
             else => {},

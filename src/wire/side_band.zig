@@ -205,7 +205,7 @@ const Shown = struct {
             s.full = true;
             return;
         };
-        if (s.len != 0) p.report(p.context, .{ .remote = s.buf[0..s.len] });
+        if (s.len != 0) p.reporter.report(.{ .remote = s.buf[0..s.len] });
         s.len = 0;
     }
 
@@ -475,22 +475,24 @@ test "data comes through, progress goes to the caller, a flush ends it" {
     try band(&wire.writer, 1, "data");
     try pkt_line.flush(&wire.writer);
 
-    var heard: std.ArrayList(u8) = .empty;
-    defer heard.deinit(testing.allocator);
-    const Ctx = struct {
-        fn report(context: ?*anyopaque, event: progress_mod.Event) void {
-            const list: *std.ArrayList(u8) = @ptrCast(@alignCast(context.?));
-            list.appendSlice(testing.allocator, event.remote) catch @panic("OOM");
+    const Heard = struct {
+        interface: progress_mod.Reporter = .{ .vtable = &.{ .report = report } },
+        list: std.ArrayList(u8) = .empty,
+        fn report(reporter: *progress_mod.Reporter, event: progress_mod.Event) void {
+            const heard: *@This() = @fieldParentPtr("interface", reporter);
+            heard.list.appendSlice(testing.allocator, event.remote) catch @panic("OOM");
         }
     };
+    var heard: Heard = .{};
+    defer heard.list.deinit(testing.allocator);
     var buffer: [pkt_line.max_line]u8 = undefined;
     var fixed: Io.Reader = .fixed(wire.written());
     var in = fixed.limited(.unlimited, &buffer);
-    var demux: Demux = .init(&in.interface, &.{}, .{ .context = &heard, .report = Ctx.report });
+    var demux: Demux = .init(&in.interface, &.{}, .{ .reporter = &heard.interface });
     var out: [64]u8 = undefined;
     const n = try demux.interface.readSliceShort(&out);
     try testing.expectEqualStrings("PACKdata", out[0..n]);
-    try testing.expectEqualStrings("Counting objects: 1\r", heard.items);
+    try testing.expectEqualStrings("Counting objects: 1\r", heard.list.items);
 }
 
 test "the server's fatal error ends the stream and is kept" {
@@ -535,9 +537,10 @@ test "the server's last words in colour: the keyword they start with, as git's m
     var in = fixed.limited(.unlimited, &buffer);
     const colors: RemoteColors = .{};
     const Ignore = struct {
-        fn report(_: ?*anyopaque, _: progress_mod.Event) void {}
+        fn report(_: *progress_mod.Reporter, _: progress_mod.Event) void {}
     };
-    var demux: Demux = .init(&in.interface, &.{}, .{ .report = Ignore.report, .remote_keywords = colors.keywords() });
+    var ignore: progress_mod.Reporter = .{ .vtable = &.{ .report = Ignore.report } };
+    var demux: Demux = .init(&in.interface, &.{}, .{ .reporter = &ignore, .remote_keywords = colors.keywords() });
     var out: [8]u8 = undefined;
     try testing.expectError(error.ReadFailed, demux.interface.readSliceShort(&out));
     try testing.expectEqualStrings("\x1b[1;31mError\x1b[m: no such ref^G", demux.message());

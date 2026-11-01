@@ -68,20 +68,22 @@ fn heard(gpa: std.mem.Allocator, control: progress.Control, messages: []const []
     try pkt_line.write(&wire.writer, line[0 .. fatal.len + 1]);
 
     const Sink = struct {
-        fn report(context: ?*anyopaque, event: progress.Event) void {
-            const list: *std.ArrayList(u8) = @ptrCast(@alignCast(context.?)); // safe: the context handed out with this function is a list
-            list.appendSlice(std.testing.allocator, event.remote) catch @panic("out of memory");
+        interface: progress.Reporter = .{ .vtable = &.{ .report = report } },
+        shown: std.ArrayList(u8) = .empty,
+        fn report(reporter: *progress.Reporter, event: progress.Event) void {
+            const sink: *@This() = @fieldParentPtr("interface", reporter);
+            sink.shown.appendSlice(std.testing.allocator, event.remote) catch @panic("out of memory");
         }
     };
-    var shown: std.ArrayList(u8) = .empty;
-    errdefer shown.deinit(gpa);
+    var sink: Sink = .{};
+    errdefer sink.shown.deinit(gpa);
     var buffer: [pkt_line.max_line]u8 = undefined;
     var fixed: Io.Reader = .fixed(wire.written());
     var in = fixed.limited(.unlimited, &buffer);
-    var demux: side_band.Demux = .init(&in.interface, &.{}, .{ .context = &shown, .report = Sink.report, .remote_control = control });
+    var demux: side_band.Demux = .init(&in.interface, &.{}, .{ .reporter = &sink.interface, .remote_control = control });
     var out: [16]u8 = undefined;
     try std.testing.expectError(error.ReadFailed, demux.interface.readSliceShort(&out));
-    return .{ .progress = try shown.toOwnedSlice(gpa), .message = try gpa.dupe(u8, demux.message()) };
+    return .{ .progress = try sink.shown.toOwnedSlice(gpa), .message = try gpa.dupe(u8, demux.message()) };
 }
 
 test "CVE-2024-52005, t5409-colorize-remote-messages 'disallow (color) control sequences in sideband': a remote's control sequences are shown, not obeyed" {

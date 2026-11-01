@@ -39,10 +39,9 @@ pub const Count = struct {
 
 /// Where events go.
 pub const Progress = struct {
-    context: ?*anyopaque = null,
     /// Called on the caller's own task, between two steps of the
     /// operation; whatever it does delays the operation by that much.
-    report: *const fn (context: ?*anyopaque, event: Event) void,
+    reporter: *Reporter,
     /// What the remote's text may keep of its control characters: git's
     /// `sideband.allowControlCharacters` (`transport.side_band.Allowed`
     /// reads it), whose default keeps colour.
@@ -55,7 +54,21 @@ pub const Progress = struct {
     /// Hand `event` to the caller, when there is one to hand it to.
     pub fn emit(progress: ?Progress, event: Event) void {
         const p = progress orelse return;
-        p.report(p.context, event);
+        p.reporter.report(event);
+    }
+};
+
+/// What hears a `Progress`'s events: a node its owner embeds, found again
+/// from the node by `@fieldParentPtr`.
+pub const Reporter = struct {
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        report: *const fn (reporter: *Reporter, event: Event) void,
+    };
+
+    pub fn report(reporter: *Reporter, event: Event) void {
+        reporter.vtable.report(reporter, event);
     }
 };
 
@@ -178,16 +191,19 @@ test "a remote's control characters are shown, colour kept by default, as git 2.
 
 test "no progress is heard and nothing breaks" {
     Progress.emit(null, .{ .received = 1 });
-    var seen: u64 = 0;
-    const p: Progress = .{ .context = &seen, .report = struct {
-        fn report(context: ?*anyopaque, event: Event) void {
-            const count: *u64 = @ptrCast(@alignCast(context.?));
-            count.* += event.received;
+    const Seen = struct {
+        interface: Reporter = .{ .vtable = &.{ .report = report } },
+        count: u64 = 0,
+        fn report(reporter: *Reporter, event: Event) void {
+            const seen: *@This() = @fieldParentPtr("interface", reporter);
+            seen.count += event.received;
         }
-    }.report };
+    };
+    var seen: Seen = .{};
+    const p: Progress = .{ .reporter = &seen.interface };
     Progress.emit(p, .{ .received = 41 });
     Progress.emit(p, .{ .received = 1 });
-    try std.testing.expectEqual(@as(u64, 42), seen);
+    try std.testing.expectEqual(@as(u64, 42), seen.count);
 }
 
 /// All errors reported by this namespace.

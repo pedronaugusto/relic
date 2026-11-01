@@ -91,11 +91,12 @@ test "a fetch over smart HTTP leaves what git fetch leaves, in v2 and in v0" {
         // The server's progress comes to the caller, and only there.
         const Heard = struct {
             const Self = @This();
+            interface: progress_mod.Reporter = .{ .vtable = &.{ .report = report } },
             remote: usize = 0,
             received: u64 = 0,
             indexed: u64 = 0,
-            fn report(context: ?*anyopaque, event: progress_mod.Event) void {
-                const self_: *Self = @ptrCast(@alignCast(context.?));
+            fn report(reporter: *progress_mod.Reporter, event: progress_mod.Event) void {
+                const self_: *Self = @fieldParentPtr("interface", reporter);
                 switch (event) {
                     .remote => self_.remote += 1,
                     .received => |n| self_.received = n,
@@ -108,7 +109,7 @@ test "a fetch over smart HTTP leaves what git fetch leaves, in v2 and in v0" {
         var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{
             .who = test_who,
             .programs = .{ .environ = &env },
-            .progress = .{ .context = &heard, .report = Heard.report },
+            .progress = .{ .reporter = &heard.interface },
         });
         defer outcome.deinit();
         try testing.expect(outcome.objects > 0);
@@ -1909,9 +1910,10 @@ test "a remote's keywords come in colour as git push shows them, under color.rem
     defer repo.deinit(io);
 
     const Heard = struct {
+        interface: progress_mod.Reporter = .{ .vtable = &.{ .report = report } },
         text: std.ArrayList(u8) = .empty,
-        fn report(context: ?*anyopaque, event: progress_mod.Event) void {
-            const self_: *@This() = @ptrCast(@alignCast(context.?));
+        fn report(reporter: *progress_mod.Reporter, event: progress_mod.Event) void {
+            const self_: *@This() = @fieldParentPtr("interface", reporter);
             switch (event) {
                 .remote => |t| self_.text.appendSlice(testing.allocator, t) catch @panic("out of memory"),
                 else => {},
@@ -1972,7 +1974,7 @@ test "a remote's keywords come in colour as git push shows them, under color.rem
             .who = test_who,
             .programs = .{ .environ = &env },
             .refspecs = &.{relic_ref},
-            .progress = .{ .context = &heard, .report = Heard.report, .remote_keywords = if (colors) |*c| c.keywords() else null },
+            .progress = .{ .reporter = &heard.interface, .remote_keywords = if (colors) |*c| c.keywords() else null },
         });
         defer pushed.deinit();
         try testing.expectEqualStrings(theirs.items, heard.text.items);

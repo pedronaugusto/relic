@@ -528,8 +528,9 @@ test "checkout fetches what the store lacks through the server, many at once, an
         calls: usize = 0,
         thread: std.Thread.Id,
         wrong_thread: bool = false,
-        fn report(context: ?*anyopaque, event: progress_mod.Event) void {
-            const h: *Self = @ptrCast(@alignCast(context.?));
+        interface: progress_mod.Reporter = .{ .vtable = &.{ .report = report } },
+        fn report(reporter: *progress_mod.Reporter, event: progress_mod.Event) void {
+            const h: *Self = @fieldParentPtr("interface", reporter);
             h.calls += 1;
             if (std.Thread.getCurrentId() != h.thread) h.wrong_thread = true;
             switch (event) {
@@ -545,7 +546,7 @@ test "checkout fetches what the store lacks through the server, many at once, an
     var heard: Heard = .{ .thread = std.Thread.getCurrentId() };
     var fetcher: lfstransfer.Fetcher = .{ .server = server, .options = .{
         .concurrency = 4,
-        .progress = .{ .context = &heard, .report = Heard.report },
+        .progress = .{ .reporter = &heard.interface },
     } };
     defer fetcher.deinit();
 

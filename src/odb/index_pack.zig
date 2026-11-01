@@ -2543,6 +2543,8 @@ const Park = struct {
         on_caller: FlagCell = FlagCell.init(.unset),
         caller_parked: FlagCell = FlagCell.init(.unset),
         beside_canceled: FlagCell = FlagCell.init(.unset),
+        /// Hears the receive's progress for `arm`.
+        armer: progress_mod.Reporter = .{ .vtable = &.{ .report = arm } },
     };
     const Flag = enum(u8) { unset, set };
     const FlagCell = aegis.Atomic(Flag);
@@ -2589,13 +2591,13 @@ const Park = struct {
         s.caller = std.Thread.getCurrentId();
         defer s.armed.store(.unset, .release);
         var in: Io.Reader = .fixed(bytes);
-        return receive(gpa, io, db, .{ .pack_dir = pack_dir, .in = &in }, .{ .threads = 3, .progress = .{ .context = s, .report = arm } });
+        return receive(gpa, io, db, .{ .pack_dir = pack_dir, .in = &in }, .{ .threads = 3, .progress = .{ .reporter = &s.armer } });
     }
 
     /// Armed once every entry is indexed, so that what parks is a read
     /// resolving deltas, not one of the stream's.
-    fn arm(context: ?*anyopaque, event: progress_mod.Event) void {
-        const s: *State = @ptrCast(@alignCast(context.?)); // aegis: no-danger: receiveOn hands its layer's state as the context
+    fn arm(reporter: *progress_mod.Reporter, event: progress_mod.Event) void {
+        const s: *State = @fieldParentPtr("armer", reporter);
         switch (event) {
             .indexed => |n| if (n.done == n.total) s.armed.store(.set, .release),
             else => {},
