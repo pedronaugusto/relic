@@ -102,12 +102,20 @@ pub const SubmoduleHistory = struct {
     tips: []const Oid,
 };
 
-/// How a merge reaches the submodules it meets: the caller opens the one at
-/// `path`, or returns `null` when it is not checked out, which git reports
-/// as a conflict of its own.
+/// How a merge reaches the submodules it meets: an interface its
+/// implementation holds, as `std.Io.Writer` is one.
 pub const Submodules = struct {
-    context: *anyopaque,
-    openFn: *const fn (context: *anyopaque, path: []const u8) ?SubmoduleHistory,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        open: *const fn (submodules: *Submodules, path: []const u8) ?SubmoduleHistory,
+    };
+
+    /// The submodule at `path`, or `null` when it is not checked out,
+    /// which git reports as a conflict of its own.
+    pub fn open(submodules: *Submodules, path: []const u8) ?SubmoduleHistory {
+        return submodules.vtable.open(submodules, path);
+    }
 };
 
 /// Where a refusal writes the path that caused it, so a caller can say which
@@ -171,7 +179,7 @@ pub const Options = struct {
     /// The driver for a path whose `merge` attribute says nothing:
     /// `merge.default`. Text when `null`.
     default_driver: ?[]const u8 = null,
-    submodules: ?Submodules = null,
+    submodules: ?*Submodules = null,
     /// How long the ancestor's short name is in a merge of commits:
     /// `core.abbrev`.
     abbrev_len: usize = abbrev.fallback,
@@ -1162,7 +1170,7 @@ const Merge = struct {
     fn mergeSubmodule(m: *Merge, path: []const u8, o: Oid, a: Oid, b: Oid, result: *Oid) Error!bool {
         result.* = if (m.call_depth > 0) o else a;
         const search = m.call_depth == 0;
-        const sub = if (m.options.submodules) |s| s.openFn(s.context, path) else null;
+        const sub = if (m.options.submodules) |s| s.open(path) else null;
         const history = sub orelse {
             try m.pathMsg("Failed to merge submodule {s} (not checked out)", .submodule_not_initialized, path, null, null, &.{}, .{path});
             return false;

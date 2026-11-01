@@ -768,6 +768,7 @@ pub const StatusProbe = struct {
     /// What went wrong when `worktree.status` returned
     /// `error.SubmoduleUnreadable`.
     failure: ?Failure = null,
+    interface: worktree.SubmoduleProbe,
 
     /// How the probe reads settings.
     pub const ProbeOptions = struct {
@@ -805,6 +806,7 @@ pub const StatusProbe = struct {
             .modules = try loadGitmodules(gpa, io, repo, index),
             .options = options,
             .depth = depth,
+            .interface = .{ .vtable = &.{ .inspect = inspect }, .ignore_staged = options.ignore == .all },
         };
     }
 
@@ -815,13 +817,13 @@ pub const StatusProbe = struct {
     }
 
     /// The interface `worktree.StatusOptions.submodules` takes. The probe
-    /// must outlive the status call.
-    pub fn probe(p: *StatusProbe) worktree.SubmoduleProbe {
-        return .{ .context = p, .inspectFn = inspect, .ignore_staged = p.options.ignore == .all };
+    /// must outlive the status call, and not move once this is handed out.
+    pub fn probe(p: *StatusProbe) *worktree.SubmoduleProbe {
+        return &p.interface;
     }
 
-    fn inspect(io: Io, context: *anyopaque, path: []const u8, recorded: Oid) worktree.Error!worktree.SubmoduleState {
-        const p: *StatusProbe = @ptrCast(@alignCast(context)); // aegis: no-danger: the context handed out with this function is a StatusProbe
+    fn inspect(interface: *worktree.SubmoduleProbe, io: Io, path: []const u8, recorded: Oid) worktree.Error!worktree.SubmoduleState {
+        const p: *StatusProbe = @fieldParentPtr("interface", interface);
         return p.inspectPath(io, path, recorded) catch |err| return p.fail(path, err);
     }
 
@@ -2463,14 +2465,16 @@ pub const Mover = struct {
     /// Why the last refused move was refused. `options.refusal` says which
     /// submodule.
     failure: ?MoveError = null,
+    interface: worktree.SubmoduleMover = .{ .vtable = &.{ .move = moveFn } },
 
-    /// What an update moves its submodules with.
-    pub fn submodules(m: *Mover) worktree.SubmoduleMover {
-        return .{ .context = m, .moveFn = moveFn };
+    /// What an update moves its submodules with. The mover must not move
+    /// once this is handed out.
+    pub fn submodules(m: *Mover) *worktree.SubmoduleMover {
+        return &m.interface;
     }
 
-    fn moveFn(io: Io, context: *anyopaque, request: worktree.SubmoduleMove) worktree.Error!void {
-        const m: *Mover = @ptrCast(@alignCast(context)); // aegis: no-danger: the context handed out with this function is a Mover
+    fn moveFn(interface: *worktree.SubmoduleMover, io: Io, request: worktree.SubmoduleMove) worktree.Error!void {
+        const m: *Mover = @fieldParentPtr("interface", interface);
         m.move(io, request) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Canceled => return error.Canceled,

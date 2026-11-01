@@ -60,6 +60,7 @@ const SubOpener = struct {
     db: ?odb_mod.Odb = null,
     git_dir: ?Io.Dir = null,
     tips: std.ArrayList(Oid) = .empty,
+    interface: ort.Submodules = .{ .vtable = &.{ .open = open } },
 
     fn deinit(o: *SubOpener) void {
         if (o.db) |*db| db.deinit(o.io);
@@ -68,8 +69,8 @@ const SubOpener = struct {
         o.* = undefined;
     }
 
-    fn open(context: *anyopaque, path: []const u8) ?ort.SubmoduleHistory {
-        const o: *SubOpener = @ptrCast(@alignCast(context));
+    fn open(interface: *ort.Submodules, path: []const u8) ?ort.SubmoduleHistory {
+        const o: *SubOpener = @fieldParentPtr("interface", interface);
         if (!std.mem.eql(u8, path, "sub")) return null;
         if (o.db) |*db| return .{ .db = db, .tips = o.tips.items };
         const git_dir = o.repo.dir.openDir(o.io, "sub/.git", .{}) catch return null;
@@ -1124,7 +1125,7 @@ test "submodules merge by fast-forward, or say which merge would join them, as g
         // refuses to rename a directory with a file in it held open.
         var opener: SubOpener = .{ .gpa = gpa, .io = io, .repo = &repo };
         defer opener.deinit();
-        const subs: ort.Submodules = .{ .context = &opener, .openFn = SubOpener.open };
+        const subs = &opener.interface;
         try expectSameMerge(gpa, io, &repo, "left", "ahead", .{ .submodules = subs });
         try expectSameMerge(gpa, io, &repo, "left", "right", .{ .submodules = subs });
     }

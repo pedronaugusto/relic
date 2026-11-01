@@ -381,7 +381,7 @@ pub const Rules = struct {
     /// for a fetch, a clone or a received push, as git checks them.
     /// `fetch.fsck.` and `receive.fsck.` names no message has are left out
     /// and said in `warnings`, as git warns; `fsck.` ones are refused.
-    pub const LoadOptions = struct { kind: Kind, scope: Scope = .fsck, strict: bool = false, sink: ?Sink = null, base: ?Io.Dir = null };
+    pub const LoadOptions = struct { kind: Kind, scope: Scope = .fsck, strict: bool = false, sink: ?*Sink = null, base: ?Io.Dir = null };
     pub fn load(gpa: Allocator, io: Io, config: *const config_mod.Config, options: LoadOptions) LoadError!Rules {
         const strict = options.strict;
         var rules: Rules = .{ .strict = strict };
@@ -392,7 +392,7 @@ pub const Rules = struct {
 
     /// `load`, over rules already made: `baseline` takes the
     /// configuration this way.
-    pub const ConfigureOptions = struct { kind: Kind, scope: Scope = .fsck, sink: ?Sink = null, base: ?Io.Dir = null };
+    pub const ConfigureOptions = struct { kind: Kind, scope: Scope = .fsck, sink: ?*Sink = null, base: ?Io.Dir = null };
     pub fn configure(r: *Rules, gpa: Allocator, io: Io, config: *const config_mod.Config, options: ConfigureOptions) LoadError!void {
         const kind = options.kind;
         const scope = options.scope;
@@ -419,7 +419,7 @@ pub const Rules = struct {
                 // not know, so `largePathname=warn:<n>` is refused here.
                 if (Level.parse(value) == null) return error.UnknownFsckLevel;
                 if (Problem.fromConfigName(entry.name) == null) {
-                    if (sink) |s| try s.unknown(s.context, entry.name);
+                    if (sink) |s| try s.unknown(entry.name);
                     continue;
                 }
             }
@@ -477,7 +477,7 @@ pub const TransferInputs = struct {
     base: ?Io.Dir = null,
 };
 /// Explicit policy and an optional warning sink.
-pub const TransferOptions = struct { explicit: ?bool = null, sink: ?Sink = null };
+pub const TransferOptions = struct { explicit: ?bool = null, sink: ?*Sink = null };
 
 /// The rules a fetch or clone with `config` checks with, or `null` for
 /// none: `explicit` when the caller says, otherwise `fetch.fsckObjects` or
@@ -520,29 +520,44 @@ pub const Finding = struct {
     }
 };
 
-/// Where warnings go, and names configuration gave that no message has.
+/// Where warnings go, and names configuration gave that no message has:
+/// an interface its implementation holds, as `std.Io.Writer` is one.
 pub const Sink = struct {
-    context: *anyopaque,
-    warning: *const fn (context: *anyopaque, finding: Finding) Allocator.Error!void,
-    unknown: *const fn (context: *anyopaque, name: []const u8) Allocator.Error!void,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        report: *const fn (sink: *Sink, finding: Finding) Allocator.Error!void,
+        unknown: *const fn (sink: *Sink, name: []const u8) Allocator.Error!void,
+    };
+
+    /// A finding at the `warn` or `info` level.
+    pub fn report(sink: *Sink, finding: Finding) Allocator.Error!void {
+        return sink.vtable.report(sink, finding);
+    }
+
+    /// A message id the configuration names that git has no message for.
+    pub fn unknown(sink: *Sink, name: []const u8) Allocator.Error!void {
+        return sink.vtable.unknown(sink, name);
+    }
 };
 
 /// A `Sink` that keeps what it is given in `warnings`, as git prints it.
 /// One task at a time.
 pub const ToWarnings = struct {
     warnings: ?*warning.Warnings,
+    interface: Sink = .{ .vtable = &.{ .report = noteFinding, .unknown = noteUnknown } },
 
-    pub fn sink(t: *ToWarnings) Sink {
-        return .{ .context = t, .warning = noteFinding, .unknown = noteUnknown };
+    pub fn sink(t: *ToWarnings) *Sink {
+        return &t.interface;
     }
 
-    fn noteFinding(context: *anyopaque, finding: Finding) Allocator.Error!void {
-        const t: *ToWarnings = @ptrCast(@alignCast(context)); // aegis: no-danger: the context is the ToWarnings the sink was made from
+    fn noteFinding(interface: *Sink, finding: Finding) Allocator.Error!void {
+        const t: *ToWarnings = @fieldParentPtr("interface", interface);
         try note(t.warnings, finding);
     }
 
-    fn noteUnknown(context: *anyopaque, name: []const u8) Allocator.Error!void {
-        const t: *ToWarnings = @ptrCast(@alignCast(context)); // aegis: no-danger: the context is the ToWarnings the sink was made from
+    fn noteUnknown(interface: *Sink, name: []const u8) Allocator.Error!void {
+        const t: *ToWarnings = @fieldParentPtr("interface", interface);
         try warning.note(t.warnings, .{ .fsck_unknown_message = name });
     }
 };
@@ -576,7 +591,7 @@ pub const Special = enum { modules, attributes };
 const Reporter = struct {
     rules: *const Rules,
     oid: Oid,
-    sink: ?Sink,
+    sink: ?*Sink,
     first: ?Finding = null,
 
     /// Report `problem`; whether it is an error, which stops a commit's or
@@ -586,7 +601,7 @@ const Reporter = struct {
         switch (r.rules.level(problem)) {
             .ignore => return false,
             .warn, .info => {
-                if (r.sink) |s| try s.warning(s.context, .{ .oid = r.oid, .problem = problem, .level = .warn, .detail = detail });
+                if (r.sink) |s| try s.report(.{ .oid = r.oid, .problem = problem, .level = .warn, .detail = detail });
                 return false;
             },
             .fatal, .@"error" => {
@@ -600,7 +615,7 @@ const Reporter = struct {
 /// Borrowed object identity, type and content.
 pub const ObjectInputs = struct { kind: Kind, oid: Oid, type: object.Type, bytes: []const u8 };
 /// Optional special-blob collection and warning sink.
-pub const CheckOptions = struct { found: ?*Found = null, sink: ?Sink = null };
+pub const CheckOptions = struct { found: ?*Found = null, sink: ?*Sink = null };
 
 /// The first error in object `oid` of type `t`, whose content is `bytes`,
 /// as git's `index-pack` finds it with `rules`: a commit or tag git's
@@ -1025,7 +1040,7 @@ const attr_max_line_length: usize = 2048;
 
 /// A special blob, or null content when it exceeds the read limit.
 pub const BlobInputs = struct { oid: Oid, as: Special, bytes: ?[]const u8 };
-pub const BlobOptions = struct { sink: ?Sink = null };
+pub const BlobOptions = struct { sink: ?*Sink = null };
 
 /// The first error in a blob a tree named `.gitmodules` or
 /// `.gitattributes`, as git's `fsck_blob` finds it; `bytes` is `null` for
@@ -1086,7 +1101,7 @@ pub fn checkBlob(gpa: Allocator, rules: *const Rules, inputs: BlobInputs, option
 
 /// A found blob that is not there, or is not a blob: git's
 /// `gitmodulesMissing`, `gitmodulesBlob` and the `.gitattributes` pair.
-pub fn checkFoundObject(rules: *const Rules, oid: Oid, as: Special, missing: bool, sink: ?Sink) Allocator.Error!?Finding {
+pub fn checkFoundObject(rules: *const Rules, oid: Oid, as: Special, missing: bool, sink: ?*Sink) Allocator.Error!?Finding {
     var r: Reporter = .{ .rules = rules, .oid = oid, .sink = sink };
     const problem: Problem = switch (as) {
         .modules => if (missing) .gitmodules_missing else .gitmodules_blob,
@@ -1234,6 +1249,7 @@ const Collected = struct {
     gpa: Allocator,
     items: std.ArrayList(Problem) = .empty,
     unknown: std.ArrayList([]const u8) = .empty,
+    interface: Sink = .{ .vtable = &.{ .report = noteProblem, .unknown = unknownName } },
 
     fn deinit(c: *Collected) void {
         c.items.deinit(c.gpa);
@@ -1242,17 +1258,17 @@ const Collected = struct {
         c.* = undefined;
     }
 
-    fn sink(c: *Collected) Sink {
-        return .{ .context = c, .warning = noteProblem, .unknown = unknownName };
+    fn sink(c: *Collected) *Sink {
+        return &c.interface;
     }
 
-    fn noteProblem(context: *anyopaque, finding: Finding) Allocator.Error!void {
-        const c: *Collected = @ptrCast(@alignCast(context)); // aegis: no-danger: the context is the Collected the sink was made from
+    fn noteProblem(interface: *Sink, finding: Finding) Allocator.Error!void {
+        const c: *Collected = @fieldParentPtr("interface", interface);
         try c.items.append(c.gpa, finding.problem.?);
     }
 
-    fn unknownName(context: *anyopaque, name: []const u8) Allocator.Error!void {
-        const c: *Collected = @ptrCast(@alignCast(context)); // aegis: no-danger: the context is the Collected the sink was made from
+    fn unknownName(interface: *Sink, name: []const u8) Allocator.Error!void {
+        const c: *Collected = @fieldParentPtr("interface", interface);
         try c.unknown.append(c.gpa, try c.gpa.dupe(u8, name));
     }
 };

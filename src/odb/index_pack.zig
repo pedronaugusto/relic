@@ -319,7 +319,7 @@ pub const FoundOptions = struct {
 pub fn checkFound(gpa: Allocator, io: Io, owner: anytype, found: *const fsck.Found, options: FoundOptions) Error!void {
     const db: Database = .from(owner);
     var to_warnings: fsck.ToWarnings = .{ .warnings = options.warnings };
-    const sink: ?fsck.Sink = if (options.warnings != null) to_warnings.sink() else null;
+    const sink: ?*fsck.Sink = if (options.warnings != null) to_warnings.sink() else null;
     for ([_]fsck.Special{ .modules, .attributes }) |as| {
         const set = switch (as) {
             .modules => &found.modules,
@@ -765,6 +765,8 @@ const Indexer = struct {
     /// Whether a thread failed, which stops the others; the failure is
     /// `shared`'s.
     failed: FailedCell = FailedCell.init(.running),
+    /// Where fsck's warnings on this pack's objects go.
+    fsck_sink: fsck.Sink = .{ .vtable = &.{ .report = noteFinding, .unknown = noteUnknown } },
     /// The stream, while `parse` reads from it.
     tee: ?*Tee = null,
 
@@ -1041,19 +1043,19 @@ const Indexer = struct {
         return x.fail(err, .{ .oid = oid, .problem = f.problem, .offset = offset });
     }
 
-    fn fsckSink(x: *Indexer) ?fsck.Sink {
+    fn fsckSink(x: *Indexer) ?*fsck.Sink {
         if (x.options.warnings == null) return null;
-        return .{ .context = x, .warning = noteFinding, .unknown = noteUnknown };
+        return &x.fsck_sink;
     }
 
-    fn noteFinding(context: *anyopaque, finding: fsck.Finding) Allocator.Error!void {
-        const x: *Indexer = @ptrCast(@alignCast(context)); // aegis: no-danger: the context is the Indexer the sink was made from
+    fn noteFinding(interface: *fsck.Sink, finding: fsck.Finding) Allocator.Error!void {
+        const x: *Indexer = @fieldParentPtr("fsck_sink", interface);
         var guard = x.shared.acquireUncancelable(x.io);
         defer guard.deinit(x.io);
         try fsck.note(x.options.warnings, finding);
     }
 
-    fn noteUnknown(_: *anyopaque, _: []const u8) Allocator.Error!void {}
+    fn noteUnknown(_: *fsck.Sink, _: []const u8) Allocator.Error!void {}
 
     /// Read back and check every blob a tree named as `.gitmodules` or
     /// `.gitattributes`, from the pack or else the database, as git's

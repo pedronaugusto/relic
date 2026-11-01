@@ -151,7 +151,7 @@ pub const Rules = struct {
     /// `--recurse-submodules` and `submodule.recurse`: what moves the
     /// submodules whose gitlinks are written or removed. Without one a
     /// gitlink is written as an empty directory.
-    submodules: ?SubmoduleMover = null,
+    submodules: ?*SubmoduleMover = null,
 
     /// Put the stat an add or a write found into `entry`: git's
     /// `fill_stat_cache_info`, which under `ignore_stat` marks the entry
@@ -1036,13 +1036,18 @@ pub const SubmoduleMove = struct {
 /// through here; `submodule.Mover` makes them the way git does, a
 /// submodule's own submodules with them. A move that cannot be made is
 /// `error.SubmoduleNotUpdated`, and the mover says which and why.
+///
+/// An interface its implementation holds, as `std.Io.Writer` is one.
 pub const SubmoduleMover = struct {
-    context: *anyopaque,
-    moveFn: *const fn (io: Io, context: *anyopaque, move: SubmoduleMove) Error!void,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        move: *const fn (mover: *SubmoduleMover, io: Io, move: SubmoduleMove) Error!void,
+    };
 
     /// Make `move`, or with `move.dry_run` say whether it would go through.
-    pub fn move(m: SubmoduleMover, io: Io, request: SubmoduleMove) Self.Error!void {
-        return m.moveFn(io, m.context, request);
+    pub fn move(m: *SubmoduleMover, io: Io, request: SubmoduleMove) Self.Error!void {
+        return m.vtable.move(m, io, request);
     }
 };
 
@@ -1053,19 +1058,24 @@ pub const SubmoduleMover = struct {
 /// `submodule.StatusProbe` answers it the way git does: it opens the
 /// submodule, honours `submodule.<name>.ignore` and `diff.ignoreSubmodules`,
 /// and runs a status inside, recursively.
+///
+/// An interface its implementation holds, as `std.Io.Writer` is one.
 pub const SubmoduleProbe = struct {
-    context: *anyopaque,
-    inspectFn: *const fn (io: Io, context: *anyopaque, path: []const u8, recorded: Oid) Error!SubmoduleState,
+    vtable: *const VTable,
     /// Whether a gitlink whose index entry differs from `HEAD`'s is left out
     /// too. `--ignore-submodules=all` asks for that and no configured
     /// setting can: git always shows a staged submodule, so that one added
     /// by hand is not committed unseen.
     ignore_staged: bool = false,
 
+    pub const VTable = struct {
+        inspect: *const fn (probe: *SubmoduleProbe, io: Io, path: []const u8, recorded: Oid) Error!SubmoduleState,
+    };
+
     /// What the submodule at `path` holds, against the commit the index
     /// records for it, already filtered by what the settings ignore.
-    pub fn inspect(p: SubmoduleProbe, io: Io, path: []const u8, recorded: Oid) Self.Error!SubmoduleState {
-        return p.inspectFn(io, p.context, path, recorded);
+    pub fn inspect(p: *SubmoduleProbe, io: Io, path: []const u8, recorded: Oid) Self.Error!SubmoduleState {
+        return p.vtable.inspect(p, io, path, recorded);
     }
 };
 
@@ -1127,7 +1137,7 @@ pub const StatusOptions = struct {
     /// How a populated submodule is looked into. Without one, a gitlink's
     /// working-tree state is its `HEAD` against the recorded commit and
     /// nothing else: no content is inspected and no ignore setting is read.
-    submodules: ?SubmoduleProbe = null,
+    submodules: ?*SubmoduleProbe = null,
     /// The permission to run the clean filters `rules.filters` names, which
     /// is how a filtered file whose stat changed is compared.
     programs: ?program.Programs = null,
@@ -3489,7 +3499,7 @@ pub fn verifyUpdates(
 
 /// What `verifySubmoduleMoves` is told.
 pub const SubmoduleCheck = struct {
-    mover: SubmoduleMover,
+    mover: *SubmoduleMover,
     /// `read-tree --reset`: each move asked as a forced one, and a
     /// submodule's `HEAD` not asked to be where its gitlink was.
     force: bool = false,

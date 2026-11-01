@@ -98,7 +98,7 @@ pub const Options = struct {
     /// `--recurse-submodules`: what moves the submodules whose gitlinks the
     /// working tree takes, as `worktree.Rules.submodules`. Without one a
     /// submodule's checkout is left where it is.
-    submodules: ?worktree.SubmoduleMover = null,
+    submodules: ?*worktree.SubmoduleMover = null,
     /// `read-tree -n`: every change checked as `read-tree` without `-u`
     /// checks it -- what has changes of its own, not what stands in the
     /// way, since nothing is written -- and nothing written. The outcome
@@ -719,6 +719,7 @@ const SubmoduleOpener = struct {
     io: Io,
     wt: Io.Dir,
     opened: std.ArrayList(*Opened) = .empty,
+    interface: ort.Submodules = .{ .vtable = &.{ .open = open } },
 
     const Opened = struct { repo: Repository, tips: []Oid };
 
@@ -732,8 +733,8 @@ const SubmoduleOpener = struct {
         s.* = undefined;
     }
 
-    fn open(context: *anyopaque, path: []const u8) ?ort.SubmoduleHistory {
-        const s: *SubmoduleOpener = @ptrCast(@alignCast(context)); // aegis: no-danger: the context handed out with this function is a SubmoduleOpener
+    fn open(interface: *ort.Submodules, path: []const u8) ?ort.SubmoduleHistory {
+        const s: *SubmoduleOpener = @fieldParentPtr("interface", interface);
         return s.openInner(path) catch null;
     }
 
@@ -876,7 +877,7 @@ const Machinery = struct {
             .attributes_dir = setup.wt,
             .configured_drivers = try configuredDrivers(arena, repo),
             .default_driver = repo.configuration().get("merge.default"),
-            .submodules = if (m.submodules) |*s| .{ .context = s, .openFn = SubmoduleOpener.open } else null,
+            .submodules = if (m.submodules) |*s| &s.interface else null,
             .abbrev_len = abbrev.defaultLength(repo.configuration(), db),
             .blocked = options.blocked,
             .renormalize = if (settings.renormalize) &m.normalizer else null,

@@ -52,7 +52,7 @@ pub const Options = struct {
     /// the tree records, forced, as git's `read-tree --reset`; `merge`
     /// moves those whose gitlink changes, refused where a submodule would
     /// lose work. Without one a submodule's checkout is left where it is.
-    submodules: ?worktree.SubmoduleMover = null,
+    submodules: ?*worktree.SubmoduleMover = null,
     /// Where a refused submodule is listed.
     obstructions: ?*worktree.Obstructions = null,
 };
