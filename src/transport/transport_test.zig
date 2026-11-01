@@ -2447,38 +2447,29 @@ fn expectSameSubmoduleFetch(gpa: Allocator, io: Io, world: *SubmoduleWorld) !voi
     }
 }
 
-test "a fetch goes into the submodules as git's fetch_submodules does: on demand, always, never, by their settings, for a commit by name, several at once" {
+/// A fetch of `SubmoduleWorld`'s twin by git and by relic, after `inner`
+/// moved on.
+const SubmoduleFetch = struct {
+    /// The ref `inner`'s new commit goes to, and whether the gitlinks
+    /// above it record it.
+    ref: []const u8 = "refs/heads/main",
+    record: bool = true,
+    config: []const [2][]const u8 = &.{},
+    git_args: []const []const u8 = &.{},
+    options: fetch_mod.Options,
+    /// The submodules relic's fetch says it went into.
+    went: []const []const u8,
+};
+
+/// Each of `cases` against git's, in one world, each cloned afresh from
+/// where the last left it: what a case fetches is only its own advance. A
+/// case is a recursive clone and fetches by git and by relic, several
+/// processes of git's each, slow to start on macOS, so a test holds a few.
+fn expectSubmoduleFetches(cases: []const SubmoduleFetch) !void {
     const gpa = testing.allocator;
     const io = testing.io;
     var env = try testremote.environ(gpa);
     defer env.deinit();
-    const Case = struct {
-        /// The ref `inner`'s new commit goes to, and whether the gitlinks
-        /// above it record it.
-        ref: []const u8 = "refs/heads/main",
-        record: bool = true,
-        config: []const [2][]const u8 = &.{},
-        git_args: []const []const u8 = &.{},
-        options: fetch_mod.Options,
-        /// The submodules relic's fetch says it went into.
-        went: []const []const u8,
-    };
-    const cases = [_]Case{
-        .{ .options = .{ .who = test_who }, .went = &.{ "lib", "lib/inner", "vendor/inner" } },
-        .{ .git_args = &.{"--no-recurse-submodules"}, .options = .{ .who = test_who, .recurse_submodules = .off }, .went = &.{} },
-        .{ .record = false, .options = .{ .who = test_who }, .went = &.{} },
-        .{ .record = false, .git_args = &.{"--recurse-submodules"}, .options = .{ .who = test_who, .recurse_submodules = .on }, .went = &.{ "lib", "lib/inner", "vendor/inner" } },
-        .{ .config = &.{.{ "fetch.recurseSubmodules", "false" }}, .options = .{ .who = test_who }, .went = &.{} },
-        // The clone wrote `[submodule] active`, so `submodule.recurse` goes
-        // there, before `[fetch]`, and the fetch's setting is the later.
-        .{ .config = &.{ .{ "submodule.recurse", "false" }, .{ "fetch.recurseSubmodules", "true" } }, .record = false, .options = .{ .who = test_who }, .went = &.{ "lib", "lib/inner", "vendor/inner" } },
-        .{ .config = &.{.{ "submodule.recurse", "true" }}, .record = false, .options = .{ .who = test_who }, .went = &.{ "lib", "lib/inner", "vendor/inner" } },
-        .{ .config = &.{.{ "submodule.lib.fetchRecurseSubmodules", "true" }}, .record = false, .options = .{ .who = test_who }, .went = &.{ "lib", "lib/inner" } },
-        .{ .ref = "refs/keep/aside", .options = .{ .who = test_who }, .went = &.{ "lib", "lib/inner", "vendor/inner" } },
-        .{ .git_args = &.{ "-j", "2" }, .options = .{ .who = test_who, .submodule_jobs = 2 }, .went = &.{ "lib", "lib/inner", "vendor/inner" } },
-    };
-    // One world for every case, each cloned afresh from where the last
-    // left it: what a case fetches is only its own advance.
     var world = try SubmoduleWorld.init(gpa, io);
     defer world.deinit(gpa);
     for (cases) |case| {
@@ -2515,6 +2506,33 @@ test "a fetch goes into the submodules as git's fetch_submodules does: on demand
         for (case.went, went.items) |want, got| try testing.expectEqualStrings(want, got);
         try expectSameSubmoduleFetch(gpa, io, &world);
     }
+}
+
+test "a fetch goes into the submodules as git's fetch_submodules does: on demand, never, and always" {
+    try expectSubmoduleFetches(&.{
+        .{ .options = .{ .who = test_who }, .went = &.{ "lib", "lib/inner", "vendor/inner" } },
+        .{ .git_args = &.{"--no-recurse-submodules"}, .options = .{ .who = test_who, .recurse_submodules = .off }, .went = &.{} },
+        .{ .record = false, .options = .{ .who = test_who }, .went = &.{} },
+        .{ .record = false, .git_args = &.{"--recurse-submodules"}, .options = .{ .who = test_who, .recurse_submodules = .on }, .went = &.{ "lib", "lib/inner", "vendor/inner" } },
+    });
+}
+
+test "a fetch goes into the submodules as git's fetch_submodules does: by fetch.recurseSubmodules, submodule.recurse and a submodule's own setting" {
+    try expectSubmoduleFetches(&.{
+        .{ .config = &.{.{ "fetch.recurseSubmodules", "false" }}, .options = .{ .who = test_who }, .went = &.{} },
+        // The clone wrote `[submodule] active`, so `submodule.recurse` goes
+        // there, before `[fetch]`, and the fetch's setting is the later.
+        .{ .config = &.{ .{ "submodule.recurse", "false" }, .{ "fetch.recurseSubmodules", "true" } }, .record = false, .options = .{ .who = test_who }, .went = &.{ "lib", "lib/inner", "vendor/inner" } },
+        .{ .config = &.{.{ "submodule.recurse", "true" }}, .record = false, .options = .{ .who = test_who }, .went = &.{ "lib", "lib/inner", "vendor/inner" } },
+        .{ .config = &.{.{ "submodule.lib.fetchRecurseSubmodules", "true" }}, .record = false, .options = .{ .who = test_who }, .went = &.{ "lib", "lib/inner" } },
+    });
+}
+
+test "a fetch goes into the submodules as git's fetch_submodules does: for a commit by name, and several at once" {
+    try expectSubmoduleFetches(&.{
+        .{ .ref = "refs/keep/aside", .options = .{ .who = test_who }, .went = &.{ "lib", "lib/inner", "vendor/inner" } },
+        .{ .git_args = &.{ "-j", "2" }, .options = .{ .who = test_who, .submodule_jobs = 2 }, .went = &.{ "lib", "lib/inner", "vendor/inner" } },
+    });
 }
 
 /// Each git directory of two recursive clones the same: refs, `HEAD`, the
