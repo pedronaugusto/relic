@@ -14,6 +14,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const Io = std.Io;
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
@@ -162,15 +163,37 @@ const Tail = struct {
     /// The read end, taken from the child, whose own clean-up would
     /// close it under the reading task.
     file: ?fs.OwnedFile = null,
+    /// The read end, lent to the reading task once the program runs.
+    handed: aegis.BlockingGuarded(?fs.OwnedFile.Lending) = .init(null),
+    handed_set: aegis.Condition = .init(),
 
-    /// Read the program's standard error to its end, keeping the last
-    /// of it.
-    fn drain(tail: *Tail, io: Io, file: Io.File) void {
+    /// Wait for the program's standard error, then read it to its end,
+    /// keeping the last of it. The task begins before the program, so a
+    /// program that writes there always has a reader.
+    fn drain(tail: *Tail, io: Io) void {
+        const file = (tail.wait(io) catch return).get();
         var chunk: [1024]u8 = undefined;
         while (true) {
             const n = file.readStreaming(io, &.{&chunk}) catch return;
             tail.keep(chunk[0..n]);
         }
+    }
+
+    fn wait(tail: *Tail, io: Io) aegis.Condition.WaitError!fs.OwnedFile.Lending {
+        var held = try tail.handed.acquire(io);
+        defer held.deinit(io);
+        while (true) {
+            if (held.value().*) |file| return file;
+            try tail.handed_set.wait(io, &held, .none);
+        }
+    }
+
+    /// Lend the reading task `file`.
+    fn hand(tail: *Tail, io: Io, file: fs.OwnedFile.Lending) void {
+        var held = tail.handed.acquireUncancelable(io);
+        held.value().* = file;
+        held.deinit(io);
+        tail.handed_set.signal(io);
     }
 
     /// Stop reading once the program has ended. All it wrote is in
@@ -271,26 +294,31 @@ pub const Process = struct {
         const write_buffer = try gpa.alloc(u8, 64 * 1024);
         errdefer gpa.free(write_buffer);
 
+        // The reader of a captured standard error starts first, waiting
+        // for the pipe: where `io` runs no task beside this one, the
+        // program's standard error is this process's, as git leaves it.
         var effective = invocation;
         var tail: ?*Tail = null;
-        errdefer if (tail) |t| gpa.destroy(t);
+        errdefer if (tail) |t| {
+            if (t.task) |*task| task.cancel(io);
+            gpa.destroy(t);
+        };
         if (invocation.stderr == .capture) {
-            if (canRunBeside(io)) {
-                tail = try gpa.create(Tail);
-                tail.?.* = .{};
-            } else effective.stderr = .inherit;
+            const t = try gpa.create(Tail);
+            t.* = .{};
+            if (io.concurrent(Tail.drain, .{ t, io })) |task| {
+                t.task = task;
+                tail = t;
+            } else |_| {
+                gpa.destroy(t);
+                effective.stderr = .inherit;
+            }
         }
         var running = try program.start(gpa, io, programs, effective);
         errdefer running.deinit(io);
         if (tail) |t| {
             t.file = .init(running.child.takeStderr().?);
-            t.task = io.concurrent(Tail.drain, .{ t, io, t.file.?.lend().get() }) catch null;
-            if (t.task == null) {
-                // The probe said a task would run and none did: the pipe is
-                // closed rather than left to fill.
-                t.file.?.deinit(io);
-                t.file = null;
-            }
+            t.hand(io, t.file.?.lend());
         }
         p.* = .{
             .gpa = gpa,
@@ -305,16 +333,6 @@ pub const Process = struct {
         p.connection.context = p;
         return &p.connection;
     }
-
-    /// Whether `io` runs a second task beside this one, asked by running an
-    /// empty one.
-    fn canRunBeside(io: Io) bool {
-        var probe = io.concurrent(nothing, .{}) catch return false;
-        probe.await(io);
-        return true;
-    }
-
-    fn nothing() void {}
 
     fn advertisement(context: *anyopaque, _: *Connection) Error!*Io.Reader {
         const p: *Process = @ptrCast(@alignCast(context)); // aegis: no-danger: this vtable's context, a Process, from start
@@ -540,6 +558,31 @@ test "a conversation that is not a program's is not read as one" {
 
 const builtin = @import("builtin");
 const testremote = @import("../testing/remote.zig");
+
+test "a program's standard error is read from its first byte, and stays its own where no task can read it" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest; // `sh` is the program
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var env = try testremote.environ(gpa);
+    defer env.deinit();
+    {
+        const c = try Process.start(gpa, io, .{ .environ = &env }, .{ .argv = &.{ "sh", "-c", "printf said >&2" }, .stderr = .capture });
+        defer c.deinit(io);
+        const ended = try Process.diagnose(c, io);
+        try std.testing.expectEqualStrings("said", ended.stderr);
+        try std.testing.expectEqual(@as(?u32, 0), ended.code);
+    }
+    // An `Io` that runs no task beside the caller's: nothing is captured,
+    // and the program starts as it would with its standard error left alone.
+    var threaded: Io.Threaded = .init(gpa, .{ .async_limit = .nothing, .concurrent_limit = .nothing });
+    defer threaded.deinit();
+    const alone = threaded.io();
+    const c = try Process.start(gpa, alone, .{ .environ = &env }, .{ .argv = &.{"true"}, .stderr = .capture });
+    defer c.deinit(alone);
+    const ended = try Process.diagnose(c, alone);
+    try std.testing.expectEqualStrings("", ended.stderr);
+    try std.testing.expectEqual(@as(?u32, 0), ended.code);
+}
 
 fn closeThenSleep(io: Io, c: *Connection) Io.Cancelable!void {
     c.deinit(io);
