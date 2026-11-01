@@ -3,6 +3,7 @@
 //! client takes from git's server what git's client takes.
 
 const std = @import("std");
+const testing_io = @import("../testing/io.zig");
 const warp = @import("warp");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -244,4 +245,47 @@ test "relic's client takes git's archive, here and from git's upload-archive ove
         }));
         try std.testing.expectEqualStrings(remote.died, said.text());
     }
+}
+
+test "a cancel that stops a read of git's upload-archive is Canceled, not a protocol error" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    try fixture(io, &git);
+    const path = try testremote.absolutePath(gpa, io, git.dir);
+    defer gpa.free(path);
+    var tools = std.testing.tmpDir(.{});
+    defer tools.cleanup();
+    const fake = try testremote.fakeSsh(gpa, io, tools.dir);
+    defer gpa.free(fake);
+    var env = try testremote.environ(gpa);
+    defer env.deinit();
+    var here = try testgit.Repo.init(gpa, io, &.{});
+    defer here.deinit();
+    try here.exec(io, &.{ "config", "core.sshCommand", fake });
+    var repo = try repo_mod.Repository.open(gpa, io, here.dir, .{});
+    defer repo.deinit(io);
+    // Over ssh, so the answer comes through a program's pipe.
+    const url = try gpa.print("example.invalid:{s}", .{path});
+    defer gpa.free(url);
+    const Fetch = struct {
+        path: []const u8,
+        env: *const std.process.Environ.Map,
+        repo: *repo_mod.Repository,
+        pub fn run(f: *const @This(), run_io: Io) !void {
+            var out: Io.Writer.Allocating = .init(gpa);
+            defer out.deinit();
+            try remote.fetch(gpa, run_io, &out.writer, .{ .url = f.path, .args = &.{"HEAD"} }, .{
+                .programs = .{ .environ = f.env },
+                .config = f.repo.configuration(),
+            });
+        }
+    };
+    const fetch: Fetch = .{ .path = url, .env = &env, .repo = &repo };
+    // No task beside the fetch's own, such as one draining the program's
+    // standard error, which only the fetch would cancel.
+    var alone: Io.Threaded = .init(gpa, .{ .concurrent_limit = .nothing });
+    defer alone.deinit();
+    try testing_io.eachCallCanceled(gpa, alone.io(), &fetch, .file_read_streaming);
 }

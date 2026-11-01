@@ -219,7 +219,10 @@ pub const Daemon = struct {
             while (into.interface.end <= max_request) {
                 _ = r.interface.stream(&into.interface, Io.Limit.limited(max_request + 1 - into.interface.end)) catch |err| switch (err) {
                     error.EndOfStream => break,
-                    error.ReadFailed => return .served,
+                    error.ReadFailed => {
+                        if (r.err) |cause| if (cause == error.Canceled) return error.Canceled;
+                        return .served;
+                    },
                     // The writer fails only for want of memory.
                     error.WriteFailed => return error.OutOfMemory,
                 };
@@ -443,4 +446,27 @@ test "a cancel that lands in sending an answer is the daemon's end, not lost wit
     const faults = try shakedown.FaultIo.init(gpa, io, .{ .plan = &plan });
     defer faults.deinit();
     try std.testing.expectError(error.Canceled, sendAnswer(gpa, faults.io(), served, &e, false));
+}
+
+test "a cancel that stops the read of a request is the daemon's end, not a client served" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const address = try Io.net.IpAddress.parse("127.0.0.1", 0);
+    var listener = try address.listen(io, .{ .reuse_address = true });
+    defer listener.deinit(io);
+    const client = try listener.socket.address.connect(io, .{ .mode = .stream });
+    defer client.close(io);
+    const served = try listener.accept(io);
+    defer served.close(io);
+    var buf: [64]u8 = undefined;
+    var w = client.writer(io, &buf);
+    try w.interface.writeAll("action=get\nprotocol=https\nhost=example.com\n\n");
+    try w.interface.flush();
+    const plan = [_]shakedown.IoPlan.Entry{.{ .at = .{ .nth = .{ .call = .net_read, .n = 1 } }, .fault = .cancel, .times = 1 }};
+    const faults = try shakedown.FaultIo.init(gpa, io, .{ .plan = &plan });
+    defer faults.deinit();
+    // `serveOne` reads and answers; the listening socket is not its.
+    var d: Daemon = .{ .gpa = gpa, .io = faults.io(), .server = undefined, .socket_path = &.{} };
+    defer d.entries.deinit(gpa);
+    try std.testing.expectError(error.Canceled, d.serveOne(served));
 }

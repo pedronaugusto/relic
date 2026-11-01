@@ -574,12 +574,14 @@ pub const Session = struct {
             .can_delay = can_delay,
         }) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
+            error.Canceled => {
+                s.dropProcess(p);
+                return error.Canceled;
+            },
             error.FilterReply => return error.FilterReply,
             error.FilterCapability => return error.FilterCapability,
             error.FilterGone, error.FilterPathTooLong, error.FilterHandshake => {
-                const canceled = p.canceled();
                 s.dropProcess(p);
-                if (canceled) return error.Canceled;
                 _ = try s.passOver(path, driver, .broken, "");
                 return .passed_over;
             },
@@ -670,6 +672,10 @@ pub const Session = struct {
             };
             const listed = p.protocol.listAvailable(a) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
+                error.Canceled => {
+                    s.dropProcess(p);
+                    return error.Canceled;
+                },
                 error.FilterReply => return error.FilterReply,
                 else => {
                     s.dropProcess(p);
@@ -729,12 +735,14 @@ pub const Session = struct {
             .blob = d.blob,
         }) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
+            error.Canceled => {
+                s.dropProcess(p);
+                return error.Canceled;
+            },
             error.FilterReply => return error.FilterReply,
             error.FilterCapability => return error.FilterCapability,
             else => {
-                const canceled = p.canceled();
                 s.dropProcess(p);
-                if (canceled) return error.Canceled;
                 _ = try s.passOver(d.path, d.driver, .broken, "");
                 return .{ .path = d.path, .content = .{ .bytes = "" } };
             },

@@ -2044,7 +2044,7 @@ pub const Client = struct {
             .none => try c.sendWhole(io, ex, transport, method, headers.items, if (request.method.requestHasBody()) .{ .bytes = "" } else .none),
             .bytes => |bytes| try c.sendWhole(io, ex, transport, method, headers.items, .{ .bytes = bytes }),
             .object => |o| {
-                var owned = (o.store.open(io, &o.pointer) catch |err| return c.fail("{s}", io, .{@errorName(err)}, error.ConnectionFailed)) orelse
+                var owned = (o.store.open(io, &o.pointer) catch |err| return if (err == error.Canceled) error.Canceled else c.fail("{s}", io, .{@errorName(err)}, error.ConnectionFailed)) orelse
                     return c.fail("object {s} is not in the store", io, .{&o.pointer.oid}, error.HttpStatus);
                 defer owned.deinit(io);
                 const file = owned.lend().get();
@@ -2061,9 +2061,12 @@ pub const Client = struct {
                 var left = o.pointer.size;
                 while (left > 0) {
                     const want: usize = @intCast(@min(left, chunk.len));
-                    const n = fr.interface.readSliceShort(chunk[0..want]) catch return c.fail("upload: reading the object", io, .{}, error.ConnectionFailed);
+                    const n = fr.interface.readSliceShort(chunk[0..want]) catch {
+                        if (fr.err) |cause| if (cause == error.Canceled) return error.Canceled;
+                        return c.fail("upload: reading the object", io, .{}, error.ConnectionFailed);
+                    };
                     if (n == 0) return c.fail("upload: the object is shorter than its pointer", io, .{}, error.ConnectionFailed);
-                    outgoing.writer().writeAll(chunk[0..n]) catch return c.fail("upload: the connection broke", io, .{}, error.ConnectionFailed);
+                    outgoing.writer().writeAll(chunk[0..n]) catch return c.uploadBroke(io, ex, &outgoing, request_url);
                     left -= n;
                     if (request.sent) |count| count.* += n;
                     if (request.on_bytes) |cb| cb.add(cb.context, n);
@@ -2093,6 +2096,14 @@ pub const Client = struct {
     /// An error of the HTTP client's, as this module names it, with why in
     /// the message. A timeout is a connection that failed, which git-lfs
     /// retries as it retries any.
+    /// A write of an upload's body that failed: `finish` says why, a
+    /// cancel among the reasons.
+    fn uploadBroke(c: *Client, io: Io, ex: *Exchange, outgoing: *uplink.Outgoing, url: []const u8) ErrorNamespace.Error {
+        var res = outgoing.finish(io) catch |err| return c.clientFailed(io, &ex.state().diagnostics, err, url);
+        res.deinit(io);
+        return c.fail("upload: the connection broke", io, .{}, error.ConnectionFailed);
+    }
+
     fn clientFailed(c: *Client, io: Io, diagnostics: *const uplink.Diagnostics, err: ClientError, url: []const u8) ErrorNamespace.Error {
         const where = stripQuery(url);
         return switch (err) {
@@ -2129,12 +2140,12 @@ pub const Client = struct {
     fn objectContentType(c: *Client, a: Allocator, io: Io, url: []const u8, store: *const lfs.Store, pointer: *const lfs.Pointer) ErrorNamespace.Error![]const u8 {
         const setting = try c.settings.urlGet(a, "lfs", url, "contenttype");
         if (!gitLfsBool(setting, true)) return "application/octet-stream";
-        var owned = (store.open(io, pointer) catch |err| return c.fail("{s}", io, .{@errorName(err)}, error.ConnectionFailed)) orelse
+        var owned = (store.open(io, pointer) catch |err| return if (err == error.Canceled) error.Canceled else c.fail("{s}", io, .{@errorName(err)}, error.ConnectionFailed)) orelse
             return c.fail("object {s} is not in the store", io, .{&pointer.oid}, error.HttpStatus);
         defer owned.deinit(io);
         const file = owned.lend().get();
         var head: [mime_sniff.sniff_len]u8 = undefined;
-        const n = file.readPositionalAll(io, &head, 0) catch return c.fail("upload: reading the object", io, .{}, error.ConnectionFailed);
+        const n = file.readPositionalAll(io, &head, 0) catch |err| return if (err == error.Canceled) error.Canceled else c.fail("upload: reading the object", io, .{}, error.ConnectionFailed);
         return mime_sniff.contentType(head[0..n]);
     }
 
@@ -2639,8 +2650,16 @@ pub const Exchange = struct {
         return .init(r.allocRemaining(ex.arena.allocator(), .limited(limit)) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.StreamTooLong => return error.StreamTooLong,
-            error.ReadFailed => return ex.client.fail("reading the answer: {s}", io, .{ex.bodyError()}, error.ConnectionFailed),
+            error.ReadFailed => {
+                if (ex.canceled()) return error.Canceled;
+                return ex.client.fail("reading the answer: {s}", io, .{ex.bodyError()}, error.ConnectionFailed);
+            },
         });
+    }
+
+    /// Whether the last read of the body failed for a cancel.
+    pub fn canceled(ex: *const Exchange) bool {
+        return ex.state().response.failure() == error.Canceled;
     }
 
     /// The reason a read of the body failed.

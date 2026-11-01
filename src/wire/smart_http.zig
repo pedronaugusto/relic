@@ -308,6 +308,13 @@ pub const Files = struct {
     pub fn message(f: *const Files) []const u8 {
         return f.h.connection.message();
     }
+
+    /// Whether the last read of the body `get` handed out failed for a
+    /// cancel.
+    pub fn canceled(f: *const Files) bool {
+        const res = &(f.h.in_flight orelse return false);
+        return res.failure() == error.Canceled;
+    }
 };
 
 /// A request `Files.begin` made ready, sent by `send`.
@@ -357,6 +364,12 @@ pub const Early = struct {
         return res.readerBuffered(io, buffer);
     }
 
+    /// Whether the last read of `body` failed for a cancel.
+    pub fn canceled(e: *const Early) bool {
+        const res = &(e.response orelse return false);
+        return res.failure() == error.Canceled;
+    }
+
     /// The request ended, ready for the next.
     pub fn reset(e: *Early, io: Io) void {
         if (e.response) |*res| res.deinit(io);
@@ -396,7 +409,7 @@ pub fn download(gpa: Allocator, io: Io, w: *Io.Writer, url: url_mod.Url, options
     const body = res.reader(io);
     _ = body.streamRemaining(w) catch |err| return switch (err) {
         error.WriteFailed => error.WriteFailed,
-        error.ReadFailed => h.fail(error.ConnectionFailed, "the body was cut short"),
+        error.ReadFailed => h.cutShort(res),
     };
 }
 
@@ -425,6 +438,7 @@ fn prepare(gpa: Allocator, io: Io, url: url_mod.Url, service: Service, options: 
     errdefer if (h.proxy_credentials) |*p| p.deinit();
     errdefer if (h.proxy_secret) |*p| p.deinit();
     errdefer h.freeTls();
+    errdefer if (h.cookies) |*jar| jar.deinit(io);
 
     const configured = try h.configure(url);
     // The client points at the authorities and certificates `configure`
@@ -730,8 +744,9 @@ const Http = struct {
         h.cookies.?.load(h.io, &reader.interface) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             // curl skips a line too long for its buffer, and stops at a
-            // failed read with what it has.
-            error.ReadFailed, error.StreamTooLong => {},
+            // failed read with what it has; a cancel stops the read.
+            error.ReadFailed => if (reader.err) |cause| if (cause == error.Canceled) return error.Canceled,
+            error.StreamTooLong => {},
         };
     }
 
@@ -981,6 +996,12 @@ const Http = struct {
     fn fail(h: *Http, err: Error, text: []const u8) Error {
         h.connection.setMessage(text);
         return err;
+    }
+
+    /// A body whose read failed: canceled, or cut short.
+    fn cutShort(h: *Http, res: *const uplink.Response) Error {
+        if (res.failure() == error.Canceled) return error.Canceled;
+        return h.fail(error.ConnectionFailed, "the body was cut short");
     }
 
     /// What the client can fail with: a request, or the end of one whose
@@ -1291,7 +1312,7 @@ const Http = struct {
             var listing: std.ArrayList(u8) = .empty;
             res.reader(h.io).appendRemaining(h.arena.allocator(), &listing, .limited(max_dumb_file_bytes)) catch |err| return switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
-                error.ReadFailed => h.fail(error.ConnectionFailed, "the body was cut short"),
+                error.ReadFailed => h.cutShort(res),
                 error.StreamTooLong => h.fail(error.DumbHttpFileTooLarge, "the info/refs listing is larger than 1 GiB"),
             };
             h.downloading = true;

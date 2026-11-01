@@ -19,6 +19,7 @@ const transport = @import("../transport/transport.zig");
 const fetch_mod = @import("../transport/fetch.zig");
 const repo_mod = @import("../repo/repo.zig");
 const config_mod = @import("../config/config.zig");
+const testing_io = @import("io.zig");
 
 const who: object.Signature = .{ .name = "T", .email = "t@example.com", .when_secs = 1_700_000_000, .offset_minutes = 0 };
 
@@ -454,4 +455,66 @@ test "dumb HTTP: a corrupt or missing object, a depth or a date, a push and a re
 
     // A push goes nowhere: git's needs WebDAV.
     try testing.expectError(error.DumbHttpPushUnsupported, transport.Session.open(gpa, io, try s.url("whole.git"), .{ .service = .receive_pack }, .{ .who = who, .programs = .{ .environ = &s.env } }));
+}
+
+test "dumb HTTP: a cancel that stops any read of an answer or of the cookie file is Canceled, not a broken or corrupt download" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const s = try Served.init(gpa, io, .{ .keep_alive = true });
+    defer s.deinit();
+    var source = try testremote.historyRepo(gpa, io, 3);
+    defer source.deinit();
+    // A blob that does not compress, so its object's body takes reads of
+    // its own past the answer's head.
+    const big = try s.arena().alloc(u8, 256 * 1024);
+    var prng: std.Random.DefaultPrng = .init(1);
+    prng.random().bytes(big);
+    try source.writeFile(io, "big.bin", big);
+    try source.exec(io, &.{ "add", "big.bin" });
+    try source.exec(io, &.{ "commit", "-q", "-m", "big" });
+    // Loose objects, and a pack found through its index.
+    _ = try publishLoose(s, io, &source, "loose.git");
+    const packed_path = try s.publish(io, &source, "packed.git");
+    _ = try s.git(io, &.{ "-C", packed_path, "repack", "-a", "-d", "-q" });
+    _ = try s.git(io, &.{ "-C", packed_path, "update-server-info" });
+    try s.out.dir.writeFile(io, .{ .sub_path = "cookies", .data = "127.0.0.1\tFALSE\t/\tFALSE\t0\tsession\tone\n" });
+    const cookies = try config_mod.escapeValue(s.arena(), try std.Io.Dir.path.join(s.arena(), &.{ s.out_path, "cookies" }));
+    var config = try config_mod.Config.parseText(gpa, try std.mem.concat(s.arena(), u8, &.{ "[http]\n\tcookieFile = ", cookies, "\n" }), .local);
+    defer config.deinit();
+
+    const Clone = struct {
+        s: *Served,
+        name: []const u8,
+        runs: u32 = 0,
+        pub fn run(c: *@This(), run_io: Io) !void {
+            c.runs += 1;
+            const made = try c.s.target(io, try c.s.arena().print("{s}-{d}", .{ c.name, c.runs }));
+            var dir = made.dir;
+            defer dir.close(io);
+            var repo = try clone_mod.clone(gpa, run_io, try c.s.url(c.name), dir, .{ .who = who, .programs = .{ .environ = &c.s.env } });
+            repo.deinit(run_io);
+        }
+    };
+    // No task beside the clone's own: a cancel lands where the clone's
+    // task would be canceled, never in a request begun early, which only
+    // the clone cancels.
+    var alone: Io.Threaded = .init(gpa, .{ .concurrent_limit = .nothing });
+    defer alone.deinit();
+    for ([_][]const u8{ "loose.git", "packed.git" }) |name| {
+        var clone: Clone = .{ .s = s, .name = name };
+        try testing_io.eachCallCanceled(gpa, alone.io(), &clone, .net_read);
+    }
+    const List = struct {
+        s: *Served,
+        config: *const config_mod.Config,
+        pub fn run(l: *const @This(), run_io: Io) !void {
+            var session = try transport.Session.open(gpa, run_io, try l.s.url("packed.git"), .{ .service = .upload_pack }, .{ .who = who, .config = l.config, .programs = .{ .environ = &l.s.env } });
+            defer session.deinit(run_io);
+            var refs = try session.listRefs(gpa, run_io, &.{});
+            refs.deinit();
+        }
+    };
+    const list: List = .{ .s = s, .config = &config };
+    try testing_io.eachCallCanceled(gpa, io, &list, .fileReadPositional);
+    try testing_io.eachCallCanceled(gpa, io, &list, .net_read);
 }

@@ -91,3 +91,32 @@ pub fn cancelKept(io: Io, result: anyerror!void, injected: ?shakedown.Injected) 
     std.debug.print("a cancel at step {d} ({t}) was lost\n", .{ at.step, at.call });
     return error.CancelLost;
 }
+
+/// Cancel each call of `call` that `ctx.run(io)` makes, one run per call,
+/// and expect every cancel kept: handed back as `error.Canceled`, or put
+/// back for the task's next cancelation point. A read or write that a
+/// cancel stops is never to be taken for the other end failing. A run
+/// that makes fewer such calls than the first, as a socket's reads may
+/// vary, is passed over.
+pub fn eachCallCanceled(gpa: std.mem.Allocator, io: Io, ctx: anytype, call: shakedown.IoCall) !void {
+    const made = made: {
+        const faults = try shakedown.FaultIo.init(gpa, io, .{});
+        defer faults.deinit();
+        try ctx.run(faults.io());
+        break :made faults.count(call);
+    };
+    try std.testing.expect(made != 0);
+    var n: u32 = 1;
+    while (n <= made) : (n += 1) {
+        const plan = [_]shakedown.IoPlan.Entry{.{ .at = .{ .nth = .{ .call = call, .n = n } }, .fault = .cancel, .times = 1 }};
+        const faults = try shakedown.FaultIo.init(gpa, io, .{ .plan = &plan, .trace = .all });
+        defer faults.deinit();
+        const result = ctx.run(faults.io());
+        if (faults.fired().len == 0) continue;
+        if (result) |_| {
+            faults.io().checkCancel() catch continue;
+        } else |err| if (err == error.Canceled) continue;
+        std.debug.print("a cancel at {t} {d} of {d} was lost: {any}\n{f}", .{ call, n, made, result, faults.trace() });
+        return error.CancelLost;
+    }
+}

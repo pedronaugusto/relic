@@ -12,6 +12,7 @@ const builtin = @import("builtin");
 const Io = std.Io;
 
 const testgit = @import("../testing/git.zig");
+const testing_io = @import("../testing/io.zig");
 const hash = @import("../hash/hash.zig");
 const repo_mod = @import("../repo/repo.zig");
 const worktree = @import("checkout.zig");
@@ -642,4 +643,43 @@ test "status compares a filtered file through what it would be stored as" {
     const porcelain = try r.run(io, &.{ "status", "--porcelain" });
     defer gpa.free(porcelain);
     try testing.expectEqualStrings(" M changed.r\n", porcelain);
+}
+
+test "a cancel that stops a read or write of a process filter's pipes is Canceled, not the filter gone" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var env = try environ(gpa);
+    defer env.deinit();
+    const command = try helperCommand(gpa, "--delay");
+    defer gpa.free(command);
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const Talk = struct {
+        programs: program.Programs,
+        command: []const u8,
+        cwd: Io.Dir,
+        // The handshake, a request, one the filter delays, its list and the
+        // delayed file asked for. The reaping is cancel-protected cleanup,
+        // done through the test's own Io, where no cancel is planned.
+        pub fn run(t: *const @This(), run_io: Io) !void {
+            const p = try filter.Process.open(gpa, run_io, t.programs, t.command, t.cwd);
+            defer p.deinit(io);
+            errdefer p.kill(io);
+            const clean = try p.protocol.request(gpa, .{ .command = .clean, .path = "a.r", .content = "Hello\n" });
+            try testing.expect(clean == .content);
+            gpa.free(clean.content);
+            try testing.expectEqual(filter.Protocol.Reply.delayed, try p.protocol.request(gpa, .{ .command = .smudge, .path = "b.r", .content = "Uryyb\n", .can_delay = true }));
+            const available = try p.protocol.listAvailable(gpa);
+            defer {
+                for (available.paths) |path| gpa.free(path);
+                gpa.free(available.paths);
+            }
+            const smudged = try p.protocol.request(gpa, .{ .command = .smudge, .path = "b.r", .content = "" });
+            try testing.expect(smudged == .content);
+            gpa.free(smudged.content);
+        }
+    };
+    const talk: Talk = .{ .programs = .{ .environ = &env }, .command = command, .cwd = tmp.dir };
+    try testing_io.eachCallCanceled(gpa, io, &talk, .file_read_streaming);
+    try testing_io.eachCallCanceled(gpa, io, &talk, .file_write_streaming);
 }

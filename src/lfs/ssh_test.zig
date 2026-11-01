@@ -20,6 +20,8 @@ const repo_mod = @import("../repo/repo.zig");
 const lfstransfer = @import("transfer.zig");
 const lfslocks = @import("locks.zig");
 const testlfs = @import("../testing/lfs.zig");
+const lfsapi = @import("api.zig");
+const testing_io = @import("../testing/io.zig");
 const t = @import("transfer_test.zig");
 const builtin = @import("builtin");
 
@@ -649,5 +651,39 @@ test "cached SSH lock connection refuses pipe failure and cancellation without r
         const after = try repo.commonDirectory().get().readFileAlloc(io, path, gpa, .unlimited);
         defer gpa.free(after);
         try testing.expectEqualStrings(previous, after);
+    }
+}
+
+test "a cancel that stops a read of an object going up over git-lfs-transfer, or a write to ssh, is Canceled, not a failed object" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var s = try Ssh.init("");
+    defer s.deinit();
+    const big = try t.noise(gpa, 200 * 1024, 43);
+    defer gpa.free(big);
+    var d = try s.repo("canceled", &.{.{ "b.bin", big }});
+    defer d.close(io);
+    const Up = struct {
+        s: *Ssh,
+        d: Io.Dir,
+        object: lfstransfer.Object,
+        // Each run starts from an empty store on the server's side.
+        pub fn run(u: *const @This(), run_io: Io) !void {
+            try Io.Dir.cwd().deleteTree(io, u.s.root);
+            var repo = try repo_mod.Repository.open(gpa, run_io, u.d, .{});
+            defer repo.deinit(run_io);
+            const server = try lfsapi.Server.open(gpa, run_io, &repo, "origin", .{ .programs = u.s.fx.programs() });
+            defer server.deinit(run_io);
+            var uploaded = try lfstransfer.upload(run_io, server, &.{u.object}, .{});
+            defer uploaded.deinit();
+            try t.expectNoFailures(&uploaded);
+        }
+    };
+    const up: Up = .{ .s = &s, .d = d, .object = .{ .oid = testlfs.sha256Hex(big), .size = big.len, .name = "b.bin" } };
+    // The calls only the upload's own task makes: the object's reads and
+    // the writes to ssh, `quit` among them. ssh's pipes are also read by
+    // the task draining its standard error, which only the upload cancels.
+    for ([_]shakedown_mod.IoCall{ .fileReadPositional, .file_write_streaming }) |call| {
+        try testing_io.eachCallCanceled(gpa, io, &up, call);
     }
 }

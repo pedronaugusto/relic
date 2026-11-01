@@ -1052,7 +1052,8 @@ fn attemptCustom(state: *Run, worker: usize, r: *Result, action: ?Action, verify
             // way into the store, then given up as git-lfs gives it up.
             const named = path orelse return .{ .fail = "the custom transfer named no file" };
             const full = if (std.Io.Dir.path.isAbsolute(named)) named else try std.Io.Dir.path.join(scratch, &.{ server.base_path, named });
-            const file = Io.Dir.cwd().openFile(io, full, .{}) catch return .{ .fail = "the custom transfer's file cannot be read" };
+            const file = Io.Dir.cwd().openFile(io, full, .{}) catch |err|
+                return if (err == error.Canceled) error.Canceled else .{ .fail = "the custom transfer's file cannot be read" };
             defer {
                 file.close(io);
                 // The custom transfer's file was read; removing it is best effort, as git-lfs leaves it otherwise.
@@ -1480,6 +1481,7 @@ const Partial = struct {
             if (broken) {
                 // Broken off: what came is kept for the next attempt.
                 p.keep = at > 0;
+                if (ex.canceled()) return error.Canceled;
                 return .{ .retry = .{ .message = try state.dupe(ex.bodyError()) } };
             }
             if (n < buf.len) break;
@@ -1769,8 +1771,7 @@ fn batchRequest(
 /// with the action's `id`, `token` and expiry, `noop` for an object with
 /// nothing to do.
 fn sshBatch(a: Allocator, io: Io, server: *lfsapi.Server, t: *lfsssh.Transfer, objects: []const Object, ref: ?[]const u8) Error!BatchResponse {
-    const line = t.connection(io, 0) catch |err| return sshBatchFailed(io, server, err, try t.failure(io, a));
-    var held = try line.acquire(io);
+    var held = t.connection(io, 0) catch |err| return sshBatchFailed(io, server, err, try t.failure(io, a));
     defer held.deinit(io);
     const conn = held.value();
     var args: std.ArrayList([]const u8) = .empty;
@@ -1887,8 +1888,7 @@ fn attemptDownloadSsh(state: *Run, t: *lfsssh.Transfer, worker: usize, r: *Resul
     var scratch_state: std.heap.ArenaAllocator = .init(state.server.gpa);
     defer scratch_state.deinit();
     const scratch = scratch_state.allocator();
-    const line = t.connection(io, worker) catch |err| return sshRetry(state, err);
-    var held = try line.acquire(io);
+    var held = t.connection(io, worker) catch |err| return sshRetry(state, err);
     defer held.deinit(io);
     const conn = held.value();
     const command = try scratch.print("get-object {s}", .{&r.oid});
@@ -1934,8 +1934,7 @@ fn attemptUploadSsh(state: *Run, t: *lfsssh.Transfer, worker: usize, r: *Result,
     var owned = (try store.open(io, &pointer)) orelse return .{ .fail = "the object is not in the store" };
     defer owned.deinit(io);
     const file = owned.lend().get();
-    const line = t.connection(io, worker) catch |err| return sshRetry(state, err);
-    var held = try line.acquire(io);
+    var held = t.connection(io, worker) catch |err| return sshRetry(state, err);
     defer held.deinit(io);
     const conn = held.value();
     const args = try sshObjectArgs(scratch, r, action);
@@ -1948,7 +1947,10 @@ fn attemptUploadSsh(state: *Run, t: *lfsssh.Transfer, worker: usize, r: *Result,
         var left = r.size;
         while (left > 0) {
             const want: usize = @intCast(@min(left, chunk.len));
-            const n = fr.interface.readSliceShort(chunk[0..want]) catch return .{ .fail = "upload: reading the object" };
+            const n = fr.interface.readSliceShort(chunk[0..want]) catch {
+                if (fr.err) |cause| if (cause == error.Canceled) return error.Canceled;
+                return .{ .fail = "upload: reading the object" };
+            };
             if (n == 0) return .{ .fail = "upload: the object is shorter than its pointer" };
             conn.writeData(io, chunk[0..n]) catch |err| {
                 state.say(.{ .unsent = sent });

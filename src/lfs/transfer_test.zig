@@ -27,6 +27,8 @@ const lfstransfer = @import("transfer.zig");
 const object_walk = @import("../walk/object/walk.zig");
 const testlfs = @import("../testing/lfs.zig");
 const testremote = @import("../testing/remote.zig");
+const testing_io = @import("../testing/io.zig");
+const shakedown = @import("shakedown");
 const program = @import("../process.zig").program;
 const auth = @import("../wire.zig").auth;
 const worktree = @import("../checkout/checkout.zig");
@@ -2160,4 +2162,52 @@ test "a redirect to another host leaves the request's own Authorization behind, 
     try testing.expectEqual(@as(usize, 3), std.mem.count(u8, here, with_token));
     try testing.expect(std.mem.find(u8, there, "ada") == null);
     try testing.expect(std.mem.find(u8, there, line) != null);
+}
+
+test "a cancel that stops any read or write of an upload or a download is Canceled, not a failed object or a retry" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const fx = try Fixture.init(gpa, io, .{});
+    defer fx.deinit();
+    const nobody = try testlfs.credentialHelper(gpa, io, fx.tools, "nobody", "no", "no");
+    defer gpa.free(nobody);
+    // Large enough that its body takes reads and writes of its own.
+    const content = try noise(gpa, 300 * 1024, 15);
+    defer gpa.free(content);
+    const ours = try committed(fx, "ours", nobody, &.{.{ "a.bin", content }});
+    defer ours.close(io);
+    const theirs = try committed(fx, "theirs", nobody, &.{.{ "a.bin", content }});
+    defer theirs.close(io);
+    const Move = struct {
+        fx: *Fixture,
+        ours: Io.Dir,
+        theirs: Io.Dir,
+        object: lfstransfer.Object,
+        // The object uploaded from `ours`, then downloaded into `theirs`;
+        // each run starts with the server and `theirs` without it.
+        pub fn run(m: *const @This(), run_io: Io) !void {
+            m.fx.server.removeObject(&m.object.oid);
+            try emptyStore(m.fx, m.theirs);
+            {
+                var repo = try repo_mod.Repository.open(gpa, run_io, m.ours, .{});
+                defer repo.deinit(run_io);
+                const server = try lfsapi.Server.open(gpa, run_io, &repo, "origin", .{ .programs = m.fx.programs() });
+                defer server.deinit(run_io);
+                var uploaded = try lfstransfer.upload(run_io, server, &.{m.object}, .{});
+                defer uploaded.deinit();
+                try expectNoFailures(&uploaded);
+            }
+            var repo = try repo_mod.Repository.open(gpa, run_io, m.theirs, .{});
+            defer repo.deinit(run_io);
+            const server = try lfsapi.Server.open(gpa, run_io, &repo, "origin", .{ .programs = m.fx.programs() });
+            defer server.deinit(run_io);
+            var fetched = try lfstransfer.fetch(run_io, server, &repo, .{});
+            defer fetched.deinit();
+            try expectNoFailures(&fetched);
+        }
+    };
+    const move: Move = .{ .fx = fx, .ours = ours, .theirs = theirs, .object = .{ .oid = testlfs.sha256Hex(content), .size = content.len, .name = "a.bin" } };
+    for ([_]shakedown.IoCall{ .net_read, .fileReadPositional }) |call| {
+        try testing_io.eachCallCanceled(gpa, io, &move, call);
+    }
 }

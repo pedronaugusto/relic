@@ -174,7 +174,7 @@ pub const Remote = struct {
         _ = io;
         const a = r.arena.allocator();
         const body = (try r.files.get("/HEAD")) orelse return null;
-        const raw = readWhole(a, body) catch |err| return switch (err) {
+        const raw = readWhole(a, body, &r.files) catch |err| return switch (err) {
             error.ConnectionFailed => null,
             else => |e| e,
         };
@@ -550,13 +550,14 @@ const Self = ErrorNamespace;
 
 /// A body read whole, as git reads these files, up to
 /// `smart_http.max_dumb_file_bytes`; a body cut short is the connection's
-/// failure.
-fn readWhole(a: Allocator, body: *Io.Reader) Self.Error![]u8 {
+/// failure, unless `from`, the body's `smart_http.Files` or `Early`, says
+/// a cancel stopped it.
+fn readWhole(a: Allocator, body: *Io.Reader, from: anytype) Self.Error![]u8 {
     var list: std.ArrayList(u8) = .empty;
     errdefer list.deinit(a);
     body.appendRemaining(a, &list, .limited(smart_http.max_dumb_file_bytes)) catch |err| return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
-        error.ReadFailed => error.ConnectionFailed,
+        error.ReadFailed => if (from.canceled()) error.Canceled else error.ConnectionFailed,
         error.StreamTooLong => error.DumbHttpFileTooLarge,
     };
     return list.toOwnedSlice(a);
@@ -575,7 +576,7 @@ fn fetchObjectImpl(r: *Remote, io: Io, db: *odb_mod.Odb, oid: Oid, receive: inde
         defer lane.end(io);
         switch (taken.answer) {
             .ok => if (lane.early.body(io, &lane.buffer)) |body| {
-                if (try writeLoose(io, db, oid, body) == .written) {
+                if (try writeLoose(io, db, oid, body, &lane.early) == .written) {
                     fetched.loose += 1;
                     return;
                 }
@@ -624,8 +625,9 @@ fn filesOfImpl(r: *Remote, i: usize) *smart_http.Files {
 /// (git's `http_object_request`).
 fn looseImpl(r: *Remote, io: Io, db: *odb_mod.Odb, i: usize, oid: Oid) Self.Error!Loose {
     var path_buf: LoosePath = undefined;
-    const body = (try r.filesOf(i).get(loosePath(&path_buf, oid))) orelse return .missing;
-    return writeLoose(io, db, oid, body);
+    const files = r.filesOf(i);
+    const body = (try files.get(loosePath(&path_buf, oid))) orelse return .missing;
+    return writeLoose(io, db, oid, body, files);
 }
 
 const LoosePath = ["/objects/".len + 1 + hash.max_hex_len]u8;
@@ -641,8 +643,10 @@ fn loosePath(buf: *LoosePath, oid: Oid) []const u8 {
     return buf[0 .. "/objects/".len + 1 + hex.len];
 }
 
-/// A loose object's file, `body`, inflated and written as `oid`.
-fn writeLoose(io: Io, db: *odb_mod.Odb, oid: Oid, body: *Io.Reader) Self.Error!Loose {
+/// A loose object's file, `body`, inflated and written as `oid`. A read
+/// that fails is a corrupt object, unless `from`, the body's
+/// `smart_http.Files` or `Early`, says a cancel stopped it.
+fn writeLoose(io: Io, db: *odb_mod.Odb, oid: Oid, body: *Io.Reader, from: anytype) Self.Error!Loose {
     var window: [(1 << 15) + 4096]u8 = undefined;
     var inflate: warp.Inflate.Reader = .init(body, &window, .{});
     const in = &inflate.interface;
@@ -650,7 +654,7 @@ fn writeLoose(io: Io, db: *odb_mod.Odb, oid: Oid, body: *Io.Reader) Self.Error!L
     var header_buf: [32]u8 = undefined;
     var header_len: usize = 0;
     for (&header_buf) |*slot| {
-        const c = in.takeByte() catch return .corrupt;
+        const c = in.takeByte() catch return if (from.canceled()) error.Canceled else .corrupt;
         slot.* = c;
         header_len += 1;
         if (c == 0) break;
@@ -666,7 +670,7 @@ fn writeLoose(io: Io, db: *odb_mod.Odb, oid: Oid, body: *Io.Reader) Self.Error!L
     // The stream holds the header's size: a byte past it fails the write,
     // one short of it `finish`.
     _ = in.streamRemaining(stream.writer()) catch |err| switch (err) {
-        error.ReadFailed => return .corrupt,
+        error.ReadFailed => return if (from.canceled()) error.Canceled else .corrupt,
         error.WriteFailed => switch (stream.failure orelse error.CorruptLooseObject) {
             error.CorruptLooseObject => return .corrupt,
             else => |e| return e,
@@ -692,8 +696,12 @@ fn fromPackImpl(r: *Remote, io: Io, db: *odb_mod.Odb, i: usize, oid: Oid, receiv
     var listed = list.orderedRemove(at);
     defer listed.index.deinit();
     const path = try std.mem.concat(r.arena.allocator(), u8, &.{ "/objects/pack/", listed.name, ".pack" });
-    const body = (try r.filesOf(i).get(path)) orelse return false;
-    var received = try db.receivePack(io, body, receive);
+    const files = r.filesOf(i);
+    const body = (try files.get(path)) orelse return false;
+    var received = db.receivePack(io, body, receive) catch |err| {
+        if (err == error.ReadFailed and files.canceled()) return error.Canceled;
+        return err;
+    };
     // git's `index-pack --stdin` keeps nothing.
     if (received.keep) |*token| token.deinit(io);
     // The walk asks for what the pack holds next: it is to be found.
@@ -713,7 +721,7 @@ fn readPacksImpl(r: *Remote, io: Io, i: usize) Self.Error!void {
     }
     const a = r.arena.allocator();
     const files = r.filesOf(i);
-    const text = if (try files.get("/objects/info/packs")) |body| try readWhole(a, body) else "";
+    const text = if (try files.get("/objects/info/packs")) |body| try readWhole(a, body, files) else "";
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |line| {
         // git's `parse_info_packs`: `P pack-<hex>.pack`.
@@ -722,7 +730,7 @@ fn readPacksImpl(r: *Remote, io: Io, i: usize) Self.Error!void {
         if (name.len != "pack-".len + r.kind.hexLen()) continue;
         const path = try std.mem.concat(a, u8, &.{ "/objects/pack/", name, ".idx" });
         const body = (try files.get(path)) orelse continue;
-        const bytes = try readWhole(r.gpa, body);
+        const bytes = try readWhole(r.gpa, body, files);
         const index = pack.Index.parse(r.gpa, r.kind, bytes) catch |err| {
             r.gpa.free(bytes);
             return err;
@@ -742,7 +750,7 @@ fn readAlternatesImpl(r: *Remote, io: Io) Self.Error!void {
     var text: []const u8 = "";
     // A request that fails, or an empty file, moves on to `alternates`.
     if (r.files.get("/objects/info/http-alternates")) |found| {
-        if (found) |body| text = readWhole(a, body) catch |err| switch (err) {
+        if (found) |body| text = readWhole(a, body, &r.files) catch |err| switch (err) {
             error.ConnectionFailed => "",
             else => |e| return e,
         };
@@ -753,7 +761,7 @@ fn readAlternatesImpl(r: *Remote, io: Io) Self.Error!void {
     if (text.len == 0) {
         http_specific = false;
         const body = (try r.files.get("/objects/info/alternates")) orelse return;
-        text = readWhole(a, body) catch |err| switch (err) {
+        text = readWhole(a, body, &r.files) catch |err| switch (err) {
             error.ConnectionFailed => return,
             else => |e| return e,
         };

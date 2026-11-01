@@ -766,7 +766,7 @@ fn sshLockOf(arena: Allocator, status: lfsssh.Status) Error!Lock {
 }
 
 fn sshLock(arena: Allocator, io: Io, server: *lfsapi.Server, t: *lfsssh.Transfer, path: []const u8, ref: ?[]const u8) Error!Acquired {
-    var held = try (try t.connection(io, 0)).acquire(io);
+    var held = try t.connection(io, 0);
     defer held.deinit(io);
     const conn = held.value();
     var args: std.ArrayList([]const u8) = .empty;
@@ -784,7 +784,7 @@ fn sshLock(arena: Allocator, io: Io, server: *lfsapi.Server, t: *lfsssh.Transfer
 /// `Ref.Name` does, `main` for `refs/heads/main`, where every other request
 /// names it in full.
 fn sshUnlock(arena: Allocator, io: Io, server: *lfsapi.Server, t: *lfsssh.Transfer, id: []const u8, ref: ?[]const u8) Error!Lock {
-    var held = try (try t.connection(io, 0)).acquire(io);
+    var held = try t.connection(io, 0);
     defer held.deinit(io);
     const conn = held.value();
     var args: std.ArrayList([]const u8) = .empty;
@@ -827,7 +827,7 @@ const SshQuery = struct {
 /// and described by `path`, `locked-at`, `ownername` and `owner` lines
 /// naming the same id.
 fn sshListPage(arena: Allocator, io: Io, server: *lfsapi.Server, t: *lfsssh.Transfer, q: SshQuery) Error!struct { locks: []const SshListed, next_cursor: ?[]const u8 } {
-    var held = try (try t.connection(io, 0)).acquire(io);
+    var held = try t.connection(io, 0);
     defer held.deinit(io);
     const conn = held.value();
     var args: std.ArrayList([]const u8) = .empty;

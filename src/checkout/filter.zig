@@ -395,7 +395,7 @@ pub const ProtocolError = error{
     FilterGone,
     /// A path longer than a pkt-line can carry.
     FilterPathTooLong,
-} || Allocator.Error;
+} || Allocator.Error || Io.Cancelable;
 
 /// The client side of git's long-running filter protocol, version 2, over
 /// any reader and writer. The reader's buffer holds `pktline.max_line`
@@ -406,6 +406,10 @@ pub const Protocol = struct {
     in: *Io.Reader,
     /// What the filter reads.
     out: *Io.Writer,
+    /// The pipes `in` and `out` are made over, when they are a program's:
+    /// a read or write either fails on is the program gone, unless the
+    /// failure was a cancel.
+    pipes: ?Pipes = null,
     /// What the handshake settled on.
     capabilities: Capabilities = .{},
 
@@ -491,7 +495,7 @@ pub const Protocol = struct {
         var rest = req.content;
         while (rest.len > 0) {
             const n = @min(rest.len, pkt_line.max_data);
-            pkt_line.write(p.out, rest[0..n]) catch return error.FilterGone;
+            pkt_line.write(p.out, rest[0..n]) catch return p.writeGone();
             rest = rest[n..];
         }
         try p.end();
@@ -576,7 +580,8 @@ pub const Protocol = struct {
     fn readPacket(p: *Protocol) ProtocolError!?[]const u8 {
         const packet = pkt_line.read(p.in) catch |err| switch (err) {
             error.BadPacket => return error.FilterReply,
-            error.EndOfStream, error.ReadFailed => return error.FilterGone,
+            error.EndOfStream => return error.FilterGone,
+            error.ReadFailed => return p.readGone(),
         };
         return switch (packet) {
             .data => |data| {
@@ -599,21 +604,41 @@ pub const Protocol = struct {
     }
 
     fn line(p: *Protocol, text: []const u8) ProtocolError!void {
-        pkt_line.write(p.out, text) catch return error.FilterGone;
+        pkt_line.write(p.out, text) catch return p.writeGone();
     }
 
     fn print(p: *Protocol, comptime fmt: []const u8, args: anytype) ProtocolError!void {
-        pkt_line.print(p.out, fmt, args) catch return error.FilterGone;
+        pkt_line.print(p.out, fmt, args) catch return p.writeGone();
     }
 
     fn flushOnly(p: *Protocol) ProtocolError!void {
-        pkt_line.flush(p.out) catch return error.FilterGone;
+        pkt_line.flush(p.out) catch return p.writeGone();
     }
 
     /// A flush packet, and everything written so far sent.
     fn end(p: *Protocol) ProtocolError!void {
         try p.flushOnly();
-        p.out.flush() catch return error.FilterGone;
+        p.out.flush() catch return p.writeGone();
+    }
+
+    /// A program's two pipes, as `Process` reads and writes them.
+    pub const Pipes = struct {
+        reader: *const Io.File.Reader,
+        writer: *const Io.File.Writer,
+    };
+
+    /// What a failed read of `in` was.
+    fn readGone(p: *const Protocol) error{ FilterGone, Canceled } {
+        const pipes = p.pipes orelse return error.FilterGone;
+        const cause = pipes.reader.err orelse return error.FilterGone;
+        return if (cause == error.Canceled) error.Canceled else error.FilterGone;
+    }
+
+    /// What a failed write to `out` was.
+    fn writeGone(p: *const Protocol) error{ FilterGone, Canceled } {
+        const pipes = p.pipes orelse return error.FilterGone;
+        const cause = pipes.writer.err orelse return error.FilterGone;
+        return if (cause == error.Canceled) error.Canceled else error.FilterGone;
     }
 };
 
@@ -668,22 +693,19 @@ pub const Process = struct {
         errdefer p.running.deinit(io);
         p.reader = p.running.child.stdoutFile().?.readerStreaming(io, p.in_buffer);
         p.writer = p.running.child.stdinFile().?.writerStreaming(io, p.out_buffer);
-        p.protocol = .{ .in = &p.reader.interface, .out = &p.writer.interface };
+        p.protocol = .{
+            .in = &p.reader.interface,
+            .out = &p.writer.interface,
+            .pipes = .{ .reader = &p.reader, .writer = &p.writer },
+        };
         p.protocol.handshake() catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
+            error.Canceled => return error.Canceled,
             error.FilterCapability => return error.FilterCapability,
             error.FilterReply => return error.FilterReply,
             error.FilterHandshake, error.FilterGone, error.FilterPathTooLong => return error.FilterNotStarted,
         };
         return p;
-    }
-
-    /// Whether the last read or write was stopped by cancelation rather
-    /// than by the program.
-    pub fn canceled(p: *const Process) bool {
-        if (p.reader.err) |err| if (err == error.Canceled) return true;
-        if (p.writer.err) |err| if (err == error.Canceled) return true;
-        return false;
     }
 
     /// End a process that broke its protocol. Cleanup still belongs to
@@ -696,8 +718,14 @@ pub const Process = struct {
 
     /// Close its input, wait for completion and release everything.
     pub fn deinit(p: *Process, io: Io) void {
-        // glint-ignore: Z026 -- each reply was already read, so its exit status changes nothing
-        if (!p.running.terminated) _ = p.running.wait(io) catch {};
+        if (!p.running.terminated) {
+            // Reaping it is cleanup: a cancel stays for the caller's next
+            // cancelation point.
+            const protection = io.swapCancelProtection(.blocked);
+            defer _ = io.swapCancelProtection(protection);
+            // glint-ignore: Z026 -- each reply was already read, so its exit status changes nothing
+            _ = p.running.wait(io) catch {};
+        }
         p.running.deinit(io);
         const gpa = p.gpa;
         gpa.free(p.command);

@@ -94,6 +94,8 @@ pub const Connection = struct {
 
     gpa: Allocator,
     conn: *connection.Connection,
+    /// The conversation is over: said `quit`, or broken by a request that
+    /// failed part way, which leaves the two sides out of step.
     ended: bool = false,
 
     /// Start `invocation` and agree on version 1. A server that does not
@@ -138,12 +140,14 @@ pub const Connection = struct {
 
     /// Send `command` and its arguments.
     pub fn send(c: *Connection, io: Io, command: []const u8, args: []const []const u8) Self.Error!void {
+        errdefer c.ended = true;
         try c.writeHead(io, command, args);
         pkt_line.flush((try connection.Process.streams(c.conn, io)).writer) catch |err| return c.conn.writeFailed(err);
     }
 
     /// Send `command`, its arguments, a delimiter, and `lines`.
     pub fn sendLines(c: *Connection, io: Io, command: []const u8, args: []const []const u8, lines: []const []const u8) Self.Error!void {
+        errdefer c.ended = true;
         try c.writeHead(io, command, args);
         pkt_line.delim((try connection.Process.streams(c.conn, io)).writer) catch |err| return c.conn.writeFailed(err);
         for (lines) |line| pkt_line.print((try connection.Process.streams(c.conn, io)).writer, "{s}\n", .{line}) catch |err| return c.conn.writeFailed(err);
@@ -153,12 +157,14 @@ pub const Connection = struct {
     /// Start `command` with its arguments and a delimiter; the data follows
     /// through `writeData` and ends with `endData`.
     pub fn beginData(c: *Connection, io: Io, command: []const u8, args: []const []const u8) Self.Error!void {
+        errdefer c.ended = true;
         try c.writeHead(io, command, args);
         pkt_line.delim((try connection.Process.streams(c.conn, io)).writer) catch |err| return c.conn.writeFailed(err);
     }
 
     /// A piece of data, in lines of at most `pktline.max_data` bytes.
     pub fn writeData(c: *Connection, io: Io, bytes: []const u8) Self.Error!void {
+        errdefer c.ended = true;
         var rest = bytes;
         while (rest.len != 0) {
             const n = @min(rest.len, pkt_line.max_data);
@@ -169,6 +175,7 @@ pub const Connection = struct {
 
     /// The end of the data.
     pub fn endData(c: *Connection, io: Io) Self.Error!void {
+        errdefer c.ended = true;
         pkt_line.flush((try connection.Process.streams(c.conn, io)).writer) catch |err| return c.conn.writeFailed(err);
     }
 
@@ -185,6 +192,7 @@ pub const Connection = struct {
     /// Read an answer made of a status, arguments, and lines after a
     /// delimiter, to its flush. Everything is copied into `arena`.
     pub fn readAnswer(c: *Connection, arena: Allocator, io: Io) Self.Error!Status {
+        errdefer c.ended = true;
         try c.flushOut(io);
         var args: std.ArrayList([]const u8) = .empty;
         var lines: std.ArrayList([]const u8) = .empty;
@@ -214,6 +222,7 @@ pub const Connection = struct {
     /// Read the head of an answer that carries data after its delimiter;
     /// the data is then read with `nextData`.
     pub fn readHead(c: *Connection, arena: Allocator, io: Io) Self.Error!Head {
+        errdefer c.ended = true;
         try c.flushOut(io);
         var args: std.ArrayList([]const u8) = .empty;
         var code: ?u16 = null;
@@ -238,6 +247,7 @@ pub const Connection = struct {
     /// The next piece of an answer's data, valid until the next read, or
     /// `null` at its end.
     pub fn nextData(c: *Connection, io: Io) Self.Error!?[]const u8 {
+        errdefer c.ended = true;
         return switch (try c.conn.readPacket((try connection.Process.streams(c.conn, io)).reader)) {
             .flush => null,
             .data => |d| d.readForParse(),
@@ -262,8 +272,10 @@ pub const Connection = struct {
             c.ended = true;
             var scratch: std.heap.ArenaAllocator = .init(c.gpa);
             defer scratch.deinit();
-            // glint-ignore: Z026 -- quit is a courtesy; the connection is closed next whether or not the server answered
-            c.sayQuit(scratch.allocator(), io) catch {};
+            // quit is a courtesy; the connection is closed next whether or
+            // not the server answered, and a cancel stays for the caller's
+            // next cancelation point.
+            c.sayQuit(scratch.allocator(), io) catch |err| if (err == error.Canceled) io.recancel();
         }
         c.conn.deinit(io);
         c.* = undefined;
@@ -345,9 +357,24 @@ pub const Transfer = struct {
         return out;
     }
 
-    /// Connection `n`'s line, the connection started the first time it is
-    /// asked for. When it does not start, `failure` says what ssh said.
-    pub fn connection(t: *Transfer, io: Io, n: usize) Self.Error!*Line {
+    /// Connection `n`, held for a request and its answer: started the
+    /// first time it is asked for, and again when a request broke the
+    /// conversation it had. When it does not start, `failure` says what ssh
+    /// said.
+    pub fn connection(t: *Transfer, io: Io, n: usize) Self.Error!Line.Guard {
+        var held = try (try t.lineOf(io, n)).acquire(io);
+        errdefer held.deinit(io);
+        const c = held.value();
+        if (c.ended) {
+            const fresh = try t.start(io, n);
+            c.deinit(io);
+            c.* = fresh;
+        }
+        return held;
+    }
+
+    /// Connection `n`'s line, the connection started the first time.
+    fn lineOf(t: *Transfer, io: Io, n: usize) Self.Error!*Line {
         var guard = try t.held.acquire(io);
         defer guard.deinit(io);
         const h = guard.value();
@@ -358,6 +385,13 @@ pub const Transfer = struct {
         line.* = .init(try Connection.open(t.gpa, io, t.programs, if (n == 0) t.first else t.rest, &h.message));
         h.lines.items[n] = line;
         return line;
+    }
+
+    /// A new conversation for connection `n`.
+    fn start(t: *Transfer, io: Io, n: usize) Self.Error!Connection {
+        var guard = try t.held.acquire(io);
+        defer guard.deinit(io);
+        return Connection.open(t.gpa, io, t.programs, if (n == 0) t.first else t.rest, &guard.value().message);
     }
 
     /// What ssh said when a connection last did not start, copied with
@@ -384,8 +418,10 @@ pub const Transfer = struct {
 
     fn removeControlDir(t: *Transfer, io: Io) void {
         const dir = t.control_dir orelse return;
-        // glint-ignore: Z026 -- a control directory left behind holds only a dead socket, in the system's temporary space
-        Io.Dir.cwd().deleteTree(io, dir) catch {};
+        // A control directory left behind holds only a dead socket, in the
+        // system's temporary space; a cancel stays for the caller's next
+        // cancelation point.
+        Io.Dir.cwd().deleteTree(io, dir) catch |err| if (err == error.Canceled) io.recancel();
         t.control_dir = null;
     }
 };

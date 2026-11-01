@@ -272,6 +272,15 @@ pub const Server = struct {
         gop.value_ptr.* = try s.gpa.dupe(u8, bytes);
     }
 
+    /// Take an object off the server, so the next push uploads it again.
+    pub fn removeObject(s: *Server, oid: []const u8) void {
+        s.mutex.lockUncancelable(s.io);
+        defer s.mutex.unlock(s.io);
+        const kv = s.objects.fetchSwapRemove(oid) orelse return;
+        s.gpa.free(kv.key);
+        s.gpa.free(kv.value);
+    }
+
     /// The object's bytes, or `null`. The result is the caller's.
     pub fn object(s: *Server, gpa: Allocator, oid: []const u8) !?[]u8 {
         s.mutex.lockUncancelable(s.io);

@@ -409,7 +409,7 @@ pub fn fetch(gpa: Allocator, io: Io, out: *Io.Writer, request: Request, options:
     for (request.args) |arg| pkt_line.print(w, "argument {s}\n", .{arg}) catch |err| return conn.writeFailed(err);
     pkt_line.flush(w) catch |err| return conn.writeFailed(err);
     const in = try conn.response();
-    const first = pkt_line.read(in) catch return error.ProtocolError;
+    const first = pkt_line.read(in) catch |err| return if (err == error.ReadFailed) conn.failure() else error.ProtocolError;
     const line = switch (first) {
         .data => |d| std.mem.trimEnd(u8, d.readForParse(), "\n"),
         else => return error.ProtocolError,
@@ -421,7 +421,7 @@ pub fn fetch(gpa: Allocator, io: Io, out: *Io.Writer, request: Request, options:
         }
         return error.ProtocolError;
     }
-    switch (pkt_line.read(in) catch return error.ProtocolError) {
+    switch (pkt_line.read(in) catch |err| return if (err == error.ReadFailed) conn.failure() else error.ProtocolError) {
         .flush => {},
         else => return error.ProtocolError,
     }
@@ -431,9 +431,13 @@ pub fn fetch(gpa: Allocator, io: Io, out: *Io.Writer, request: Request, options:
     _ = demux.interface.streamRemaining(out) catch |err| switch (err) {
         error.WriteFailed => return error.WriteFailed,
         error.ReadFailed => {
-            if (demux.err) |e| if (e == error.RemoteError) {
-                conn.setMessage(demux.message());
-                return error.ArchiveFailed;
+            if (demux.err) |e| switch (e) {
+                error.RemoteError => {
+                    conn.setMessage(demux.message());
+                    return error.ArchiveFailed;
+                },
+                error.ReadFailed => return conn.failure(),
+                else => {},
             };
             return error.ProtocolError;
         },
