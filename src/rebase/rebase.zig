@@ -482,6 +482,12 @@ const Run = struct {
         return r.arena.dupe(u8, try abbrev.unique(r.io, r.repo.objectDatabase(), oid, r.abbrev_len, &buf));
     }
 
+    /// `oid`'s short name in `buf`, its full one where none can be found:
+    /// the names a sheet is written with (`todo.format`).
+    pub fn shorten(r: *Run, oid: Oid, buf: *[hash.max_hex_len]u8) []const u8 {
+        return abbrev.unique(r.io, r.repo.objectDatabase(), oid, r.abbrev_len, buf) catch oid.hex(buf);
+    }
+
     fn head(r: *Run) Error!head_mod.Head {
         return head_mod.read(r.gpa, r.io, r.repo);
     }
@@ -1087,7 +1093,7 @@ fn rearrangeSquash(r: *Run, items: []todo.Item) Error![]todo.Item {
                 target = at;
             } else if (std.mem.findScalar(u8, p, ' ') == null) found_name: {
                 var context: sequencer.ResolverContext = .{ .repo = r.repo, .io = r.io };
-                const resolved = context.resolver().resolveFn(&context, p) orelse break :found_name;
+                const resolved = context.resolve(p) orelse break :found_name;
                 if (by_commit.get(resolved.oid.bytes)) |at| target = at;
             }
             if (target == null) {
@@ -1181,7 +1187,7 @@ fn resolveTip(r: *Run) Error!Tip {
             return .{ .head_name = full, .orig_head = resolved.oid };
         }
         var context: sequencer.ResolverContext = .{ .repo = r.repo, .io = r.io };
-        const found = context.resolver().resolveFn(&context, name) orelse return error.NotACommit;
+        const found = context.resolve(name) orelse return error.NotACommit;
         return .{ .head_name = null, .orig_head = found.oid };
     }
     var h = try r.head();
@@ -1252,16 +1258,8 @@ pub fn plan(gpa: Allocator, io: Io, repo: *Repository, upstream: Oid, options: O
 fn sheetText(r: *Run, gpa: Allocator, items: []const todo.Item, upstream: Oid, onto: Oid, orig_head: Oid, short: bool) Error![]u8 {
     var out: std.Io.Writer.Allocating = .init(gpa);
     errdefer out.deinit();
-    const Shorten = struct {
-        fn shorten(context: *anyopaque, oid: Oid, buf: *[hash.max_hex_len]u8) []const u8 {
-            const run: *Run = @ptrCast(@alignCast(context)); // aegis: no-danger: the context handed out with this function is a Run
-            return abbrev.unique(run.io, run.repo.objectDatabase(), oid, run.abbrev_len, buf) catch oid.hex(buf);
-        }
-    };
-    todo.format(&out.writer, items, .{
-        .short = if (short) .{ .context = r, .shortenFn = Shorten.shorten } else null,
-        .abbreviate_commands = try r.repo.configuration().getBool("rebase.abbreviatecommands", false),
-    }) catch return error.OutOfMemory;
+    const options: todo.FormatOptions = .{ .abbreviate_commands = try r.repo.configuration().getBool("rebase.abbreviatecommands", false) };
+    (if (short) todo.format(&out.writer, items, options, r) else todo.format(&out.writer, items, options, todo.full_names)) catch return error.OutOfMemory;
     var count: usize = 0;
     for (items) |item| {
         if (item.command != .comment) count += 1;
@@ -1428,7 +1426,7 @@ fn begin(r: *Run, upstream: Oid, tip: Tip, onto: Oid, onto_name: []const u8) Err
     const sheet = try message.stripSpace(r.arena, options.todo orelse shown, r.comment);
     if (sheet.len == 0) return error.NothingToDo;
     var context: sequencer.ResolverContext = .{ .repo = repo, .io = io };
-    const list = try todo.parse(r.arena, sheet, context.resolver(), .{ .comment = r.comment, .rebase = true });
+    const list = try todo.parse(r.arena, sheet, &context, .{ .comment = r.comment, .rebase = true });
     if (options.todo) |left| if (try missingCommits(r, items, list.items.items)) {
         // `edit_todo_list`'s refusal: the sheet as it was left, `dropped`
         // marking it, and `onto` checked out for it to be corrected.
@@ -1606,7 +1604,7 @@ fn skipUnnecessaryPicks(r: *Run, base_in: Oid) Error!Oid {
     // Only as far as the last pick actually taken.
     while (skipped > 0 and r.items.items[skipped - 1].command != .pick) skipped -= 1;
     if (skipped == 0) return base_in;
-    const done = try todo.toBytes(r.arena, r.items.items[0..skipped], .{});
+    const done = try todo.toBytes(r.arena, r.items.items[0..skipped], .{}, todo.full_names);
     try r.state("done", done);
     r.done_nr += countCommands(r.items.items[0..skipped]);
     const rest = try r.arena.dupe(todo.Item, r.items.items[skipped..]);
@@ -1682,15 +1680,15 @@ fn removeState(r: *Run) Error!void {
 /// goes to `git-rebase-todo`, and the current one to `done`. With
 /// `reschedule` the current one stays on the sheet.
 fn saveTodo(r: *Run, current: usize) Error!void {
-    const bytes = try todo.toBytes(r.arena, r.items.items[current..], .{});
+    const bytes = try todo.toBytes(r.arena, r.items.items[current..], .{}, todo.full_names);
     try r.state("git-rebase-todo", bytes);
 }
 
 fn advance(r: *Run) Error!void {
     const item = r.items.items[0];
-    const rest = try todo.toBytes(r.arena, r.items.items[1..], .{});
+    const rest = try todo.toBytes(r.arena, r.items.items[1..], .{}, todo.full_names);
     try r.state("git-rebase-todo", rest);
-    const line = try todo.toBytes(r.arena, &.{item}, .{});
+    const line = try todo.toBytes(r.arena, &.{item}, .{}, todo.full_names);
     try r.appendState("done", line);
 }
 
@@ -2503,7 +2501,7 @@ fn lookupLabel(r: *Run, name: []const u8) Error!Oid {
         return resolved.oid;
     }
     var context: sequencer.ResolverContext = .{ .repo = r.repo, .io = r.io };
-    const found = context.resolver().resolveFn(&context, name) orelse return error.UnknownLabel;
+    const found = context.resolve(name) orelse return error.UnknownLabel;
     return found.oid;
 }
 
@@ -3138,12 +3136,12 @@ fn loadRun(gpa: Allocator, io: Io, repo: *Repository, options: Options) Error!Ru
     _ = try readBasicState(&r);
     const text = (try r.readState("git-rebase-todo")) orelse "";
     var context: sequencer.ResolverContext = .{ .repo = repo, .io = io };
-    const list = try todo.parse(r.arena, text, context.resolver(), .{ .comment = r.comment, .rebase = true, .fixup_first_ok = true });
+    const list = try todo.parse(r.arena, text, &context, .{ .comment = r.comment, .rebase = true, .fixup_first_ok = true });
     try r.items.appendSlice(r.arena, list.items.items);
     // `read_populate_todo`: how many are done is what `done` lists, or
     // none where it does not parse; `msgnum` is only written.
     if (try r.readState("done")) |done| {
-        if (todo.parse(r.arena, done, context.resolver(), .{ .comment = r.comment, .rebase = true, .fixup_first_ok = true })) |parsed| {
+        if (todo.parse(r.arena, done, &context, .{ .comment = r.comment, .rebase = true, .fixup_first_ok = true })) |parsed| {
             r.done_nr = countCommands(parsed.items.items);
         } else |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
@@ -3189,7 +3187,7 @@ pub fn proceed(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self
     if (r.hasState("dropped")) {
         const backup = (try r.readState("git-rebase-todo.backup")) orelse "";
         var context: sequencer.ResolverContext = .{ .repo = repo, .io = io };
-        const old = try todo.parse(r.arena, backup, context.resolver(), .{ .comment = r.comment, .rebase = true, .fixup_first_ok = true });
+        const old = try todo.parse(r.arena, backup, &context, .{ .comment = r.comment, .rebase = true, .fixup_first_ok = true });
         if (try missingCommits(&r, old.items.items, r.items.items)) return finishOutcome(&r, .stopped, .missing_commits, null);
         try r.removeState("dropped");
     }

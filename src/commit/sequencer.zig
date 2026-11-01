@@ -829,14 +829,14 @@ fn finishOutcome(r: *Replay, arena_instance: *std.heap.ArenaAllocator, picked: P
 }
 
 fn saveTodo(r: *Replay, items: []const todo.Item) Error!void {
-    const Shorten = struct {
-        fn shorten(context: *anyopaque, oid: Oid, buf: *[hash.max_hex_len]u8) []const u8 {
-            const replay: *Replay = @ptrCast(@alignCast(context)); // aegis: no-danger: the context handed out with this function is a Replay
-            const text = abbrev.unique(replay.io, replay.repo.objectDatabase(), oid, replay.abbrev_len, buf) catch return oid.hex(buf);
-            return text;
+    const Short = struct {
+        replay: *Replay,
+
+        pub fn shorten(s: @This(), oid: Oid, buf: *[hash.max_hex_len]u8) []const u8 {
+            return abbrev.unique(s.replay.io, s.replay.repo.objectDatabase(), oid, s.replay.abbrev_len, buf) catch oid.hex(buf);
         }
     };
-    const bytes = try todo.toBytes(r.arena, items, .{ .short = .{ .context = r, .shortenFn = Shorten.shorten } });
+    const bytes = try todo.toBytes(r.arena, items, .{}, Short{ .replay = r });
     try state_file.write(r.io, r.repo.gitDirectory().get(), todo_path, bytes);
 }
 
@@ -851,12 +851,8 @@ pub const ResolverContext = struct {
     repo: *Repository,
     io: Io,
 
-    pub fn resolver(c: *ResolverContext) todo.Resolver {
-        return .{ .context = c, .resolveFn = resolveName };
-    }
-
-    fn resolveName(context: *anyopaque, text: []const u8) ?todo.Resolver.Resolved {
-        const c: *ResolverContext = @ptrCast(@alignCast(context)); // aegis: no-danger: the context handed out with this function is a ResolverContext
+    /// The commit `text` names, and how many parents it has.
+    pub fn resolve(c: *ResolverContext, text: []const u8) ?todo.Resolved {
         const gpa = c.repo.allocator();
         var oid: ?Oid = null;
         if (text.len == c.repo.objectFormat().hexLen()) oid = Oid.parse(c.repo.objectFormat(), text) catch null;
@@ -880,7 +876,7 @@ pub const ResolverContext = struct {
 fn readTodo(r: *Replay) Error!todo.List {
     const text = (try state_file.read(r.arena, r.io, r.repo.gitDirectory().get(), todo_path)) orelse return error.NoSequencerInProgress;
     var context: ResolverContext = .{ .repo = r.repo, .io = r.io };
-    const list = try todo.parse(r.arena, text, context.resolver(), .{ .comment = r.comment });
+    const list = try todo.parse(r.arena, text, &context, .{ .comment = r.comment });
     if (list.count() == 0) return error.MalformedState;
     for (list.items.items) |item| {
         if (item.command == .comment) continue;

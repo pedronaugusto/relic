@@ -155,19 +155,11 @@ pub const Diagnostic = struct {
     };
 };
 
-/// How a sheet's commits are found: whatever names a commit -- a full or
-/// abbreviated object name, a ref -- to the commit, and how many parents it
-/// has. `null` when the name names no commit.
-pub const Resolver = struct {
-    context: *anyopaque,
-    resolveFn: *const fn (context: *anyopaque, text: []const u8) ?Resolved,
-
-    pub const Resolved = struct { oid: Oid, parents: usize };
-
-    fn resolve(r: Resolver, text: []const u8) ?Resolved {
-        return r.resolveFn(r.context, text);
-    }
-};
+/// A commit a sheet names, and how many parents it has: what `parse`'s
+/// resolver gives for whatever names a commit -- a full or abbreviated
+/// object name, a ref. Its `resolve(text) ?Resolved` is `null` when the
+/// name names no commit.
+pub const Resolved = struct { oid: Oid, parents: usize };
 
 /// How a sheet is read.
 pub const ParseOptions = struct {
@@ -220,7 +212,7 @@ pub fn isValidLabel(text: []const u8) bool {
 
 /// Parse one line, which has had its newline and a carriage return before
 /// it removed.
-fn parseLine(line_in: []const u8, number: usize, resolver: Resolver, options: ParseOptions) ParseError!Item {
+fn parseLine(line_in: []const u8, number: usize, resolver: anytype, options: ParseOptions) ParseError!Item {
     const line = skipBlanks(line_in);
     if (line.len == 0 or line[0] == '\r' or std.mem.startsWith(u8, line, options.comment)) {
         return .{ .command = .comment, .arg = line };
@@ -297,7 +289,7 @@ fn parseLine(line_in: []const u8, number: usize, resolver: Resolver, options: Pa
 }
 
 /// Parse a sheet. `bytes` is copied; the list owns what its items borrow.
-pub fn parse(gpa: Allocator, bytes: []const u8, resolver: Resolver, options: ParseOptions) Self.ParseError!List {
+pub fn parse(gpa: Allocator, bytes: []const u8, resolver: anytype, options: ParseOptions) Self.ParseError!List {
     const buf = try gpa.dupe(u8, bytes);
     errdefer gpa.free(buf);
     var items: std.ArrayList(Item) = .empty;
@@ -328,24 +320,27 @@ pub fn parse(gpa: Allocator, bytes: []const u8, resolver: Resolver, options: Par
 pub const FormatOptions = struct {
     /// `rebase.abbreviateCommands`: `p` for `pick` and so on.
     abbreviate_commands: bool = false,
-    /// Short object names instead of full ones, as git writes the sheet a
-    /// person edits and the sequencer's `todo`.
-    short: ?Shortener = null,
 };
 
-/// Turns an object name into the short name git would print.
-pub const Shortener = struct {
-    context: *anyopaque,
-    shortenFn: *const fn (context: *anyopaque, oid: Oid, buf: *[hash.max_hex_len]u8) []const u8,
+/// Writes each object name whole: the `names` for `format` where git writes
+/// full names. Any other is a value whose `shorten(oid, buf)` gives the
+/// short name git would print, as it writes the sheet a person edits and
+/// the sequencer's `todo`.
+pub const full_names: FullNames = .{};
+
+pub const FullNames = struct {
+    pub fn shorten(_: FullNames, oid: Oid, buf: *[hash.max_hex_len]u8) []const u8 {
+        return oid.hex(buf);
+    }
 };
 
 /// Write `items` as git's `todo_list_to_strbuf` writes them.
-pub fn format(w: *std.Io.Writer, items: []const Item, options: FormatOptions) std.Io.Writer.Error!void {
-    for (items) |item| try formatItem(w, item, options);
+pub fn format(w: *std.Io.Writer, items: []const Item, options: FormatOptions, names: anytype) std.Io.Writer.Error!void {
+    for (items) |item| try formatItem(w, item, options, names);
 }
 
 /// Write one instruction and its newline.
-pub fn formatItem(w: *std.Io.Writer, item: Item, options: FormatOptions) std.Io.Writer.Error!void {
+pub fn formatItem(w: *std.Io.Writer, item: Item, options: FormatOptions, names: anytype) std.Io.Writer.Error!void {
     // What `parse` reads back: one instruction to a line, and a commit for
     // every instruction that applies one.
     assert(std.mem.findScalar(u8, item.arg, '\n') == null);
@@ -366,7 +361,7 @@ pub fn formatItem(w: *std.Io.Writer, item: Item, options: FormatOptions) std.Io.
             try w.writeAll(if (item.edit_message) " -c" else " -C");
         }
         var buf: [hash.max_hex_len]u8 = undefined;
-        const text = if (options.short) |s| s.shortenFn(s.context, oid, &buf) else oid.hex(&buf);
+        const text = names.shorten(oid, &buf);
         try w.writeByte(' ');
         try w.writeAll(text);
     }
@@ -378,10 +373,10 @@ pub fn formatItem(w: *std.Io.Writer, item: Item, options: FormatOptions) std.Io.
 }
 
 /// Write `items` to a new buffer. The result is the caller's.
-pub fn toBytes(gpa: Allocator, items: []const Item, options: FormatOptions) Allocator.Error![]u8 {
+pub fn toBytes(gpa: Allocator, items: []const Item, options: FormatOptions, names: anytype) Allocator.Error![]u8 {
     var out: std.Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
-    format(&out.writer, items, options) catch return error.OutOfMemory;
+    format(&out.writer, items, options, names) catch return error.OutOfMemory;
     return out.toOwnedSlice() catch return error.OutOfMemory;
 }
 
@@ -446,7 +441,7 @@ pub const Sheet = struct {
 //=========================================================================
 
 const TestResolver = struct {
-    fn resolve(_: *anyopaque, text: []const u8) ?Resolver.Resolved {
+    fn resolve(_: TestResolver, text: []const u8) ?Resolved {
         if (text.len < 4 or text.len > 40) return null;
         for (text) |c| if (!std.ascii.isHex(c)) return null;
         var full: [40]u8 = @splat('0');
@@ -454,19 +449,13 @@ const TestResolver = struct {
         const oid = Oid.parse(.sha1, &full) catch return null;
         return .{ .oid = oid, .parents = if (text[0] == 'f') 2 else 1 };
     }
-    fn shorten(_: *anyopaque, oid: Oid, buf: *[hash.max_hex_len]u8) []const u8 {
+    fn shorten(_: TestResolver, oid: Oid, buf: *[hash.max_hex_len]u8) []const u8 {
         return oid.hex(buf)[0..7];
     }
 };
 
-/// The resolver the tests read sheets with, over a context it does not read.
-fn testResolver(context: *u8) Resolver {
-    return .{ .context = context, .resolveFn = TestResolver.resolve };
-}
-
 test "every instruction reads and writes back as git writes it" {
     const gpa = std.testing.allocator;
-    var context: u8 = 0;
     const sheet =
         "pick 1234567 one\n" ++
         "p 2345678 # two\n" ++
@@ -487,11 +476,11 @@ test "every instruction reads and writes back as git writes it" {
         "d abcdef0\n" ++
         "# a comment\n" ++
         "\n";
-    var list = try parse(gpa, sheet, testResolver(&context), .{});
+    var list = try parse(gpa, sheet, TestResolver{}, .{});
     defer list.deinit();
     try std.testing.expectEqual(@as(usize, 19), list.items.items.len);
     try std.testing.expectEqual(@as(usize, 17), list.count());
-    const written = try toBytes(gpa, list.items.items, .{ .short = .{ .context = &context, .shortenFn = TestResolver.shorten } });
+    const written = try toBytes(gpa, list.items.items, .{}, TestResolver{});
     defer gpa.free(written);
     try std.testing.expectEqualStrings(
         "pick 1234567 one\n" ++
@@ -515,7 +504,7 @@ test "every instruction reads and writes back as git writes it" {
             "\n",
         written,
     );
-    const abbreviated = try toBytes(gpa, list.items.items[0..3], .{ .abbreviate_commands = true });
+    const abbreviated = try toBytes(gpa, list.items.items[0..3], .{ .abbreviate_commands = true }, full_names);
     defer gpa.free(abbreviated);
     try std.testing.expectEqualStrings(
         "p 1234567000000000000000000000000000000000 one\n" ++
@@ -527,7 +516,6 @@ test "every instruction reads and writes back as git writes it" {
 
 test "a bad line is refused with its number and why" {
     const gpa = std.testing.allocator;
-    var context: u8 = 0;
     const cases = [_]struct { sheet: []const u8, line: usize, reason: Diagnostic.Reason }{
         .{ .sheet = "pick 1234567\nfrobnicate 1234567\n", .line = 2, .reason = .unknown_command },
         .{ .sheet = "break now\n", .line = 1, .reason = .unexpected_argument },
@@ -538,15 +526,15 @@ test "a bad line is refused with its number and why" {
     };
     for (cases) |case| {
         var diagnostic: Diagnostic = .{};
-        try std.testing.expectError(error.InvalidTodoLine, parse(gpa, case.sheet, testResolver(&context), .{ .diagnostic = &diagnostic }));
+        try std.testing.expectError(error.InvalidTodoLine, parse(gpa, case.sheet, TestResolver{}, .{ .diagnostic = &diagnostic }));
         try std.testing.expectEqual(case.line, diagnostic.line);
         try std.testing.expectEqual(case.reason, diagnostic.reason);
     }
     var diagnostic: Diagnostic = .{};
-    try std.testing.expectError(error.InvalidTodoLine, parse(gpa, "pick f123456\n", testResolver(&context), .{ .rebase = true, .diagnostic = &diagnostic }));
+    try std.testing.expectError(error.InvalidTodoLine, parse(gpa, "pick f123456\n", TestResolver{}, .{ .rebase = true, .diagnostic = &diagnostic }));
     try std.testing.expectEqual(Diagnostic.Reason.merge_commit, diagnostic.reason);
-    try std.testing.expectError(error.FixupWithoutCommit, parse(gpa, "# c\nfixup 1234567\n", testResolver(&context), .{}));
-    var ok = try parse(gpa, "fixup 1234567\n", testResolver(&context), .{ .fixup_first_ok = true });
+    try std.testing.expectError(error.FixupWithoutCommit, parse(gpa, "# c\nfixup 1234567\n", TestResolver{}, .{}));
+    var ok = try parse(gpa, "fixup 1234567\n", TestResolver{}, .{ .fixup_first_ok = true });
     ok.deinit();
 }
 
@@ -556,18 +544,17 @@ test "fuzz: any bytes are a sheet or a named error, and a sheet writes back to o
 
 fn fuzzTodo(_: void, case: *shakedown.Case) anyerror!void {
     const gpa = std.testing.allocator;
-    var context: u8 = 0;
     var buf: [512]u8 = undefined;
     const text = buf[0..shakedown.gen.intRange(case.source, usize, 0, buf.len)];
     case.source.bytes(text);
-    var list = parse(gpa, text, testResolver(&context), .{ .fixup_first_ok = true }) catch |err| switch (err) {
+    var list = parse(gpa, text, TestResolver{}, .{ .fixup_first_ok = true }) catch |err| switch (err) {
         error.InvalidTodoLine, error.FixupWithoutCommit => return,
         error.OutOfMemory => return err,
     };
     defer list.deinit();
-    const written = try toBytes(gpa, list.items.items, .{});
+    const written = try toBytes(gpa, list.items.items, .{}, full_names);
     defer gpa.free(written);
-    var again = try parse(gpa, written, testResolver(&context), .{ .fixup_first_ok = true });
+    var again = try parse(gpa, written, TestResolver{}, .{ .fixup_first_ok = true });
     defer again.deinit();
     try std.testing.expectEqual(list.items.items.len, again.items.items.len);
     for (list.items.items, again.items.items) |a, b| {

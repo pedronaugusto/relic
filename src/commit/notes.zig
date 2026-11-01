@@ -862,7 +862,8 @@ fn updateRef(io: Io, repo: *Repository, name: []const u8, new: Oid, expected: re
 /// subject is another command starts empty, as git's starts it. Each text
 /// kept is committed at once, with no parent, its message the command and
 /// `update notes cache` in the ref's log. Hand `cache()` to
-/// `textconv_mod.Textconv`; it must outlive every conversion.
+/// `textconv_mod.Textconv`; it must outlive every conversion and not move
+/// once `cache()` has been handed out.
 pub const TextconvCaches = struct {
     pub const Error = ErrorNamespace.Error;
 
@@ -870,6 +871,7 @@ pub const TextconvCaches = struct {
     repo: *Repository,
     who: object.Signature,
     caches: std.StringHashMapUnmanaged(*Entry) = .empty,
+    interface: textconv_mod.Cache = .{ .vtable = &.{ .get = getText, .put = putText } },
 
     const Entry = struct { notes: Notes, validity: []const u8 };
 
@@ -889,8 +891,8 @@ pub const TextconvCaches = struct {
         c.* = undefined;
     }
 
-    pub fn cache(c: *TextconvCaches) textconv_mod.Cache {
-        return .{ .context = c, .getFn = getFn, .putFn = putFn };
+    pub fn cache(c: *TextconvCaches) *textconv_mod.Cache {
+        return &c.interface;
     }
 
     /// `notes_cache_init`: the driver's cache, opened once.
@@ -928,8 +930,8 @@ pub const TextconvCaches = struct {
         return std.mem.eql(u8, std.mem.trim(u8, subject, " \t\n\r"), validity);
     }
 
-    fn getFn(context: *anyopaque, a: Allocator, io: Io, key: textconv_mod.Cache.Key) textconv_mod.Error!?[]const u8 {
-        const c: *TextconvCaches = @ptrCast(@alignCast(context)); // aegis: no-danger: the context handed out with this function is a TextconvCaches
+    fn getText(interface: *textconv_mod.Cache, a: Allocator, io: Io, key: textconv_mod.Cache.Key) textconv_mod.Error!?[]const u8 {
+        const c: *TextconvCaches = @fieldParentPtr("interface", interface);
         const entry = c.entryFor(io, key.driver, key.command) catch |err| return cacheError(err);
         const note = (entry.notes.get(io, key.blob) catch |err| return cacheError(err)) orelse return null;
         const found = c.repo.objectDatabase().read(io, note) catch |err| return cacheError(err);
@@ -939,8 +941,8 @@ pub const TextconvCaches = struct {
 
     /// `notes_cache_put` and `notes_cache_write`, whose failure git passes
     /// over: the repository may be read-only.
-    fn putFn(context: *anyopaque, io: Io, key: textconv_mod.Cache.Key, text: []const u8) textconv_mod.Error!void {
-        const c: *TextconvCaches = @ptrCast(@alignCast(context)); // aegis: no-danger: the context handed out with this function is a TextconvCaches
+    fn putText(interface: *textconv_mod.Cache, io: Io, key: textconv_mod.Cache.Key, text: []const u8) textconv_mod.Error!void {
+        const c: *TextconvCaches = @fieldParentPtr("interface", interface);
         c.put(io, key, text) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Canceled => return error.Canceled,
