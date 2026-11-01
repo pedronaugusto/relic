@@ -90,15 +90,24 @@ pub const Options = struct {
     /// repository set up by git-lfs works on a machine without git-lfs,
     /// where the hook itself would stop with "git-lfs was not found".
     /// `lfshooks.Native` is relic's own.
-    lfs: ?LfsHooks = null,
+    lfs: ?*LfsHooks = null,
 };
 
-/// What stands in for git-lfs's own hooks.
+/// What stands in for git-lfs's own hooks: a node its owner embeds, found
+/// again from the node by `@fieldParentPtr`.
 pub const LfsHooks = struct {
-    context: ?*anyopaque = null,
-    /// Do what `git lfs <event>` would do with these arguments and this
-    /// input. Returning false fails the hook, as the hook's own exit would.
-    run: *const fn (io: Io, context: ?*anyopaque, event: []const u8, args: []const []const u8, input: []const u8) bool,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        /// Do what `git lfs <event>` would do with these arguments and this
+        /// input. Returning false fails the hook, as the hook's own exit
+        /// would.
+        run: *const fn (lfs: *LfsHooks, io: Io, event: []const u8, args: []const []const u8, input: []const u8) bool,
+    };
+
+    pub fn run(lfs: *LfsHooks, io: Io, event: []const u8, args: []const []const u8, input: []const u8) bool {
+        return lfs.vtable.run(lfs, io, event, args, input);
+    }
 };
 
 /// The hook `git lfs install` writes for `{{Command}}`, and the ones older
@@ -435,7 +444,7 @@ pub const Runner = struct {
             const lfs_hooks = runner.options.lfs.?;
             ran.count += 1;
             ran.lfs_native = true;
-            if (!lfs_hooks.run(io, lfs_hooks.context, event, request.args, request.input) and ran.failure == null) {
+            if (!lfs_hooks.run(io, event, request.args, request.input) and ran.failure == null) {
                 ran.failure = .init(event, .{ .exited = 1 });
             }
         }

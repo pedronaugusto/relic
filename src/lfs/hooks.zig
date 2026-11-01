@@ -43,15 +43,16 @@ pub const Native = struct {
     fixed: ?lfslocks.Fixed = null,
     /// The name of the error the last call ended in, when it failed.
     failure: ?[]const u8 = null,
+    interface: hooks.LfsHooks = .{ .vtable = &.{ .run = run } },
 
     /// What `hooks.Options.lfs` is set to.
-    pub fn lfsHooks(n: *Native) hooks.LfsHooks {
-        return .{ .context = n, .run = run };
+    pub fn lfsHooks(n: *Native) *hooks.LfsHooks {
+        return &n.interface;
     }
 
-    fn run(io: Io, context: ?*anyopaque, event: []const u8, args: []const []const u8, input: []const u8) bool {
+    fn run(lfs: *hooks.LfsHooks, io: Io, event: []const u8, args: []const []const u8, input: []const u8) bool {
         _ = input;
-        const n: *Native = @ptrCast(@alignCast(context.?)); // aegis: no-danger: the context handed out with this function is a Native
+        const n: *Native = @fieldParentPtr("interface", lfs);
         n.fixed = null;
         n.failure = null;
         n.handle(io, event, args) catch |err| {
