@@ -144,9 +144,9 @@ const Seeds = struct {
     /// `after` with what `prune` takes away: an unreachable blob and
     /// commit, loose copies of packed objects, a stale temporary file.
     pruning: Image,
-    /// Every object `pruning` holds, one name a line, sorted: what a
-    /// repack keeps at every crash.
-    pruning_objects: []u8,
+    /// The objects nothing reaches in `pruning`, as `unreachableObjects` gives
+    /// them: with every reachable one, what a repack keeps at every crash.
+    pruning_unreachable: []u8,
     /// The second commit's objects that the first lacks.
     pack: []u8,
     first: [40]u8,
@@ -185,8 +185,8 @@ const Seeds = struct {
         try git.writeFile(io, ".git/objects/pack/tmp_pack_stale", "x");
         seeds.pruning = try Image.read(gpa, io, git.dir);
         errdefer seeds.pruning.deinit(gpa);
-        seeds.pruning_objects = try allObjects(&git, io);
-        errdefer gpa.free(seeds.pruning_objects);
+        seeds.pruning_unreachable = try unreachableObjects(&git, io);
+        errdefer gpa.free(seeds.pruning_unreachable);
         // Loose copies of packed objects: the first commit's, as they were
         // before the repack. git writes none of an object a pack holds.
         for (seeds.before.files.items) |f| {
@@ -221,7 +221,7 @@ const Seeds = struct {
         seeds.before.deinit(gpa);
         seeds.after.deinit(gpa);
         seeds.pruning.deinit(gpa);
-        gpa.free(seeds.pruning_objects);
+        gpa.free(seeds.pruning_unreachable);
         gpa.free(seeds.pack);
     }
 };
@@ -413,46 +413,48 @@ pub const Case = struct {
     }
 
     fn checkState(c: *Case, io: Io, git: *testgit.Repo) !void {
-        var fsck = try git.capture(io, &.{ "fsck", "--full", "--no-progress", "--no-dangling" });
-        defer fsck.deinit(git.gpa);
-        if (fsck.code != 0) {
-            std.debug.print("git fsck ({d}):\n{s}{s}\n", .{ fsck.code, fsck.stdout, fsck.stderr });
-            return error.FsckFailed;
+        switch (c.kind) {
+            // A repack moves no ref and loses no object: the unreachable
+            // ones stay loose, or go into the cruft pack before the loose
+            // copies go. fsck passing holds every reachable one, and the
+            // objects it finds unreachable are the seed's.
+            .repack, .repack_cruft, .repack_geometric, .loose_objects, .incremental_repack => {
+                const held = try unreachableObjects(git, io);
+                defer git.gpa.free(held);
+                if (!std.mem.eql(u8, held, c.seeds.pruning_unreachable)) {
+                    std.debug.print("unreachable before:\n{s}after:\n{s}", .{ c.seeds.pruning_unreachable, held });
+                    return error.ObjectLost;
+                }
+            },
+            else => {
+                var fsck = try git.capture(io, &.{ "fsck", "--full", "--no-progress", "--no-dangling" });
+                defer fsck.deinit(git.gpa);
+                if (fsck.code != 0) {
+                    std.debug.print("git fsck ({d}):\n{s}{s}\n", .{ fsck.code, fsck.stdout, fsck.stderr });
+                    return error.FsckFailed;
+                }
+            },
         }
         // No commit lost: both are where they were, or where the run put them.
         const first: []const u8 = &c.seeds.first;
         const second: []const u8 = &c.seeds.second;
         switch (c.kind) {
             .pack_receive => {
-                try expectRef(io, git, "refs/heads/main", &.{first});
-                try expectRef(io, git, "refs/heads/next", &.{ "", second });
+                try expectHeads(io, git, &.{first}, &.{ "", second });
             },
             .ref_update => {
-                try expectRef(io, git, "refs/heads/main", &.{ first, second });
-                try expectRef(io, git, "refs/heads/next", &.{second});
+                try expectHeads(io, git, &.{ first, second }, &.{second});
             },
             // Packing moves no ref, and expiring and pruning move none:
             // each is where it was at every crash.
             .pack_refs, .reflog_expire, .prune, .commit_graph => {
-                try expectRef(io, git, "refs/heads/main", &.{first});
-                try expectRef(io, git, "refs/heads/next", &.{second});
+                try expectHeads(io, git, &.{first}, &.{second});
             },
-            // A repack moves no ref and loses no object: the unreachable
-            // ones stay loose, or go into the cruft pack before the loose
-            // copies go.
             .repack, .repack_cruft, .repack_geometric, .loose_objects, .incremental_repack => {
-                try expectRef(io, git, "refs/heads/main", &.{first});
-                try expectRef(io, git, "refs/heads/next", &.{second});
-                const held = try allObjects(git, io);
-                defer git.gpa.free(held);
-                if (!std.mem.eql(u8, held, c.seeds.pruning_objects)) {
-                    std.debug.print("objects before:\n{s}after:\n{s}", .{ c.seeds.pruning_objects, held });
-                    return error.ObjectLost;
-                }
+                try expectHeads(io, git, &.{first}, &.{second});
             },
             .index_write, .checkout => {
-                try expectRef(io, git, "refs/heads/main", &.{first});
-                try expectRef(io, git, "refs/heads/next", &.{second});
+                try expectHeads(io, git, &.{first}, &.{second});
                 const head = try git.line(io, &.{ "symbolic-ref", "HEAD" });
                 defer git.gpa.free(head);
                 const heads: []const []const u8 = if (c.kind == .checkout) &.{ "refs/heads/main", "refs/heads/next" } else &.{"refs/heads/main"};
@@ -464,19 +466,59 @@ pub const Case = struct {
     }
 };
 
-/// Every object `git` holds, one name a line, sorted.
-fn allObjects(git: *testgit.Repo, io: Io) ![]u8 {
-    return git.run(io, &.{ "cat-file", "--batch-all-objects", "--batch-check=%(objectname)" });
+/// `git fsck --full`, which must pass, and the objects it finds nothing
+/// reaches, one line each, sorted: one git process where a state's checks
+/// are most of a crash test's time.
+fn unreachableObjects(git: *testgit.Repo, io: Io) ![]u8 {
+    var fsck = try git.capture(io, &.{ "fsck", "--full", "--no-progress", "--no-dangling", "--unreachable" });
+    defer fsck.deinit(git.gpa);
+    if (fsck.code != 0) {
+        std.debug.print("git fsck ({d}):\n{s}{s}\n", .{ fsck.code, fsck.stdout, fsck.stderr });
+        return error.FsckFailed;
+    }
+    var lines: std.ArrayList([]const u8) = .empty;
+    defer lines.deinit(git.gpa);
+    var it = std.mem.tokenizeScalar(u8, fsck.stdout, '\n');
+    while (it.next()) |line| try lines.append(git.gpa, line);
+    std.mem.sort([]const u8, lines.items, {}, struct {
+        fn less(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.order(u8, a, b) == .lt;
+        }
+    }.less);
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(git.gpa);
+    for (lines.items) |line| {
+        try out.appendSlice(git.gpa, line);
+        try out.append(git.gpa, '\n');
+    }
+    return out.toOwnedSlice(git.gpa);
 }
 
-fn expectRef(io: Io, git: *testgit.Repo, name: []const u8, allowed: []const []const u8) !void {
-    var got = try git.capture(io, &.{ "rev-parse", "-q", "--verify", name });
+/// `refs/heads/main` and `refs/heads/next` each at one of its allowed
+/// values, "" for none, read by one `git for-each-ref`: a git process a
+/// state, where a state's checks are most of a crash test's time.
+fn expectHeads(io: Io, git: *testgit.Repo, main: []const []const u8, next: []const []const u8) !void {
+    var got = try git.capture(io, &.{ "for-each-ref", "--format=%(refname) %(objectname)", "refs/heads/main", "refs/heads/next" });
     defer got.deinit(git.gpa);
-    const value = std.mem.trimEnd(u8, got.stdout, "\n");
-    expectOneOf(value, allowed) catch |err| {
-        std.debug.print("{s} is '{s}'\n", .{ name, value });
-        return err;
-    };
+    if (got.code != 0) {
+        std.debug.print("git for-each-ref ({d}):\n{s}\n", .{ got.code, got.stderr });
+        return error.UnexpectedValue;
+    }
+    const heads = [_][]const u8{ "refs/heads/main", "refs/heads/next" };
+    var values: [heads.len][]const u8 = .{ "", "" };
+    var lines = std.mem.tokenizeScalar(u8, got.stdout, '\n');
+    while (lines.next()) |line| {
+        const space = std.mem.findScalar(u8, line, ' ') orelse return error.UnexpectedValue;
+        for (heads, &values) |name, *value| {
+            if (std.mem.eql(u8, line[0..space], name)) value.* = line[space + 1 ..];
+        }
+    }
+    for (heads, values, [_][]const []const u8{ main, next }) |name, value, allowed| {
+        expectOneOf(value, allowed) catch |err| {
+            std.debug.print("{s} is '{s}'\n", .{ name, value });
+            return err;
+        };
+    }
 }
 
 fn expectOneOf(value: []const u8, allowed: []const []const u8) !void {

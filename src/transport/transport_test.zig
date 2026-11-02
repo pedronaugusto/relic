@@ -2902,10 +2902,15 @@ fn expectRemoteUpdates(cases: []const RemoteUpdate) !void {
     }
 }
 
-test "submodule update --remote is git's: each submodule fetched and checked out at its remote-tracking branch, recursively, by its branch setting in the config or .gitmodules, and the superproject's own" {
+test "submodule update --remote is git's: each submodule fetched and checked out at its remote-tracking branch, recursively" {
     try expectRemoteUpdates(&.{
         .{},
         .{ .git_args = &.{"--recursive"}, .recursive = true },
+    });
+}
+
+test "submodule update --remote is git's: the branch by its setting in the config or .gitmodules, and the superproject's own" {
+    try expectRemoteUpdates(&.{
         .{ .ref = "refs/heads/side", .config = &.{.{ "submodule.vendor/inner.branch", "side" }} },
         .{ .ref = "refs/heads/side", .gitmodules = &.{.{ "submodule.vendor/inner.branch", "side" }} },
         .{ .config = &.{.{ "submodule.vendor/inner.branch", "." }} },
