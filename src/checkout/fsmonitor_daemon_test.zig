@@ -388,9 +388,18 @@ test "git's own daemon, where git has one, answers this package as it answers gi
     try r.exec(io, &.{ "commit", "-q", "-m", "base" });
     try r.exec(io, &.{ "config", "core.fsmonitor", "true" });
     r.report_failures = false;
+    // The daemon keeps its own account of what it saw and answered, in the
+    // git directory, where it takes no change of its own as the working
+    // tree's: a failure below prints it.
+    const top = try r.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(top);
+    const trace = try std.fs.path.join(gpa, &.{ top, ".git", "fsmonitor-trace" });
+    defer gpa.free(trace);
+    try r.isolated.?.put("GIT_TRACE_FSMONITOR", trace);
     // A git built without the daemon says so, and the test has nothing to
     // hold this package to.
     var started = try r.capture(io, &.{ "fsmonitor--daemon", "start" });
+    _ = r.isolated.?.swapRemove("GIT_TRACE_FSMONITOR");
     const running = started.code == 0;
     started.deinit(gpa);
     if (!running) return error.SkipZigTest;
@@ -399,6 +408,10 @@ test "git's own daemon, where git has one, answers this package as it answers gi
         s.deinit(gpa);
     } else |_| {};
     r.report_failures = true;
+    errdefer if (r.dir.readFileAlloc(io, ".git/fsmonitor-trace", gpa, .limited(1 << 20))) |text| {
+        defer gpa.free(text);
+        std.debug.print("git's daemon traced:\n{s}\n", .{text});
+    } else |_| {};
 
     const first = try ourStatus(gpa, io, &r);
     defer gpa.free(first);
