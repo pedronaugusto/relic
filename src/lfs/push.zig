@@ -35,6 +35,7 @@ const credential = @import("../wire.zig").credential;
 const progress_mod = @import("../report.zig").progress;
 const lfs = @import("lfs.zig");
 const lfsapi = @import("api.zig");
+const lfs_settings = @import("settings.zig");
 const lfstransfer = @import("transfer.zig");
 const lfslocks = @import("locks.zig");
 const auth = @import("../wire.zig").auth;
@@ -258,9 +259,9 @@ fn usesLfs(io: Io, repo: *Repository) bool {
 const VerifyState = enum { unknown, enabled, disabled };
 
 /// `lfs.<url>.locksverify`, as git-lfs reads it.
-fn verifyState(a: Allocator, settings: *const lfsapi.Settings, url: []const u8) lfsapi.Error!VerifyState {
+fn verifyState(a: Allocator, settings: *const lfs_settings.Settings, url: []const u8) lfsapi.Error!VerifyState {
     const value = (try settings.urlGet(a, "lfs", url, "locksverify")) orelse {
-        const parts = lfsapi.UrlParts.parse(url) orelse return .unknown;
+        const parts = lfs_settings.UrlParts.parse(url) orelse return .unknown;
         const known = (std.mem.eql(u8, parts.scheme, "https") or std.mem.eql(u8, parts.scheme, "ssh")) and
             std.ascii.eqlIgnoreCase(parts.host, "github.com");
         return if (known) .enabled else .unknown;

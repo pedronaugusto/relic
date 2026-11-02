@@ -99,14 +99,21 @@ pub const LfsHooks = struct {
     vtable: *const VTable,
 
     pub const VTable = struct {
-        /// Do what `git lfs <event>` would do with these arguments and this
-        /// input. Returning false fails the hook, as the hook's own exit
-        /// would.
-        run: *const fn (lfs: *LfsHooks, io: Io, event: []const u8, args: []const []const u8, input: []const u8) bool,
+        /// Do what `git lfs <event>` would do with what the hook is handed.
+        /// Returning false fails the hook, as the hook's own exit would.
+        run: *const fn (lfs: *LfsHooks, io: Io, event: []const u8, handed: Handed) bool,
     };
 
-    pub fn run(lfs: *LfsHooks, io: Io, event: []const u8, args: []const []const u8, input: []const u8) bool {
-        return lfs.vtable.run(lfs, io, event, args, input);
+    /// What the hook would be handed.
+    pub const Handed = struct {
+        args: []const []const u8,
+        input: []const u8,
+        /// The environment the hook would start from: `Runner.programs`'s.
+        environ: *const std.process.Environ.Map,
+    };
+
+    pub fn run(lfs: *LfsHooks, io: Io, event: []const u8, handed: Handed) bool {
+        return lfs.vtable.run(lfs, io, event, handed);
     }
 };
 
@@ -444,7 +451,7 @@ pub const Runner = struct {
             const lfs_hooks = runner.options.lfs.?;
             ran.count += 1;
             ran.lfs_native = true;
-            if (!lfs_hooks.run(io, event, request.args, request.input) and ran.failure == null) {
+            if (!lfs_hooks.run(io, event, .{ .args = request.args, .input = request.input, .environ = runner.programs.environ }) and ran.failure == null) {
                 ran.failure = .init(event, .{ .exited = 1 });
             }
         }

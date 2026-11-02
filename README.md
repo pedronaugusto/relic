@@ -758,6 +758,7 @@ writes beside them, and `relic.refs.reftable.table` is the table format.
 | `lfs.transfer` | Module within `lfs`. |
 | `lfs.custom` | Module within `lfs`. |
 | `lfs.api` | Module within `lfs`. |
+| `lfs.settings` | git-lfs's configuration and `.lfsconfig`, read as git-lfs reads them. |
 | `lfs.server` | `Backend`, `Store`, `Directory`, `S3` — a Git LFS server as a handler for uplink's server: the batch API, basic transfers into the caller's store (a directory, or S3-compatible storage through signed URLs), the locking API, authorization by the caller's hook. |
 | `patch` | `parse`, `Patch`, `FilePatch`, `Fragment`: git patches and plain unified diffs read as `git apply` reads them, from whatever surrounds them. |
 | `patch.am` | `start`, `proceed`, `skip`, `abort`, `quit` — `git am` with `--3way`, its state in `rebase-apply` as git keeps it. |

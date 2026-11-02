@@ -29,7 +29,7 @@ const Io = std.Io;
 const config_mod = @import("../config/config.zig");
 const program = @import("../process.zig").program;
 const connection = @import("../wire.zig").connection;
-const lfs = @import("lfs.zig");
+const lfs_settings = @import("settings.zig");
 const lfsapi = @import("api.zig");
 const time_text = @import("time_text.zig");
 
@@ -115,7 +115,7 @@ pub fn configured(arena: Allocator, config: *const config_mod.Config) Configured
         const path = try value(arena, config, &key_buf, name, "path") orelse continue;
         const concurrent_key = std.mem.print(&key_buf, "lfs.customtransfer.{s}.concurrent", .{name}) catch continue;
         // tq's custom adapters read it through git-lfs's config.Bool.
-        const concurrent = lfs.configBool(lfs.configValue(config, concurrent_key) orelse "", true);
+        const concurrent = lfs_settings.configBool(lfs_settings.configValue(config, concurrent_key) orelse "", true);
         try out.append(arena, .{
             .name = try arena.dupe(u8, name),
             .path = path,

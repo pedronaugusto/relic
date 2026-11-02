@@ -14,6 +14,7 @@ const testgit = @import("git.zig");
 const repo_mod = @import("../repo/repo.zig");
 const sparse_checkout = @import("../worktree/sparse_checkout.zig");
 const lfsapi = @import("../lfs/api.zig");
+const lfs_settings = @import("../lfs/settings.zig");
 
 const Repository = repo_mod.Repository;
 const testing = std.testing;
@@ -484,7 +485,7 @@ test "what an LFS server teaches is written without another process's settings l
     defer repo.deinit(io);
     try repo.editConfig(io, &.{.{ .name = "fixture.memory", .value = "only" }}, .{});
     try git.exec(io, &.{ "config", "fixture.external", "yes" });
-    const settings: lfsapi.Settings = .{ .gpa = gpa, .config = repo.configuration() };
+    const settings: lfs_settings.Settings = .{ .gpa = gpa, .config = repo.configuration() };
     var client = try lfsapi.Client.open(gpa, io, &settings, .{ .remote = "origin", .where = .{}, .reach = .{} });
     defer client.deinit(io);
     try client.learnLocksVerify(io, "https://example.com/project", false);

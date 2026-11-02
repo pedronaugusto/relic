@@ -156,6 +156,7 @@
 //! | `lfs.transfer` | Module within `lfs`. |
 //! | `lfs.custom` | Module within `lfs`. |
 //! | `lfs.api` | Module within `lfs`. |
+//! | `lfs.settings` | git-lfs's configuration and `.lfsconfig`, read as git-lfs reads them. |
 //! | `lfs.server` | Module within `lfs`. |
 //! | `patch` | Public concern. |
 //! | `patch.am` | Module within `patch`. |

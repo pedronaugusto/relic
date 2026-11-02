@@ -50,12 +50,11 @@ pub const Native = struct {
         return &n.interface;
     }
 
-    fn run(lfs: *hooks.LfsHooks, io: Io, event: []const u8, args: []const []const u8, input: []const u8) bool {
-        _ = input;
+    fn run(lfs: *hooks.LfsHooks, io: Io, event: []const u8, handed: hooks.LfsHooks.Handed) bool {
         const n: *Native = @fieldParentPtr("interface", lfs);
         n.fixed = null;
         n.failure = null;
-        n.handle(io, event, args) catch |err| {
+        n.handle(io, event, handed.args, handed.environ) catch |err| {
             n.failure = @errorName(err);
             // git-lfs's post-checkout and post-merge warn and go on; its
             // post-commit fails.
@@ -64,7 +63,7 @@ pub const Native = struct {
         return true;
     }
 
-    fn handle(n: *Native, io: Io, event: []const u8, args: []const []const u8) !void {
+    fn handle(n: *Native, io: Io, event: []const u8, args: []const []const u8, environ: *const std.process.Environ.Map) !void {
         if (std.mem.eql(u8, event, "pre-push")) return;
         var arena_state: std.heap.ArenaAllocator = .init(n.gpa);
         defer arena_state.deinit();
@@ -91,7 +90,7 @@ pub const Native = struct {
             if (commit.parents.len == 0) return;
             paths = try n.changed(arena, io, commit.parents[0], head.oid);
         } else if (!std.mem.eql(u8, event, "post-merge")) return;
-        n.fixed = try lfslocks.fixWriteFlags(n.gpa, io, n.repo, paths, .{});
+        n.fixed = try lfslocks.fixWriteFlags(n.gpa, io, n.repo, .{ .paths = paths, .environ = environ });
     }
 
     /// The paths that differ between two commits' trees.

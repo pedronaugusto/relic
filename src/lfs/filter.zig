@@ -11,6 +11,7 @@ const native = @import("../checkout/native.zig");
 const filter = @import("../checkout/filter.zig");
 const repo = @import("../repo/repo.zig");
 const lfs = @import("lfs.zig");
+const lfs_settings = @import("settings.zig");
 const testing = std.testing;
 pub const Error = native.Error || repo.Repository.LoadFiltersError;
 pub const Options = struct {
@@ -36,7 +37,7 @@ pub fn provider(options: *const Options) *const native.Provider {
     return &options.interface;
 }
 
-fn loadDriver(p: *const native.Provider, gpa: Allocator, io: Io, configuration: *const config.Config, options: native.LoadOptions) native.Error!native.Driver {
+fn loadDriver(p: *const native.Provider, gpa: Allocator, _: Io, configuration: *const config.Config, options: native.LoadOptions) native.Error!native.Driver {
     const with: *const Options = @fieldParentPtr("interface", p);
     const backend = try gpa.create(Backend);
     errdefer gpa.destroy(backend);
@@ -44,15 +45,15 @@ fn loadDriver(p: *const native.Provider, gpa: Allocator, io: Io, configuration: 
     commands.clean = configuration.get("filter.lfs.clean");
     commands.smudge = configuration.get("filter.lfs.smudge");
     commands.process = configuration.get("filter.lfs.process");
+    var lfs_config: lfs_settings.Settings = try .parse(gpa, configuration, options.config_text);
+    defer lfs_config.deinit();
     backend.* = .{
         .gpa = gpa,
         .fetch = with.fetch,
-        .lfs = try lfs.Lfs.load(gpa, io, configuration, .{
+        .lfs = try lfs.Lfs.load(gpa, &lfs_config, .{
             .common_dir = options.common_dir,
             .shared = options.shared,
-            .work_dir = options.work_dir,
             .skip_smudge = options.skip_smudge or with.skip_smudge or (isGitLfs(commands) and skipsSmudge(commands)),
-            .lfsconfig = options.config_text,
         }),
     };
     return .{ .name = "lfs", .context = backend, .vtable = &Backend.vtable };

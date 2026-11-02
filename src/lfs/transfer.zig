@@ -66,6 +66,7 @@ const repo_mod = @import("../repo/repo.zig");
 const fs = @import("../fs/fs.zig");
 const lfs = @import("lfs.zig");
 const lfsapi = @import("api.zig");
+const lfs_settings = @import("settings.zig");
 const object_walk = @import("../walk/object/walk.zig");
 const progress_mod = @import("../report.zig").progress;
 const time_text = @import("time_text.zig");
@@ -209,7 +210,7 @@ const Limits = struct {
     /// The adapters the batch request offers beside `basic`.
     transfers: []const []const u8 = &.{},
 
-    fn read(settings: *const lfsapi.Settings, options: Options) Limits {
+    fn read(settings: *const lfs_settings.Settings, options: Options) Limits {
         const retries = settings.getInt("lfs.transfer.maxretries", 8);
         const delay = settings.getInt("lfs.transfer.maxretrydelay", 10);
         const retry_time = settings.getInt("lfs.transfer.maxretrytime", 300);
@@ -2059,10 +2060,9 @@ fn copyLocal(
     defer dir.close(io);
     var remote = Repository.open(gpa, io, dir, .{ .discover = false }) catch return error.LfsLocalRemoteUnreadable;
     defer remote.deinit(io);
-    var remote_lfs = lfs.Lfs.load(gpa, io, remote.configuration(), .{
+    var remote_lfs = lfs.Lfs.load(gpa, &.{ .gpa = gpa, .config = remote.configuration() }, .{
         .common_dir = remote.commonDirectory().get(),
         .shared = remote.sharedPermissions(),
-        .work_dir = null,
     }) catch return error.LfsLocalRemoteUnreadable;
     defer remote_lfs.deinit();
     const here = server.store();

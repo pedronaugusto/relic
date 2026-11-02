@@ -32,7 +32,6 @@
 
 const ErrorNamespace = @This();
 const glob_mod = @import("../text.zig").glob;
-const decimal = @import("../text.zig").decimal;
 const fs = @import("../fs/fs.zig");
 const Self = @This();
 
@@ -48,6 +47,7 @@ const assert = std.debug.assert;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
 const config_mod = @import("../config/config.zig");
+const settings_mod = @import("settings.zig");
 
 /// The version line every pointer written carries.
 pub const spec_version = "https://git-lfs.github.com/spec/v1";
@@ -590,8 +590,7 @@ pub const Lfs = struct {
     extensions: bool,
 
     /// Errors from loading.
-    pub const LoadError = Allocator.Error || aegis.own.ReadFileError ||
-        config_mod.ParseError || error{MalformedValue};
+    pub const LoadError = Allocator.Error || config_mod.PathError;
 
     /// How `load` behaves.
     pub const Options = struct {
@@ -600,53 +599,31 @@ pub const Lfs = struct {
         /// (`Repository.sharedPermissions`), which the store's directories
         /// and objects are made with.
         shared: fs.Shared,
-        work_dir: ?Io.Dir = null,
         /// Leave every pointer as it is on checkout.
         skip_smudge: bool = false,
-        /// `.lfsconfig` as git-lfs finds it when the working tree has none —
-        /// from the index, else from `HEAD` — for a caller that has read it
-        /// there. `Repository.lfsconfigText` does.
-        lfsconfig: ?[]const u8 = null,
     };
 
     /// Read the settings: `lfs.storage` from the configuration, and
-    /// `lfs.fetchinclude`, `lfs.fetchexclude` and `lfs.url` from the
-    /// configuration or, where it does not set them, from `.lfsconfig` at
-    /// the root of `work_dir`. git-lfs lets `.lfsconfig` set only a few keys
-    /// and `lfs.storage` is not one of them. `common_dir` is borrowed for as
-    /// long as the result lives.
-    pub fn load(
-        gpa: Allocator,
-        io: Io,
-        config: *const config_mod.Config,
-        options: Options,
-    ) LoadError!Lfs {
-        const common_dir = options.common_dir;
-        const work_dir = options.work_dir;
+    /// `lfs.fetchinclude`, `lfs.fetchexclude` and `lfs.url` as git-lfs reads
+    /// them, from the configuration or, where it does not set them, from
+    /// `.lfsconfig` (`Settings.get`). git-lfs lets `.lfsconfig` set only a
+    /// few keys and `lfs.storage` is not one of them. `settings` is read
+    /// here only; `common_dir` is borrowed for as long as the result lives.
+    pub fn load(gpa: Allocator, settings: *const settings_mod.Settings, options: Options) LoadError!Lfs {
+        const config = settings.config;
         var arena_instance: std.heap.ArenaAllocator = .init(gpa);
         errdefer arena_instance.deinit();
         const a = arena_instance.allocator();
-
-        var file_config: ?config_mod.Config = null;
-        defer if (file_config) |*c| c.deinit();
-        if (work_dir) |wd| {
-            if (try fs.readFileAlloc(a, io, wd, ".lfsconfig", 1 << 20)) |text| {
-                file_config = try config_mod.Config.parseText(gpa, text, .local);
-            }
-        }
-        if (file_config == null) {
-            if (options.lfsconfig) |text| file_config = try config_mod.Config.parseText(gpa, text, .local);
-        }
 
         // git-lfs's own setting, expanded as git-lfs expands it: no
         // `:(optional)`.
         const root = if (config.get("lfs.storage")) |raw| try config_mod.interpolatePath(a, raw, config.context.home) else "lfs";
         // filepathfilter reads it through git-lfs's gitEnv.Bool.
-        const case_fold = configBool(configValue(config, "core.ignorecase") orelse "", false);
+        const case_fold = settings_mod.configBool(settings_mod.configValue(config, "core.ignorecase") orelse "", false);
 
-        const include = try settingValue(a, config, if (file_config) |*c| c else null, "lfs.fetchinclude");
-        const exclude = try settingValue(a, config, if (file_config) |*c| c else null, "lfs.fetchexclude");
-        const url = try settingValue(a, config, if (file_config) |*c| c else null, "lfs.url");
+        const include = try settings.get(a, "lfs.fetchinclude");
+        const exclude = try settings.get(a, "lfs.fetchexclude");
+        const url = try settings.get(a, "lfs.url");
 
         var extensions = false;
         for (config.entries.items) |entry| {
@@ -664,7 +641,7 @@ pub const Lfs = struct {
             .gpa = gpa,
             .arena = arena_instance.state,
             .extensions = extensions,
-            .store = .{ .base = common_dir, .root = root, .shared = options.shared },
+            .store = .{ .base = options.common_dir, .root = root, .shared = options.shared },
             .settings = .{
                 .fetch_include = fetch_include,
                 .fetch_exclude = fetch_exclude,
@@ -682,49 +659,6 @@ pub const Lfs = struct {
     }
 };
 
-fn settingValue(
-    a: Allocator,
-    config: *const config_mod.Config,
-    file_config: ?*const config_mod.Config,
-    name: []const u8,
-) (Allocator.Error || error{MalformedValue})!?[]const u8 {
-    const raw = config.get(name) orelse
-        (if (file_config) |c| c.get(name) else null) orelse
-        return null;
-    const copy = try a.dupe(u8, raw);
-    return copy;
-}
-
-/// The value git-lfs sees for `full_name` in `config`: the last one written
-/// with a value. git-lfs reads `git config -l -z`, where a name written with
-/// no `=` has no value line, and drops it (`git.ParseConfigEntries`).
-pub fn configValue(config: *const config_mod.Config, full_name: []const u8) ?[]const u8 {
-    const split = config_mod.splitFullName(full_name) orelse return null;
-    var found: ?[]const u8 = null;
-    for (config.entries.items) |entry| {
-        if (!entry.matches(split.section, split.subsection, split.name)) continue;
-        found = entry.value orelse continue;
-    }
-    return found;
-}
-
-/// git-lfs's `config.Bool`, which every boolean git-lfs setting is read
-/// through: `fallback` for an empty value; `true`, `1`, `on`, `yes` and `t`
-/// in any case are true, and anything else is false.
-pub fn configBool(value: []const u8, fallback: bool) bool {
-    if (value.len == 0) return fallback;
-    for ([_][]const u8{ "true", "1", "on", "yes", "t" }) |word| {
-        if (std.ascii.eqlIgnoreCase(value, word)) return true;
-    }
-    return false;
-}
-
-/// git-lfs's `config.Int`: `fallback` for an empty value or one Go's
-/// `strconv.Atoi` refuses (`text.decimal.goInt`).
-pub fn configInt(value: []const u8, fallback: i64) i64 {
-    return decimal.goInt(i64, value) orelse fallback;
-}
-
 const testing = std.testing;
 
 fn pointerText(comptime oid: []const u8, comptime size: []const u8) []const u8 {
@@ -737,7 +671,6 @@ test "settings that outgrow the arena's first block are all freed with it" {
     // Enough patterns that their lists take blocks of their own, which the
     // arena's state did not hold when it was taken before them.
     const gpa = std.testing.allocator;
-    const io = std.testing.io;
     const many = repeat("p,", 3000) ++ "p";
     var config = try config_mod.Config.parseText(gpa, "[lfs]\n" ++
         "\tfetchinclude = " ++ many ++ "\n" ++
@@ -745,35 +678,10 @@ test "settings that outgrow the arena's first block are all freed with it" {
     defer config.deinit();
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var lfs = try Lfs.load(gpa, io, &config, .{
-        .common_dir = tmp.dir,
-        .shared = .umask,
-        .work_dir = null,
-    });
+    var lfs = try Lfs.load(gpa, &.{ .gpa = gpa, .config = &config }, .{ .common_dir = tmp.dir, .shared = .umask });
     defer lfs.deinit();
     try std.testing.expectEqual(@as(usize, 3001), lfs.settings.fetch_include.len);
     try std.testing.expectEqual(@as(usize, 3001), lfs.settings.fetch_exclude.len);
-}
-
-test "a setting is read as git-lfs reads it: its config.Bool and config.Int, and a name with no value not there" {
-    var config = try config_mod.Config.parseText(std.testing.allocator,
-        \\[lfs]
-        \\    on = t
-        \\    word = sometimes
-        \\    empty =
-        \\    count = 1_000
-        \\    bare = 7
-        \\    bare
-    , .local);
-    defer config.deinit();
-    try std.testing.expect(configBool(configValue(&config, "lfs.on").?, false));
-    try std.testing.expect(!configBool(configValue(&config, "lfs.word").?, true));
-    try std.testing.expect(configBool(configValue(&config, "lfs.empty").?, true));
-    try std.testing.expect(!configBool("2", true));
-    try std.testing.expectEqual(@as(i64, 8), configInt(configValue(&config, "lfs.count").?, 8));
-    try std.testing.expectEqual(@as(i64, 8), configInt("1k", 8));
-    try std.testing.expectEqual(@as(i64, -3), configInt("-3", 8));
-    try std.testing.expectEqualStrings("7", configValue(&config, "lfs.bare").?);
 }
 
 test "a pointer decodes and encodes to the same bytes" {
@@ -938,21 +846,14 @@ test "a fetch pattern longer than a kilobyte names what it names" {
 }
 
 test "settings come from the configuration first and .lfsconfig second" {
-    const io = testing.io;
     const gpa = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(io, .{
-        .sub_path = ".lfsconfig",
-        .data = "[lfs]\n\tfetchinclude = a, b/c ,\n\tfetchexclude = x\n\tstorage = ignored\n\turl = https://lfs.example/\n",
-    });
     var config = try config_mod.Config.parseText(gpa, "[lfs]\n\tfetchexclude = y,z\n\tstorage = /elsewhere/lfs\n", .local);
     defer config.deinit();
-    var l = try Lfs.load(gpa, io, &config, .{
-        .common_dir = tmp.dir,
-        .shared = .umask,
-        .work_dir = tmp.dir,
-    });
+    var settings: settings_mod.Settings = try .parse(gpa, &config, "[lfs]\n\tfetchinclude = a, b/c ,\n\tfetchexclude = x\n\tstorage = ignored\n\turl = https://lfs.example/\n");
+    defer settings.deinit();
+    var l = try Lfs.load(gpa, &settings, .{ .common_dir = tmp.dir, .shared = .umask });
     defer l.deinit();
     try testing.expectEqual(@as(usize, 2), l.settings.fetch_include.len);
     try testing.expectEqualStrings("b/c", l.settings.fetch_include[1].text);
@@ -960,6 +861,21 @@ test "settings come from the configuration first and .lfsconfig second" {
     try testing.expectEqualStrings("y", l.settings.fetch_exclude[0].text);
     try testing.expectEqualStrings("/elsewhere/lfs", l.store.root);
     try testing.expectEqualStrings("https://lfs.example/", l.settings.url.?);
+}
+
+test "a setting written with no value is not there, as git-lfs reads it: .lfsconfig's is taken" {
+    const gpa = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var config = try config_mod.Config.parseText(gpa, "[lfs]\n\turl\n\tfetchinclude = a\n\tfetchinclude\n", .local);
+    defer config.deinit();
+    var settings: settings_mod.Settings = try .parse(gpa, &config, "[lfs]\n\turl = https://lfs.example/\n");
+    defer settings.deinit();
+    var l = try Lfs.load(gpa, &settings, .{ .common_dir = tmp.dir, .shared = .umask });
+    defer l.deinit();
+    try testing.expectEqualStrings("https://lfs.example/", l.settings.url.?);
+    try testing.expectEqual(@as(usize, 1), l.settings.fetch_include.len);
+    try testing.expectEqualStrings("a", l.settings.fetch_include[0].text);
 }
 
 test "fuzz: any bytes are a pointer or a named error, and a pointer survives its encoding" {

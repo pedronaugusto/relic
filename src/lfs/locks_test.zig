@@ -229,7 +229,7 @@ test "lockable files are read-only unless the person holds the lock, with git-lf
     defer server.deinit(io);
 
     // After a checkout, with no locks: every lockable file read-only.
-    _ = try lfslocks.fixWriteFlags(gpa, io, &repo, null, .{});
+    _ = try lfslocks.fixWriteFlags(gpa, io, &repo, .{ .environ = &fx.env });
     try fx.gitIn(pair.theirs, &.{ "lfs", "post-checkout", zero, "HEAD", "1" });
     for ([_][]const u8{ "x.bin", "y.bin", "plain.txt", ".gitattributes" }) |p| {
         try testing.expectEqual(try mode(io, pair.theirs, p), try mode(io, pair.ours, p));
@@ -247,7 +247,7 @@ test "lockable files are read-only unless the person holds the lock, with git-lf
     // A checkout keeps it so, from the cache alone.
     var split = try lfslocks.verify(io, server, &repo, .{});
     split.deinit();
-    _ = try lfslocks.fixWriteFlags(gpa, io, &repo, null, .{});
+    _ = try lfslocks.fixWriteFlags(gpa, io, &repo, .{ .environ = &fx.env });
     try fx.gitIn(pair.theirs, &.{ "lfs", "post-checkout", zero, "HEAD", "1" });
     try testing.expectEqual(try mode(io, pair.theirs, "y.bin"), try mode(io, pair.ours, "x.bin"));
     try testing.expectEqual(try mode(io, pair.theirs, "x.bin"), try mode(io, pair.ours, "y.bin"));
@@ -257,6 +257,39 @@ test "lockable files are read-only unless the person holds the lock, with git-lf
     try fx.gitIn(pair.theirs, &.{ "lfs", "unlock", "y.bin" });
     try testing.expectEqual(try mode(io, pair.theirs, "y.bin"), try mode(io, pair.ours, "x.bin"));
     try testing.expect(!try writable(io, pair.ours, "x.bin"));
+}
+
+test "GIT_LFS_SET_LOCKABLE_READONLY false leaves lockable files as they are, as git-lfs's post-checkout does" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var pair = try Pair.init(gpa, io);
+    defer pair.deinit();
+    const fx = pair.fx;
+    const zero = "0000000000000000000000000000000000000000";
+
+    var repo = try repo_mod.Repository.open(gpa, io, pair.ours, .{});
+    defer repo.deinit(io);
+    var off = try fx.env.clone(gpa);
+    defer off.deinit();
+    try off.put("GIT_LFS_SET_LOCKABLE_READONLY", "0");
+
+    // A lockable file written again, so writable, in each clone.
+    for ([_]Io.Dir{ pair.ours, pair.theirs }) |dir| {
+        try dir.deleteFile(io, "x.bin");
+        try dir.writeFile(io, .{ .sub_path = "x.bin", .data = "changed\n" });
+        try testing.expect(try writable(io, dir, "x.bin"));
+    }
+    const fixed = try lfslocks.fixWriteFlags(gpa, io, &repo, .{ .environ = &off });
+    try testing.expectEqual(@as(u32, 0), fixed.read_only);
+    try testing.expect(try writable(io, pair.ours, "x.bin"));
+    gpa.free(try testlfs.git(gpa, io, pair.theirs, &off, &.{ "lfs", "post-checkout", zero, "HEAD", "1" }, true));
+    try testing.expect(try writable(io, pair.theirs, "x.bin"));
+
+    // Unset, it is read-only again, in both.
+    _ = try lfslocks.fixWriteFlags(gpa, io, &repo, .{ .environ = &fx.env });
+    try testing.expect(!try writable(io, pair.ours, "x.bin"));
+    try fx.gitIn(pair.theirs, &.{ "lfs", "post-checkout", zero, "HEAD", "1" });
+    try testing.expect(!try writable(io, pair.theirs, "x.bin"));
 }
 
 test "a lock's file is the one asked about, and a path the server answers with outside the tree is never touched" {
@@ -273,7 +306,7 @@ test "a lock's file is the one asked about, and a path the server answers with o
     defer repo.deinit(io);
     const server = try pair.open(&repo);
     defer server.deinit(io);
-    _ = try lfslocks.fixWriteFlags(gpa, io, &repo, null, .{});
+    _ = try lfslocks.fixWriteFlags(gpa, io, &repo, .{ .environ = &fx.env });
     try testing.expect(!try writable(io, pair.ours, "y.bin"));
 
     // The server says the lock is on y.bin: x.bin, asked for, is the one

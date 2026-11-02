@@ -36,6 +36,7 @@ const attributes = @import("../patterns.zig").attributes;
 const fs = @import("../fs/fs.zig");
 const lfs = @import("lfs.zig");
 const lfsapi = @import("api.zig");
+const lfs_settings = @import("settings.zig");
 const lfsssh = @import("ssh.zig");
 const time_text = @import("time_text.zig");
 const index_mod = @import("../index/index.zig");
@@ -60,7 +61,7 @@ pub const Error = error{
     InvalidLockPath,
 } || attributes.Error || lfsapi.Error || fs.AtomicWriteError || Io.Dir.CreateDirPathError || Io.Dir.StatFileError ||
     Io.Dir.SetFilePermissionsError || repo_mod.Error || index_mod.ReadError ||
-    lfsapi.Settings.LoadError || lfs.Lfs.LoadError;
+    lfs_settings.Settings.LoadRepoError || lfs.Lfs.LoadError;
 
 /// A lock, as the server reports it. Every slice is owned by whatever
 /// returned it.
@@ -545,7 +546,8 @@ fn gaveBack(arena: Allocator, io: Io, server: *lfsapi.Server, repo: *Repository,
     const path = asked orelse if (checkPath(released.path)) released.path else |_| return;
     if (repo.workDirectory()) |lent_wt| {
         const wt = lent_wt.get();
-        if (readOnlyWanted(&server.settings)) {
+        const environ = if (server.client.options.programs) |programs| programs.environ else null;
+        if (readOnlyWanted(&server.settings, environ)) {
             var lockables = try Lockables.load(io, repo);
             defer lockables.deinit();
             if (try lockables.isLockable(arena, io, path)) _ = try setWritable(io, wt, path, false);
@@ -1095,9 +1097,12 @@ pub const Lockables = struct {
     }
 };
 
-/// Whether lockable files are kept read-only: `lfs.setlockablereadonly`,
-/// true unless set false.
-fn readOnlyWanted(settings: *const lfsapi.Settings) bool {
+/// Whether lockable files are kept read-only: `GIT_LFS_SET_LOCKABLE_READONLY`
+/// in `environ` and `lfs.setlockablereadonly` both true or unset, as
+/// git-lfs's `SetLockableFilesReadOnly` reads them. A null `environ` holds
+/// nothing.
+fn readOnlyWanted(settings: *const lfs_settings.Settings, environ: ?*const std.process.Environ.Map) bool {
+    if (environ) |env| if (!lfsapi.gitLfsBool(env.get("GIT_LFS_SET_LOCKABLE_READONLY"), true)) return false;
     return settings.getBool("lfs.setlockablereadonly", true);
 }
 
@@ -1109,27 +1114,35 @@ pub const Fixed = struct {
     writable: u32 = 0,
 };
 
-/// Make every lockable file in the working tree — or only `paths` — read-only
-/// unless the person holds its lock, and writable if they do, as git-lfs's
-/// post-checkout hook does after a checkout. Whose a lock is comes from the
-/// cached split for `options.ref`; nothing is sent. Nothing is done when
-/// `lfs.setlockablereadonly` is false.
-pub fn fixWriteFlags(gpa: Allocator, io: Io, repo: *Repository, paths: ?[]const []const u8, options: Options) Self.Error!Fixed {
+/// What `fixWriteFlags` fixes, and how it decides.
+pub const Fix = struct {
+    /// Only these files, or every lockable one when null.
+    paths: ?[]const []const u8 = null,
+    /// The environment git-lfs would run in, for
+    /// `GIT_LFS_SET_LOCKABLE_READONLY`.
+    environ: *const std.process.Environ.Map,
+    /// The ref whose cached split of the locks says whose each is.
+    request: Options = .{},
+};
+
+/// Make every lockable file in the working tree — or only `fix.paths` —
+/// read-only unless the person holds its lock, and writable if they do, as
+/// git-lfs's post-checkout hook does after a checkout. Whose a lock is comes
+/// from the cached split for `fix.request.ref`; nothing is sent. Nothing is
+/// done when `lfs.setlockablereadonly` is false, or
+/// `GIT_LFS_SET_LOCKABLE_READONLY` in `fix.environ`.
+pub fn fixWriteFlags(gpa: Allocator, io: Io, repo: *Repository, fix: Fix) Self.Error!Fixed {
     var fixed: Fixed = .{};
     const wt = (repo.workDirectory() orelse return fixed).get();
-    var settings = try lfsapi.Settings.load(gpa, io, repo.configuration(), if (repo.workDirectory()) |work| work.get() else null);
+    var settings: lfs_settings.Settings = try .loadRepo(gpa, io, repo);
     defer settings.deinit();
-    if (!readOnlyWanted(&settings)) return fixed;
+    if (!readOnlyWanted(&settings, fix.environ)) return fixed;
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    var store_settings = try lfs.Lfs.load(gpa, io, repo.configuration(), .{
-        .common_dir = repo.commonDirectory().get(),
-        .shared = repo.sharedPermissions(),
-        .work_dir = if (repo.workDirectory()) |work| work.get() else null,
-    });
+    var store_settings = try lfs.Lfs.load(gpa, &settings, .{ .common_dir = repo.commonDirectory().get(), .shared = repo.sharedPermissions() });
     defer store_settings.deinit();
-    const ref = try refFor(arena, io, repo, options);
+    const ref = try refFor(arena, io, repo, fix.request);
     const cache = try Cache.read(arena, io, &store_settings.store, ref);
     var ours: std.StringHashMapUnmanaged(void) = .empty;
     for (cache.ours) |l| try ours.put(arena, l.path, {});
@@ -1138,7 +1151,7 @@ pub fn fixWriteFlags(gpa: Allocator, io: Io, repo: *Repository, paths: ?[]const 
     defer lockables.deinit();
     var index = try repo.openIndex(io);
     defer index.deinit();
-    const candidates: []const []const u8 = paths orelse blk: {
+    const candidates: []const []const u8 = fix.paths orelse blk: {
         const all = try arena.alloc([]const u8, index.entries.items.len);
         for (index.entries.items, all) |e, *p| p.* = try arena.dupe(u8, e.path);
         break :blk all;

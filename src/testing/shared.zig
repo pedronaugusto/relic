@@ -225,7 +225,7 @@ test "core.sharedRepository reaches the shallow file, MERGE_RR, and LFS objects 
         outcome.deinit();
         try std.testing.expectEqual(file_mode, try modeOf(io, git_dir, "MERGE_RR"));
 
-        var lfs = try relic.lfs.Lfs.load(gpa, io, repo.configuration(), .{ .common_dir = repo.commonDirectory().get(), .shared = repo.sharedPermissions() });
+        var lfs = try relic.lfs.Lfs.load(gpa, &.{ .gpa = gpa, .config = repo.configuration() }, .{ .common_dir = repo.commonDirectory().get(), .shared = repo.sharedPermissions() });
         defer lfs.deinit();
         var source: Io.Reader = .fixed("object\n");
         const pointer = try lfs.store.install(io, &source, null);

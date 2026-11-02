@@ -76,6 +76,7 @@ test {
         _ = @import("fs/stat.zig");
         _ = @import("lfs/time_text.zig");
         _ = @import("lfs/mime_sniff.zig");
+        _ = @import("lfs/settings.zig");
         _ = @import("config/write.zig");
         _ = @import("testing/git.zig");
         _ = @import("testing/git_release.zig");
