@@ -126,7 +126,7 @@ pub const DiffWriter = struct {
         });
         var attrs: ?attributes.Attrs = if (sub.workDirectory() != null) try sub.loadAttrs(io) else null;
         defer if (attrs) |*x| x.deinit();
-        const drivers: driver_mod.Drivers = .{ .attrs = if (attrs) |*x| x else null, .work_dir = if (sub.workDirectory()) |work| work.get() else null, .config = config };
+        const drivers: driver_mod.Drivers = .{ .attrs = if (attrs) |*x| x else null, .work_dir = sub.workDirectory(), .config = config };
         var nested = try DiffWriter.init(d.gpa, sub, d.programs);
         const textconv: ?textconv_mod.Textconv = if (d.programs) |p| .{ .programs = p } else null;
         const external: ?external_mod.External = if (d.programs) |p| .{ .programs = p, .command = try external_mod.configured(config) } else null;
@@ -145,7 +145,7 @@ pub const DiffWriter = struct {
 /// finds it: its working tree's `.git`, else the one `.gitmodules` names
 /// it by in `modules`; `null` when there is none, or it does not open.
 fn open(gpa: Allocator, io: Io, repo: *Repository, path: []const u8) ?Repository {
-    const wt = (repo.workDirectory() orelse return null).get();
+    const wt = repo.workDirectory() orelse return null;
     if (gitlink.isRepository(gpa, io, wt, path) catch false) {
         return submodule.openRepository(gpa, io, repo, .{ .path = path, .name = path }, .{}) catch null;
     }

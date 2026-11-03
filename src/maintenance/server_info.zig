@@ -31,14 +31,14 @@ pub fn updateServerInfo(gpa: Allocator, io: Io, repo: *Repository) Self.Error!vo
 
     var refs: std.Io.Writer.Allocating = .init(arena);
     try infoRefs(gpa, io, repo, &refs.writer);
-    try update(arena, io, repo.commonDirectory().get(), "info", "refs", refs.written(), shared);
+    try update(arena, io, repo.commonDirectory(), "info", "refs", refs.written(), shared);
 
     const db = repo.objectDatabase();
     var packs: std.Io.Writer.Allocating = .init(arena);
     try infoPacks(arena, io, db, &packs.writer);
-    try update(arena, io, db.objectsDirectory().get(), "info", "packs", packs.written(), shared);
+    try update(arena, io, db.objectsDirectory(), "info", "packs", packs.written(), shared);
 
-    repo.commonDirectory().get().deleteFile(io, "info/rev-cache") catch |err| switch (err) {
+    repo.commonDirectory().deleteFile(io, "info/rev-cache") catch |err| switch (err) {
         error.FileNotFound, error.NotDir => {},
         else => |e| return e,
     };
@@ -91,7 +91,7 @@ fn infoRefs(gpa: Allocator, io: Io, repo: *Repository, out: *Io.Writer) Self.Err
 /// their places when it lists only packs that are there, as git's
 /// `init_pack_info` keeps them; the others follow.
 fn infoPacks(arena: Allocator, io: Io, db: *odb_mod.Odb, out: *Io.Writer) Self.Error!void {
-    const pack_dir = db.objectsDirectory().get().openDir(io, "pack", .{ .iterate = true }) catch |err| switch (err) {
+    const pack_dir = db.objectsDirectory().openDir(io, "pack", .{ .iterate = true }) catch |err| switch (err) {
         error.FileNotFound, error.NotDir => return out.writeAll("\n"),
         else => |e| return e,
     };
@@ -109,7 +109,7 @@ fn infoPacks(arena: Allocator, io: Io, db: *odb_mod.Odb, out: *Io.Writer) Self.E
     std.mem.sort([]const u8, present.items, {}, lessString);
 
     var ordered: std.ArrayList([]const u8) = .empty;
-    const old: []const u8 = aegis.own.readFile(io, db.objectsDirectory().get(), "info/packs", arena, aegis.units.Bytes(u64).fromRaw(1 << 24)) catch |err| switch (err) {
+    const old: []const u8 = aegis.own.readFile(io, db.objectsDirectory(), "info/packs", arena, aegis.units.Bytes(u64).fromRaw(1 << 24)) catch |err| switch (err) {
         error.FileNotFound, error.NotDir => "",
         else => |e| return e,
     };

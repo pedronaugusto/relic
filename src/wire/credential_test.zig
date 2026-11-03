@@ -353,7 +353,7 @@ test "credential-store run in process keeps the file git's keeps and answers as 
             if (try store_mod.get(gpa, io, files, step.c)) |got| {
                 var found = got;
                 defer gpa.free(found.username);
-                defer found.password.deinit();
+                defer found.password.deinit(gpa);
                 try ours_answer.print(gpa, "username={s}\npassword={s}\n", .{ found.username, found.password.expose() });
             }
         } else if (std.mem.eql(u8, step.op, "store")) {
@@ -591,7 +591,7 @@ test "credential-cache's daemon takes a request of the most a request may be, pa
         .action = .store,
         .input = "protocol=https\nhost=example.com\nusername=ada\npassword=one\n\n",
     })) orelse return error.TestDaemonNotListening;
-    stored.deinit();
+    stored.deinit(gpa);
 
     // A request is the client's two lines, then the credential's; a line
     // the daemon does not know pads it to the length wanted.
@@ -606,7 +606,7 @@ test "credential-cache's daemon takes a request of the most a request may be, pa
         @memset(padded[query.len .. padded.len - 2], 'x');
         @memcpy(padded[padded.len - 2 ..], "\n\n");
         var said = (try cache.request(gpa, io, socket, .{ .action = .get, .input = padded })) orelse return error.TestDaemonNotListening;
-        defer said.deinit();
+        defer said.deinit(gpa);
         if (longer) {
             try testing.expectEqualStrings("", said.expose());
         } else {
@@ -615,10 +615,10 @@ test "credential-cache's daemon takes a request of the most a request may be, pa
     }
 
     var again = (try cache.request(gpa, io, socket, .{ .action = .get, .input = "protocol=https\nhost=example.com\n\n" })) orelse return error.TestDaemonNotListening;
-    defer again.deinit();
+    defer again.deinit(gpa);
     try testing.expect(std.mem.find(u8, again.expose(), "password=one\n") != null);
     var exited = (try cache.request(gpa, io, socket, .{ .action = .exit, .input = "" })) orelse return error.TestDaemonNotListening;
-    exited.deinit();
+    exited.deinit(gpa);
 }
 
 test "credential-cache's daemon lets a credential go when its time is up, and ends thirty seconds after it holds nothing, by the clock it runs on" {
@@ -643,7 +643,7 @@ test "credential-cache's daemon lets a credential go when its time is up, and en
     const ask = struct {
         fn ask(a: Allocator, s: []const u8, action: cache.Action, timeout: i32, input: []const u8) !?[]u8 {
             var answer = (try cache.request(a, testing.io, s, .{ .action = action, .timeout = timeout, .input = input })) orelse return null;
-            defer answer.deinit();
+            defer answer.deinit(a);
             return try a.dupe(u8, answer.expose());
         }
     }.ask;

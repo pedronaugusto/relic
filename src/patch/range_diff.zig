@@ -193,7 +193,7 @@ const Reader = struct {
             .a = a,
             .diff_options = try diff.configured(config, .{}),
             .renames = (try diff.RenameSettings.read(config)).options(),
-            .order = try diff.Order.configured(a, io, repo.topDirectory().get(), config),
+            .order = try diff.Order.configured(a, io, repo.topDirectory(), config),
             .show_root = (try config.getBool("log.showroot", true)),
             .quote_path = (try config.getBool("core.quotepath", true)),
             .textconv = options.textconv,
@@ -295,7 +295,7 @@ const Reader = struct {
         const same = (if (old) |o| o.oid else zero).eql(if (new) |n| n.oid else zero);
         var pair: diff.FilePair = undefined;
         if (!same) {
-            const drivers: driver.Drivers = .{ .attrs = if (r.attrs) |*attrs| attrs else null, .work_dir = if (r.repo.workDirectory()) |work| work.get() else null, .config = r.repo.configuration() };
+            const drivers: driver.Drivers = .{ .attrs = if (r.attrs) |*attrs| attrs else null, .work_dir = r.repo.workDirectory(), .config = r.repo.configuration() };
             try pair.init(r.gpa, r.io, .{ .db = r.repo.objectDatabase(), .drivers = drivers, .textconv = r.textconv }, sides);
             if (pair.silent(change.status)) {
                 pair.deinit();

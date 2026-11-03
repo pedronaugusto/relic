@@ -345,7 +345,7 @@ pub const Session = struct {
 
     fn lock(s: *Session, arena: Allocator, req: Request, user: Who) Error!void {
         const path = req.arg("path") orelse return s.status(400, &.{}, &.{"no path"});
-        var table = try lock_store.Table.take(s.gpa, arena, s.io, s.remote.repo.gitDirectory().get());
+        var table = try lock_store.Table.take(s.gpa, arena, s.io, s.remote.repo.gitDirectory());
         defer table.deinit();
         for (table.list) |l| if (std.mem.eql(u8, l.path, path)) {
             return s.status(409, try lockArgs(arena, l), &.{"already locked"});
@@ -363,7 +363,7 @@ pub const Session = struct {
     }
 
     fn listLocks(s: *Session, arena: Allocator, req: Request, user: Who) Error!void {
-        const all = try lock_store.read(arena, s.io, s.remote.repo.gitDirectory().get());
+        const all = try lock_store.read(arena, s.io, s.remote.repo.gitDirectory());
         var matching: std.ArrayList(locks.Lock) = .empty;
         for (all) |l| {
             if (req.arg("path")) |p| if (!std.mem.eql(u8, l.path, p)) continue;
@@ -386,7 +386,7 @@ pub const Session = struct {
     }
 
     fn unlock(s: *Session, arena: Allocator, req: Request, id: []const u8, user: Who) Error!void {
-        var table = try lock_store.Table.take(s.gpa, arena, s.io, s.remote.repo.gitDirectory().get());
+        var table = try lock_store.Table.take(s.gpa, arena, s.io, s.remote.repo.gitDirectory());
         defer table.deinit();
         const at = for (table.list, 0..) |l, i| {
             if (std.mem.eql(u8, l.id, id)) break i;

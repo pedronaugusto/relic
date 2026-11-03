@@ -588,7 +588,7 @@ const Importer = struct {
 
     fn readMarks(imp: *Importer) Error!void {
         const path = imp.import_marks.?;
-        const dir = if (imp.marksInRepository(path)) imp.repo.commonDirectory().get() else imp.options.cwd orelse Io.Dir.cwd();
+        const dir = if (imp.marksInRepository(path)) imp.repo.commonDirectory() else imp.options.cwd orelse Io.Dir.cwd();
         const bytes = aegis.own.readFile(imp.io, dir, path, imp.gpa, aegis.units.Bytes(u64).fromRaw(std.math.maxInt(u64))) catch |err| switch (err) {
             error.FileNotFound => {
                 if (!imp.import_marks_if_exists) return error.FileNotFound;
@@ -613,7 +613,7 @@ const Importer = struct {
     fn dumpMarks(imp: *Importer) Error!void {
         const path = imp.export_marks orelse return;
         if (imp.import_marks != null and !imp.import_marks_done) return;
-        const dir = if (imp.marksInRepository(path)) imp.repo.commonDirectory().get() else imp.options.cwd orelse Io.Dir.cwd();
+        const dir = if (imp.marksInRepository(path)) imp.repo.commonDirectory() else imp.options.cwd orelse Io.Dir.cwd();
         if (std.Io.Dir.path.dirname(path)) |parent| try dir.createDirPath(imp.io, parent);
         var buffer: [4096]u8 = undefined;
         var lock = try fs.LockFile.open(imp.gpa, imp.io, dir, .{ .sub_path = path, .buffer = &buffer }, .{ .sync = .none });

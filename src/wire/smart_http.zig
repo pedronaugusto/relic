@@ -288,8 +288,8 @@ pub const Files = struct {
         if (h.credentials.authorization()) |text| {
             // Its own copy, as a 401 to `get` may change the session's.
             var copy = aegis.SecretBytes.init(e.arena.child_allocator, text.len) catch return error.OutOfMemory;
-            copy.appendSlice(text) catch {
-                copy.deinit();
+            copy.appendSlice(e.arena.child_allocator, text) catch {
+                copy.deinit(e.arena.child_allocator);
                 return error.OutOfMemory;
             };
             e.authorization = copy;
@@ -374,7 +374,7 @@ pub const Early = struct {
     pub fn reset(e: *Early, io: Io) void {
         if (e.response) |*res| res.deinit(io);
         e.response = null;
-        if (e.authorization) |*copy| copy.deinit();
+        if (e.authorization) |*copy| copy.deinit(e.arena.child_allocator);
         e.authorization = null;
         e.client = null;
         e.url = "";
@@ -436,7 +436,7 @@ fn prepare(gpa: Allocator, io: Io, url: url_mod.Url, service: Service, options: 
     errdefer h.arena.deinit();
     errdefer h.credentials.deinit();
     errdefer if (h.proxy_credentials) |*p| p.deinit();
-    errdefer if (h.proxy_secret) |*p| p.deinit();
+    errdefer if (h.proxy_secret) |*p| p.deinit(gpa);
     errdefer h.freeTls();
     errdefer if (h.cookies) |*jar| jar.deinit(io);
 
@@ -882,7 +882,7 @@ const Http = struct {
             const bytes = kept.exposeMut();
             @memcpy(bytes[0..user.len], user);
             @memcpy(bytes[user.len..], password);
-            if (h.proxy_secret) |*old| old.deinit();
+            if (h.proxy_secret) |*old| old.deinit(h.gpa);
             h.proxy_secret = kept;
             proxy.credential = .{ .user = bytes[0..user.len], .password = bytes[user.len..], .method = method };
         }
@@ -1047,8 +1047,8 @@ const Http = struct {
             error.ClientCertificateSchemeUnsupported => h.fail(error.ClientCertificateSchemeUnsupported, "no signature scheme the server takes"),
             error.InvalidUrl => h.fail(error.MalformedUrl, "a URL no request can carry"),
             error.InvalidHeader => h.fail(error.InvalidHttpHeader, "http.extraHeader"),
-            // unreachable: the origin is http or https, a whole body is bytes and a written one is chunked, `finish` runs once, the proxy is fixed, and no redirect, retry, credential or hook is uplink's
-            error.UnsupportedScheme, error.InvalidBody, error.BodyReadFailed, error.BodyTooLong, error.ExchangeOver, error.InvalidProxy, error.BodyNotReplayable, error.TooManyRedirects, error.InsecureRedirect, error.InvalidRedirect, error.CredentialsUnavailable, error.PrepareFailed => unreachable,
+            // unreachable: the origin is http or https, a whole body is bytes and a written one is chunked, `finish` runs once, the proxy is fixed, no redirect, retry, credential or hook is uplink's, and no named pipe or extended CONNECT is asked for
+            error.UnsupportedScheme, error.InvalidBody, error.BodyReadFailed, error.BodyTooLong, error.ExchangeOver, error.InvalidProxy, error.BodyNotReplayable, error.TooManyRedirects, error.InsecureRedirect, error.InvalidRedirect, error.CredentialsUnavailable, error.PrepareFailed, error.NamedPipeUnsupported, error.ExtendedConnectUnsupported => unreachable,
         };
     }
 
@@ -1147,7 +1147,7 @@ const Http = struct {
             if (read.end != 0) {
                 asked = .fromRaw(@intCast(@max(read.value, 0))); // aegis: no-danger: strtol of 64 bits fits an i64
             } else if (h.options.now) |now| if (uplink.wire.date.parse(value)) |at| {
-                asked = .fromRaw(@max(at - date.seconds(now), 0));
+                asked = .fromRaw(@max(at.raw() - date.seconds(now), 0));
             };
         }
         var buf: [160]u8 = undefined;
@@ -1464,7 +1464,7 @@ const Http = struct {
         const h = self(context);
         h.endRequest();
         h.client.deinit(io);
-        if (h.proxy_secret) |*p| p.deinit();
+        if (h.proxy_secret) |*p| p.deinit(h.gpa);
         h.saveCookies(io);
         if (h.cookies) |*jar| jar.deinit(io);
         h.credentials.deinit();

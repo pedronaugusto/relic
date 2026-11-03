@@ -1137,7 +1137,7 @@ fn applyAttributes(a: Allocator, gpa: Allocator, io: Io, repos: *Repos, items: [
         var state: ?attributes.State = null;
         const repo = repos.list.items[item.owner];
         if (repos.attrs.items[item.owner]) |*at| {
-            if (repo.workDirectory()) |w| try at.enter(io, w.get(), item.path);
+            if (repo.workDirectory()) |w| try at.enter(io, w, item.path);
             state = (try at.lookup(a, item.path, .file)).get("diff");
         }
         const driver = driver_mod.Driver.of(config, state);
@@ -1263,7 +1263,7 @@ const Batch = struct {
                     const found = try repo.objectDatabase().read(io, oid);
                     break :blk found.bytes;
                 },
-                .file => (fs.readFileAlloc(repo.objectDatabase().allocator(), io, repo.workDirectory().?.get(), item.path, 1 << 31) catch null) orelse null,
+                .file => (fs.readFileAlloc(repo.objectDatabase().allocator(), io, repo.workDirectory().?, item.path, 1 << 31) catch null) orelse null,
             };
             if (content) |c| {
                 try batch.owned.append(gpa, .{ .bytes = c, .owner = item.owner });

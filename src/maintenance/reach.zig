@@ -120,7 +120,7 @@ pub fn collectStarts(gpa: Allocator, arena: Allocator, io: Io, repo: *Repository
     for (others) |id| try admin_paths.append(arena, try arena.print("worktrees/{s}", .{id}));
     for (admin_paths.items) |admin| {
         const path = try std.fs.path.join(arena, &.{ admin, "index" });
-        var index = repo.openIndexAt(io, repo.commonDirectory().get(), path) catch |err| switch (err) {
+        var index = repo.openIndexAt(io, repo.commonDirectory(), path) catch |err| switch (err) {
             error.FileNotFound => continue,
             else => |e| return e,
         };
@@ -146,12 +146,12 @@ pub fn collectStarts(gpa: Allocator, arena: Allocator, io: Io, repo: *Repository
     // Every worktree's rebase state: git's `add_rebase_files`.
     if (options.rebase_state) {
         var git_dirs: std.ArrayList(Io.Dir) = .empty;
-        try git_dirs.append(arena, repo.gitDirectory().get());
-        if (repo.isLinkedWorktree()) try git_dirs.append(arena, repo.commonDirectory().get());
+        try git_dirs.append(arena, repo.gitDirectory());
+        if (repo.isLinkedWorktree()) try git_dirs.append(arena, repo.commonDirectory());
         var opened: std.ArrayList(Io.Dir) = .empty;
         defer for (opened.items) |d| d.close(io);
         for (others) |id| {
-            const dir = repo.commonDirectory().get().openDir(io, try arena.print("worktrees/{s}", .{id}), .{}) catch |err| switch (err) {
+            const dir = repo.commonDirectory().openDir(io, try arena.print("worktrees/{s}", .{id}), .{}) catch |err| switch (err) {
                 error.FileNotFound, error.NotDir => continue,
                 else => |e| return e,
             };
@@ -256,7 +256,7 @@ pub fn hookedObjects(gpa: Allocator, io: Io, repo: *Repository, programs: ?progr
         var outcome = program.run(gpa, io, programs orelse return error.ProgramsNotGranted, .{
             .argv = &.{command},
             .shell = true,
-            .cwd = .{ .dir = repo.topDirectory().get() },
+            .cwd = .{ .dir = repo.topDirectory() },
             .unset = &program.repository_variables,
             .stderr = .inherit,
         }, .{}) catch |err| switch (err) {

@@ -89,15 +89,23 @@ pub const Backend = struct {
     /// The root's absolute path.
     root: []const u8,
     options: Options,
+    /// What uplink's server calls: `serve`, found from this field.
+    answers: uplink.server.Handler = .{ .handleFn = answer },
 
     /// Serve the repositories under `root`, an absolute path, borrowed.
     pub fn init(gpa: Allocator, root: []const u8, options: Options) Backend {
         return .{ .gpa = gpa, .root = root, .options = options };
     }
 
-    /// The handler to give uplink's server.
-    pub fn handler(b: *Backend) uplink.server.Handler {
-        return .init(b, serve);
+    /// The handler to give uplink's server, which holds it: the backend
+    /// stays where it is while a server serves it.
+    pub fn handler(b: *Backend) *uplink.server.Handler {
+        return &b.answers;
+    }
+
+    fn answer(h: *uplink.server.Handler, io: Io, request: *Request, response: *Response) anyerror!void {
+        const b: *Backend = @alignCast(@fieldParentPtr("answers", h));
+        return b.serve(io, request, response);
     }
 
     /// Answer one request.
@@ -215,7 +223,7 @@ pub const Backend = struct {
     /// and time, or not found.
     fn sendFile(io: Io, arena: Allocator, remote: *local.Remote, file: []const u8, content_type: []const u8, response: *Response) anyerror!void {
         const sub_path = std.mem.trimStart(u8, file, "/");
-        const opened = remote.repo.gitDirectory().get().openFile(io, sub_path, .{}) catch return notFound(io, response);
+        const opened = remote.repo.gitDirectory().openFile(io, sub_path, .{}) catch return notFound(io, response);
         defer opened.close(io);
         const stat = try opened.stat(io);
         try response.header("Content-Type", content_type);
@@ -401,7 +409,7 @@ pub fn openServed(gpa: Allocator, io: Io, root: []const u8, relative: []const u8
         else => return null,
     };
     if (!export_all) {
-        remote.repo.gitDirectory().get().access(io, "git-daemon-export-ok", .{}) catch {
+        remote.repo.gitDirectory().access(io, "git-daemon-export-ok", .{}) catch {
             remote.deinit(io);
             return null;
         };

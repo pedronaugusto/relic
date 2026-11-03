@@ -157,12 +157,12 @@ pub fn expireReflogs(gpa: Allocator, io: Io, repo: *Repository, options: ReflogE
         switch (where.owner) {
             .current, .shared => try repo.refStore().expireLog(gpa, io, &keeper, .{ .name = name, .rewrite = options.rewrite, .update_ref = options.update_ref }),
             .main, .other => {
-                var admin: ?fs.OwnedDir = if (where.owner == .main) null else fs.OwnedDir.init(repo.commonDirectory().get().openDir(io, name[0 .. name.len - where.bare.len - 1], .{}) catch |err| switch (err) {
+                var admin: ?fs.OwnedDir = if (where.owner == .main) null else fs.OwnedDir.init(repo.commonDirectory().openDir(io, name[0 .. name.len - where.bare.len - 1], .{}) catch |err| switch (err) {
                     error.FileNotFound, error.NotDir => continue,
                     else => |e| return e,
                 });
                 defer if (admin) |*dir| dir.deinit(io);
-                var store = try repo.refStore().sibling(if (admin) |*dir| dir.lend() else repo.commonDirectory());
+                var store = try repo.refStore().sibling(if (admin) |*dir| dir.borrow().* else repo.commonDirectory());
                 defer store.deinit();
                 try store.expireLog(gpa, io, &keeper, .{ .name = where.bare, .rewrite = options.rewrite, .update_ref = options.update_ref });
             },

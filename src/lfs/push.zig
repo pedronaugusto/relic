@@ -252,7 +252,7 @@ fn usesLfs(io: Io, repo: *Repository) bool {
     for (repo.configuration().entries.items) |entry| {
         if (std.ascii.eqlIgnoreCase(entry.section, "filter") and std.mem.eql(u8, entry.subsection, "lfs")) return true;
     }
-    repo.commonDirectory().get().access(io, "lfs", .{}) catch return false;
+    repo.commonDirectory().access(io, "lfs", .{}) catch return false;
     return true;
 }
 

@@ -2,6 +2,7 @@
 //! This module is package plumbing, reached by no public name.
 const fs = @import("../fs/fs.zig");
 const std = @import("std");
+const Io = std.Io;
 const hash = @import("../hash/hash.zig");
 const refs = @import("value.zig");
 const stack = @import("reftable/stack/cache.zig");
@@ -12,8 +13,8 @@ const policy = @import("reftable/stack/policy.zig");
 pub const State = struct {
     gpa: std.mem.Allocator,
     /// Lent by the store's caller, which closes them after the store.
-    git_dir: fs.LentDir,
-    common_dir: fs.LentDir,
+    git_dir: Io.Dir,
+    common_dir: Io.Dir,
     kind: hash.Kind,
     format: refs.Format,
     options: policy.Options,
@@ -44,7 +45,7 @@ pub const Locks = struct {
     pid_file: bool = false,
 };
 
-pub fn create(gpa: std.mem.Allocator, kind: hash.Kind, format: refs.Format, options: policy.Options, git_dir: fs.LentDir, common_dir: fs.LentDir) std.mem.Allocator.Error!*State {
+pub fn create(gpa: std.mem.Allocator, kind: hash.Kind, format: refs.Format, options: policy.Options, git_dir: Io.Dir, common_dir: Io.Dir) std.mem.Allocator.Error!*State {
     const data = try gpa.create(State);
     errdefer gpa.destroy(data);
     const cache = if (format == .reftable) blk: {

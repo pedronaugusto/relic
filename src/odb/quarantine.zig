@@ -66,7 +66,7 @@ pub const Quarantine = struct {
 
     /// Make the directory beside `main`'s objects and open a database on it.
     pub fn begin(gpa: Allocator, io: Io, main: *Odb, purpose: Purpose) ErrorNamespace.Error!Quarantine {
-        const objects = main.objectsDirectory().get();
+        const objects = main.objectsDirectory();
         var q: Quarantine = .{ .gpa = gpa, .db = undefined, .objects = objects, .name_buf = undefined, .name_len = 0, .path = &.{}, .objects_path = &.{}, .shared = main.sharedPermissions() };
         const dir_name = fs.tempName(io, &q.name_buf, purpose.prefix());
         q.name_len = dir_name.len;
@@ -131,7 +131,7 @@ pub const Quarantine = struct {
             defer pack_in.close(io);
             var opened_pack_out = try main.openPackDirectory(io);
             defer opened_pack_out.deinit(io);
-            const pack_out = opened_pack_out.lend().get();
+            const pack_out = opened_pack_out.borrow().*;
             // Every pack's companions first, its index after them.
             var names: std.ArrayList([]u8) = .empty;
             defer {

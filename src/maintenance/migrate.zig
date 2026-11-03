@@ -55,15 +55,15 @@ pub fn migrate(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self
         defer linked.deinit();
         if (linked.entries.len != 0) return error.WorktreesUnsupported;
     }
-    const git_dir = repo.gitDirectory().get();
+    const git_dir = repo.gitDirectory();
     var name_buf: [32]u8 = undefined;
     const dir_name = try tempDirectory(io, git_dir, &name_buf);
     var owned = fs.OwnedDir.init(try git_dir.openDir(io, dir_name, .{ .iterate = true }));
     defer owned.deinit(io);
-    const dir = owned.lend().get();
+    const dir = owned.borrow().*;
     try refs_mod.create(io, dir, options.format, .{ .shared = old.sharedPermissions() });
     {
-        var store = try refs_mod.Store.init(gpa, repo.objectFormat(), owned.lend(), owned.lend(), .{ .format = options.format, .reftable = old.reftableOptions(), .shared = old.sharedPermissions() });
+        var store = try refs_mod.Store.init(gpa, repo.objectFormat(), owned.borrow().*, owned.borrow().*, .{ .format = options.format, .reftable = old.reftableOptions(), .shared = old.sharedPermissions() });
         defer store.deinit();
         try copyRefs(gpa, io, repo, &store);
         if (options.reflogs) try copyLogs(gpa, io, old, &store);
@@ -120,7 +120,7 @@ fn writeFormat(gpa: Allocator, io: Io, repo: *Repository, format: refs_mod.Forma
         try edits.append(gpa, .{ .set = .{ .name = "extensions.submodulepathconfig", .value = "true" } });
     }
     try edits.append(gpa, .{ .set = .{ .name = "core.repositoryformatversion", .value = version } });
-    _ = try config_write.editFile(gpa, io, repo.commonDirectory().get(), "config", .local, repo.configLock(), edits.items);
+    _ = try config_write.editFile(gpa, io, repo.commonDirectory(), "config", .local, repo.configLock(), edits.items);
 }
 
 /// `ref_migration.XXXXXX`, made in `git_dir` as `mkdtemp` makes it.

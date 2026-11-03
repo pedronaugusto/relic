@@ -484,7 +484,7 @@ pub const Session = struct {
         return .{
             .config = options.config,
             .remote_name = options.remote_name,
-            .base = if (options.repository) |r| r.topDirectory().get() else null,
+            .base = if (options.repository) |r| r.topDirectory() else null,
             .proxy = options.proxy,
             .programs = options.programs,
             .protocol_v2 = options.protocol_v2 orelse wantsV2(options.config),
@@ -519,7 +519,7 @@ pub const Session = struct {
         const spec = remote_helper.Spec.of(remote_url, options.remote_name, vcs) orelse return null;
         try checkAllowed(options, spec.name);
         const programs = options.programs orelse return error.ProgramsNotGranted;
-        const git_dir: ?[:0]u8 = if (options.repository) |r| try fs.realPathAlloc(gpa, io, r.gitDirectory().get(), ".") else null;
+        const git_dir: ?[:0]u8 = if (options.repository) |r| try fs.realPathAlloc(gpa, io, r.gitDirectory(), ".") else null;
         defer if (git_dir) |d| gpa.free(d);
         const h = try remote_helper.Helper.open(gpa, io, spec, .{
             .programs = programs,

@@ -208,7 +208,7 @@ fn blobBytes(ext: *const External, a: Allocator, io: Io, spec: Run, s: Side) Sel
         .file => |*file| blk: {
             defer file.deinit(io);
             var buf: [4096]u8 = undefined;
-            var reader = file.lend().get().readerStreaming(io, &buf);
+            var reader = file.borrow().*.readerStreaming(io, &buf);
             break :blk try reader.interface.allocRemaining(a, .unlimited);
         },
         .delayed => error.DelayedContent,

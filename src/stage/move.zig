@@ -154,7 +154,7 @@ pub fn move(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Er
     if (options.sources.len == 0) return error.NoSource;
     var outcome: Outcome = .{ .arena = .init(gpa) };
     errdefer outcome.deinit();
-    const wt = (repo.workDirectory() orelse return error.BareRepository).get();
+    const wt = repo.workDirectory() orelse return error.BareRepository;
     const ignore_case = repo.settings().ignore_case;
 
     var locked = try repo.lockIndex(io);
@@ -163,7 +163,7 @@ pub fn move(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Er
 
     const settings = try sparse_checkout.settings(io, repo);
     var cone_patterns: ?sparse.Patterns = if (settings.enabled)
-        try sparse.Patterns.load(gpa, io, repo.gitDirectory().get(), .{ .case_fold = ignore_case, .cone = settings.cone })
+        try sparse.Patterns.load(gpa, io, repo.gitDirectory(), .{ .case_fold = ignore_case, .cone = settings.cone })
     else
         null;
     defer if (cone_patterns) |*p| p.deinit();

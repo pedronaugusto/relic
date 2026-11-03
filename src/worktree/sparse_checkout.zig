@@ -157,7 +157,7 @@ pub fn add(io: Io, repo: *Repository, patterns: []const []const u8, options: Opt
     var arena_instance: std.heap.ArenaAllocator = .init(repo.allocator());
     defer arena_instance.deinit();
     const arena = arena_instance.allocator();
-    const existing = (try fs.readFileAlloc(arena, io, repo.gitDirectory().get(), pattern_file, 1 << 24)) orelse
+    const existing = (try fs.readFileAlloc(arena, io, repo.gitDirectory(), pattern_file, 1 << 24)) orelse
         return error.PatternFileMissing;
 
     const text = if (op.state.cone) blk: {
@@ -207,7 +207,7 @@ pub fn init(io: Io, repo: *Repository, options: Options) Self.Error!Outcome {
     var op = try Op.init(io, repo);
     defer op.deinit();
     try op.updateModes(options);
-    if (try fs.statAt(io, repo.gitDirectory().get(), pattern_file)) |_| return op.updateWorkingTree(null);
+    if (try fs.statAt(io, repo.gitDirectory(), pattern_file)) |_| return op.updateWorkingTree(null);
     return op.writePatternsAndUpdate("/*\n!/*/\n");
 }
 
@@ -256,7 +256,7 @@ pub fn list(io: Io, repo: *Repository) Self.Error!Listing {
     var arena_instance: std.heap.ArenaAllocator = .init(repo.allocator());
     errdefer arena_instance.deinit();
     const arena = arena_instance.allocator();
-    const text = (try fs.readFileAlloc(arena, io, repo.gitDirectory().get(), pattern_file, 1 << 24)) orelse "";
+    const text = (try fs.readFileAlloc(arena, io, repo.gitDirectory(), pattern_file, 1 << 24)) orelse "";
 
     var entries: std.ArrayList([]const u8) = .empty;
     var cone_listing = false;
@@ -381,7 +381,7 @@ const Op = struct {
         // The main worktree's own file is this repository's in the main
         // worktree, and one beside it from a linked one.
         if (repo.isLinkedWorktree())
-            _ = try repo.writeConfigFile(io, repo.commonDirectory().get(), "config.worktree", moved[0..n])
+            _ = try repo.writeConfigFile(io, repo.commonDirectory(), "config.worktree", moved[0..n])
         else
             _ = try repo.writeConfig(io, .worktree, moved[0..n], .{});
         _ = try repo.writeConfig(io, .local, unset[0..n], .{});
@@ -419,7 +419,7 @@ const Op = struct {
         const repo = op.repo;
         try makeInfoDir(op.io, repo);
         var buffer: [4096]u8 = undefined;
-        var lock = try fs.LockFile.open(repo.allocator(), op.io, repo.gitDirectory().get(), .{ .sub_path = pattern_file, .buffer = &buffer }, .{ .shared = repo.sharedPermissions(), .sync = .none, .write_pid = repo.lockfilePid() });
+        var lock = try fs.LockFile.open(repo.allocator(), op.io, repo.gitDirectory(), .{ .sub_path = pattern_file, .buffer = &buffer }, .{ .shared = repo.sharedPermissions(), .sync = .none, .write_pid = repo.lockfilePid() });
         defer lock.deinit(op.io);
 
         var patterns = try sparse.Patterns.fromText(repo.allocator(), text, .{ .case_fold = op.fold, .cone = op.state.cone });
@@ -435,7 +435,7 @@ const Op = struct {
     /// `update_working_directory(NULL)`.
     fn updateWorkingTree(op: *Op, patterns: ?*const sparse.Patterns) Error!Outcome {
         if (patterns) |p| return op.updateWorkingTreeWith(p);
-        var loaded = (try sparse.Patterns.load(op.repo.allocator(), op.io, op.repo.gitDirectory().get(), .{
+        var loaded = (try sparse.Patterns.load(op.repo.allocator(), op.io, op.repo.gitDirectory(), .{
             .case_fold = op.fold,
             .cone = op.state.cone,
         })) orelse try sparse.Patterns.init(op.repo.allocator(), .{ .case_fold = op.fold });
@@ -449,14 +449,14 @@ const Op = struct {
     fn updateWorkingTreeWith(op: *Op, patterns: *const sparse.Patterns) Error!Outcome {
         const repo = op.repo;
         const io = op.io;
-        if (try fs.statAt(io, repo.gitDirectory().get(), "index") == null) return .{};
+        if (try fs.statAt(io, repo.gitDirectory(), "index") == null) return .{};
 
         var locked = try repo.lockIndex(io);
         defer locked.deinit(io);
         const index = &locked.index;
         var unmarked: u32 = 0;
         if (op.state.enabled and !try repo.configuration().getBool("sparse.expectfilesoutsideofpatterns", false)) {
-            unmarked = try sparse_index.clearSkipFromPresent(repo.allocator(), io, repo.workDirectory().?.get(), index, repo.objectDatabase());
+            unmarked = try sparse_index.clearSkipFromPresent(repo.allocator(), io, repo.workDirectory().?, index, repo.objectDatabase());
         }
 
         var rules = try repo.worktreeRules();
@@ -464,7 +464,7 @@ const Op = struct {
         defer attrs.deinit();
         rules.attrs = &attrs;
 
-        const update = try worktree.applySparse(repo.allocator(), io, repo.workDirectory().?.get(), .{ .index = index, .db = repo.objectDatabase(), .patterns = patterns }, .{ .rules = rules });
+        const update = try worktree.applySparse(repo.allocator(), io, repo.workDirectory().?, .{ .index = index, .db = repo.objectDatabase(), .patterns = patterns }, .{ .rules = rules });
 
         // git decides at every write whether the index may be sparse: sparse
         // checkout on, in cone mode, with `index.sparse`, and patterns that
@@ -479,7 +479,7 @@ const Op = struct {
 };
 
 fn makeInfoDir(io: Io, repo: *Repository) Error!void {
-    repo.gitDirectory().get().createDirPath(io, "info") catch |err| switch (err) {
+    repo.gitDirectory().createDirPath(io, "info") catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => |e| return e,
     };

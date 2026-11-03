@@ -37,9 +37,6 @@ const aegis = @import("aegis");
 pub const OwnedDir = aegis.own.OwnedIo(Io.Dir, closeDir);
 /// A file handle with its one owner, as `OwnedDir`.
 pub const OwnedFile = aegis.own.OwnedIo(Io.File, closeFile);
-/// A directory handle lent out of the owner that keeps it: not the
-/// holder's to close, and good until that owner closes it.
-pub const LentDir = aegis.own.Lent(Io.Dir);
 /// A connected socket with its one owner, as `OwnedDir`.
 pub const OwnedStream = aegis.own.OwnedIo(Io.net.Stream, closeStream);
 /// A listening socket with its one owner, as `OwnedDir`.
@@ -107,14 +104,10 @@ pub fn syncAll(gpa: Allocator, io: Io, files: []const Named, directories: []cons
     defer gpa.free(slots);
     var batch: airlock.Batch = .init(slots);
     defer batch.reset(io);
-    // aegis: no-danger: a slot for each file and each directory
-    for (files) |file| batch.addPath(file.dir, file.sub_path) catch unreachable;
-    // aegis: no-danger: a slot for each file and each directory
-    for (directories) |directory| batch.addDirPath(directory.dir, directory.sub_path) catch unreachable;
-    _ = batch.commitOrRefuse(io, .{ .level = .data }) catch |err| switch (err) {
-        error.BatchFull => unreachable, // aegis: no-danger: nothing was added past the slots
-        else => |e| return e,
-    };
+    // A slot for each file and each directory: every add has its room.
+    for (files) |file| batch.addPath(file.dir, file.sub_path);
+    for (directories) |directory| batch.addDirPath(directory.dir, directory.sub_path);
+    _ = try batch.commitOrRefuse(io, .{ .level = .data });
 }
 
 /// How hard one file is pushed towards the disk. airlock does the syncing
@@ -1065,10 +1058,7 @@ pub fn removeLeftover(io: Io, dir: Io.Dir, name: []const u8) void {
 /// Rename over the name `new_name`, as git renames: with no sync, and on
 /// Windows retried while a scanner or indexer holds either name.
 pub fn rename(io: Io, dir: Io.Dir, old_name: []const u8, new_name: []const u8) Io.Dir.RenameError!void {
-    _ = airlock.rename(io, dir, old_name, dir, new_name, .{ .sync = .{ .level = .none } }) catch |err| switch (err) {
-        error.PublishedNotDurable => unreachable, // aegis: no-danger: a rename asked to sync nothing reports no failed sync
-        else => |e| return e,
-    };
+    return airlock.renameUnsynced(io, dir, old_name, dir, new_name, .fromMilliseconds(2000));
 }
 
 /// Take off `sub_path`'s read-only attribute, when it has one, as git for
@@ -1275,7 +1265,7 @@ pub fn setFilePermissions(io: Io, dir: Io.Dir, sub_path: []const u8, permissions
     const wanted = @backingInt(permissions) & settable;
     // A zero would leave the attributes as they are: no attributes at all is
     // `FILE_ATTRIBUTE_NORMAL`.
-    try file.lend().get().setPermissions(io, @fromBackingInt(if (wanted == 0) 0x80 else wanted));
+    try file.borrow().*.setPermissions(io, @fromBackingInt(if (wanted == 0) 0x80 else wanted));
 }
 
 /// `Dir.setTimestamps`, on Windows as well, where the standard library's
@@ -1290,7 +1280,7 @@ pub fn setTimestamps(io: Io, dir: Io.Dir, sub_path: []const u8, options: Io.File
     });
     var file = try openAttributesWindows(dir, sub_path);
     defer file.deinit(io);
-    try file.lend().get().setTimestamps(io, options);
+    try file.borrow().*.setTimestamps(io, options);
 }
 
 /// Link two paths in a directory. Zig 0.17's threaded I/O has no Windows
@@ -1767,19 +1757,19 @@ pub fn readSecretFile(
     // The length is a first guess: the file may change as it is read.
     const guess = std.math.cast(usize, file.length(io) catch 0) orelse max_bytes;
     var secret = try aegis.SecretBytes.init(gpa, @min(guess, max_bytes) + 1);
-    errdefer secret.deinit();
+    errdefer secret.deinit(gpa);
     var at: Reading = .offset;
     while (true) {
         const have = secret.len();
         if (have == secret.capacity()) {
             if (have > max_bytes) return error.StreamTooLong;
-            try secret.reserve(@min(have *| 2, max_bytes + 1));
+            try secret.reserve(gpa, @min(have *| 2, max_bytes + 1));
         }
         // unreachable: the capacity was just made room for.
         secret.resizeWithinCapacity(secret.capacity()) catch unreachable;
         const read = at.read(io, file, secret.exposeMut()[have..], have) catch |err| switch (err) {
             error.IsDir => {
-                secret.deinit();
+                secret.deinit(gpa);
                 return null;
             },
             else => |e| return e,
@@ -2036,15 +2026,15 @@ test "a secret file is read whole into its owner, and refused past its limit as 
     try dir.createDirPath(io, "d");
 
     var whole = (try readSecretFile(gpa, io, dir, "f", 1 << 20)).?;
-    defer whole.deinit();
+    defer whole.deinit(gpa);
     try std.testing.expectEqualStrings("twelve bytes", whole.expose());
 
     var at_limit = (try readSecretFile(gpa, io, dir, "f", 12)).?;
-    defer at_limit.deinit();
+    defer at_limit.deinit(gpa);
     try std.testing.expectEqualStrings("twelve bytes", at_limit.expose());
 
     var empty = (try readSecretFile(gpa, io, dir, "empty", 1 << 20)).?;
-    defer empty.deinit();
+    defer empty.deinit(gpa);
     try std.testing.expectEqual(@as(usize, 0), empty.len());
 
     try std.testing.expectError(error.StreamTooLong, readSecretFile(gpa, io, dir, "f", 4));
@@ -2090,7 +2080,7 @@ test "a secret file is read on past a streamed read that gives no bytes short of
 
     var secret: ZeroMidStream = .init(std.testing.io, .{});
     var kept = (try readSecretFile(gpa, secret.io(), tmp.dir, "f", 1 << 20)).?;
-    defer kept.deinit();
+    defer kept.deinit(gpa);
     try std.testing.expectEqualStrings("twelve bytes", kept.expose());
     try std.testing.expect(secret.state.reads > 2);
 }

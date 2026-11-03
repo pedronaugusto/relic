@@ -91,14 +91,14 @@ pub const Source = struct {
     midx_packs: std.ArrayList(?u32),
 
     /// The `objects` directory, lent until the source is closed.
-    pub fn directory(source: *Source) fs.LentDir {
-        return source.dir.lend();
+    pub fn directory(source: *Source) Io.Dir {
+        return source.dir.borrow().*;
     }
 
     /// Its `pack` directory, lent until the source is closed, or `null`
     /// when there is none yet.
-    pub fn packDirectory(source: *Source) ?fs.LentDir {
-        return if (source.pack_dir) |*dir| dir.lend() else null;
+    pub fn packDirectory(source: *Source) ?Io.Dir {
+        return if (source.pack_dir) |*dir| dir.borrow().* else null;
     }
 
     /// Which pack holds `oid`, asking the multi-pack index first.

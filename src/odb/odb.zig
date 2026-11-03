@@ -396,7 +396,7 @@ pub const Odb = struct {
 
     /// The writable objects directory, lent until this database is closed.
     /// Accelerator writers use it so storage paths have one owner.
-    pub fn objectsDirectory(db: *const Odb) fs.LentDir {
+    pub fn objectsDirectory(db: *const Odb) Io.Dir {
         for (db.backendData().sources.items) |source| if (source.writable) return source.directory();
         unreachable;
     }
@@ -407,7 +407,7 @@ pub const Odb = struct {
         const data = db.backendData();
         if (!data.options.use_bitmaps or db.shallow.count() != 0) return null;
         if (!data.bitmap_checked) {
-            data.bitmap = reachability.Store.open(data.gpa, io, db.objectsDirectory().get(), data.kind) catch |err| blk: {
+            data.bitmap = reachability.Store.open(data.gpa, io, db.objectsDirectory(), data.kind) catch |err| blk: {
                 if (opening.readRefusal(err)) return @errorCast(err);
                 break :blk null;
             };
@@ -469,7 +469,7 @@ pub const Odb = struct {
         var objects = fs.OwnedDir.init(try git_dir.openDir(io, "objects", .{ .iterate = true }));
         try odb.addSource(io, &objects, true, 0);
         if (options.probe_timestamp_resolution) {
-            odb.timestamp_resolution = try fs.probeTimestampResolution(io, odb.objectsDirectory().get());
+            odb.timestamp_resolution = try fs.probeTimestampResolution(io, odb.objectsDirectory());
         }
         return odb;
     }
@@ -489,7 +489,7 @@ pub const Odb = struct {
         var owned = fs.OwnedDir.init(try objects_dir.openDir(io, ".", .{ .iterate = true }));
         try odb.addSource(io, &owned, true, 0);
         if (options.probe_timestamp_resolution) {
-            odb.timestamp_resolution = try fs.probeTimestampResolution(io, odb.objectsDirectory().get());
+            odb.timestamp_resolution = try fs.probeTimestampResolution(io, odb.objectsDirectory());
         }
         return odb;
     }
@@ -499,7 +499,7 @@ pub const Odb = struct {
     /// Comments and empty lines are omitted, quoted names are decoded, and
     /// the caller owns the result.
     pub fn listAlternates(odb: *Odb, gpa: Allocator, io: Io) ErrorNamespace.Error!Alternates {
-        const file = (try fs.readFileAlloc(gpa, io, odb.backendData().sources.items[0].directory().get(), "info/alternates", 1 << 20)) orelse try gpa.alloc(u8, 0);
+        const file = (try fs.readFileAlloc(gpa, io, odb.backendData().sources.items[0].directory(), "info/alternates", 1 << 20)) orelse try gpa.alloc(u8, 0);
         errdefer gpa.free(file);
         var paths: std.ArrayList([]u8) = .empty;
         errdefer {
@@ -539,7 +539,7 @@ pub const Odb = struct {
     /// alternates come with it. The handle is borrowed.
     pub fn borrow(odb: *Odb, io: Io, objects_dir: Io.Dir) ErrorNamespace.Error!void {
         var dir = fs.OwnedDir.init(try objects_dir.openDir(io, ".", .{ .iterate = true }));
-        const already = odb.alreadySource(io, dir.lend().get()) catch |err| {
+        const already = odb.alreadySource(io, dir.borrow().*) catch |err| {
             dir.deinit(io);
             return err;
         };
@@ -581,7 +581,7 @@ pub const Odb = struct {
 
     fn writeAlternates(odb: *Odb, io: Io, content: []const u8) ErrorNamespace.Error!void {
         if (content.len > 1 << 20) return error.AlternatesTooLarge;
-        const dir = odb.backendData().sources.items[0].directory().get();
+        const dir = odb.backendData().sources.items[0].directory();
         try dir.createDirPath(io, "info");
         // git syncs `info/alternates` under no `core.fsync` component.
         try fs.atomicWrite(io, dir, "info/alternates", content, .{ .prefix = "alternates-", .sync = .none });
@@ -600,7 +600,7 @@ pub const Odb = struct {
         try opening.register(io, odb, dir, writable);
         const at = odb.backendData().sources.items.len - 1;
         try odb.scanPacks(io, at);
-        try odb.readAlternates(io, odb.backendData().sources.items[at].directory().get(), depth);
+        try odb.readAlternates(io, odb.backendData().sources.items[at].directory(), depth);
     }
 
     /// Add the alternates `dir` names, as git's `link_alt_odb_entries`
@@ -616,7 +616,7 @@ pub const Odb = struct {
             const line = entry.path orelse continue;
             defer odb.backendData().gpa.free(line);
             var alt = (try opening.openDirectory(io, dir, line)) orelse continue;
-            const already = odb.alreadySource(io, alt.lend().get()) catch |err| {
+            const already = odb.alreadySource(io, alt.borrow().*) catch |err| {
                 alt.deinit(io);
                 return err;
             };
@@ -650,8 +650,8 @@ pub const Odb = struct {
         const source = odb.backendData().sources.items[source_index];
         // A `pack` directory made since the database was opened is found
         // here, as git reads `objects/pack` again on every scan.
-        if (source.pack_dir == null) source.pack_dir = try opening.openDirectory(io, source.directory().get(), "pack");
-        const pack_dir = (source.packDirectory() orelse return).get();
+        if (source.pack_dir == null) source.pack_dir = try opening.openDirectory(io, source.directory(), "pack");
+        const pack_dir = source.packDirectory() orelse return;
         var it = pack_dir.iterate();
         while (try it.next(io)) |entry| {
             if (entry.kind == .directory) continue;
@@ -704,7 +704,7 @@ pub const Odb = struct {
     /// Every pack `scanPacks` left out because it did not read as one,
     /// opened again for its error.
     fn verifyUnopened(odb: *Odb, io: Io, source: *Source) ErrorNamespace.Error!void {
-        const pack_dir = (source.packDirectory() orelse return).get();
+        const pack_dir = source.packDirectory() orelse return;
         var it = pack_dir.iterate();
         while (try it.next(io)) |entry| {
             if (entry.kind == .directory or !std.mem.endsWith(u8, entry.name, ".idx")) continue;
@@ -730,7 +730,7 @@ pub const Odb = struct {
         source.midx = null;
         source.midx_packs.clearRetainingCapacity();
 
-        const pack_dir = (source.packDirectory() orelse return).get();
+        const pack_dir = source.packDirectory() orelse return;
         var index = (midx.Index.open(odb.backendData().gpa, io, pack_dir, odb.backendData().kind) catch |err| switch (err) {
             error.NotAMultiPackIndex, error.UnsupportedMidxVersion, error.ObjectFormatMismatch, error.CorruptMultiPackIndex, error.ChainUnsupported => return,
             else => |failure| return failure,
@@ -827,7 +827,7 @@ pub const Odb = struct {
             .empty_tree => return .{ .type = .tree, .bytes = try odb.backendData().gpa.alloc(u8, 0) },
             .loose => |*file| {
                 defer file.deinit(io);
-                return odb.readLooseFile(io, file.lend().get());
+                return odb.readLooseFile(io, file.borrow().*);
             },
             .in_pack => |at| {
                 const obj = try at.named.pack.readAt(io, at.offset, odb.packRead(at.named));
@@ -864,7 +864,7 @@ pub const Odb = struct {
             },
             .loose => |*file| {
                 defer file.deinit(io);
-                const found = try odb.readLooseFrom(io, file.lend().get(), .{ .list = buffer });
+                const found = try odb.readLooseFrom(io, file.borrow().*, .{ .list = buffer });
                 return .{ .type = found.header.type, .bytes = buffer.items };
             },
             .in_pack => |at| {
@@ -1049,7 +1049,7 @@ pub const Odb = struct {
                 var input: [loose_input_bytes]u8 = undefined;
                 var window: [inflate_window_bytes]u8 = undefined;
                 var inflating: LooseInflate = undefined;
-                try inflating.start(io, file.lend().get(), &input, &window);
+                try inflating.start(io, file.borrow().*, &input, &window);
                 if (inflating.header.size > limit) {
                     // The stream reads the file again from its start: the
                     // reads are positional. It takes the file.
@@ -1094,7 +1094,7 @@ pub const Odb = struct {
             .loose => |*file| {
                 s.source = .{ .loose = .{ .file = file.move(), .inflating = undefined, .input = undefined, .window = undefined } };
                 const l = &s.source.loose;
-                l.inflating.start(io, l.file.lend().get(), &l.input, &l.window) catch |err| {
+                l.inflating.start(io, l.file.borrow().*, &l.input, &l.window) catch |err| {
                     l.file.deinit(io);
                     return err;
                 };
@@ -1115,7 +1115,7 @@ pub const Odb = struct {
                             e.fixed = .fixed(pack.mappedFrom(mem, entry.data_at) orelse return error.TruncatedPack);
                             break :blk &e.fixed;
                         } else blk: {
-                            e.file_reader = p.file.lend().get().reader(io, &e.input);
+                            e.file_reader = p.file.borrow().*.reader(io, &e.input);
                             e.file_reader.seekTo(entry.data_at) catch |x| return switch (x) {
                                 error.EndOfStream => error.TruncatedPack,
                                 error.ReadFailed => e.file_reader.err orelse error.ReadFailed,
@@ -1123,7 +1123,7 @@ pub const Odb = struct {
                             };
                             break :blk &e.file_reader.interface;
                         };
-                        e.inflate = .init(input, &e.window, .{});
+                        e.inflate = warp.Inflate.Reader.init(input, &e.window, .{}) catch aegis.assert.never("zlib's default window, and the buffer holds it and a read");
                     },
                     .ofs_delta, .ref_delta => {
                         const obj = try p.readAt(io, at.offset, odb.packRead(at.named));
@@ -1197,7 +1197,7 @@ pub const Odb = struct {
         var path_buf: [hash.max_hex_len + 2]u8 = undefined;
         const path = odb.loosePath(oid, &path_buf);
         for (odb.backendData().sources.items) |source| {
-            return fs.OwnedFile.init(source.directory().get().openFile(io, path, .{}) catch |err| switch (err) {
+            return fs.OwnedFile.init(source.directory().openFile(io, path, .{}) catch |err| switch (err) {
                 error.FileNotFound, error.NotDir => continue,
                 else => |e| return e,
             });
@@ -1209,7 +1209,7 @@ pub const Odb = struct {
     fn readLoose(odb: *Odb, io: Io, oid: Oid) ErrorNamespace.Error!?Read {
         var file = (try odb.openLoose(io, oid)) orelse return null;
         defer file.deinit(io);
-        return try odb.readLooseFile(io, file.lend().get());
+        return try odb.readLooseFile(io, file.borrow().*);
     }
 
     fn readLooseFile(odb: *const Odb, io: Io, file: Io.File) ErrorNamespace.Error!Read {
@@ -1251,7 +1251,7 @@ pub const Odb = struct {
         /// (`inflate_window_bytes`) the inflater's.
         fn start(l: *LooseInflate, io: Io, file: Io.File, input: []u8, window: []u8) ErrorNamespace.Error!void {
             l.file_reader = file.reader(io, input);
-            l.inflate = .init(&l.file_reader.interface, window, .{});
+            l.inflate = warp.Inflate.Reader.init(&l.file_reader.interface, window, .{}) catch aegis.assert.never("zlib's default window, and the buffer holds it and a read");
             const r = &l.inflate.interface;
             const head = r.peekDelimiterInclusive(0) catch |err| return switch (err) {
                 error.ReadFailed => looseInflateError(&l.file_reader),
@@ -1355,7 +1355,7 @@ pub const Odb = struct {
         var path_buf: [hash.max_hex_len + 2]u8 = undefined;
         const path = odb.loosePath(oid, &path_buf);
         for (odb.backendData().sources.items) |source| {
-            const stat = source.directory().get().statFile(io, path, .{}) catch |err| switch (err) {
+            const stat = source.directory().statFile(io, path, .{}) catch |err| switch (err) {
                 error.FileNotFound, error.NotDir => continue,
                 else => |e| return e,
             };
@@ -1454,7 +1454,7 @@ pub const Odb = struct {
     fn readLooseFor(odb: *const Odb, io: Io, oid: Oid, want: LooseWant) ErrorNamespace.Error!?LooseFound {
         var file = (try odb.openLoose(io, oid)) orelse return null;
         defer file.deinit(io);
-        return try odb.readLooseFrom(io, file.lend().get(), want);
+        return try odb.readLooseFrom(io, file.borrow().*, want);
     }
 
     /// `readLooseFor` of the loose file `file`.
@@ -1526,7 +1526,7 @@ pub const Odb = struct {
         var path_buf: [hash.max_hex_len + 2]u8 = undefined;
         const path = odb.loosePath(oid, &path_buf);
         for (odb.backendData().sources.items) |source| {
-            if (try opening.exists(io, source.directory().get(), path)) return true;
+            if (try opening.exists(io, source.directory(), path)) return true;
         }
         for (odb.backendData().sources.items) |source| {
             if ((try source.findPack(oid, &odb.stats)) != null) return true;
@@ -1552,10 +1552,10 @@ pub const Odb = struct {
         var found: ?Oid = null;
         for (odb.backendData().sources.items) |source| {
             var dir_name: [3]u8 = .{ prefix[0], prefix[1], 0 };
-            var sub = try opening.openDirectory(io, source.directory().get(), dir_name[0..2]);
+            var sub = try opening.openDirectory(io, source.directory(), dir_name[0..2]);
             if (sub) |*opened_sub| {
                 defer opened_sub.deinit(io);
-                const d = opened_sub.lend().get();
+                const d = opened_sub.borrow().*;
                 var it = d.iterate();
                 while (try it.next(io)) |entry| {
                     if (entry.kind == .directory) continue;
@@ -1608,7 +1608,7 @@ pub const Odb = struct {
         const source = odb.writableSource();
         var path_buf: [hash.max_hex_len + 2]u8 = undefined;
         const path = odb.loosePath(oid, &path_buf);
-        if (try opening.exists(io, source.directory().get(), path)) return true;
+        if (try opening.exists(io, source.directory(), path)) return true;
         return (try source.findPack(oid, &odb.stats)) != null;
     }
 
@@ -1628,7 +1628,7 @@ pub const Odb = struct {
     /// copy is there already, which is left as it is.
     pub fn loosen(odb: *Odb, io: Io, oid: Oid, time: ?i64) ErrorNamespace.Error!bool {
         var path_buf: [hash.max_hex_len + 2]u8 = undefined;
-        odb.writableSource().directory().get().access(io, odb.loosePath(oid, &path_buf), .{}) catch |err| switch (err) {
+        odb.writableSource().directory().access(io, odb.loosePath(oid, &path_buf), .{}) catch |err| switch (err) {
             error.FileNotFound => {
                 try odb.copyLoose(io, oid, time);
                 return true;
@@ -1685,7 +1685,7 @@ pub const Odb = struct {
             const oid = try p.index.nameAt(@intCast(i));
             const path = odb.loosePath(oid, &path_buf);
             for (odb.backendData().sources.items) |source| {
-                if (try opening.exists(io, source.directory().get(), path)) continue :objects;
+                if (try opening.exists(io, source.directory(), path)) continue :objects;
                 for (source.packs.items) |named| {
                     if (&named.pack == p) continue;
                     if ((try named.pack.index.find(oid)) != null) continue :objects;
@@ -1719,26 +1719,26 @@ pub const Odb = struct {
 
         const shared = odb.backendData().options.shared;
         var fan_out_made = false;
-        var file = source.directory().get().createFile(io, temp, .{ .exclusive = true, .permissions = object_permissions }) catch |err| switch (err) {
+        var file = source.directory().createFile(io, temp, .{ .exclusive = true, .permissions = object_permissions }) catch |err| switch (err) {
             error.FileNotFound => blk: {
-                if (source.directory().get().createDir(io, text[0..2], .default_dir)) |_| {
+                if (source.directory().createDir(io, text[0..2], .default_dir)) |_| {
                     fan_out_made = true;
-                    fs.adjustShared(io, source.directory().get(), text[0..2], shared);
+                    fs.adjustShared(io, source.directory(), text[0..2], shared);
                 } else |e| switch (e) {
                     error.PathAlreadyExists => {},
                     else => |other| return other,
                 }
                 odb.stats.fan_out_created += 1;
-                break :blk try source.directory().get().createFile(io, temp, .{ .exclusive = true, .permissions = object_permissions });
+                break :blk try source.directory().createFile(io, temp, .{ .exclusive = true, .permissions = object_permissions });
             },
             else => |e| return e,
         };
-        if (shared != .umask) fs.adjustShared(io, source.directory().get(), temp, shared);
+        if (shared != .umask) fs.adjustShared(io, source.directory(), temp, shared);
         var failed = true;
         defer if (failed) {
             file.close(io);
             // The write's error is the one to report; a temporary object left behind is what git gc prunes.
-            fs.removeLeftover(io, source.directory().get(), temp);
+            fs.removeLeftover(io, source.directory(), temp);
         };
 
         // The reusable Warp state and both writer buffers belong to the
@@ -1750,7 +1750,7 @@ pub const Odb = struct {
         // for twenty per cent smaller objects, paid on every blob written.
         const compress = state.compress;
         compress.reset(.nothing);
-        var writer: warp.Deflate.Writer = .init(compress, &file_writer.interface, state.input);
+        var writer = warp.Deflate.Writer.init(compress, &file_writer.interface, state.input) catch aegis.assert.never("the 4 KiB stage is the writer's least");
         var header_buf: [64]u8 = undefined;
         // unreachable: a type name is at most six bytes and a usize at most twenty digits
         const header = std.mem.print(&header_buf, "{s} {d}\x00", .{ t.name(), bytes.len }) catch unreachable;
@@ -1764,13 +1764,13 @@ pub const Odb = struct {
         file.close(io);
         failed = false;
         // The time before the name, as git's `write_loose_object` sets it.
-        if (time) |seconds| fs.setTimestamps(io, source.directory().get(), temp, .{ .modify_timestamp = .{ .new = date.timestamp(seconds) } }) catch |err| {
+        if (time) |seconds| fs.setTimestamps(io, source.directory(), temp, .{ .modify_timestamp = .{ .new = date.timestamp(seconds) } }) catch |err| {
             // The error is the one to report; a temporary object left behind is what `git gc` prunes.
-            fs.removeLeftover(io, source.directory().get(), temp);
+            fs.removeLeftover(io, source.directory(), temp);
             return err;
         };
 
-        try finalizeLoose(io, source.directory().get(), temp, final, odb.backendData().options.create_object);
+        try finalizeLoose(io, source.directory(), temp, final, odb.backendData().options.create_object);
         odb.noteLooseObject(oid, fan_out_made);
         odb.stats.loose_written += 1;
     }
@@ -1798,7 +1798,7 @@ pub const Odb = struct {
         // the pack's names are synced in it once it is published.
         var opened_dir = try db.openPackDirectory(io);
         defer opened_dir.deinit(io);
-        const dir = opened_dir.lend().get();
+        const dir = opened_dir.borrow().*;
         var receiving = options;
         receiving.keep = true;
         return indexpack_mod.receive(db.allocator(), io, db, .{ .pack_dir = dir, .in = input }, receiving);
@@ -1811,15 +1811,15 @@ pub const Odb = struct {
         // git's `commit_graph_compatible`: the graph records the parents
         // the commits carry, which replacements may not.
         if (try db.replacing(io)) return null;
-        return commit_graph_mod.Graph.openUsable(db.backendData().gpa, io, db.objectsDirectory().get(), db.objectFormat());
+        return commit_graph_mod.Graph.openUsable(db.backendData().gpa, io, db.objectsDirectory(), db.objectFormat());
     }
 
     /// The writable pack directory, made with the shared mode when it is
     /// missing and opened for iteration, the caller's. Every pack and
     /// companion this database writes is in it.
     pub fn openPackDirectory(db: *const Odb, io: Io) (Io.Dir.CreateDirPathError || Io.Dir.OpenError)!fs.OwnedDir {
-        try fs.makeDirs(io, db.objectsDirectory().get(), "pack", db.sharedPermissions());
-        return fs.OwnedDir.init(try db.objectsDirectory().get().openDir(io, "pack", .{ .iterate = true }));
+        try fs.makeDirs(io, db.objectsDirectory(), "pack", db.sharedPermissions());
+        return fs.OwnedDir.init(try db.objectsDirectory().openDir(io, "pack", .{ .iterate = true }));
     }
 
     /// Errors from `writePromisor`.
@@ -1844,7 +1844,7 @@ pub const Odb = struct {
         const file_name = std.mem.print(&name_buf, "pack-{s}.promisor", .{name.hex(&hex)}) catch unreachable;
         var opened_dir = try db.openPackDirectory(io);
         defer opened_dir.deinit(io);
-        const dir = opened_dir.lend().get();
+        const dir = opened_dir.borrow().*;
         const file = dir.createFile(io, file_name, .{ .exclusive = existing == .keep }) catch |err| switch (err) {
             error.PathAlreadyExists => return,
             else => |e| return e,
@@ -1878,7 +1878,10 @@ pub const Odb = struct {
         const gpa = odb.allocator();
         const compress = try gpa.create(warp.Deflate);
         errdefer gpa.destroy(compress);
-        compress.* = try .init(gpa, .{ .level = odb.backendData().options.packing.loose_compression.level() });
+        compress.* = warp.Deflate.init(gpa, .{ .level = odb.backendData().options.packing.loose_compression.level() }) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidOptions => aegis.assert.never("the default window and hash bits are valid"),
+        };
         errdefer compress.deinit();
         const buffer = try gpa.alloc(u8, deflate_output_buffer_len);
         errdefer gpa.free(buffer);
@@ -1909,16 +1912,19 @@ pub const Odb = struct {
         // What fails before `out` holds it all is undone here; after, by
         // `out.abort`.
         out.* = begun: {
-            const file = try source.directory().get().createFile(io, temp, .{ .exclusive = true, .permissions = object_permissions });
-            fs.adjustShared(io, source.directory().get(), temp, odb.backendData().options.shared);
+            const file = try source.directory().createFile(io, temp, .{ .exclusive = true, .permissions = object_permissions });
+            fs.adjustShared(io, source.directory(), temp, odb.backendData().options.shared);
             errdefer {
                 file.close(io);
                 // The write's error is the one to report; a temporary object left behind is what git gc prunes.
-                fs.removeLeftover(io, source.directory().get(), temp);
+                fs.removeLeftover(io, source.directory(), temp);
             }
             const window = try odb.allocator().alloc(u8, 4096);
             errdefer odb.allocator().free(window);
-            var compress = try warp.Deflate.init(odb.allocator(), .{ .level = 1 });
+            var compress = warp.Deflate.init(odb.allocator(), .{ .level = 1 }) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.InvalidOptions => aegis.assert.never("the default window and hash bits are valid"),
+            };
             errdefer compress.deinit();
             const out_buffer = try odb.backendData().gpa.alloc(u8, 16 * 1024);
             break :begun .{
@@ -1938,8 +1944,8 @@ pub const Odb = struct {
             };
         };
         @memcpy(out.temp[0..temp.len], temp);
-        out.file_writer = out.file.?.lend().get().writer(io, out.out_buffer);
-        out.compressed_writer = .init(&out.compress, &out.file_writer.interface, out.window);
+        out.file_writer = out.file.?.borrow().*.writer(io, out.out_buffer);
+        out.compressed_writer = warp.Deflate.Writer.init(&out.compress, &out.file_writer.interface, out.window) catch aegis.assert.never("the 4 KiB stage is the writer's least");
         out.hasher.updateHeader(t.name(), size);
         var digits: [20]u8 = undefined;
         const size_text = digits[0..std.fmt.printInt(&digits, size, 10, .lower, .{})];
@@ -1965,14 +1971,14 @@ pub const Odb = struct {
     pub fn verify(odb: *Odb, io: Io) ErrorNamespace.Error!Report {
         var report: Report = .{};
         for (odb.backendData().sources.items) |source| {
-            var top = source.directory().get().iterate();
+            var top = source.directory().iterate();
             while (try top.next(io)) |entry| {
                 if (entry.kind != .directory) continue;
                 if (entry.name.len != 2) continue;
                 if (hexPair(entry.name) == null) continue;
-                var opened_sub = (try opening.openDirectory(io, source.directory().get(), entry.name)) orelse continue;
+                var opened_sub = (try opening.openDirectory(io, source.directory(), entry.name)) orelse continue;
                 defer opened_sub.deinit(io);
-                const sub = opened_sub.lend().get();
+                const sub = opened_sub.borrow().*;
                 var it = sub.iterate();
                 while (try it.next(io)) |file_entry| {
                     if (file_entry.kind == .directory) continue;
@@ -2261,13 +2267,13 @@ pub const Odb = struct {
         var set: Oid.Set = .empty;
         errdefer set.deinit(odb.backendData().gpa);
         for (odb.backendData().sources.items) |source| {
-            var top = source.directory().get().iterate();
+            var top = source.directory().iterate();
             while (try top.next(io)) |entry| {
                 if (entry.kind != .directory or entry.name.len != 2) continue;
                 if (hexPair(entry.name) == null) continue;
-                var opened_sub = (try opening.openDirectory(io, source.directory().get(), entry.name)) orelse continue;
+                var opened_sub = (try opening.openDirectory(io, source.directory(), entry.name)) orelse continue;
                 defer opened_sub.deinit(io);
-                const sub = opened_sub.lend().get();
+                const sub = opened_sub.borrow().*;
                 var it = sub.iterate();
                 while (try it.next(io)) |file_entry| {
                     if (file_entry.name.len != odb.backendData().kind.hexLen() - 2) continue;
@@ -2335,7 +2341,7 @@ pub const Odb = struct {
         defer loose.deinit(io);
         while (try loose.next(io)) |found| {
             const oid = found.oid orelse continue;
-            const stat = found.dir.get().statFile(io, found.name, .{}) catch |err| switch (err) {
+            const stat = found.dir.statFile(io, found.name, .{}) catch |err| switch (err) {
                 error.FileNotFound => continue,
                 else => |e| return e,
             };
@@ -2348,14 +2354,14 @@ pub const Odb = struct {
             // A pack with an `.mtimes` beside it is a cruft pack, as git
             // reads it, and each of its objects has its own time.
             const mtimes_name = std.mem.print(&name_buf, "{s}.mtimes", .{named.name}) catch continue;
-            const times: ?[]u32 = mtimes.read(gpa, io, lent_pack.get(), mtimes_name, index.count) catch |err| switch (err) {
+            const times: ?[]u32 = mtimes.read(gpa, io, lent_pack, mtimes_name, index.count) catch |err| switch (err) {
                 error.FileNotFound => null,
                 else => |e| return e,
             };
             defer if (times) |t| gpa.free(t);
             const pack_time = if (times != null) 0 else blk: {
                 const file = std.mem.print(&name_buf, "{s}.pack", .{named.name}) catch continue;
-                const stat = lent_pack.get().statFile(io, file, .{}) catch |err| switch (err) {
+                const stat = lent_pack.statFile(io, file, .{}) catch |err| switch (err) {
                     error.FileNotFound => continue,
                     else => |e| return e,
                 };
@@ -2412,18 +2418,18 @@ pub const Odb = struct {
             while (try loose.next(io)) |found| {
                 if (found.oid) |oid| {
                     if (options.keep.contains(oid)) continue;
-                    if (!try notAfter(io, found.dir.get(), found.name, options.expire)) continue;
+                    if (!try notAfter(io, found.dir, found.name, options.expire)) continue;
                     report.pruned += 1;
-                    if (!options.dry_run) try deleteIfThere(io, found.dir.get(), found.name);
+                    if (!options.dry_run) try deleteIfThere(io, found.dir, found.name);
                 } else if (std.mem.startsWith(u8, found.name, "tmp_obj_")) {
-                    report.temporary_removed += try pruneTemporary(io, found.dir.get(), found.name, options);
+                    report.temporary_removed += try pruneTemporary(io, found.dir, found.name, options);
                 }
             }
         }
         report.packed_removed = try odb.prunePacked(io, options.dry_run);
         const source = odb.writableSource();
-        report.temporary_removed += try pruneTemporaries(io, source.directory().get(), options);
-        if (source.packDirectory()) |pack_dir| report.temporary_removed += try pruneTemporaries(io, pack_dir.get(), options);
+        report.temporary_removed += try pruneTemporaries(io, source.directory(), options);
+        if (source.packDirectory()) |pack_dir| report.temporary_removed += try pruneTemporaries(io, pack_dir, options);
         return report;
     }
 
@@ -2441,7 +2447,7 @@ pub const Odb = struct {
             for (odb.backendData().sources.items) |source| {
                 if ((try source.findPack(oid, &odb.stats)) == null) continue;
                 removed += 1;
-                if (!dry_run) try deleteIfThere(io, found.dir.get(), found.name);
+                if (!dry_run) try deleteIfThere(io, found.dir, found.name);
                 break;
             }
         }
@@ -2515,7 +2521,7 @@ pub const Odb = struct {
         name_buf: [Io.Dir.max_name_bytes]u8 = undefined,
 
         /// A name, and its directory lent until the next `next`.
-        const Found = struct { dir: fs.LentDir, name: []const u8, oid: ?Oid };
+        const Found = struct { dir: Io.Dir, name: []const u8, oid: ?Oid };
 
         fn next(l: *LooseNames, io: Io) ErrorNamespace.Error!?Found {
             while (true) {
@@ -2523,13 +2529,13 @@ pub const Odb = struct {
                     if (try it.next(io)) |entry| {
                         @memcpy(l.name_buf[0..entry.name.len], entry.name);
                         const name = l.name_buf[0..entry.name.len];
-                        return .{ .dir = l.dir.?.lend(), .name = name, .oid = l.parse(name) };
+                        return .{ .dir = l.dir.?.borrow().*, .name = name, .oid = l.parse(name) };
                     }
                     l.dir.?.deinit(io);
                     l.dir = null;
                     l.it = null;
                     // glint-ignore: Z026 -- git's `prune_subdir` is an rmdir whose failure, a directory still holding files, is the answer
-                    if (l.remove_empty) l.odb.writableSource().directory().get().deleteDir(io, &l.hex) catch {};
+                    if (l.remove_empty) l.odb.writableSource().directory().deleteDir(io, &l.hex) catch {};
                     continue;
                 }
                 if (l.present == null) l.present = try l.listFans(io);
@@ -2537,14 +2543,14 @@ pub const Odb = struct {
                 if (l.fan > 0xff) return null;
                 l.hex = std.fmt.hex(@as(u8, @intCast(l.fan)));
                 l.fan += 1;
-                l.dir = (try opening.openDirectory(io, l.odb.writableSource().directory().get(), &l.hex)) orelse continue;
-                l.it = l.dir.?.lend().get().iterate();
+                l.dir = (try opening.openDirectory(io, l.odb.writableSource().directory(), &l.hex)) orelse continue;
+                l.it = l.dir.?.borrow().*.iterate();
             }
         }
 
         fn listFans(l: *const LooseNames, io: Io) ErrorNamespace.Error!std.bit_set.Static(256) {
             var present: std.bit_set.Static(256) = .empty;
-            var it = l.odb.writableSource().directory().get().iterate();
+            var it = l.odb.writableSource().directory().iterate();
             while (try it.next(io)) |entry| {
                 if (entry.name.len != 2) continue;
                 // git opens the lowercase spelling alone.
@@ -2638,19 +2644,19 @@ pub const Odb = struct {
                 const slot = try packs.getOrPut(odb.backendData().gpa, hit.at);
                 if (slot.found_existing) continue;
                 const named = source.packs.items[hit.at];
-                try files.append(arena, .{ .dir = source.packDirectory().?.get(), .sub_path = try arena.print("{s}.pack", .{named.name}) });
-                try files.append(arena, .{ .dir = source.packDirectory().?.get(), .sub_path = try arena.print("{s}.idx", .{named.name}) });
+                try files.append(arena, .{ .dir = source.packDirectory().?, .sub_path = try arena.print("{s}.pack", .{named.name}) });
+                try files.append(arena, .{ .dir = source.packDirectory().?, .sub_path = try arena.print("{s}.idx", .{named.name}) });
             } else {
                 var path_buf: [hash.max_hex_len + 2]u8 = undefined;
-                try files.append(arena, .{ .dir = source.directory().get(), .sub_path = try arena.dupe(u8, odb.loosePath(oid.*, &path_buf)) });
+                try files.append(arena, .{ .dir = source.directory(), .sub_path = try arena.dupe(u8, odb.loosePath(oid.*, &path_buf)) });
                 fanouts[oid.raw()[0]] = true;
             }
         }
         for (fanouts, 0..) |used, byte| if (used) {
-            try directories.append(arena, .{ .dir = source.directory().get(), .sub_path = try arena.print("{x:0>2}", .{byte}) });
+            try directories.append(arena, .{ .dir = source.directory(), .sub_path = try arena.print("{x:0>2}", .{byte}) });
         };
-        if (packs.count() != 0) try directories.append(arena, .{ .dir = source.directory().get(), .sub_path = "pack" });
-        try directories.append(arena, .{ .dir = source.directory().get(), .sub_path = "." });
+        if (packs.count() != 0) try directories.append(arena, .{ .dir = source.directory(), .sub_path = "pack" });
+        try directories.append(arena, .{ .dir = source.directory(), .sub_path = "." });
         try fs.syncAll(odb.backendData().gpa, io, files.items, directories.items);
     }
 
@@ -2676,13 +2682,13 @@ pub const Odb = struct {
             var name: [2]u8 = undefined;
             // unreachable: a byte is two hex digits
             _ = std.mem.print(&name, "{x:0>2}", .{byte}) catch unreachable;
-            const sub = try source.directory().get().openDir(io, &name, .{ .iterate = true });
+            const sub = try source.directory().openDir(io, &name, .{ .iterate = true });
             defer sub.close(io);
             try fs.syncDir(io, sub);
             data.unsynced_fanouts.unset(byte);
         }
         if (data.unsynced_objects_dir) {
-            try fs.syncDir(io, source.directory().get());
+            try fs.syncDir(io, source.directory());
             data.unsynced_objects_dir = false;
         }
     }
@@ -2803,7 +2809,7 @@ pub const Odb = struct {
                 continue;
             }
             var path_buf: [hash.max_hex_len + 2]u8 = undefined;
-            const stat = odb.writableSource().directory().get().statFile(io, odb.loosePath(entry.oid, &path_buf), .{}) catch |err| switch (err) {
+            const stat = odb.writableSource().directory().statFile(io, odb.loosePath(entry.oid, &path_buf), .{}) catch |err| switch (err) {
                 error.FileNotFound => {
                     size.* = 0;
                     continue;
@@ -3306,13 +3312,13 @@ pub const Odb = struct {
         var entries: std.ArrayList(PackEntry) = .empty;
         defer entries.deinit(odb.backendData().gpa);
         const source = odb.writableSource();
-        var top = source.directory().get().iterate();
+        var top = source.directory().iterate();
         while (try top.next(io)) |entry| {
             if (entry.kind != .directory or entry.name.len != 2) continue;
             if (hexPair(entry.name) == null) continue;
-            var opened_sub = (try opening.openDirectory(io, source.directory().get(), entry.name)) orelse continue;
+            var opened_sub = (try opening.openDirectory(io, source.directory(), entry.name)) orelse continue;
             defer opened_sub.deinit(io);
-            const sub = opened_sub.lend().get();
+            const sub = opened_sub.borrow().*;
             var it = sub.iterate();
             while (try it.next(io)) |file| {
                 if (file.name.len != odb.backendData().kind.hexLen() - 2) continue;
@@ -3536,7 +3542,7 @@ pub const Odb = struct {
         errdefer out.deinit(gpa);
         const sources = odb.backendData().sources.items;
         for (sources[0..if (scope == .own) @min(sources.len, 1) else sources.len], 0..) |source, at| {
-            const pack_dir = (source.packDirectory() orelse continue).get();
+            const pack_dir = source.packDirectory() orelse continue;
             for (source.packs.items, 0..) |named, position| {
                 var name_buf: [Io.Dir.max_name_bytes]u8 = undefined;
                 const file = std.mem.print(&name_buf, "{s}.pack", .{named.name}) catch continue;
@@ -3653,7 +3659,7 @@ pub const Odb = struct {
             const source = odb.writableSource();
             var opened_pack_dir = try odb.openPackDirectory(io);
             defer opened_pack_dir.deinit(io);
-            const pack_dir = opened_pack_dir.lend().get();
+            const pack_dir = opened_pack_dir.borrow().*;
             for (source.packs.items) |named| {
                 if (try hasCompanion(io, pack_dir, named.name, ".keep")) {
                     try kept.ensureUnusedCapacity(gpa, 1);
@@ -3700,7 +3706,7 @@ pub const Odb = struct {
         if (promised_entries.items.len != 0) {
             var opened_pack_dir = try odb.openPackDirectory(io);
             defer opened_pack_dir.deinit(io);
-            const pack_dir = opened_pack_dir.lend().get();
+            const pack_dir = opened_pack_dir.borrow().*;
             const written = try odb.writePack(io, pack_dir, promised_entries.items, options.pack);
             try odb.writePromisor(io, written.name, "", .replace);
             try odb.refresh(io);
@@ -3741,13 +3747,13 @@ pub const Odb = struct {
         const collected: struct { entries: []const PackEntry } = .{ .entries = entries };
 
         const source = odb.writableSource();
-        if (source.directory().get().createDir(io, "pack", .default_dir)) |_| {
-            fs.adjustShared(io, source.directory().get(), "pack", odb.backendData().options.shared);
+        if (source.directory().createDir(io, "pack", .default_dir)) |_| {
+            fs.adjustShared(io, source.directory(), "pack", odb.backendData().options.shared);
         } else |err| switch (err) {
             error.PathAlreadyExists => {},
             else => |e| return e,
         }
-        var pack_dir = try source.directory().get().openDir(io, "pack", .{ .iterate = true });
+        var pack_dir = try source.directory().openDir(io, "pack", .{ .iterate = true });
         defer pack_dir.close(io);
 
         // Which packs were there before, so that the ones this replaces can
@@ -3803,13 +3809,13 @@ pub const Odb = struct {
             const Remove = struct {
                 const Self = @This();
                 odb: *const Odb,
-                dir: fs.LentDir,
+                dir: Io.Dir,
                 doomed: []const Oid,
                 removed: *Removed,
                 fn work(task_io: Io, c: Self, _: usize, i: usize) ErrorNamespace.Error!void {
                     var path_buf: [hash.max_hex_len + 2]u8 = undefined;
                     const path = c.odb.loosePath(c.doomed[i], &path_buf);
-                    c.dir.get().deleteFile(task_io, path) catch return;
+                    c.dir.deleteFile(task_io, path) catch return;
                     _ = c.removed.fetchAddWrapping(Oids.fromRaw(1), .monotonic);
                 }
             };
@@ -3879,7 +3885,7 @@ pub const Odb = struct {
     /// again after. How many files went.
     pub fn removePackGarbage(odb: *Odb, io: Io) ErrorNamespace.Error!u32 {
         const gpa = odb.backendData().gpa;
-        const pack_dir = (odb.writableSource().packDirectory() orelse return 0).get();
+        const pack_dir = odb.writableSource().packDirectory() orelse return 0;
         var names: std.ArrayList([]u8) = .empty;
         defer freeNames(gpa, &names);
         var it = pack_dir.iterate();
@@ -3933,7 +3939,7 @@ pub const Odb = struct {
     pub fn removePacks(odb: *Odb, io: Io, names: []const []const u8) ErrorNamespace.Error!u32 {
         if (names.len == 0) return 0;
         const source = odb.writableSource();
-        const pack_dir = (source.packDirectory() orelse return 0).get();
+        const pack_dir = source.packDirectory() orelse return 0;
         var in_midx = false;
         if (source.midx) |*m| for (names) |name| {
             var listed = m.packNames();
@@ -4010,18 +4016,18 @@ pub const Odb = struct {
     /// `finishPack` is what closes it; `abortPack` leaves nothing behind.
     pub fn beginPack(odb: *Odb, io: Io, options: PackOptions) ErrorNamespace.Error!OpenPack {
         const source = odb.writableSource();
-        if (source.directory().get().createDir(io, "pack", .default_dir)) |_| {
-            fs.adjustShared(io, source.directory().get(), "pack", odb.backendData().options.shared);
+        if (source.directory().createDir(io, "pack", .default_dir)) |_| {
+            fs.adjustShared(io, source.directory(), "pack", odb.backendData().options.shared);
         } else |err| switch (err) {
             error.PathAlreadyExists => {},
             else => |e| return e,
         }
         const gpa = odb.backendData().gpa;
-        var dir = fs.OwnedDir.init(try source.directory().get().openDir(io, "pack", .{ .iterate = true }));
+        var dir = fs.OwnedDir.init(try source.directory().openDir(io, "pack", .{ .iterate = true }));
         errdefer dir.deinit(io);
         const filling = try gpa.create(Filling);
         errdefer gpa.destroy(filling);
-        const writer = try pack.Writer.open(gpa, io, dir.lend().get(), .{ .kind = odb.backendData().kind }, .{
+        const writer = try pack.Writer.open(gpa, io, dir.borrow().*, .{ .kind = odb.backendData().kind }, .{
             .fsync = odb.backendData().options.fsync,
             .compression = options.compression,
             .shared = odb.backendData().options.shared,
@@ -4127,7 +4133,7 @@ pub const ObjectStream = struct {
 
     odb: *Odb,
     /// The objects directory, lent by the database.
-    dir: fs.LentDir,
+    dir: Io.Dir,
     temp: [128]u8,
     temp_len: usize,
     /// The temporary file, open until the object is finished or abandoned.
@@ -4196,22 +4202,22 @@ pub const ObjectStream = struct {
         if (s.remaining != 0) return error.CorruptLooseObject;
         try s.compressed_writer.finish();
         try s.file_writer.interface.flush();
-        try fs.syncFile(io, s.file.?.lend().get(), .{ .policy = s.odb.looseSync() });
+        try fs.syncFile(io, s.file.?.borrow().*, .{ .policy = s.odb.looseSync() });
         s.file.?.deinit(io);
         s.file = null;
 
         const oid = s.hasher.final();
         if (s.hasher.collisionAttack()) return error.CollisionAttack;
         if (s.expected) |want| if (!want.eql(oid)) {
-            fs.removeLeftover(io, s.dir.get(), s.temp[0..s.temp_len]);
+            fs.removeLeftover(io, s.dir, s.temp[0..s.temp_len]);
             return error.ObjectNameMismatch;
         };
         var hex: [hash.max_hex_len]u8 = undefined;
         const text = oid.hex(&hex);
         var fan_out_made = false;
-        if (s.dir.get().createDir(io, text[0..2], .default_dir)) |_| {
+        if (s.dir.createDir(io, text[0..2], .default_dir)) |_| {
             fan_out_made = true;
-            fs.adjustShared(io, s.dir.get(), text[0..2], s.odb.backendData().options.shared);
+            fs.adjustShared(io, s.dir, text[0..2], s.odb.backendData().options.shared);
         } else |err| switch (err) {
             error.PathAlreadyExists => {},
             else => |e| return e,
@@ -4221,14 +4227,14 @@ pub const ObjectStream = struct {
         const final_path = std.mem.print(&final_buf, "{s}/{s}", .{ text[0..2], text[2..] }) catch unreachable;
         const temp = s.temp[0..s.temp_len];
         // The time before the name, as `writeLoose` sets it.
-        if (s.time) |seconds| fs.setTimestamps(io, s.dir.get(), temp, .{ .modify_timestamp = .{ .new = date.timestamp(seconds) } }) catch |err| {
+        if (s.time) |seconds| fs.setTimestamps(io, s.dir, temp, .{ .modify_timestamp = .{ .new = date.timestamp(seconds) } }) catch |err| {
             // The error is the one to report; a temporary object left behind is what `git gc` prunes.
-            fs.removeLeftover(io, s.dir.get(), temp);
+            fs.removeLeftover(io, s.dir, temp);
             return err;
         };
-        finalizeLoose(io, s.dir.get(), temp, final_path, s.odb.backendData().options.create_object) catch |err| {
+        finalizeLoose(io, s.dir, temp, final_path, s.odb.backendData().options.create_object) catch |err| {
             // The error is the one to report; a temporary object left behind is what `git gc` prunes.
-            fs.removeLeftover(io, s.dir.get(), temp);
+            fs.removeLeftover(io, s.dir, temp);
             return err;
         };
         s.finished = true;
@@ -4242,7 +4248,7 @@ pub const ObjectStream = struct {
             if (s.file) |*file| file.deinit(io);
             s.file = null;
             // Abandoning cannot fail; a temporary object left behind is what `git gc` prunes.
-            fs.removeLeftover(io, s.dir.get(), s.temp[0..s.temp_len]);
+            fs.removeLeftover(io, s.dir, s.temp[0..s.temp_len]);
             s.finished = true;
         }
         s.compress.deinit();
@@ -6184,7 +6190,7 @@ test "a stream whose installation fails remains abortable" {
         else => return err,
     }
 
-    var it = odb.backendData().sources.items[0].directory().get().iterate();
+    var it = odb.backendData().sources.items[0].directory().iterate();
     while (try it.next(io)) |entry| {
         try std.testing.expect(!std.mem.startsWith(u8, entry.name, "tmp_obj_"));
     }

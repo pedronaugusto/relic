@@ -1413,7 +1413,7 @@ const Negotiation = struct {
         var running = try program.start(s.gpa, s.io, programs, .{
             .argv = argv.items,
             .shell = true,
-            .cwd = .{ .dir = s.remote.repo.gitDirectory().get() },
+            .cwd = .{ .dir = s.remote.repo.gitDirectory() },
             .set = &.{.{ .name = "GIT_DIR", .value = "." }},
             // Without a side band, its words are this process's, as git's
             // are its own standard error.
@@ -1439,7 +1439,11 @@ const Negotiation = struct {
         // pipe is closed rather than left to fill.
         var relay: ?Io.Future(void) = null;
         defer if (relay) |*task| task.cancel(s.io);
-        if (running.child.takeStderr()) |file| {
+        if (running.child.takeStderr()) |taken| {
+            // The relay owns the read end from here, and closes it.
+            var owned = taken;
+            var file: Io.File = undefined;
+            owned.take(&file);
             relay = s.io.concurrent(Paced.relayProgress, .{ paced, file }) catch blk: {
                 file.close(s.io);
                 break :blk null;

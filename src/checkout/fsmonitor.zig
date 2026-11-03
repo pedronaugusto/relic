@@ -354,7 +354,7 @@ fn converseWithDaemon(arena: Allocator, io: Io, daemon: Daemon, since: []const u
     if (!Io.net.has_unix_sockets) return null;
     var owned = (try connectSocket(arena, io, daemon)) orelse return null;
     defer owned.deinit(io);
-    const stream = owned.lend().get();
+    const stream = owned.borrow().*;
     var writer = stream.writer(io, &write_buffer);
     var reader = stream.reader(io, read_buffer);
     return exchange(arena, &writer.interface, &reader.interface, since);
@@ -398,11 +398,11 @@ else
 /// git's `connect_to_server`: a refused connection is a daemon too busy to
 /// take it, tried again every 50 ms for a second; anything else, a socket
 /// that is not there among them, is no daemon.
-fn connectSocket(arena: Allocator, io: Io, daemon: Daemon) Error!?fs.OwnedStream {
+fn connectSocket(arena: Allocator, io: Io, daemon: Daemon) Error!?reactor.net.owned.Stream {
     const address: Io.net.UnixAddress = .{ .path = (try socketPath(arena, io, daemon)) orelse return null };
     var waited_ms: u32 = 0;
     while (true) {
-        return .init(reactor.net.connectUnix(io, &address) catch |err| switch (err) {
+        return reactor.net.connectUnix(io, &address) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             error.ConnectionRefused, error.WouldBlock => {
                 if (waited_ms >= 1000) return null;
@@ -411,7 +411,7 @@ fn connectSocket(arena: Allocator, io: Io, daemon: Daemon) Error!?fs.OwnedStream
                 continue;
             },
             else => return null,
-        });
+        };
     }
 }
 

@@ -98,7 +98,7 @@ pub fn remove(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.
     defer locked.deinit(io);
     const index = &locked.index;
     try sparse_index.expand(gpa, io, index, repo.objectDatabase(), null);
-    const wt: ?Io.Dir = if (repo.workDirectory()) |work| work.get() else null;
+    const wt: ?Io.Dir = repo.workDirectory();
 
     // Every entry the pathspec names, once a path.
     const seen = try arena.alloc(pathspec_mod.How, spec.items.len);

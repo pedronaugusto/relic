@@ -268,7 +268,7 @@ pub const File = struct {
         f.gpa = gpa;
         f.file = .init(try dir.openFile(io, path, .{}));
         errdefer f.file.deinit(io);
-        f.reader = f.file.lend().get().reader(io, &f.buffer);
+        f.reader = f.file.borrow().*.reader(io, &f.buffer);
         f.header = try Header.read(gpa, &f.reader.interface);
         return f;
     }

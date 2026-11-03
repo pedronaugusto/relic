@@ -125,7 +125,7 @@ pub const Daemon = struct {
             const wait = d.checkExpirations() orelse return;
             var stream = (try d.acceptWithin(wait)) orelse continue;
             defer stream.deinit(d.io);
-            if (try d.serveOne(stream.lend().get()) == .exit) {
+            if (try d.serveOne(stream.borrow().*) == .exit) {
                 // The socket goes before the client hears the end, as
                 // git's daemon removes it at exit and only then closes.
                 removeSocket(d.io, d.socket_path);
@@ -209,9 +209,9 @@ pub const Daemon = struct {
     fn serveOne(d: *Daemon, stream: Io.net.Stream) RunError!Served {
         // Room for a usual request, so it seldom grows.
         var text = try aegis.SecretBytes.init(d.gpa, 1024);
-        defer text.deinit();
+        defer text.deinit(d.gpa);
         {
-            var into = aegis.SecretBytes.Writer.init(&text);
+            var into = aegis.SecretBytes.Writer.init(&text, d.gpa);
             // No buffer of the reader's: each read lands in `text`'s own
             // storage, wiped as it grows and when it is let go.
             var r = stream.reader(d.io, &.{});
@@ -326,9 +326,9 @@ fn nextLine(rest: *[]const u8) []const u8 {
 /// whole, so the credential in it is held nowhere else.
 fn sendAnswer(gpa: Allocator, io: Io, stream: Io.net.Stream, e: *const Session, authtype_asked: bool) (Allocator.Error || Io.Cancelable)!void {
     var text = try aegis.SecretBytes.init(gpa, 256);
-    defer text.deinit();
+    defer text.deinit(gpa);
     {
-        var into = aegis.SecretBytes.Writer.init(&text);
+        var into = aegis.SecretBytes.Writer.init(&text, gpa);
         // The writer fails only for want of memory.
         answer(&into.interface, e, authtype_asked) catch return error.OutOfMemory;
         into.interface.flush() catch return error.OutOfMemory;

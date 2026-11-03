@@ -25,7 +25,7 @@ pub const Options = struct {
 pub fn load(gpa: Allocator, io: Io, repository: *repo.Repository, options: Options) Error!filter.Drivers {
     const text = try repository.lfsconfigText(io);
     defer if (text) |bytes| repository.allocator().free(bytes);
-    return filter.Drivers.load(gpa, io, repository.configuration(), .{ .common = repository.commonDirectory().get(), .work = if (repository.workDirectory()) |work| work.get() else null, .shared = repository.sharedPermissions() }, .{
+    return filter.Drivers.load(gpa, io, repository.configuration(), .{ .common = repository.commonDirectory(), .work = repository.workDirectory(), .shared = repository.sharedPermissions() }, .{
         .native_provider = provider(&options),
         .skip_smudge = options.skip_smudge,
         .config_text = text,
@@ -333,7 +333,7 @@ test "native LFS selection owns settings, preserves custom commands and hash-onl
     try testing.expect(content == .file);
     defer content.file.deinit(io);
     var buffer: [64]u8 = undefined;
-    const n = try content.file.lend().get().readPositionalAll(io, &buffer, 0);
+    const n = try content.file.borrow().*.readPositionalAll(io, &buffer, 0);
     try testing.expectEqualStrings("large content", buffer[0..n]);
 }
 

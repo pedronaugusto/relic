@@ -199,11 +199,11 @@ fn matchesTemplate(text: []const u8, template: []const u8, event: []const u8) bo
 pub const Place = struct {
     config: *const config_mod.Config,
     /// The per-worktree directory.
-    git_dir: fs.LentDir,
+    git_dir: Io.Dir,
     /// The shared directory, where `hooks/` lives.
-    common_dir: fs.LentDir,
+    common_dir: Io.Dir,
     /// The working tree, or `null` in a bare repository.
-    work_dir: ?fs.LentDir,
+    work_dir: ?Io.Dir,
 };
 
 /// How a hook that failed ended.
@@ -336,7 +336,7 @@ pub const Runner = struct {
         const arena = arena_instance.allocator();
 
         var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const top = (place.work_dir orelse place.git_dir).get();
+        const top = place.work_dir orelse place.git_dir;
         const cwd = try arena.dupe(u8, try fs.realPath(io, top, &buf));
 
         // Read as git's configset reads it: the last value alone.
@@ -351,7 +351,7 @@ pub const Runner = struct {
             else
                 try std.mem.concat(arena, u8, &.{ cwd, "/", configured })
         else blk: {
-            const common = try fs.realPath(io, place.common_dir.get(), &buf);
+            const common = try fs.realPath(io, place.common_dir, &buf);
             break :blk try std.mem.concat(arena, u8, &.{ common, "/hooks" });
         };
 
@@ -1153,9 +1153,9 @@ fn openRunner(gpa: Allocator, io: Io, repo: *testgit.Repo, environ: *const std.p
     errdefer config.deinit();
     const runner = try Runner.init(gpa, io, .{
         .config = &config,
-        .git_dir = git_dir.lend(),
-        .common_dir = git_dir.lend(),
-        .work_dir = work.lend(),
+        .git_dir = git_dir.borrow().*,
+        .common_dir = git_dir.borrow().*,
+        .work_dir = work.borrow().*,
     }, .{ .environ = environ }, .{ .output = .capture });
     return .{ .runner = runner, .config = config, .git_dir = git_dir.move() };
 }
@@ -1280,7 +1280,7 @@ test "configured hooks run first, in the order last named, through the shell" {
     try repo.exec(io, &.{ "branch", "side" });
     try repo.exec(io, &.{ "commit", "-q", "--allow-empty", "-m", "b" });
     try repo.exec(io, &.{ "checkout", "-q", "side" });
-    var config_file = try opened.git_dir.lend().get().openFile(io, "config", .{ .mode = .read_write });
+    var config_file = try opened.git_dir.borrow().*.openFile(io, "config", .{ .mode = .read_write });
     defer config_file.close(io);
     try config_file.writePositionalAll(io, text, try config_file.length(io));
     // Hooks declared in the configuration are git 2.54's.

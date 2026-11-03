@@ -23,9 +23,9 @@ pub fn register(io: Io, db: anytype, dir: *fs.OwnedDir, writable: bool) odb.Erro
     errdefer dir.deinit(io);
     const data = storage.get(db.state);
     const gpa = data.gpa;
-    const real_path = try realPath(gpa, io, dir.lend().get());
+    const real_path = try realPath(gpa, io, dir.borrow().*);
     errdefer gpa.free(real_path);
-    var pack_dir = try openDirectory(io, dir.lend().get(), "pack");
+    var pack_dir = try openDirectory(io, dir.borrow().*, "pack");
     errdefer if (pack_dir) |*d| d.deinit(io);
     const source = try gpa.create(storage.Source);
     errdefer gpa.destroy(source);
@@ -60,7 +60,7 @@ pub fn openOwn(comptime Odb: type, gpa: Allocator, io: Io, git_dir: Io.Dir, kind
     var objects = fs.OwnedDir.init(try git_dir.openDir(io, "objects", .{ .iterate = true }));
     try register(io, &db, &objects, true);
     try db.refresh(io);
-    if (options.probe_timestamp_resolution) db.timestamp_resolution = try fs.probeTimestampResolution(io, storage.get(db.state).sources.items[0].directory().get());
+    if (options.probe_timestamp_resolution) db.timestamp_resolution = try fs.probeTimestampResolution(io, storage.get(db.state).sources.items[0].directory());
     return db;
 }
 

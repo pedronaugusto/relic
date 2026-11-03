@@ -1425,7 +1425,7 @@ const Partial = struct {
         assert(p.from == 0);
         var buf: [64 * 1024]u8 = undefined;
         while (true) {
-            const n = try p.file.lend().get().readPositionalAll(io, &buf, p.from);
+            const n = try p.file.borrow().*.readPositionalAll(io, &buf, p.from);
             if (n == 0) break;
             p.sha.update(buf[0..n]);
             p.from += n;
@@ -1436,7 +1436,7 @@ const Partial = struct {
 
     /// Start again from nothing.
     fn restart(p: *Partial, io: Io) Error!void {
-        try p.file.lend().get().setLength(io, 0);
+        try p.file.borrow().*.setLength(io, 0);
         p.from = 0;
         p.sha = .init(.{});
     }
@@ -1479,7 +1479,7 @@ const Partial = struct {
             }
             if (at + n > size) return .{ .fail = "the server sent more than the object's size" };
             p.sha.update(buf[0..n]);
-            try p.file.lend().get().writePositionalAll(io, buf[0..n], at);
+            try p.file.borrow().*.writePositionalAll(io, buf[0..n], at);
             at += n;
             if (broken) {
                 // Broken off: what came is kept for the next attempt.
@@ -1936,7 +1936,7 @@ fn attemptUploadSsh(state: *Run, t: *lfsssh.Transfer, worker: usize, r: *Result,
     const pointer: lfs.Pointer = .{ .oid = r.oid, .size = r.size };
     var owned = (try store.open(io, &pointer)) orelse return .{ .fail = "the object is not in the store" };
     defer owned.deinit(io);
-    const file = owned.lend().get();
+    const file = owned.borrow().*;
     var held = t.connection(io, worker) catch |err| return sshRetry(state, err);
     defer held.deinit(io);
     const conn = held.value();
@@ -2061,7 +2061,7 @@ fn copyLocal(
     var remote = Repository.open(gpa, io, dir, .{ .discover = false }) catch return error.LfsLocalRemoteUnreadable;
     defer remote.deinit(io);
     var remote_lfs = lfs.Lfs.load(gpa, &.{ .gpa = gpa, .config = remote.configuration() }, .{
-        .common_dir = remote.commonDirectory().get(),
+        .common_dir = remote.commonDirectory(),
         .shared = remote.sharedPermissions(),
     }) catch return error.LfsLocalRemoteUnreadable;
     defer remote_lfs.deinit();
@@ -2092,7 +2092,7 @@ fn copyLocal(
             continue;
         };
         defer owned.deinit(io);
-        const file = owned.lend().get();
+        const file = owned.borrow().*;
         var buf: [64 * 1024]u8 = undefined;
         var fr = file.reader(io, &buf);
         _ = to.install(io, &fr.interface, &pointer) catch |err| switch (err) {
@@ -2463,7 +2463,7 @@ pub fn pull(io: Io, server: *lfsapi.Server, repo: *Repository, options: FetchOpt
 /// has it, and its index entry is refreshed so git and relic both call it
 /// clean.
 pub fn checkoutPointers(gpa: Allocator, io: Io, repo: *Repository, store: *const lfs.Store) transfer.FetchError!struct { replaced: u32, left: u32 } {
-    const wt = (repo.workDirectory() orelse return .{ .replaced = 0, .left = 0 }).get();
+    const wt = repo.workDirectory() orelse return .{ .replaced = 0, .left = 0 };
     var locked_index = try repo.lockIndex(io);
     defer locked_index.deinit(io);
     const index = &locked_index.index;
@@ -2497,7 +2497,7 @@ pub fn checkoutPointers(gpa: Allocator, io: Io, repo: *Repository, store: *const
             continue;
         };
         defer owned.deinit(io);
-        const file = owned.lend().get();
+        const file = owned.borrow().*;
         try replaceWith(io, wt, entry.path, file, entry.mode == .exec);
         if (try fs.statAt(io, wt, entry.path)) |after| entry.stat = after.stat;
         replaced += 1;

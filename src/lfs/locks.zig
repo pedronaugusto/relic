@@ -471,7 +471,7 @@ fn tookLock(arena: Allocator, io: Io, server: *lfsapi.Server, repo: *Repository,
     var cache = try Cache.load(arena, io, server, ref);
     cache.addOurs(arena, taken) catch return error.OutOfMemory;
     try cache.save(arena, io, server, ref);
-    if (repo.workDirectory()) |wt| _ = try setWritable(io, wt.get(), path, true);
+    if (repo.workDirectory()) |wt| _ = try setWritable(io, wt, path, true);
 }
 
 /// Give back the lock with `id`, or break someone else's with `force`, as
@@ -544,8 +544,7 @@ fn gaveBack(arena: Allocator, io: Io, server: *lfsapi.Server, repo: *Repository,
     try cache.remove(arena, id);
     try cache.save(arena, io, server, ref);
     const path = asked orelse if (checkPath(released.path)) released.path else |_| return;
-    if (repo.workDirectory()) |lent_wt| {
-        const wt = lent_wt.get();
+    if (repo.workDirectory()) |wt| {
         const environ = if (server.client.options.programs) |programs| programs.environ else null;
         if (readOnlyWanted(&server.settings, environ)) {
             var lockables = try Lockables.load(io, repo);
@@ -1079,7 +1078,7 @@ pub const Lockables = struct {
 
     /// Load them for `repo`.
     pub fn load(io: Io, repo: *Repository) Self.Error!Lockables {
-        return .{ .attrs = try repo.loadAttrs(io), .work_dir = if (repo.workDirectory()) |work| work.get() else null };
+        return .{ .attrs = try repo.loadAttrs(io), .work_dir = repo.workDirectory() };
     }
 
     /// Whether `path` has the `lockable` attribute.
@@ -1133,14 +1132,14 @@ pub const Fix = struct {
 /// `GIT_LFS_SET_LOCKABLE_READONLY` in `fix.environ`.
 pub fn fixWriteFlags(gpa: Allocator, io: Io, repo: *Repository, fix: Fix) Self.Error!Fixed {
     var fixed: Fixed = .{};
-    const wt = (repo.workDirectory() orelse return fixed).get();
+    const wt = repo.workDirectory() orelse return fixed;
     var settings: lfs_settings.Settings = try .loadRepo(gpa, io, repo);
     defer settings.deinit();
     if (!readOnlyWanted(&settings, fix.environ)) return fixed;
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    var store_settings = try lfs.Lfs.load(gpa, &settings, .{ .common_dir = repo.commonDirectory().get(), .shared = repo.sharedPermissions() });
+    var store_settings = try lfs.Lfs.load(gpa, &settings, .{ .common_dir = repo.commonDirectory(), .shared = repo.sharedPermissions() });
     defer store_settings.deinit();
     const ref = try refFor(arena, io, repo, fix.request);
     const cache = try Cache.read(arena, io, &store_settings.store, ref);

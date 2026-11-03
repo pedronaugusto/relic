@@ -400,7 +400,7 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
     defer remote.deinit();
 
     var to_warnings: fsck.ToWarnings = .{ .warnings = options.warnings };
-    var rules = try fsck.forTransfer(gpa, io, repo.configuration(), .{ .kind = repo.objectFormat(), .scope = .fetch, .base = repo.topDirectory().get() }, .{ .explicit = options.check_objects, .sink = to_warnings.sink() });
+    var rules = try fsck.forTransfer(gpa, io, repo.configuration(), .{ .kind = repo.objectFormat(), .scope = .fetch, .base = repo.topDirectory() }, .{ .explicit = options.check_objects, .sink = to_warnings.sink() });
     defer if (rules) |*r| r.deinit(gpa);
     const checks: ?*const fsck.Rules = if (rules) |*r| r else null;
 
@@ -795,7 +795,7 @@ fn bringObjects(
 
     defer opened_pack_dir.deinit(io);
 
-    const pack_dir = opened_pack_dir.lend().get();
+    const pack_dir = opened_pack_dir.borrow().*;
     const boundary = try shallowList(arena, &repo.objectDatabase().shallow);
     var shallow_info: fetch_pack.ShallowInfo = .{ .gpa = gpa };
     defer shallow_info.deinit();

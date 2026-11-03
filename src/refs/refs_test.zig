@@ -423,7 +423,7 @@ test "an edit to a symbolic value releases its target when the transaction canno
             defer tmp.cleanup();
             var held_store = fs.OwnedDir.init(try tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true }));
             defer held_store.deinit(std.testing.io);
-            var store: refs.Store = try .init(gpa, .sha1, held_store.lend(), held_store.lend(), .{});
+            var store: refs.Store = try .init(gpa, .sha1, held_store.borrow().*, held_store.borrow().*, .{});
             defer store.deinit();
             var tx = store.begin(gpa);
             defer tx.deinit(std.testing.io);

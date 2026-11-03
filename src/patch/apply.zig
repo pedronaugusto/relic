@@ -538,7 +538,7 @@ pub fn apply(gpa: Allocator, io: Io, repo: *Repository, text: []const u8, option
     const writes = !options.check;
     const ws = wsPolicy(ws_option, writes);
 
-    const wt: ?Io.Dir = if (repo.workDirectory()) |work| work.get() else null;
+    const wt: ?Io.Dir = repo.workDirectory();
     if (!cached and wt == null) return error.BareRepository;
 
     // the repository's attributes unless the caller brings rules of its
@@ -567,7 +567,7 @@ pub fn apply(gpa: Allocator, io: Io, repo: *Repository, text: []const u8, option
         .wt = wt,
         .rules = rules,
         .conv = .open(gpa, io, .{
-            .wt = wt orelse repo.gitDirectory().get(),
+            .wt = wt orelse repo.gitDirectory(),
             .kind = repo.objectFormat(),
             .core = rules.core,
             .required_filters = rules.required_filters,

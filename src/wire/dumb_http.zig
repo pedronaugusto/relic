@@ -28,6 +28,7 @@ const odb_mod = @import("../odb/odb.zig");
 const pack = @import("../odb/pack.zig");
 const index_pack = @import("../odb/index_pack.zig");
 const warning = @import("../report.zig").warning;
+const aegis = @import("aegis");
 const warp = @import("warp");
 
 const Oid = hash.Oid;
@@ -648,7 +649,7 @@ fn loosePath(buf: *LoosePath, oid: Oid) []const u8 {
 /// `smart_http.Files` or `Early`, says a cancel stopped it.
 fn writeLoose(io: Io, db: *odb_mod.Odb, oid: Oid, body: *Io.Reader, from: anytype) Self.Error!Loose {
     var window: [(1 << 15) + 4096]u8 = undefined;
-    var inflate: warp.Inflate.Reader = .init(body, &window, .{});
+    var inflate = warp.Inflate.Reader.init(body, &window, .{}) catch aegis.assert.never("zlib's default window, and the buffer holds it and a read");
     const in = &inflate.interface;
     // The header: `<type> <size>\0`.
     var header_buf: [32]u8 = undefined;

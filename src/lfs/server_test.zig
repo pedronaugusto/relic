@@ -346,6 +346,7 @@ test "git-lfs pushes, clones, pulls and locks against relic's LFS server" {
 const FakeS3 = struct {
     gpa: Allocator,
     signer: sigv4.Signer,
+    answers: uplink.server.Handler = .{ .handleFn = answer },
     mutex: Io.Mutex = .init,
     objects: std.array_hash_map.String([]u8) = .empty,
     presigned: std.atomic.Value(u32) = .init(0),
@@ -357,6 +358,11 @@ const FakeS3 = struct {
             f.gpa.free(v);
         }
         f.objects.deinit(f.gpa);
+    }
+
+    fn answer(h: *uplink.server.Handler, io: Io, request: *uplink.server.Request, response: *uplink.server.Response) anyerror!void {
+        const f: *FakeS3 = @alignCast(@fieldParentPtr("answers", h));
+        return f.serve(io, request, response);
     }
 
     fn serve(f: *FakeS3, io: Io, request: *uplink.server.Request, response: *uplink.server.Response) anyerror!void {
@@ -423,7 +429,8 @@ const FakeS3 = struct {
                 return std.fmt.parseInt(u32, t, 10) catch null;
             }
         }.n;
-        return uplink.wire.date.civil(n(date[0..4]) orelse return null, n(date[4..6]) orelse return null, n(date[6..8]) orelse return null, n(date[9..11]) orelse return null, n(date[11..13]) orelse return null, n(date[13..15]) orelse return null);
+        const at = uplink.wire.date.civil(n(date[0..4]) orelse return null, n(date[4..6]) orelse return null, n(date[6..8]) orelse return null, n(date[9..11]) orelse return null, n(date[11..13]) orelse return null, n(date[13..15]) orelse return null) orelse return null;
+        return at.raw();
     }
 };
 
@@ -440,7 +447,7 @@ test "git-lfs moves objects through URLs S3-compatible storage signed for relic'
     const signer: sigv4.Signer = .{ .key = .{ .access_key = "AKIDLOCAL", .secret_key = "local/secret+key", .session_token = "session" }, .region = "local-1" };
     var fake: FakeS3 = .{ .gpa = gpa, .signer = signer };
     defer fake.deinit();
-    var storage = uplink.Server.init(gpa, .{}, .init(&fake, FakeS3.serve));
+    var storage = uplink.Server.init(gpa, .{}, &fake.answers);
     defer storage.deinit(io);
     const address = try Io.net.IpAddress.parse("127.0.0.1", 0);
     var listener = try address.listen(io, .{ .reuse_address = true });

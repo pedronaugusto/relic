@@ -276,7 +276,7 @@ pub fn run(gpa: Allocator, io: Io, repo: *Repository, options: RunOptions) Self.
     if (options.auto and options.schedule != null) return error.IncompatibleOptions;
     var report: RunReport = .{ .selection = try selectTasks(repo, options.tasks, options.schedule) };
     var buffer: [64]u8 = undefined;
-    var lock = fs.LockFile.open(gpa, io, repo.objectDatabase().objectsDirectory().get(), .{ .sub_path = "maintenance", .buffer = &buffer }, .{ .sync = .none, .write_pid = repo.lockfilePid() }) catch |err| switch (err) {
+    var lock = fs.LockFile.open(gpa, io, repo.objectDatabase().objectsDirectory(), .{ .sub_path = "maintenance", .buffer = &buffer }, .{ .sync = .none, .write_pid = repo.lockfilePid() }) catch |err| switch (err) {
         error.LockHeld => return .{ .locked = true, .selection = report.selection },
         else => |e| return e,
     };
@@ -506,7 +506,7 @@ fn packLoose(io: Io, repo: *Repository, options: RunOptions) Self.Error!void {
     pack_options.prefix = "loose";
     var opened_dir = try db.openPackDirectory(io);
     defer opened_dir.deinit(io);
-    const dir = opened_dir.lend().get();
+    const dir = opened_dir.borrow().*;
     _ = try db.writePack(io, dir, loose.entries[0..take], pack_options);
     try db.refresh(io);
 }
@@ -615,6 +615,6 @@ fn listed(config: *const config_mod.Config, path: []const u8) bool {
 /// `get_maintpath`: the working tree, or the git directory of a bare
 /// repository, resolved, with forward slashes as git writes it.
 fn maintenancePath(io: Io, repo: *Repository, buf: *[Io.Dir.max_path_bytes]u8) Io.Dir.RealPathError![]const u8 {
-    const dir = repo.topDirectory().get();
+    const dir = repo.topDirectory();
     return fs.realPath(io, dir, buf);
 }

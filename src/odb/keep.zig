@@ -74,9 +74,9 @@ pub const Token = struct {
     fn release(t: *Token, io: Io) ErrorNamespace.Error!void {
         const name = t.name[0 .. t.kind.hexLen() + affixes.len];
         var buffer: [4096]u8 = undefined;
-        var lock = try fs.LockFile.open(t.gpa, io, t.dir.lend().get(), .{ .sub_path = name, .buffer = &buffer }, .{ .sync = .none, .on_contention = .{ .wait = .fromMilliseconds(1000) } });
+        var lock = try fs.LockFile.open(t.gpa, io, t.dir.borrow().*, .{ .sub_path = name, .buffer = &buffer }, .{ .sync = .none, .on_contention = .{ .wait = .fromMilliseconds(1000) } });
         defer lock.deinit(io);
-        const previous = try aegis.own.readFile(io, t.dir.lend().get(), name, t.gpa, aegis.units.Bytes(u64).fromRaw(1 << 20));
+        const previous = try aegis.own.readFile(io, t.dir.borrow().*, name, t.gpa, aegis.units.Bytes(u64).fromRaw(1 << 20));
         defer t.gpa.free(previous);
         if (!std.mem.startsWith(u8, previous, header)) return;
         var lines = std.mem.splitScalar(u8, previous[header.len..], '\n');
@@ -89,7 +89,7 @@ pub const Token = struct {
         }
         if (remaining == 0) {
             // The lock excludes new token acquisition through this deletion.
-            try t.dir.lend().get().deleteFile(io, name);
+            try t.dir.borrow().*.deleteFile(io, name);
         } else try lock.commit(io);
     }
 };

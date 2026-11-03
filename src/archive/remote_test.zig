@@ -70,7 +70,7 @@ fn sortedLines(gpa: Allocator, text: []const u8) ![][]const u8 {
 fn gunzip(gpa: Allocator, bytes: []const u8) ![]u8 {
     var in: Io.Reader = .fixed(bytes);
     var window: [(1 << 15) + 4096]u8 = undefined;
-    var inflate: warp.Inflate.Reader = .init(&in, &window, .{ .accept = .gzip });
+    var inflate = try warp.Inflate.Reader.init(&in, &window, .{ .accept = .gzip });
     return inflate.interface.allocRemaining(gpa, .limited(1 << 30));
 }
 

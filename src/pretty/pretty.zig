@@ -410,7 +410,7 @@ pub const Decorations = struct {
             if (!std.mem.eql(u8, head.name, "HEAD") and std.mem.startsWith(u8, head.name, "refs/")) d.head_branch = try a.dupe(u8, head.name);
             try d.addRef(io, repo, .head, "HEAD", head.oid);
         }
-        var grafts = try shallow.read(gpa, io, repo.commonDirectory().get(), repo.objectFormat());
+        var grafts = try shallow.read(gpa, io, repo.commonDirectory(), repo.objectFormat());
         defer grafts.deinit(gpa);
         var sorted: std.ArrayList(Oid) = .empty;
         defer sorted.deinit(gpa);

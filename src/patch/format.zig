@@ -434,7 +434,7 @@ const Ctx = struct {
 
     /// The drivers the files take, which say which are binary.
     fn drivers(ctx: *const Ctx) driver.Drivers {
-        return .{ .attrs = ctx.attrs, .work_dir = if (ctx.repo.workDirectory()) |work| work.get() else null, .config = ctx.repo.configuration() };
+        return .{ .attrs = ctx.attrs, .work_dir = ctx.repo.workDirectory(), .config = ctx.repo.configuration() };
     }
 };
 
@@ -772,7 +772,7 @@ pub fn format(gpa: Allocator, io: Io, repo: *Repository, range: Range, given: Op
     defer if (own_attrs) |*x| x.deinit();
     if (repo.workDirectory() != null) own_attrs = try repo.loadAttrs(io);
     defer if (own_attrs) |*x| x.leave();
-    const drivers: driver.Drivers = .{ .attrs = if (own_attrs) |*x| x else null, .work_dir = if (repo.workDirectory()) |work| work.get() else null, .config = config };
+    const drivers: driver.Drivers = .{ .attrs = if (own_attrs) |*x| x else null, .work_dir = repo.workDirectory(), .config = config };
 
     const selected = try selectCommits(gpa, a, io, db, range, options, drivers) orelse return emptySeries(gpa, &arena_instance, options.output_directory);
     const list = selected.list;
@@ -806,7 +806,7 @@ pub fn format(gpa: Allocator, io: Io, repo: *Repository, range: Range, given: Op
         .encoding = try message.logOutputEncoding(config),
         .diff_options = diff_options,
         .renames = renames,
-        .order = options.order orelse try diff.Order.configured(a, io, repo.topDirectory().get(), config),
+        .order = options.order orelse try diff.Order.configured(a, io, repo.topDirectory(), config),
         .relative_to = relative_to,
         .quote_path = quote_path,
         .attrs = if (own_attrs) |*x| x else null,

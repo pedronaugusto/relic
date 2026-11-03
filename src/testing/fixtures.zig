@@ -1003,7 +1003,7 @@ test "a worktree that moved is repaired and git follows it" {
 
     var parent = try git.dir.openDir(io, "trees", .{ .iterate = true });
     defer parent.close(io);
-    try worktrees_mod.move(gpa, io, repo.commonDirectory().get(), .{ .name = "moving", .new_parent = parent, .new_name = "after" });
+    try worktrees_mod.move(gpa, io, repo.commonDirectory(), .{ .name = "moving", .new_parent = parent, .new_name = "after" });
 
     try std.testing.expectError(error.FileNotFound, git.dir.access(io, "trees/before", .{}));
     var moved = try git.dir.openDir(io, "trees/after", .{ .iterate = true });
@@ -1020,7 +1020,7 @@ test "a worktree that moved is repaired and git follows it" {
     try std.testing.expect(linked.isLinkedWorktree());
 
     // And repair on its own is idempotent.
-    try worktrees_mod.repair(io, repo.commonDirectory().get(), "moving", moved, .dot_git_only);
+    try worktrees_mod.repair(io, repo.commonDirectory(), "moving", moved, .dot_git_only);
     const again = try git.run(io, &.{ "worktree", "list", "--porcelain" });
     defer gpa.free(again);
     try std.testing.expectEqualStrings(listed, again);
@@ -1698,7 +1698,7 @@ test "a staging pass that writes a pack stages what one that writes loose object
 
         var index = try repo.openIndex(io);
         defer index.deinit();
-        const outcome = try worktree.addAll(gpa, io, repo.workDirectory().?.get(), .{ .index = &index, .db = repo.objectDatabase() }, .{
+        const outcome = try worktree.addAll(gpa, io, repo.workDirectory().?, .{ .index = &index, .db = repo.objectDatabase() }, .{
             .rules = wt_rules,
             .new_blobs = where,
         });
@@ -1714,7 +1714,7 @@ test "a staging pass that writes a pack stages what one that writes loose object
         }
 
         trees[pass] = try worktree.writeTree(gpa, io, &index, repo.objectDatabase());
-        try index.write(io, repo.gitDirectory().get(), "index", .{});
+        try index.write(io, repo.gitDirectory(), "index", .{});
 
         // git reads what was written, whichever way it was written.
         var hex: [hash.max_hex_len]u8 = undefined;

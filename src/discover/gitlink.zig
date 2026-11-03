@@ -54,13 +54,13 @@ pub const GitDir = struct {
     }
 
     /// Its `.git` directory, lent until it is closed.
-    pub fn gitDirectory(g: *GitDir) fs.LentDir {
-        return g.git_dir.lend();
+    pub fn gitDirectory(g: *GitDir) Io.Dir {
+        return g.git_dir.borrow().*;
     }
 
     /// Where its shared state lives, lent until it is closed.
-    pub fn commonDirectory(g: *GitDir) fs.LentDir {
-        return if (g.common_dir) |*common| common.lend() else g.git_dir.lend();
+    pub fn commonDirectory(g: *GitDir) Io.Dir {
+        return if (g.common_dir) |*common| common.borrow().* else g.git_dir.borrow().*;
     }
 
     /// A store over its refs, which borrows the two directories, in the
@@ -68,7 +68,7 @@ pub const GitDir = struct {
     /// objects are named with, and loose files and `packed-refs` or a
     /// stack under `reftable/`. What is on the disk has no say.
     pub fn refStore(g: *GitDir, gpa: Allocator, io: Io) repository_format.ReadError!refs_mod.Store {
-        const format = try repository_format.read(gpa, io, g.commonDirectory().get(), null);
+        const format = try repository_format.read(gpa, io, g.commonDirectory(), null);
         return refs_mod.Store.init(gpa, format.kind, g.gitDirectory(), g.commonDirectory(), .{ .format = format.ref_storage });
     }
 };
@@ -101,7 +101,7 @@ pub fn open(gpa: Allocator, io: Io, wt: Io.Dir, path: []const u8) Self.Error!?Gi
             else => return null,
         };
     };
-    const is_git = directory.isGitDirectory(io, git_dir.lend().get()) catch |err| {
+    const is_git = directory.isGitDirectory(io, git_dir.borrow().*) catch |err| {
         git_dir.deinit(io);
         return err;
     };
@@ -111,7 +111,7 @@ pub fn open(gpa: Allocator, io: Io, wt: Io.Dir, path: []const u8) Self.Error!?Gi
     }
     // `isGitDirectory` opened it already: one that does not open is not a
     // git directory, and was refused there.
-    const common = directory.openCommon(io, git_dir.lend().get()) catch |err| switch (err) {
+    const common = directory.openCommon(io, git_dir.borrow().*) catch |err| switch (err) {
         error.Canceled => return error.Canceled,
         else => null,
     };

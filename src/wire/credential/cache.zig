@@ -100,7 +100,7 @@ pub const Request = struct {
 /// `do_cache` passes over.
 pub fn request(gpa: Allocator, io: Io, socket: []const u8, req: Request) Self.Error!?SecretBytes {
     const address = Io.net.UnixAddress.init(socket) catch return error.CacheUnreachable;
-    const stream = reactor.net.connectUnix(io, &address) catch |err| switch (err) {
+    var stream = reactor.net.connectUnix(io, &address) catch |err| switch (err) {
         // Winsock's ENETDOWN for a directory missing on the way, which git
         // for Windows' `connection_fatally_broken` takes for no daemon, is
         // reactor's FileNotFound.
@@ -108,10 +108,10 @@ pub fn request(gpa: Allocator, io: Io, socket: []const u8, req: Request) Self.Er
         error.Canceled => return error.Canceled,
         else => return error.CacheUnreachable,
     };
-    defer stream.close(io);
+    defer stream.deinit(io);
     // No buffer of the writer's, which would hold a copy of the input: the
     // input goes to the daemon from where it is.
-    var w = stream.writer(io, &.{});
+    var w = stream.borrow().writer(io, &.{});
     (write: {
         w.interface.print("action={t}\ntimeout={d}\n", .{ req.action, req.timeout }) catch |e| break :write e;
         w.interface.writeAll(req.input) catch |e| break :write e;
@@ -120,19 +120,19 @@ pub fn request(gpa: Allocator, io: Io, socket: []const u8, req: Request) Self.Er
     // git's `send_request` lets the shutdown's result go: a daemon that has
     // read all it will and closed already leaves the socket unconnected,
     // and its answer, or none, is still there to read.
-    stream.shutdown(io, .send) catch |err| switch (err) {
+    stream.borrow().shutdown(io, .send) catch |err| switch (err) {
         error.Canceled => return error.Canceled,
         else => {},
     };
 
     // Room for a usual answer, so it seldom grows.
     var answer = try SecretBytes.init(gpa, 256);
-    errdefer answer.deinit();
+    errdefer answer.deinit(gpa);
     {
-        var into = SecretBytes.Writer.init(&answer);
+        var into = SecretBytes.Writer.init(&answer, gpa);
         // No buffer of the reader's: each read lands in `answer`'s own
         // storage, wiped as it grows and when it is let go.
-        var r = stream.reader(io, &.{});
+        var r = stream.borrow().reader(io, &.{});
         // One byte past the most an answer may be says it is longer.
         while (into.interface.end <= max_request) {
             _ = r.interface.stream(&into.interface, Io.Limit.limited(max_request + 1 - into.interface.end)) catch |err| switch (err) {

@@ -175,7 +175,7 @@ test "what this writes into a reftable repository git reads, logs and all" {
 
     // Compaction kept the stack short.
     {
-        var dir = try repo.gitDirectory().get().openDir(io, "reftable", .{});
+        var dir = try repo.gitDirectory().openDir(io, "reftable", .{});
         defer dir.close(io);
         var stack = try reftablestack_mod.Stack.load(gpa, io, dir, .sha1);
         defer stack.deinit();
@@ -772,7 +772,7 @@ test "a linked worktree keeps its own HEAD in its own stack, both ways" {
 
     // Inside it, HEAD comes from its stack and the branch from the shared
     // one; a per-worktree ref written there stays there.
-    var linked = try repo_mod.Repository.open(gpa, io, added.work_dir.lend().get(), .{ .discover = false });
+    var linked = try repo_mod.Repository.open(gpa, io, added.work_dir.borrow().*, .{ .discover = false });
     defer linked.deinit(io);
     const head = (try linked.head(io)).?;
     defer gpa.free(head.name);

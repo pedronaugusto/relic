@@ -391,7 +391,7 @@ pub const HttpServer = struct {
         if (content_encoding) |ce| if (std.ascii.eqlIgnoreCase(ce, "gzip")) {
             var in: Io.Reader = .fixed(body);
             var window: [(1 << 15) + 4096]u8 = undefined;
-            var inflate: warp.Inflate.Reader = .init(&in, &window, .{ .accept = .gzip });
+            var inflate = try warp.Inflate.Reader.init(&in, &window, .{ .accept = .gzip });
             input = try inflate.interface.allocRemaining(arena, .limited(1 << 30));
         };
         var outcome = try program.run(s.gpa, io, .{ .environ = &env }, .{
@@ -726,7 +726,10 @@ pub const DaemonServer = struct {
         if (s.options.receive_pack) try argv.append(arena, "--enable=receive-pack");
         var running = try program.start(s.gpa, io, .{ .environ = &s.env }, .{ .argv = argv.items, .stderr = .capture });
         defer running.deinit(io);
-        const stdin = running.child.takeStdin().?;
+        // The feed owns the daemon's standard input from here, and closes it.
+        var owned_stdin = running.child.takeStdin().?;
+        var stdin: Io.File = undefined;
+        owned_stdin.take(&stdin);
         var client_read: [16 * 1024]u8 = undefined;
         var client_write: [16 * 1024]u8 = undefined;
         var daemon_read: [16 * 1024]u8 = undefined;
@@ -740,10 +743,10 @@ pub const DaemonServer = struct {
         copy(&from_daemon.interface, &to_client.interface);
         upward.cancel(io);
         _ = try running.wait(io);
-        const stderr = running.child.takeStderr() orelse return;
-        defer stderr.close(io);
+        var stderr = running.child.takeStderr() orelse return;
+        defer stderr.deinit(io);
         var log_read: [4096]u8 = undefined;
-        var from_log = stderr.readerStreaming(io, &log_read);
+        var from_log = stderr.borrow().readerStreaming(io, &log_read);
         const said = try from_log.interface.allocRemaining(arena, .unlimited);
         s.log_mutex.lockUncancelable(io);
         defer s.log_mutex.unlock(io);

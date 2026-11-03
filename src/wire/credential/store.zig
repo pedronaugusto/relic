@@ -77,8 +77,8 @@ fn readFile(gpa: Allocator, io: Io, path: []const u8) Self.Error!?SecretBytes {
     const size = std.math.cast(usize, (try file.stat(io)).size) orelse return error.OutOfMemory;
     // The whole file and a last read that finds its end, as it stands now.
     var text = try SecretBytes.init(gpa, size +| 1);
-    errdefer text.deinit();
-    var into = SecretBytes.Writer.init(&text);
+    errdefer text.deinit(gpa);
+    var into = SecretBytes.Writer.init(&text, gpa);
     // No buffer of the reader's: each read lands in `text`'s own storage.
     var reader = file.reader(io, &.{});
     _ = reader.interface.streamRemaining(&into.interface) catch |err| switch (err) {
@@ -109,7 +109,7 @@ fn entryOf(gpa: Allocator, line: []const u8) Allocator.Error!?parts_mod.UrlParts
 pub fn get(gpa: Allocator, io: Io, files: Files, want: Credential) Self.Error!?Found {
     for (files.paths) |path| {
         var text = (try readFile(gpa, io, path)) orelse continue;
-        defer text.deinit();
+        defer text.deinit(gpa);
         var lines = std.mem.splitScalar(u8, text.expose(), '\n');
         while (lines.next()) |line| {
             var entry = (try entryOf(gpa, line)) orelse continue;
@@ -132,8 +132,8 @@ pub fn store(gpa: Allocator, io: Io, files: Files, c: Credential) Self.Error!voi
     if (c.protocol == null or (c.host == null and c.path == null) or c.username == null or c.password == null) return;
     if (files.paths.len == 0) return;
     var line = try SecretBytes.init(gpa, 0);
-    defer line.deinit();
-    try writeLine(&line, c);
+    defer line.deinit(gpa);
+    try writeLine(gpa, &line, c);
     const target = for (files.paths) |path| {
         if (exists(io, path)) break path;
     } else files.paths[0];
@@ -180,7 +180,7 @@ fn rewrite(gpa: Allocator, io: Io, path: []const u8, timeout_ms: u32, how: Rewri
         try w.writeByte('\n');
     }
     var read = try readFile(gpa, io, path);
-    defer if (read) |*text| text.deinit();
+    defer if (read) |*text| text.deinit(gpa);
     if (read) |*text| {
         var lines = std.mem.splitScalar(u8, text.expose(), '\n');
         while (lines.next()) |line| {
@@ -200,31 +200,31 @@ fn rewrite(gpa: Allocator, io: Io, path: []const u8, timeout_ms: u32, how: Rewri
 
 /// A credential as `store` keeps it: `protocol://user:password@host/path`, each
 /// part encoded, after `line`'s live bytes.
-fn writeLine(line: *SecretBytes, c: Credential) Allocator.Error!void {
-    try parts_mod.appendParts(line, &.{ c.protocol.?, "://" });
-    try encode(line, c.username.?, false);
-    try parts_mod.appendParts(line, &.{":"});
-    try encode(line, c.password.?, false);
-    try parts_mod.appendParts(line, &.{"@"});
-    if (c.host) |host| try encode(line, host, false);
+fn writeLine(gpa: Allocator, line: *SecretBytes, c: Credential) Allocator.Error!void {
+    try parts_mod.appendParts(gpa, line, &.{ c.protocol.?, "://" });
+    try encode(gpa, line, c.username.?, false);
+    try parts_mod.appendParts(gpa, line, &.{":"});
+    try encode(gpa, line, c.password.?, false);
+    try parts_mod.appendParts(gpa, line, &.{"@"});
+    if (c.host) |host| try encode(gpa, line, host, false);
     if (c.path) |path| {
-        try parts_mod.appendParts(line, &.{"/"});
-        try encode(line, path, true);
+        try parts_mod.appendParts(gpa, line, &.{"/"});
+        try encode(gpa, line, path, true);
     }
 }
 
 /// git's `strbuf_addstr_urlencode`: every byte but RFC 3986's unreserved
 /// ones -- and, for a path, its reserved ones -- as `%xx`.
-fn encode(line: *SecretBytes, text: []const u8, reserved_too: bool) Allocator.Error!void {
+fn encode(gpa: Allocator, line: *SecretBytes, text: []const u8, reserved_too: bool) Allocator.Error!void {
     for (text) |c| {
         const plain = std.ascii.isAlphanumeric(c) or std.mem.findScalar(u8, "-._~", c) != null or
             (reserved_too and std.mem.findScalar(u8, "!*'();:@&=+$,/?#[]", c) != null);
         // In lower case, as git's `strbuf_addf("%%%02x")`.
         if (plain) {
-            try parts_mod.appendParts(line, &.{&.{c}});
+            try parts_mod.appendParts(gpa, line, &.{&.{c}});
         } else {
             const hex = std.fmt.hex(c);
-            try parts_mod.appendParts(line, &.{ "%", &hex });
+            try parts_mod.appendParts(gpa, line, &.{ "%", &hex });
         }
     }
 }

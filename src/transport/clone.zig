@@ -677,7 +677,7 @@ fn receiveObjects(
     var detached = ask.detached;
     var opened_pack_dir = try repo.objectDatabase().openPackDirectory(io);
     defer opened_pack_dir.deinit(io);
-    const pack_dir = opened_pack_dir.lend().get();
+    const pack_dir = opened_pack_dir.borrow().*;
     var shallow_info: fetch_pack.ShallowInfo = .{ .gpa = gpa, .reject = options.reject_shallow.? and ask.deepen == null };
     defer shallow_info.deinit();
     // What the pack's objects name, collected as it is indexed, so that
@@ -685,7 +685,7 @@ fn receiveObjects(
     var links: index_pack.Links = .init(gpa);
     defer links.deinit();
     var to_warnings: fsck.ToWarnings = .{ .warnings = options.warnings };
-    var rules = try fsck.forTransfer(gpa, io, ask.settings, .{ .kind = repo.objectFormat(), .scope = .fetch, .base = repo.topDirectory().get() }, .{ .explicit = options.check_objects, .sink = to_warnings.sink() });
+    var rules = try fsck.forTransfer(gpa, io, ask.settings, .{ .kind = repo.objectFormat(), .scope = .fetch, .base = repo.topDirectory() }, .{ .explicit = options.check_objects, .sink = to_warnings.sink() });
     defer if (rules) |*r| r.deinit(gpa);
     // What the lenders' refs name is offered too, as git's fetch-pack
     // offers an alternate's.
@@ -1245,7 +1245,7 @@ fn checkOut(gpa: Allocator, io: Io, repo: *Repository, commit: Oid, options: Opt
     const index = &locked_index.index;
     // A new clone's working tree has nothing in it to lose, as git's
     // clone takes it.
-    _ = try worktree.checkout(gpa, io, repo.workDirectory().?.get(), .{ .index = index, .db = repo.objectDatabase(), .tree = tree }, .{
+    _ = try worktree.checkout(gpa, io, repo.workDirectory().?, .{ .index = index, .db = repo.objectDatabase(), .tree = tree }, .{
         .rules = rules,
         .programs = programs,
         .force = true,
@@ -1609,13 +1609,13 @@ test "a clone from a local repository is the clone git makes, checked out, bare,
         const out = try git(gpa, io, &env, by_git.tmp.dir, argv.items);
         gpa.free(out);
 
-        var repo = try clone(gpa, io, source_path, by_relic.dir.lend().get(), case.options);
+        var repo = try clone(gpa, io, source_path, by_relic.dir.borrow().*, case.options);
         repo.deinit(io);
-        try expectSameClone(gpa, io, &env, by_git.dir.lend().get(), by_relic.dir.lend().get(), case.options.bare);
+        try expectSameClone(gpa, io, &env, by_git.dir.borrow().*, by_relic.dir.borrow().*, case.options.bare);
         if (!case.options.bare and case.options.branch == null) {
-            const theirs = try by_git.dir.lend().get().readFileAlloc(io, "docs/x.crlf", gpa, .unlimited);
+            const theirs = try by_git.dir.borrow().*.readFileAlloc(io, "docs/x.crlf", gpa, .unlimited);
             defer gpa.free(theirs);
-            const ours = try by_relic.dir.lend().get().readFileAlloc(io, "docs/x.crlf", gpa, .unlimited);
+            const ours = try by_relic.dir.borrow().*.readFileAlloc(io, "docs/x.crlf", gpa, .unlimited);
             defer gpa.free(ours);
             try testing.expectEqualStrings("one\r\ntwo\r\n", ours);
             try testing.expectEqualStrings(theirs, ours);
@@ -1657,10 +1657,10 @@ test "a local clone writes its pack on the tasks pack.threads asks for, as git's
     var serial_target = try Twin.init(gpa, io);
     defer serial_target.deinit(gpa, io);
     var serial_tasks: io_mod.Tasks = .init(io, .{});
-    var serial = try clone(gpa, serial_tasks.io(), source_path, serial_target.dir.lend().get(), .{ .who = test_who, .checkout = false, .user_config = .{ .pairs = &.{.{ .name = "pack.threads", .value = "1" }} } });
+    var serial = try clone(gpa, serial_tasks.io(), source_path, serial_target.dir.borrow().*, .{ .who = test_who, .checkout = false, .user_config = .{ .pairs = &.{.{ .name = "pack.threads", .value = "1" }} } });
     defer serial.deinit(io);
     try serial_tasks.state.expect(0, 0);
-    var serial_packs = try serial.gitDirectory().get().openDir(io, "objects/pack", .{ .iterate = true });
+    var serial_packs = try serial.gitDirectory().openDir(io, "objects/pack", .{ .iterate = true });
     defer serial_packs.close(io);
     const serial_name = try PackFile.only(gpa, io, serial_packs);
     defer gpa.free(serial_name);
@@ -1683,14 +1683,14 @@ test "a local clone writes its pack on the tasks pack.threads asks for, as git's
             var target = try Twin.init(gpa, io);
             defer target.deinit(gpa, io);
             var tasks: io_mod.Tasks = .init(each_io, .{});
-            var repo = try clone(gpa, tasks.io(), source_path, target.dir.lend().get(), .{ .who = test_who, .checkout = false, .user_config = .{ .pairs = case.pairs } });
+            var repo = try clone(gpa, tasks.io(), source_path, target.dir.borrow().*, .{ .who = test_who, .checkout = false, .user_config = .{ .pairs = case.pairs } });
             defer repo.deinit(io);
             // Headers and bodies on at most six tasks, one search group,
             // then deflation on all tasks, each including the caller.
             const readers: usize = @min(case.workers, 6);
             const spawned = if (case.workers == 1) 0 else 2 * (readers - 1) + case.workers - 1;
             try tasks.state.expect(spawned, 0);
-            var packs = try repo.gitDirectory().get().openDir(io, "objects/pack", .{ .iterate = true });
+            var packs = try repo.gitDirectory().openDir(io, "objects/pack", .{ .iterate = true });
             defer packs.close(io);
             const name = try PackFile.only(gpa, io, packs);
             defer gpa.free(name);
@@ -1749,13 +1749,13 @@ test "a clone over ssh and over HTTP is the clone git makes" {
         defer by_relic.deinit(gpa, io);
         const out = try git(gpa, io, &env, by_git.tmp.dir, &.{ "-c", ssh_setting, "clone", "-q", url, by_git.path });
         gpa.free(out);
-        var repo = try clone(gpa, io, url, by_relic.dir.lend().get(), .{
+        var repo = try clone(gpa, io, url, by_relic.dir.borrow().*, .{
             .who = test_who,
             .programs = .{ .environ = &env },
             .config = &settings,
         });
         repo.deinit(io);
-        try expectSameClone(gpa, io, &env, by_git.dir.lend().get(), by_relic.dir.lend().get(), false);
+        try expectSameClone(gpa, io, &env, by_git.dir.borrow().*, by_relic.dir.borrow().*, false);
     }
 }
 
@@ -1774,11 +1774,11 @@ test "an empty remote clones to an unborn branch, as git's does" {
     defer by_relic.deinit(gpa, io);
     const out = try git(gpa, io, &env, by_git.tmp.dir, &.{ "clone", "-q", empty_path, by_git.path });
     gpa.free(out);
-    var repo = try clone(gpa, io, empty_path, by_relic.dir.lend().get(), .{ .who = test_who });
+    var repo = try clone(gpa, io, empty_path, by_relic.dir.borrow().*, .{ .who = test_who });
     repo.deinit(io);
-    const theirs = try git(gpa, io, &env, by_git.dir.lend().get(), &.{ "symbolic-ref", "HEAD" });
+    const theirs = try git(gpa, io, &env, by_git.dir.borrow().*, &.{ "symbolic-ref", "HEAD" });
     defer gpa.free(theirs);
-    const ours = try git(gpa, io, &env, by_relic.dir.lend().get(), &.{ "symbolic-ref", "HEAD" });
+    const ours = try git(gpa, io, &env, by_relic.dir.borrow().*, &.{ "symbolic-ref", "HEAD" });
     defer gpa.free(ours);
     try testing.expect(std.mem.startsWith(u8, ours, "refs/heads/trunk"));
     try testing.expectEqualStrings(theirs, ours);
@@ -1843,10 +1843,10 @@ test "clone.defaultRemoteName names the remote unless the clone does, and clone.
         gpa.free(out);
         var settings = try config_mod.Config.parseText(gpa, "[clone]\ndefaultRemoteName = upstream\n", .command);
         defer settings.deinit();
-        var repo = try clone(gpa, io, repo_path, by_relic.dir.lend().get(), .{ .who = test_who, .origin = origin, .config = &settings });
+        var repo = try clone(gpa, io, repo_path, by_relic.dir.borrow().*, .{ .who = test_who, .origin = origin, .config = &settings });
         repo.deinit(io);
-        try expectSameClone(gpa, io, &env, by_git.dir.lend().get(), by_relic.dir.lend().get(), false);
-        const remotes = try git(gpa, io, &env, by_relic.dir.lend().get(), &.{"remote"});
+        try expectSameClone(gpa, io, &env, by_git.dir.borrow().*, by_relic.dir.borrow().*, false);
+        const remotes = try git(gpa, io, &env, by_relic.dir.borrow().*, &.{"remote"});
         defer gpa.free(remotes);
         try testing.expectEqualStrings(if (origin == null) "upstream\n" else "mine\n", remotes);
     }
@@ -1892,7 +1892,7 @@ test "clone.defaultRemoteName names the remote unless the clone does, and clone.
         defer gpa.free(text);
         var settings = try config_mod.Config.parseText(gpa, text, .command);
         defer settings.deinit();
-        const made = clone(gpa, io, case.url, by_relic.dir.lend().get(), .{
+        const made = clone(gpa, io, case.url, by_relic.dir.borrow().*, .{
             .who = test_who,
             .programs = .{ .environ = &env },
             .config = &settings,
@@ -1905,7 +1905,7 @@ test "clone.defaultRemoteName names the remote unless the clone does, and clone.
         }
         var repo = try made;
         repo.deinit(io);
-        try expectSameClone(gpa, io, &env, by_git.dir.lend().get(), by_relic.dir.lend().get(), false);
+        try expectSameClone(gpa, io, &env, by_git.dir.borrow().*, by_relic.dir.borrow().*, false);
     }
 }
 
@@ -1965,10 +1965,10 @@ test "a clone copies its template and reads the template's configuration, as git
 
         var template = try root.dir.openDir(io, case.template, .{ .iterate = true });
         defer template.close(io);
-        var repo = try clone(gpa, io, case.url, by_relic.dir.lend().get(), .{ .who = test_who, .bare = case.bare, .template = template });
+        var repo = try clone(gpa, io, case.url, by_relic.dir.borrow().*, .{ .who = test_who, .bare = case.bare, .template = template });
         repo.deinit(io);
-        try expectSameClone(gpa, io, &env, by_git.dir.lend().get(), by_relic.dir.lend().get(), case.bare);
-        const remotes = try git(gpa, io, &env, by_relic.dir.lend().get(), &.{"remote"});
+        try expectSameClone(gpa, io, &env, by_git.dir.borrow().*, by_relic.dir.borrow().*, case.bare);
+        const remotes = try git(gpa, io, &env, by_relic.dir.borrow().*, &.{"remote"});
         defer gpa.free(remotes);
         try testing.expectEqualStrings(case.remote, remotes);
         // What the template put in the git directory, byte for byte, the
@@ -1979,7 +1979,7 @@ test "a clone copies its template and reads the template's configuration, as git
             defer gpa.free(path);
             var said: [2][]u8 = undefined;
             var mode: [2]?Io.File.Permissions = undefined;
-            for ([_]Io.Dir{ by_git.dir.lend().get(), by_relic.dir.lend().get() }, &said, &mode) |dir, *out, *m| {
+            for ([_]Io.Dir{ by_git.dir.borrow().*, by_relic.dir.borrow().* }, &said, &mode) |dir, *out, *m| {
                 out.* = dir.readFileAlloc(io, path, gpa, .limited(1 << 20)) catch |err| switch (err) {
                     error.FileNotFound => try gpa.dupe(u8, "(none)"),
                     else => return err,
@@ -1991,9 +1991,9 @@ test "a clone copies its template and reads the template's configuration, as git
             if (Io.File.Permissions.has_executable_bit) try testing.expectEqual(mode[0], mode[1]);
         }
         const settings = [_][]const u8{ "config", "--local", "--get-regexp", "^(clone|url|core\\.logallrefupdates)" };
-        const theirs = try gitOrEmpty(gpa, io, &env, by_git.dir.lend().get(), &settings);
+        const theirs = try gitOrEmpty(gpa, io, &env, by_git.dir.borrow().*, &settings);
         defer gpa.free(theirs);
-        const ours = try gitOrEmpty(gpa, io, &env, by_relic.dir.lend().get(), &settings);
+        const ours = try gitOrEmpty(gpa, io, &env, by_relic.dir.borrow().*, &settings);
         defer gpa.free(ours);
         try testing.expectEqualStrings(theirs, ours);
     }
@@ -2050,7 +2050,7 @@ test "a clone runs post-checkout from its template after the checkout, as git cl
         const by_git_out = testremote.gitInputSettings(gpa, io, by_git.tmp.dir, &env, &testgit.settings_with_hooks, argv.items, "", false);
 
         var failure: hooks_mod.Failure = .{};
-        const cloned = clone(gpa, io, source_path, by_relic.dir.lend().get(), .{
+        const cloned = clone(gpa, io, source_path, by_relic.dir.borrow().*, .{
             .who = test_who,
             .bare = case.bare,
             .template = template,
@@ -2071,7 +2071,7 @@ test "a clone runs post-checkout from its template after the checkout, as git cl
         // The hook's arguments, the null name, `HEAD` and `1`; none from a
         // bare clone, which checks nothing out, nor without `hooks`.
         var said: [2][]u8 = undefined;
-        for ([_]Io.Dir{ by_git.dir.lend().get(), by_relic.dir.lend().get() }, &said) |dir, *out| {
+        for ([_]Io.Dir{ by_git.dir.borrow().*, by_relic.dir.borrow().* }, &said) |dir, *out| {
             out.* = dir.readFileAlloc(io, "post-checkout.log", gpa, .limited(1 << 10)) catch |err| switch (err) {
                 error.FileNotFound => try gpa.dupe(u8, "(none)"),
                 else => return err,
@@ -2082,7 +2082,7 @@ test "a clone runs post-checkout from its template after the checkout, as git cl
             try testing.expectEqualStrings(said[0], said[1]);
             try testing.expectEqual(case.bare, std.mem.eql(u8, said[1], "(none)"));
             // The clone, kept whether the hook failed or not.
-            try expectSameClone(gpa, io, &env, by_git.dir.lend().get(), by_relic.dir.lend().get(), case.bare);
+            try expectSameClone(gpa, io, &env, by_git.dir.borrow().*, by_relic.dir.borrow().*, case.bare);
         } else {
             try testing.expect(!std.mem.eql(u8, said[0], "(none)"));
             try testing.expectEqualStrings("(none)", said[1]);
@@ -2132,16 +2132,16 @@ test "a clone takes init.defaultBranch for an empty remote that names no branch,
             .{ .name = "init.defaultBranch", .value = "stem" },
             .{ .name = "init.defaultRefFormat", .value = @tagName(refs_mod.Format.reftable) },
         };
-        var repo = try clone(gpa, io, ssh_url, by_relic.dir.lend().get(), .{ .who = test_who, .programs = .{ .environ = &env }, .user_config = .{ .pairs = &pairs } });
+        var repo = try clone(gpa, io, ssh_url, by_relic.dir.borrow().*, .{ .who = test_who, .programs = .{ .environ = &env }, .user_config = .{ .pairs = &pairs } });
         repo.deinit(io);
         for ([_][]const []const u8{ &.{ "symbolic-ref", "HEAD" }, &.{ "rev-parse", "--show-ref-format" }, &.{ "config", "--local", "--get-regexp", "^(remote|branch)\\." } }) |args| {
-            const theirs = try git(gpa, io, &env, by_git.dir.lend().get(), args);
+            const theirs = try git(gpa, io, &env, by_git.dir.borrow().*, args);
             defer gpa.free(theirs);
-            const ours = try git(gpa, io, &env, by_relic.dir.lend().get(), args);
+            const ours = try git(gpa, io, &env, by_relic.dir.borrow().*, args);
             defer gpa.free(ours);
             try testing.expectEqualStrings(theirs, ours);
         }
-        const head = try git(gpa, io, &env, by_relic.dir.lend().get(), &.{ "symbolic-ref", "HEAD" });
+        const head = try git(gpa, io, &env, by_relic.dir.borrow().*, &.{ "symbolic-ref", "HEAD" });
         defer gpa.free(head);
         try testing.expectEqualStrings(if (version[0] == '0') "refs/heads/stem\n" else "refs/heads/trunk\n", head);
     }
@@ -2404,7 +2404,7 @@ test "a clone borrows from --reference and --reference-if-able as git's does, an
         try argv.appendSlice(gpa, &.{ served, by_git.path });
         var warnings: warning.Warnings = .init(gpa);
         defer warnings.deinit();
-        const made = clone(gpa, io, served, by_relic.dir.lend().get(), .{ .who = test_who, .programs = .{ .environ = &env }, .config = &settings, .reference = case.references, .dissociate = case.dissociate, .warnings = &warnings });
+        const made = clone(gpa, io, served, by_relic.dir.borrow().*, .{ .who = test_who, .programs = .{ .environ = &env }, .config = &settings, .reference = case.references, .dissociate = case.dissociate, .warnings = &warnings });
         if (case.refused) |err| {
             try testing.expectError(error.GitFailed, testremote.gitInputEnv(gpa, io, by_git.tmp.dir, &env, argv.items, "", false));
             try testing.expectError(err, made);
@@ -2414,21 +2414,21 @@ test "a clone borrows from --reference and --reference-if-able as git's does, an
         gpa.free(out);
         var repo = try made;
         repo.deinit(io);
-        try expectSameClone(gpa, io, &env, by_git.dir.lend().get(), by_relic.dir.lend().get(), false);
+        try expectSameClone(gpa, io, &env, by_git.dir.borrow().*, by_relic.dir.borrow().*, false);
         // The same lenders, and as few objects of its own.
-        const alternates_theirs = by_git.dir.lend().get().readFileAlloc(io, ".git/objects/info/alternates", gpa, .unlimited) catch |e| switch (e) {
+        const alternates_theirs = by_git.dir.borrow().*.readFileAlloc(io, ".git/objects/info/alternates", gpa, .unlimited) catch |e| switch (e) {
             error.FileNotFound => try gpa.dupe(u8, "(none)"),
             else => return e,
         };
         defer gpa.free(alternates_theirs);
-        const alternates_ours = by_relic.dir.lend().get().readFileAlloc(io, ".git/objects/info/alternates", gpa, .unlimited) catch |e| switch (e) {
+        const alternates_ours = by_relic.dir.borrow().*.readFileAlloc(io, ".git/objects/info/alternates", gpa, .unlimited) catch |e| switch (e) {
             error.FileNotFound => try gpa.dupe(u8, "(none)"),
             else => return e,
         };
         defer gpa.free(alternates_ours);
         try testing.expectEqualStrings(alternates_theirs, alternates_ours);
-        const theirs = try objectsHeld(gpa, io, &env, by_git.dir.lend().get());
-        const ours = try objectsHeld(gpa, io, &env, by_relic.dir.lend().get());
+        const theirs = try objectsHeld(gpa, io, &env, by_git.dir.borrow().*);
+        const ours = try objectsHeld(gpa, io, &env, by_relic.dir.borrow().*);
         try testing.expectEqual(.{ number, theirs }, .{ number, ours });
         if (case.references.len > 1) try testing.expectEqual(@as(usize, 1), warnings.items.items.len);
     }

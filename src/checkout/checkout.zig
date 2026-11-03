@@ -497,7 +497,7 @@ const Walker = struct {
         if (depth > 64) return error.TreeTooDeep;
         var opened = (try openWalkDirectory(w.io, w.wt, dir_path)) orelse return;
         defer opened.deinit(w.io);
-        const dir = opened.lend().get();
+        const dir = opened.borrow().*;
 
         if (w.options.rules.ignore) |rules| try rules.addDirectory(w.io, w.wt, dir_path, depth);
         defer if (w.options.rules.ignore) |rules| rules.popTo(depth + 2);
@@ -1560,7 +1560,7 @@ const StatusScan = struct {
         if (depth > 64) return error.TreeTooDeep;
         var opened = (try openWalkDirectory(s.io, s.wt, dir_path)) orelse return;
         defer opened.deinit(s.io);
-        const dir = opened.lend().get();
+        const dir = opened.borrow().*;
 
         if (s.options.rules.ignore) |rules| try rules.addDirectory(s.io, s.wt, dir_path, depth);
         defer if (s.options.rules.ignore) |rules| rules.popTo(depth + 2);
@@ -1808,7 +1808,7 @@ const StatusScan = struct {
         errdefer out.deinit(s.gpa);
         var opened = (try openWalkDirectory(s.io, s.wt, path)) orelse return out;
         defer opened.deinit(s.io);
-        const dir = opened.lend().get();
+        const dir = opened.borrow().*;
         var scan = try dir_scan.Scan.init(s.gpa, s.io, dir, .{ .precompose = s.options.rules.precompose_unicode });
 
         defer scan.deinit();
@@ -3002,7 +3002,7 @@ fn writeSmudged(io: Io, wt: Io.Dir, path: safe_path.Checked, smudged: native.Con
         .bytes => |bytes| try writeFile(io, wt, path, .{ .bytes = bytes }, executable),
         .file => |*file| {
             defer file.deinit(io);
-            try writeFile(io, wt, path, .{ .file = file.lend().get() }, executable);
+            try writeFile(io, wt, path, .{ .file = file.borrow().* }, executable);
         },
         .delayed => unreachable,
     }
@@ -4156,7 +4156,7 @@ const ListScan = struct {
         if (depth > 64) return error.TreeTooDeep;
         var opened = (try openWalkDirectory(s.io, s.wt, dir_path)) orelse return;
         defer opened.deinit(s.io);
-        const dir = opened.lend().get();
+        const dir = opened.borrow().*;
 
         if (s.rules.ignore) |rules| try rules.addDirectory(s.io, s.wt, dir_path, depth);
         defer if (s.rules.ignore) |rules| rules.popTo(depth + 2);

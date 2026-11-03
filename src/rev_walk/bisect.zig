@@ -186,12 +186,12 @@ const Ctx = struct {
         try c.out.print(c.a, fmt, args);
     }
 
-    fn dir(c: *Ctx) fs.LentDir {
+    fn dir(c: *Ctx) Io.Dir {
         return c.repo.gitDirectory();
     }
 
     fn readState(c: *Ctx, name: []const u8) Error!?[]u8 {
-        return aegis.own.readFile(c.io, c.dir().get(), name, c.a, aegis.units.Bytes(u64).fromRaw(std.math.maxInt(u64))) catch |err| switch (err) {
+        return aegis.own.readFile(c.io, c.dir(), name, c.a, aegis.units.Bytes(u64).fromRaw(std.math.maxInt(u64))) catch |err| switch (err) {
             error.FileNotFound => null,
             else => |e| return e,
         };
@@ -203,12 +203,12 @@ const Ctx = struct {
     }
 
     fn exists(c: *Ctx, name: []const u8) bool {
-        _ = c.dir().get().statFile(c.io, name, .{}) catch return false;
+        _ = c.dir().statFile(c.io, name, .{}) catch return false;
         return true;
     }
 
     fn writeState(c: *Ctx, name: []const u8, bytes: []const u8) Error!void {
-        try state_file.write(c.io, c.dir().get(), name, bytes);
+        try state_file.write(c.io, c.dir(), name, bytes);
     }
 
     fn appendState(c: *Ctx, name: []const u8, bytes: []const u8) Error!void {
@@ -217,7 +217,7 @@ const Ctx = struct {
     }
 
     fn removeState(c: *Ctx, name: []const u8) Error!void {
-        c.dir().get().deleteFile(c.io, name) catch |err| switch (err) {
+        c.dir().deleteFile(c.io, name) catch |err| switch (err) {
             error.FileNotFound => {},
             else => |e| return e,
         };
@@ -1201,7 +1201,7 @@ fn resetTo(c: *Ctx, commit: ?[]const u8) Error!void {
 
 /// `git bisect log`: what `BISECT_LOG` holds. The result is the caller's.
 pub fn log(gpa: Allocator, io: Io, repo: *Repository) Self.Error![]u8 {
-    const text = aegis.own.readFile(io, repo.gitDirectory().get(), "BISECT_LOG", gpa, aegis.units.Bytes(u64).fromRaw(std.math.maxInt(u64))) catch |err| switch (err) {
+    const text = aegis.own.readFile(io, repo.gitDirectory(), "BISECT_LOG", gpa, aegis.units.Bytes(u64).fromRaw(std.math.maxInt(u64))) catch |err| switch (err) {
         error.FileNotFound => return error.NoLog,
         else => |e| return e,
     };
@@ -1352,7 +1352,7 @@ fn runCommand(c: *Ctx, line: []const u8, run_options: RunOptions) Error!i32 {
     var outcome = try program.run(c.gpa, c.io, run_options.programs, .{
         .argv = &.{line},
         .shell = true,
-        .cwd = if (c.repo.workDirectory()) |wt| .{ .dir = wt.get() } else .inherit,
+        .cwd = if (c.repo.workDirectory()) |wt| .{ .dir = wt } else .inherit,
     }, .{});
     defer outcome.deinit(c.gpa);
     return switch (outcome.term) {

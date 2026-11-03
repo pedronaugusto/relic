@@ -1632,9 +1632,9 @@ fn mergeFromDiffs(
 /// `check_notes_merge_worktree`: a merge already under way holds files in
 /// the directory.
 fn checkMergeWorktree(io: Io, repo: *Repository) Error!void {
-    var dir = repo.gitDirectory().get().openDir(io, merge_worktree, .{ .iterate = true }) catch |err| switch (err) {
+    var dir = repo.gitDirectory().openDir(io, merge_worktree, .{ .iterate = true }) catch |err| switch (err) {
         error.FileNotFound => {
-            try repo.gitDirectory().get().createDirPath(io, merge_worktree);
+            try repo.gitDirectory().createDirPath(io, merge_worktree);
             return;
         },
         else => |e| return e,
@@ -1649,7 +1649,7 @@ fn checkMergeWorktree(io: Io, repo: *Repository) Error!void {
 fn writeConflict(gpa: Allocator, io: Io, repo: *Repository, p: Pair, local_ref: []const u8, remote_ref: []const u8) Error!void {
     var name_buf: [hash.max_hex_len]u8 = undefined;
     const name = p.obj.hex(&name_buf);
-    var dir = try repo.gitDirectory().get().openDir(io, merge_worktree, .{});
+    var dir = try repo.gitDirectory().openDir(io, merge_worktree, .{});
     defer dir.close(io);
     var bytes: []const u8 = undefined;
     var owned: ?[]u8 = null;
@@ -1719,7 +1719,7 @@ pub fn mergeCommit(gpa: Allocator, io: Io, repo: *Repository, who: object.Signat
 
     var t = try Notes.open(gpa, io, repo, ref_names.Root.notes_merge_partial.name(), .overwrite);
     defer t.deinit();
-    var dir = repo.gitDirectory().get().openDir(io, merge_worktree, .{ .iterate = true }) catch |err| switch (err) {
+    var dir = repo.gitDirectory().openDir(io, merge_worktree, .{ .iterate = true }) catch |err| switch (err) {
         error.FileNotFound => return error.NoMergeInProgress,
         else => |e| return e,
     };
@@ -1750,7 +1750,7 @@ pub fn mergeCommit(gpa: Allocator, io: Io, repo: *Repository, who: object.Signat
 pub fn mergeAbort(io: Io, repo: *Repository) Self.Error!void {
     try repo.refStore().root().delete(repo.allocator(), io, .notes_merge_partial);
     try repo.refStore().root().delete(repo.allocator(), io, .notes_merge_ref);
-    var dir = repo.gitDirectory().get().openDir(io, merge_worktree, .{ .iterate = true }) catch |err| switch (err) {
+    var dir = repo.gitDirectory().openDir(io, merge_worktree, .{ .iterate = true }) catch |err| switch (err) {
         error.FileNotFound => return,
         else => |e| return e,
     };

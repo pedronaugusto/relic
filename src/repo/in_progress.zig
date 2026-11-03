@@ -44,7 +44,7 @@ pub const InProgress = struct {
 /// What `repo`'s worktree is in the middle of, in git's order of looking,
 /// so a merge hides a rebase as it does there.
 pub fn read(io: Io, repo: *Repository) InProgress {
-    const dir = repo.gitDirectory().get();
+    const dir = repo.gitDirectory();
     var p: InProgress = .{};
     if (repo.refStore().special().exists(io, .merge_head)) {
         p.merge = true;
@@ -73,7 +73,7 @@ pub const Sequenced = enum { pick, revert };
 /// ran, as git's `sequencer_get_last_command` reads it. `null` with no
 /// such line.
 pub fn lastSequenced(gpa: Allocator, io: Io, repo: *Repository) ?Sequenced {
-    const text = (state.read(gpa, io, repo.gitDirectory().get(), "sequencer/todo") catch |err| {
+    const text = (state.read(gpa, io, repo.gitDirectory(), "sequencer/todo") catch |err| {
         // A cancel is put back for the task's next cancelation point.
         if (err == error.Canceled) io.recancel();
         return null;

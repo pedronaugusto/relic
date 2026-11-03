@@ -433,8 +433,8 @@ pub const Cache = struct {
     /// from this cache.
     fn refresh(c: *Cache, guard: *const Guard, io: Io, store: anytype) ErrorNamespace.Error!*const Stacks {
         const h = guard.value();
-        const main_now = try Validity.of(io, store.commonDir().get());
-        const worktree_now: ?Validity = if (isLinked(store)) try Validity.of(io, store.gitDir().get()) else null;
+        const main_now = try Validity.of(io, store.commonDir());
+        const worktree_now: ?Validity = if (isLinked(store)) try Validity.of(io, store.gitDir()) else null;
         if (h.stacks) |*st| {
             if (Validity.same(h.main_seen, main_now) and
                 (!isLinked(store) or Validity.same(h.worktree_seen, worktree_now)))
@@ -444,12 +444,12 @@ pub const Cache = struct {
             // The stat moved; the list may not have. Reload only what did.
             h.reloads += 1;
             if (!Validity.same(h.main_seen, main_now)) {
-                const fresh = try reloadIn(c.gpa, io, store.commonDir().get(), store.objectFormat(), &st.main);
+                const fresh = try reloadIn(c.gpa, io, store.commonDir(), store.objectFormat(), &st.main);
                 st.main.arena.deinit();
                 st.main = fresh;
             }
             if (isLinked(store) and !Validity.same(h.worktree_seen, worktree_now)) {
-                const fresh = try reloadIn(c.gpa, io, store.gitDir().get(), store.objectFormat(), &st.worktree.?);
+                const fresh = try reloadIn(c.gpa, io, store.gitDir(), store.objectFormat(), &st.worktree.?);
                 st.worktree.?.arena.deinit();
                 st.worktree = fresh;
             }
@@ -495,9 +495,9 @@ const Stacks = struct {
     worktree: ?Stack,
 
     fn open(gpa: Allocator, io: Io, store: anytype) Error!Stacks {
-        var main = try loadIn(gpa, io, store.commonDir().get(), store.objectFormat());
+        var main = try loadIn(gpa, io, store.commonDir(), store.objectFormat());
         errdefer main.deinit();
-        const worktree: ?Stack = if (isLinked(store)) try loadIn(gpa, io, store.gitDir().get(), store.objectFormat()) else null;
+        const worktree: ?Stack = if (isLinked(store)) try loadIn(gpa, io, store.gitDir(), store.objectFormat()) else null;
         return .{ .main = main, .worktree = worktree };
     }
 
@@ -532,7 +532,7 @@ fn reloadIn(gpa: Allocator, io: Io, parent: Io.Dir, kind: Kind, old: ?*Stack) Er
 }
 
 fn isLinked(store: anytype) bool {
-    return store.gitDir().get().handle != store.commonDir().get().handle;
+    return store.gitDir().handle != store.commonDir().handle;
 }
 
 pub const internal = struct {

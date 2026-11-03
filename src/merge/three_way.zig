@@ -222,7 +222,7 @@ fn run(
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_instance.deinit();
     const arena = arena_instance.allocator();
-    const wt = (repo.workDirectory() orelse return error.BareRepository).get();
+    const wt = repo.workDirectory() orelse return error.BareRepository;
     const db = repo.objectDatabase();
 
     for (index.entries.items) |entry| {
@@ -428,7 +428,7 @@ fn carry(
     const arena = arena_instance.allocator();
     var rules = caller_rules;
     rules.submodules = options.submodules;
-    const wt = (repo.workDirectory() orelse return error.BareRepository).get();
+    const wt = repo.workDirectory() orelse return error.BareRepository;
     const db = repo.objectDatabase();
     const desired = try desiredChanges(gpa, arena, io, db, index, .{ .ours = ours, .merged = merged }, options.blocked);
     const messages = try ort.dupeMessages(arena, merged.messages);
@@ -551,7 +551,7 @@ fn verifyCarry(gpa: Allocator, io: Io, repo: *Repository, inputs: worktree.Verif
     defer ignore_rules.deinit();
     var obstructions: worktree.Obstructions = .init(gpa);
     defer obstructions.deinit();
-    worktree.verifyUpdates(gpa, io, repo.workDirectory().?.get(), inputs, .{
+    worktree.verifyUpdates(gpa, io, repo.workDirectory().?, inputs, .{
         .rules = rules,
         .ignore = &ignore_rules,
         .obstructions = &obstructions,
@@ -804,7 +804,7 @@ fn inMemory(gpa: Allocator, io: Io, repo: *Repository, what: InMemory, options: 
     rules.required_filters = try repo.requiredFilters(arena);
     rules.filters = options.filters;
     var machinery: Machinery = undefined;
-    try machinery.init(gpa, arena, io, repo, .{ .wt = if (repo.workDirectory()) |work| work.get() else null, .rules = rules, .options = options });
+    try machinery.init(gpa, arena, io, repo, .{ .wt = repo.workDirectory(), .rules = rules, .options = options });
     defer machinery.deinit(io);
     return switch (what.sides) {
         .trees => |t| ort.trees(gpa, io, what.db, .{ .base = t.base, .ours = t.ours, .theirs = t.theirs }, machinery.ort),
@@ -851,7 +851,7 @@ const Machinery = struct {
         // whether a stored version kept its CRLF endings. A filter runs
         // where git runs it, in the working tree or the bare repository.
         m.normalizer = .open(gpa, io, .{
-            .wt = setup.wt orelse repo.gitDirectory().get(),
+            .wt = setup.wt orelse repo.gitDirectory(),
             .kind = repo.objectFormat(),
             .core = rules.core,
             .required_filters = rules.required_filters,
@@ -1093,7 +1093,7 @@ test "a merge reads the trees it changes, not the whole tree" {
     try std.testing.expectEqualStrings("theirs\n", try r.dir.readFile(io, "d005/f", &buf));
     try std.testing.expectEqualStrings("ours\n", try r.dir.readFile(io, "d250/f", &buf));
     // The index is the merged tree, and git says so.
-    try index.write(io, repo.gitDirectory().get(), "index", .{ .lock = repo.indexLock() });
+    try index.write(io, repo.gitDirectory(), "index", .{ .lock = repo.indexLock() });
     var hex: [hash.max_hex_len]u8 = undefined;
     const written = try r.line(io, &.{"write-tree"});
     defer gpa.free(written);

@@ -118,7 +118,7 @@ fn nameAt(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, modules: 
 /// git's `default_name_or_path`: `path` while a repository is checked out
 /// there, else `null`.
 fn populatedPath(gpa: Allocator, io: Io, repo: *Repository, path: []const u8) Self.Error!?[]const u8 {
-    const wt = (repo.workDirectory() orelse return null).get();
+    const wt = repo.workDirectory() orelse return null;
     return if (try gitlink.isRepository(gpa, io, wt, path)) path else null;
 }
 
@@ -270,7 +270,7 @@ pub fn planFetch(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, ch
     var inaccessible: std.ArrayList([]const u8) = .empty;
     var missing: std.ArrayList(Changed) = .empty;
     var plan: FetchPlan = .{ .explicit = choice.explicit, .jobs = 1, .tasks = &.{}, .inaccessible = &.{}, .missing = &.{} };
-    const wt = (repo.workDirectory() orelse return plan).get();
+    const wt = repo.workDirectory() orelse return plan;
     var index = try repo.openIndex(io);
     defer index.deinit();
     var listing = try submodule.list(gpa, io, repo, &index, null);
@@ -377,7 +377,7 @@ fn hasRepository(gpa: Allocator, io: Io, repo: *Repository, path: []const u8, na
 
 /// git's `repo_has_absorbed_submodules`: `modules/` holds something.
 fn hasAbsorbed(io: Io, repo: *Repository) Self.Error!bool {
-    var dir = repo.gitDirectory().get().openDir(io, "modules", .{ .iterate = true }) catch return false;
+    var dir = repo.gitDirectory().openDir(io, "modules", .{ .iterate = true }) catch return false;
     defer dir.close(io);
     var it = dir.iterate();
     return try it.next(io) != null;

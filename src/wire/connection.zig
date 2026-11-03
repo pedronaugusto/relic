@@ -15,6 +15,7 @@ const Self = @This();
 
 const std = @import("std");
 const aegis = @import("aegis");
+const conduit = @import("conduit");
 const Io = std.Io;
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
@@ -162,16 +163,16 @@ const Tail = struct {
     task: ?Io.Future(void) = null,
     /// The read end, taken from the child, whose own clean-up would
     /// close it under the reading task.
-    file: ?fs.OwnedFile = null,
+    file: ?conduit.OwnedFile = null,
     /// The read end, lent to the reading task once the program runs.
-    handed: aegis.BlockingGuarded(?fs.OwnedFile.Lending) = .init(null),
+    handed: aegis.BlockingGuarded(?Io.File) = .init(null),
     handed_set: aegis.Condition = .init(),
 
     /// Wait for the program's standard error, then read it to its end,
     /// keeping the last of it. The task begins before the program, so a
     /// program that writes there always has a reader.
     fn drain(tail: *Tail, io: Io) void {
-        const file = (tail.wait(io) catch return).get();
+        const file = tail.wait(io) catch return;
         var chunk: [1024]u8 = undefined;
         while (true) {
             const n = file.readStreaming(io, &.{&chunk}) catch return;
@@ -179,17 +180,17 @@ const Tail = struct {
         }
     }
 
-    fn wait(tail: *Tail, io: Io) aegis.Condition.WaitError!fs.OwnedFile.Lending {
+    fn wait(tail: *Tail, io: Io) aegis.Condition.WaitError!Io.File {
         var held = try tail.handed.acquire(io);
         defer held.deinit(io);
         while (true) {
             if (held.value().*) |file| return file;
-            try tail.handed_set.wait(io, &held, .none);
+            try held.wait(&tail.handed_set, io, .none);
         }
     }
 
     /// Lend the reading task `file`.
-    fn hand(tail: *Tail, io: Io, file: fs.OwnedFile.Lending) void {
+    fn hand(tail: *Tail, io: Io, file: Io.File) void {
         var held = tail.handed.acquireUncancelable(io);
         held.value().* = file;
         held.deinit(io);
@@ -206,7 +207,7 @@ const Tail = struct {
         if (tail.task) |*task| task.cancel(io);
         tail.task = null;
         const owned = if (tail.file) |*owned| owned else return;
-        const file = owned.lend().get();
+        const file = owned.borrow().*;
         var chunk: [1024]u8 = undefined;
         while (true) {
             const n = program.readAvailable(io, file, &chunk) catch |err| switch (err) {
@@ -317,8 +318,8 @@ pub const Process = struct {
         var running = try program.start(gpa, io, programs, effective);
         errdefer running.deinit(io);
         if (tail) |t| {
-            t.file = .init(running.child.takeStderr().?);
-            t.hand(io, t.file.?.lend());
+            t.file = running.child.takeStderr().?;
+            t.hand(io, t.file.?.borrow().*);
         }
         p.* = .{
             .gpa = gpa,
@@ -391,7 +392,10 @@ pub const Process = struct {
                     put_back = true;
                 };
             };
-            if (p.running.child.takeStdout()) |stdout| stdout.close(io);
+            if (p.running.child.takeStdout()) |stdout| {
+                var owned = stdout;
+                owned.deinit(io);
+            }
             p.exited = true;
             if (canceled(p)) {
                 // cancelled: nobody is left for the program's answer, and

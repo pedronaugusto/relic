@@ -141,15 +141,23 @@ pub const Backend = struct {
     /// The root's absolute path.
     root: []const u8,
     options: Options,
+    /// What uplink's server calls: `serve`, found from this field.
+    answers: uplink.server.Handler = .{ .handleFn = answer },
 
     /// Serve the repositories under `root`, an absolute path, borrowed.
     pub fn init(gpa: Allocator, root: []const u8, options: Options) Backend {
         return .{ .gpa = gpa, .root = root, .options = options };
     }
 
-    /// The handler to give uplink's server.
-    pub fn handler(b: *Backend) uplink.server.Handler {
-        return .init(b, serve);
+    /// The handler to give uplink's server, which holds it: the backend
+    /// stays where it is while a server serves it.
+    pub fn handler(b: *Backend) *uplink.server.Handler {
+        return &b.answers;
+    }
+
+    fn answer(h: *uplink.server.Handler, io: Io, request: *Request, response: *Response) anyerror!void {
+        const b: *Backend = @alignCast(@fieldParentPtr("answers", h));
+        return b.serve(io, request, response);
     }
 
     /// Answer one request.
@@ -414,7 +422,7 @@ const Call = struct {
             error.MalformedResponse => return message(c.io, c.response, .unprocessable_entity, "Unprocessable Entity"),
         };
         if (asked.path.len == 0) return message(c.io, c.response, .unprocessable_entity, "A lock needs a path");
-        var table = try lock_store.Table.take(c.b.gpa, c.arena, c.io, c.remote.repo.gitDirectory().get());
+        var table = try lock_store.Table.take(c.b.gpa, c.arena, c.io, c.remote.repo.gitDirectory());
         defer table.deinit();
         for (table.list) |l| if (std.mem.eql(u8, l.path, asked.path)) {
             return c.lockAnswer(.conflict, l, "lock already created");
@@ -436,7 +444,7 @@ const Call = struct {
         const query = c.request.query orelse "";
         const path = try queryValue(c.arena, query, "path");
         const id = try queryValue(c.arena, query, "id");
-        const all = try lock_store.read(c.arena, c.io, c.remote.repo.gitDirectory().get());
+        const all = try lock_store.read(c.arena, c.io, c.remote.repo.gitDirectory());
         var matching: std.ArrayList(locks.Lock) = .empty;
         for (all) |l| {
             if (path) |p| if (!std.mem.eql(u8, l.path, p)) continue;
@@ -456,7 +464,7 @@ const Call = struct {
             error.OutOfMemory => return error.OutOfMemory,
             error.MalformedResponse => return message(c.io, c.response, .unprocessable_entity, "Unprocessable Entity"),
         };
-        const all = try lock_store.read(c.arena, c.io, c.remote.repo.gitDirectory().get());
+        const all = try lock_store.read(c.arena, c.io, c.remote.repo.gitDirectory());
         const limit: usize = if (asked.limit > 0) @intCast(asked.limit) else c.b.options.lock_page;
         const page = lock_store.paged(all, if (asked.cursor.len != 0) asked.cursor else null, limit);
         var ours: std.ArrayList(locks.Lock) = .empty;
@@ -476,7 +484,7 @@ const Call = struct {
             error.OutOfMemory => return error.OutOfMemory,
             error.MalformedResponse => return message(c.io, c.response, .unprocessable_entity, "Unprocessable Entity"),
         };
-        var table = try lock_store.Table.take(c.b.gpa, c.arena, c.io, c.remote.repo.gitDirectory().get());
+        var table = try lock_store.Table.take(c.b.gpa, c.arena, c.io, c.remote.repo.gitDirectory());
         defer table.deinit();
         const at = for (table.list, 0..) |l, i| {
             if (std.mem.eql(u8, l.id, id)) break i;

@@ -55,7 +55,7 @@ pub const Netrc = struct {
         // Every string is a token of `text`, apart from the others: they
         // fit in its length.
         var n: Netrc = .{ .arena = .init(gpa), .strings = try .init(gpa, text.len), .machines = &.{} };
-        errdefer n.strings.deinit();
+        errdefer n.strings.deinit(gpa);
         errdefer n.arena.deinit();
         const a = n.arena.allocator();
         // unreachable: the owner was made with the text's length.
@@ -113,7 +113,7 @@ pub const Netrc = struct {
 
     /// Release everything.
     pub fn deinit(n: *Netrc) void {
-        n.strings.deinit();
+        n.strings.deinit(n.arena.child_allocator);
         n.arena.deinit();
         n.* = undefined;
     }

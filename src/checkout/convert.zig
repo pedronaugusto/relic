@@ -358,7 +358,7 @@ pub const Session = struct {
                     .file => |*file| {
                         defer file.deinit(s.io);
                         var buf: [4096]u8 = undefined;
-                        var reader = file.lend().get().reader(s.io, &buf);
+                        var reader = file.borrow().*.reader(s.io, &buf);
                         var all: std.ArrayList(u8) = .empty;
                         try reader.interface.appendRemainingUnlimited(a, &all);
                         out = all.items;

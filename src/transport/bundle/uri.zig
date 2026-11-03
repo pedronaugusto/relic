@@ -222,7 +222,7 @@ const Run = struct {
     files: std.ArrayList([]const u8) = .empty,
 
     fn removeFiles(run: *Run) void {
-        const objects = run.repo.objectDatabase().objectsDirectory().get();
+        const objects = run.repo.objectDatabase().objectsDirectory();
         // git's `unlink_or_warn` goes on too; a file left is a stale
         // tmp_uri_ beside git's own.
         for (run.files.items) |file| fs.removeLeftover(run.io, objects, file);
@@ -254,7 +254,7 @@ const Run = struct {
             try run.warn("failed to download bundle from URI '{s}'", .{uri});
             return false;
         }
-        const objects = run.repo.objectDatabase().objectsDirectory().get();
+        const objects = run.repo.objectDatabase().objectsDirectory();
         if (!bundle.isBundle(run.gpa, run.io, objects, b.file.?)) {
             if (try run.followList(b, depth, global)) return true;
             try run.warn("file at URI '{s}' is not a bundle or bundle list", .{uri});
@@ -266,7 +266,7 @@ const Run = struct {
 
     /// `fetch_bundle_list_in_config_format`.
     fn followList(run: *Run, b: *Bundle, depth: usize, global: *List) Error!bool {
-        const objects = run.repo.objectDatabase().objectsDirectory().get();
+        const objects = run.repo.objectDatabase().objectsDirectory();
         const text = aegis.own.readFile(run.io, objects, b.file.?, run.arena, aegis.units.Bytes(u64).fromRaw(1 << 30)) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             error.OutOfMemory => return error.OutOfMemory,
@@ -287,7 +287,7 @@ const Run = struct {
 
     /// Whether `file`, read from `uri`, is a bundle list.
     fn isList(run: *Run, uri: []const u8, file: []const u8) Error!bool {
-        const objects = run.repo.objectDatabase().objectsDirectory().get();
+        const objects = run.repo.objectDatabase().objectsDirectory();
         const text = aegis.own.readFile(run.io, objects, file, run.arena, aegis.units.Bytes(u64).fromRaw(1 << 30)) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             error.OutOfMemory => return error.OutOfMemory,
@@ -349,7 +349,7 @@ const Run = struct {
         var new_max: u64 = 0;
         var cur: isize = 0;
         var direction: isize = 0;
-        const objects = run.repo.objectDatabase().objectsDirectory().get();
+        const objects = run.repo.objectDatabase().objectsDirectory();
         while (cur >= 0 and cur < items.len) {
             const b = &items[@intCast(cur)];
             if (b.creation_token <= max_token) break;
@@ -401,7 +401,7 @@ const Run = struct {
 
     /// `find_temp_filename`: a new name under `objects/bundles/`.
     fn tempFile(run: *Run) Error!?[]const u8 {
-        const objects = run.repo.objectDatabase().objectsDirectory().get();
+        const objects = run.repo.objectDatabase().objectsDirectory();
         objects.createDirPath(run.io, "bundles") catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             else => {
@@ -418,7 +418,7 @@ const Run = struct {
     /// `copy_uri_to_file`: an http or https URI downloaded, any other
     /// copied from the path it is (after `file://`).
     fn copy(run: *Run, uri: []const u8, file: []const u8) Error!bool {
-        const objects = run.repo.objectDatabase().objectsDirectory().get();
+        const objects = run.repo.objectDatabase().objectsDirectory();
         if (std.mem.startsWith(u8, uri, "https:") or std.mem.startsWith(u8, uri, "http:")) {
             // git-remote-https's `get` takes the URI and the file on one
             // line, split at a space.
@@ -451,7 +451,7 @@ const Run = struct {
     fn unbundle(run: *Run, file: []const u8) Error!bool {
         const io = run.io;
         const repo = run.repo;
-        const objects = repo.objectDatabase().objectsDirectory().get();
+        const objects = repo.objectDatabase().objectsDirectory();
         const opened = bundle.File.open(run.gpa, io, objects, file) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             error.OutOfMemory => return error.OutOfMemory,

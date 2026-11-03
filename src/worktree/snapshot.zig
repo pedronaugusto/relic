@@ -93,7 +93,7 @@ pub const Store = struct {
     pub fn open(gpa: Allocator, io: Io, dir: Io.Dir, options: OpenOptions) Self.Error!Store {
         var owned: fs.OwnedDir = .init(try dir.openDir(io, ".", .{ .iterate = true }));
         errdefer owned.deinit(io);
-        const own_dir = owned.lend().get();
+        const own_dir = owned.borrow().*;
         try own_dir.createDirPath(io, "objects/pack");
         try own_dir.createDirPath(io, "objects/info");
         var db = try opening.openOwn(odb.Odb, gpa, io, own_dir, options.kind, options.odb);
@@ -123,7 +123,7 @@ pub const Store = struct {
             if (r.objectFormat() != store.db.objectFormat()) return error.ObjectFormatMismatch;
         }
         const wt = switch (source) {
-            .repository => |r| (r.workDirectory() orelse return error.BareRepository).get(),
+            .repository => |r| r.workDirectory() orelse return error.BareRepository,
             .folder => |dir| dir,
         };
         var ignored = if (source_repo) |r| try r.loadIgnore(io) else try ignore_mod.Rules.init(store.gpa, .{ .case_fold = false });
@@ -136,18 +136,18 @@ pub const Store = struct {
             const lfsconfig = try r.lfsconfigText(io);
             defer if (lfsconfig) |text| r.allocator().free(text);
             // Native LFS writes to the private store, never to the source.
-            drivers = try filter.Drivers.load(store.gpa, io, r.configuration(), .{ .common = store.dir.lend().get(), .work = wt, .shared = r.sharedPermissions() }, .{ .config_text = lfsconfig, .native_provider = options.native_provider });
+            drivers = try filter.Drivers.load(store.gpa, io, r.configuration(), .{ .common = store.dir.borrow().*, .work = wt, .shared = r.sharedPermissions() }, .{ .config_text = lfsconfig, .native_provider = options.native_provider });
             // lfs.storage belongs to the source's storage policy. Its rules
             // still apply, but even an absolute storage path cannot redirect
             // a snapshot write out of the private store.
-            if (drivers.?.native_driver) |implementation| implementation.retarget(store.dir.lend().get());
+            if (drivers.?.native_driver) |implementation| implementation.retarget(store.dir.borrow().*);
         }
         var rules = if (source_repo) |r| try r.worktreeRules() else worktree.Rules{};
         rules.ignore = &ignored;
         rules.attrs = &attrs;
         rules.filters = if (drivers) |*d| d else null;
         var staged = if (source_repo) |r|
-            try index.Index.read(store.gpa, io, r.gitDirectory().get(), "index", .{ .git_dir = r.gitDirectory().get(), .kind = r.objectFormat(), .timestamp_resolution = r.objectDatabase().timestamp_resolution })
+            try index.Index.read(store.gpa, io, r.gitDirectory(), "index", .{ .git_dir = r.gitDirectory(), .kind = r.objectFormat(), .timestamp_resolution = r.objectDatabase().timestamp_resolution })
         else
             index.Index.initEmpty(store.gpa, store.db.objectFormat());
         defer staged.deinit();
@@ -204,7 +204,7 @@ pub const Store = struct {
         try store.db.syncBatch(io);
         if (store.durability == .durable) {
             try store.db.makeDurable(io, &.{tree});
-            try fs.syncDirectory(io, store.dir.lend().get(), ".");
+            try fs.syncDirectory(io, store.dir.borrow().*, ".");
         }
         return .{ .tree = tree };
     }

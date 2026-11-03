@@ -141,25 +141,29 @@ fn dial(gpa: Allocator, io: Io, host: []const u8, port: u16) Self.Error!*Connect
     if (comptime !http_enabled) return error.UnsupportedTransport;
     // A host that cannot be reached is `ConnectionFailed`, however the dial
     // failed, as smart HTTP names it.
-    const dialed = uplink.net.dial.dial(io, host, port, .{ .socket = .{ .nodelay = true, .keepalive = .{ .on = .{} } } }) catch |err| switch (err) {
+    var dialed = uplink.net.dial.dial(io, host, port, .{ .socket = .{ .nodelay = true, .keepalive = .{ .on = .{} } } }) catch |err| switch (err) {
         error.InvalidHostName, error.NameNotResolved, error.ConnectionFailed, error.OptionUnsupported, error.AccessDenied, error.AddressFamilyMismatch, error.TimedOut, error.ConcurrencyUnavailable => return error.ConnectionFailed,
         error.Canceled => return error.Canceled,
+        // unreachable: a host and port, never a named pipe
+        error.NamedPipeUnsupported => unreachable,
     };
-    var stream = fs.OwnedStream.init(dialed.stream);
-    errdefer stream.deinit(io);
-    return Socket.start(gpa, io, &stream);
+    errdefer dialed.stream.deinit(io);
+    return Socket.start(gpa, io, &dialed.stream);
 }
 
 /// A conversation over a connected socket: one stream each way, the
 /// server remembering it, as over a pipe.
 const Socket = struct {
     gpa: Allocator,
-    stream: fs.OwnedStream,
+    stream: Dialed,
     read_buffer: []u8,
     write_buffer: []u8,
     reader: Io.net.Stream.Reader,
     writer: Io.net.Stream.Writer,
     connection: Connection,
+
+    /// A dial's stream with its one owner, which closes it.
+    const Dialed = @FieldType(uplink.net.dial.Dialed, "stream");
 
     const vtable: Connection.VTable = .{
         .advertisement = advertisement,
@@ -171,7 +175,7 @@ const Socket = struct {
 
     /// The conversation over `stream`, which it takes once nothing more can
     /// fail, closed by its connection's `deinit`; on a failure it is still the caller's.
-    fn start(gpa: Allocator, io: Io, stream: *fs.OwnedStream) Allocator.Error!*Connection {
+    fn start(gpa: Allocator, io: Io, stream: *Dialed) Allocator.Error!*Connection {
         const s = try gpa.create(Socket);
         errdefer gpa.destroy(s);
         const read_buffer = try gpa.alloc(u8, pkt_line.max_line + 4);
@@ -186,7 +190,8 @@ const Socket = struct {
             .writer = undefined,
             .connection = .{ .context = s, .vtable = &vtable, .stateless = false },
         };
-        const lent = s.stream.lend().get();
+        // unreachable: a host and port's dial is a socket's
+        const lent = s.stream.borrow().socketStream() orelse unreachable;
         s.reader = lent.reader(io, read_buffer);
         s.writer = lent.writer(io, write_buffer);
         return &s.connection;

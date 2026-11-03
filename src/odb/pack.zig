@@ -655,7 +655,7 @@ pub const Pack = struct {
         const dest = slot.bytes.?[block_prefix..][0..len];
         var done: usize = 0;
         while (done < len) {
-            const n = try p.file.lend().get().readPositional(io, &.{dest[done..]}, std.math.add(u64, start, done) catch return error.TruncatedPack);
+            const n = try p.file.borrow().*.readPositional(io, &.{dest[done..]}, std.math.add(u64, start, done) catch return error.TruncatedPack);
             if (n == 0) return error.TruncatedPack;
             done += n;
         }
@@ -748,7 +748,7 @@ pub const Pack = struct {
     /// blocks as they were.
     fn streamReaderAt(p: *Pack, io: Io, at: u64) ErrorNamespace.Error!*Io.Reader {
         if (p.stream_buffer.len == 0) p.stream_buffer = try p.gpa.alloc(u8, stream_buffer_bytes);
-        p.stream_reader = p.file.lend().get().reader(io, p.stream_buffer);
+        p.stream_reader = p.file.borrow().*.reader(io, p.stream_buffer);
         p.stream_reader.seekTo(at) catch |err| return switch (err) {
             error.EndOfStream => error.TruncatedPack,
             error.ReadFailed => p.stream_reader.err orelse error.ReadFailed,
@@ -783,7 +783,7 @@ pub const Pack = struct {
         }
         var done: usize = 0;
         while (done < out.len) {
-            const n = try p.file.lend().get().readPositional(io, &.{out[done..]}, std.math.add(u64, offset, done) catch return error.TruncatedPack);
+            const n = try p.file.borrow().*.readPositional(io, &.{out[done..]}, std.math.add(u64, offset, done) catch return error.TruncatedPack);
             if (n == 0) return error.TruncatedPack;
             done += n;
         }
@@ -802,7 +802,7 @@ pub const Pack = struct {
         }
         var done: usize = 0;
         while (done < out.len) {
-            const n = try p.file.lend().get().readPositional(io, &.{out[done..]}, std.math.add(u64, offset, done) catch return error.TruncatedPack);
+            const n = try p.file.borrow().*.readPositional(io, &.{out[done..]}, std.math.add(u64, offset, done) catch return error.TruncatedPack);
             if (n == 0) return error.TruncatedPack;
             done += n;
         }
@@ -813,7 +813,7 @@ pub const Pack = struct {
     pub fn readerAt(p: *Pack, io: Io, offset: u64, buffer: []u8) Self.Error!Positioned {
         if (offset > p.size) return error.TruncatedPack;
         if (p.memory) |mem| return .{ .memory = .fixed(mappedFrom(mem, offset) orelse return error.TruncatedPack) };
-        var file_reader = p.file.lend().get().reader(io, buffer);
+        var file_reader = p.file.borrow().*.reader(io, buffer);
         try file_reader.seekTo(offset);
         return .{ .file = file_reader };
     }
@@ -1012,7 +1012,7 @@ pub const Pack = struct {
             // No more read ahead than the stream can take: a deflated entry
             // is at most an eighth longer than what it holds.
             const want = @min(reader.buffer.len, result_len +| result_len / 8 +| 64);
-            file_reader = p.file.lend().get().reader(io, reader.buffer[0..want]);
+            file_reader = p.file.borrow().*.reader(io, reader.buffer[0..want]);
             file_reader.seekTo(at) catch |err| return switch (err) {
                 error.EndOfStream => error.TruncatedPack,
                 error.ReadFailed => file_reader.err orelse error.ReadFailed,
@@ -1362,11 +1362,11 @@ pub const Pack = struct {
             fixed = .fixed(mappedFrom(mem, entry.data_at) orelse return error.TruncatedPack);
             break :blk &fixed;
         } else blk: {
-            file_reader = p.file.lend().get().reader(io, &input);
+            file_reader = p.file.borrow().*.reader(io, &input);
             try file_reader.seekTo(entry.data_at);
             break :blk &file_reader.interface;
         };
-        var inflating: warp.Inflate.Reader = .init(source, &window, .{});
+        var inflating = warp.Inflate.Reader.init(source, &window, .{}) catch aegis.assert.never("zlib's default window, and the buffer holds it and a read");
         var hasher: hash.Hasher = .init(p.kind);
         hasher.updateHeader(t.name(), entry.size);
         var chunk: [16 * 1024]u8 = undefined;
@@ -2038,7 +2038,7 @@ pub const Deflater = struct {
 
     pub fn init(gpa: Allocator) Allocator.Error!Deflater {
         const workspace = try gpa.alignedAlloc(u8, .@"64", warp.Deflate.memory(.{}));
-        return .{ .workspace = workspace, .compress = .initBuffer(workspace, .{}) };
+        return .{ .workspace = workspace, .compress = warp.Deflate.initBuffer(workspace, .{}) catch aegis.assert.never("the workspace is memory(.{}) bytes") };
     }
 
     pub fn deinit(d: *Deflater, gpa: Allocator) void {
@@ -2059,14 +2059,14 @@ pub const Deflater = struct {
     /// caller writes the payload in as many pieces as it has and then
     /// `finish`es it, and the stream is the one `deflate` makes of the
     /// whole.
-    pub fn open(d: *Deflater, out: *Io.Writer, compression: Compression, buffer: []u8) warp.Deflate.Writer {
+    pub fn open(d: *Deflater, out: *Io.Writer, compression: Compression, buffer: *[4096]u8) warp.Deflate.Writer {
         if (d.compression == compression) {
             d.compress.reset(.nothing);
         } else {
-            d.compress = .initBuffer(d.workspace, .{ .level = compression.level() });
+            d.compress = warp.Deflate.initBuffer(d.workspace, .{ .level = compression.level() }) catch aegis.assert.never("a level of 9 or less needs what memory(.{}) gave the workspace");
             d.compression = compression;
         }
-        return .init(&d.compress, out, buffer);
+        return warp.Deflate.Writer.init(&d.compress, out, buffer) catch aegis.assert.never("4 KiB is the writer's least");
     }
 
     /// The most bytes `deflate` is given room for ahead of the writer, for a
@@ -2526,7 +2526,7 @@ pub const Writer = struct {
         const mark = w.mark.?;
         w.mark = null;
         try w.file_writer.interface.flush();
-        try w.file.?.lend().get().setLength(io, mark.at);
+        try w.file.?.borrow().*.setLength(io, mark.at);
         try w.file_writer.seekTo(mark.at);
         w.sink.hasher = mark.hasher;
         w.sink.count = mark.at;
@@ -2613,7 +2613,7 @@ pub const Writer = struct {
         errdefer if (token) |*t| t.deinit(io);
         const pack_bytes = w.sink.count + w.kind.rawLen();
         try w.file_writer.interface.flush();
-        try fs.syncFile(io, w.file.?.lend().get(), .{ .policy = w.options.fsync.sync(.pack) });
+        try fs.syncFile(io, w.file.?.borrow().*, .{ .policy = w.options.fsync.sync(.pack) });
         w.file.?.deinit(io);
         w.finished = true;
 
@@ -2695,14 +2695,14 @@ pub const Writer = struct {
         try w.file_writer.interface.flush();
         var header: [4]u8 = undefined;
         std.mem.writeInt(u32, &header, @intCast(w.entries.items.len), .big);
-        _ = try w.file.?.lend().get().writePositionalAll(io, &header, 8);
+        _ = try w.file.?.borrow().*.writePositionalAll(io, &header, 8);
 
         var hasher: hash.Hasher = .init(w.kind);
         var at: u64 = 0;
         const buffer = w.file_buffer;
         while (at < w.sink.count) {
             const want: usize = @intCast(@min(buffer.len, w.sink.count - at));
-            const n = try w.file.?.lend().get().readPositionalAll(io, buffer[0..want], at);
+            const n = try w.file.?.borrow().*.readPositionalAll(io, buffer[0..want], at);
             if (n == 0) break;
             hasher.update(buffer[0..n]);
             at += n;

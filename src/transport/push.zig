@@ -858,7 +858,7 @@ fn pushCertificate(
     options: Options,
 ) Error![]const u8 {
     const programs = options.programs orelse return error.SigningRequiresPrograms;
-    var signer = try signing.Signer.init(gpa, io, repo.configuration(), repo.topDirectory().get(), programs);
+    var signer = try signing.Signer.init(gpa, io, repo.configuration(), repo.topDirectory(), programs);
     defer signer.deinit();
     const key_id = try signer.keyId(io, options.who);
     defer gpa.free(key_id);

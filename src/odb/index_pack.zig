@@ -1156,7 +1156,7 @@ const Indexer = struct {
             error.ReadFailed => file_reader.err orelse error.ReadFailed,
             else => error.TruncatedPack,
         };
-        var inflating: warp.Inflate.Reader = .init(&file_reader.interface, window, .{});
+        var inflating = warp.Inflate.Reader.init(&file_reader.interface, window, .{}) catch aegis.assert.never("zlib's default window, and the buffer holds it and a read");
         return x.db.same(x.io, entry.oid, &inflating.interface, entry.size) catch |err| switch (err) {
             error.ReadFailed => if (file_reader.err) |e| e else if (inflating.err()) |e| switch (e) {
                 error.Truncated => error.TruncatedPack,
@@ -1519,7 +1519,7 @@ const Inflater = struct {
             f.window = w;
             break :blk w;
         };
-        var d: warp.Inflate.Reader = .init(source.reader(), window, .{});
+        var d = warp.Inflate.Reader.init(source.reader(), window, .{}) catch aegis.assert.never("zlib's default window, and the buffer holds it and a read");
         var chunk: [16 * 1024]u8 = undefined;
         var done: u64 = 0;
         while (true) {

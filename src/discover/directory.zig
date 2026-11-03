@@ -79,7 +79,7 @@ pub fn isGitDirectory(io: Io, dir: Io.Dir) Io.Cancelable!bool {
         else => return false,
     };
     defer if (common) |*c| c.deinit(io);
-    const where = if (common) |*c| c.lend().get() else dir;
+    const where = if (common) |*c| c.borrow().* else dir;
     inline for (.{ "objects", "refs" }) |name| where.access(io, name, .{}) catch |err| switch (err) {
         error.Canceled => return error.Canceled,
         else => return false,

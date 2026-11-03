@@ -19,10 +19,16 @@ const object = @import("../object.zig");
 /// The backend, with what the requests it saw were sent as.
 const Served = struct {
     backend: http_backend.Backend,
+    answers: uplink.server.Handler = .{ .handleFn = answer },
     gzipped: std.atomic.Value(u32) = .init(0),
     requests: std.atomic.Value(u32) = .init(0),
     /// Requests that came in HTTP/2.
     h2: std.atomic.Value(u32) = .init(0),
+
+    fn answer(h: *uplink.server.Handler, io: Io, request: *uplink.server.Request, response: *uplink.server.Response) anyerror!void {
+        const s: *Served = @alignCast(@fieldParentPtr("answers", h));
+        return s.serve(io, request, response);
+    }
 
     fn serve(s: *Served, io: Io, request: *uplink.server.Request, response: *uplink.server.Response) anyerror!void {
         _ = s.requests.fetchAdd(1, .monotonic);
@@ -75,7 +81,7 @@ test "git clones, fetches and pushes over HTTP against relic's server, in v2 and
 
     var caller: http_backend.Caller = .{ .vtable = &Served.calls };
     var served: Served = .{ .backend = .init(gpa, root_path, .{ .caller = &caller }) };
-    var server = uplink.Server.init(gpa, .{}, .init(&served, Served.serve));
+    var server = uplink.Server.init(gpa, .{}, &served.answers);
     defer server.deinit(io);
     const address = try Io.net.IpAddress.parse("127.0.0.1", 0);
     var listener = try address.listen(io, .{ .reuse_address = true });
@@ -167,7 +173,7 @@ test "under http.version=HTTP/2 git and relic ask relic's server to upgrade a pl
 
     var caller: http_backend.Caller = .{ .vtable = &Served.calls };
     var served: Served = .{ .backend = .init(gpa, root_path, .{ .caller = &caller }) };
-    var server = uplink.Server.init(gpa, .{ .h2c = .alongside_http1 }, .init(&served, Served.serve));
+    var server = uplink.Server.init(gpa, .{ .h2c = .alongside_http1 }, &served.answers);
     defer server.deinit(io);
     const address = try Io.net.IpAddress.parse("127.0.0.1", 0);
     var listener = try address.listen(io, .{ .reuse_address = true });
@@ -261,7 +267,7 @@ test "git clones and fetches over the dumb protocol from relic's server, its pac
 
     var caller: http_backend.Caller = .{ .vtable = &Served.calls };
     var served: Served = .{ .backend = .init(gpa, root_path, .{ .caller = &caller }) };
-    var server = uplink.Server.init(gpa, .{}, .init(&served, Served.serve));
+    var server = uplink.Server.init(gpa, .{}, &served.answers);
     defer server.deinit(io);
     const address = try Io.net.IpAddress.parse("127.0.0.1", 0);
     var listener = try address.listen(io, .{ .reuse_address = true });

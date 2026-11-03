@@ -32,7 +32,7 @@ pub const UrlParts = struct {
         inline for (.{ "protocol", "host", "path", "username" }) |name| {
             if (@field(p, name)) |v| gpa.free(v);
         }
-        if (p.password) |*secret| secret.deinit();
+        if (p.password) |*secret| secret.deinit(gpa);
         p.* = undefined;
     }
 
@@ -83,7 +83,7 @@ pub const UrlParts = struct {
     /// it was.
     fn decodeSecret(gpa: Allocator, text: []const u8) Allocator.Error!SecretBytes {
         var secret = try SecretBytes.init(gpa, text.len);
-        errdefer secret.deinit();
+        errdefer secret.deinit(gpa);
         // unreachable: the owner was made with the text's length.
         secret.resizeWithinCapacity(text.len) catch unreachable;
         const len = percent.decodeInto(secret.exposeMut(), text, .literal);
@@ -102,8 +102,8 @@ pub const UrlParts = struct {
 
 /// `parts` after `text`'s live bytes, in order: a credential's text built a
 /// piece at a time, held nowhere but in wiped storage.
-pub fn appendParts(text: *SecretBytes, parts: []const []const u8) Allocator.Error!void {
-    for (parts) |piece| text.appendSlice(piece) catch |err| switch (err) {
+pub fn appendParts(gpa: Allocator, text: *SecretBytes, parts: []const []const u8) Allocator.Error!void {
+    for (parts) |piece| text.appendSlice(gpa, piece) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.Overlap => unreachable,
     };

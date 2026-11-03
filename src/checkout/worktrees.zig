@@ -122,7 +122,7 @@ pub const Listing = struct {
 /// The main working tree is not one of these: it has no administrative
 /// directory, and a caller that wants it in a list adds it.
 pub fn list(gpa: Allocator, io: Io, refs: *const refs_mod.Store) Self.Error!Listing {
-    const common_dir = refs.commonDir().get();
+    const common_dir = refs.commonDir();
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_instance.deinit();
     const arena = arena_instance.allocator();
@@ -246,7 +246,7 @@ fn pointsBack(arena: Allocator, io: Io, admin: Io.Dir, named: Named) Self.Error!
     defer target_dir.deinit(io);
     var target_buf: [4096]u8 = undefined;
     var admin_buf: [4096]u8 = undefined;
-    return std.mem.eql(u8, try fs.realPath(io, target_dir.lend().get(), &target_buf), try fs.realPath(io, admin, &admin_buf));
+    return std.mem.eql(u8, try fs.realPath(io, target_dir.borrow().*, &target_buf), try fs.realPath(io, admin, &admin_buf));
 }
 
 /// What `add` is asked to create.
@@ -294,7 +294,7 @@ pub fn add(
 ) Self.Error!Added {
     const name = inputs.name;
     const dest_dir = inputs.dest_dir;
-    const common_dir = refs.commonDir().get();
+    const common_dir = refs.commonDir();
     try checkId(name);
     if (options.detach_at == null) {
         if (options.branch) |branch| {
@@ -309,7 +309,7 @@ pub fn add(
     var opened_work_dir = fs.OwnedDir.init(try dest_dir.openDir(io, ".", .{ .iterate = true }));
     errdefer opened_work_dir.deinit(io);
     {
-        var it = opened_work_dir.lend().get().iterate();
+        var it = opened_work_dir.borrow().*.iterate();
         if (try it.next(io) != null) return error.DestinationNotEmpty;
     }
 
@@ -326,7 +326,7 @@ pub fn add(
     };
     var admin = fs.OwnedDir.init(try worktrees_dir.openDir(io, name, .{ .iterate = true }));
     errdefer admin.deinit(io);
-    const admin_dir = admin.lend().get();
+    const admin_dir = admin.borrow().*;
 
     // `commondir` is relative to the administrative directory, which is what
     // makes a repository movable as a whole.
@@ -340,7 +340,7 @@ pub fn add(
     try writeLine(io, admin_dir, "gitdir", gitfile_path);
 
     try refs_mod.create(io, admin_dir, refs.refFormat(), .{ .worktree = true, .shared = refs.sharedPermissions() });
-    var own = try refs_mod.Store.init(gpa, refs.objectFormat(), admin.lend(), refs.commonDir(), .{
+    var own = try refs_mod.Store.init(gpa, refs.objectFormat(), admin.borrow().*, refs.commonDir(), .{
         .format = refs.refFormat(),
         .reftable = refs.reftableOptions(),
         .shared = refs.sharedPermissions(),
@@ -510,7 +510,7 @@ pub fn prune(gpa: Allocator, io: Io, refs: *const refs_mod.Store, options: Prune
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_instance.deinit();
     const arena = arena_instance.allocator();
-    const common_dir = refs.commonDir().get();
+    const common_dir = refs.commonDir();
     var pruned: std.ArrayList(Pruned) = .empty;
     var skipped_locked: u32 = 0;
     const worktrees_dir = common_dir.openDir(io, "worktrees", .{ .iterate = true }) catch |err| switch (err) {

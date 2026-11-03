@@ -985,7 +985,7 @@ pub const Client = struct {
         var text = (fs.readSecretFile(gpa, io, dir, ".netrc", 1 << 20) catch null) orelse
             (if (builtin.target.os.tag == .windows) (fs.readSecretFile(gpa, io, dir, "_netrc", 1 << 20) catch null) else null) orelse
             return null;
-        defer text.deinit();
+        defer text.deinit(gpa);
         return netrc_mod.Netrc.parse(gpa, text.expose()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.MalformedNetrc => null,
@@ -1019,7 +1019,7 @@ pub const Client = struct {
         if (shared.netrc) |*n| n.deinit();
         shared.netrc_refused.deinit(c.gpa);
         var passphrases = shared.key_passphrases.valueIterator();
-        while (passphrases.next()) |p| p.deinit();
+        while (passphrases.next()) |p| p.deinit(c.gpa);
         shared.access.deinit(c.gpa);
         shared.learned.deinit(c.gpa);
         for (&shared.ssh_transfers) |*slot| switch (slot.*) {
@@ -1390,7 +1390,7 @@ pub const Client = struct {
     /// What a download asks to have its body compressed with, as git-lfs's
     /// Go client asks.
     pub const Accept = enum {
-        /// The HTTP client's own list, for the API.
+        /// `gzip`, as Go's transport asks on its own, for the API.
         default,
         /// No `Accept-Encoding` at all: a request with a `Range`, whose
         /// bytes count from the object's start.
@@ -1452,7 +1452,7 @@ pub const Client = struct {
                 const shared = guard.value();
                 break :blk try c.authorize(shared, scratch, io, url, access_url, operation, request.authenticated or has_auth, refusal);
             };
-            defer attempt.deinit();
+            defer attempt.deinit(c.gpa);
 
             const ex = c.exchangeOnce(io, current, url, attempt.headerValue()) catch |err| switch (err) {
                 error.ConnectionFailed => {
@@ -1543,8 +1543,8 @@ pub const Client = struct {
         netrc_host: ?[]const u8 = null,
         access: Access = .none,
 
-        fn deinit(a: *Attempt) void {
-            if (a.header) |*h| h.deinit();
+        fn deinit(a: *Attempt, gpa: Allocator) void {
+            if (a.header) |*h| h.deinit(gpa);
             a.* = undefined;
         }
 
@@ -1723,7 +1723,8 @@ pub const Client = struct {
             .none => {},
         }
 
-        const transport = try c.transportFor(a, io, request_url, request.accept != .zstd and request.accept != .none);
+        ex.accept = request.accept;
+        const transport = try c.transportFor(a, io, request_url);
         ex.url = request_url;
         const method: uplink.Method = .{ .name = @tagName(request.method) };
         switch (request.body) {
@@ -1733,7 +1734,7 @@ pub const Client = struct {
                 var owned = (o.store.open(io, &o.pointer) catch |err| return if (err == error.Canceled) error.Canceled else c.fail("{s}", io, .{@errorName(err)}, error.ConnectionFailed)) orelse
                     return c.fail("object {s} is not in the store", io, .{&o.pointer.oid}, error.HttpStatus);
                 defer owned.deinit(io);
-                const file = owned.lend().get();
+                const file = owned.borrow().*;
                 var outgoing = transport.begin(io, .{
                     .method = method,
                     .url = request_url,
@@ -1816,8 +1817,8 @@ pub const Client = struct {
             error.ClientCertificateSchemeUnsupported => c.fail("no signature scheme the server takes: {s}", io, .{where}, error.ClientCertificateSchemeUnsupported),
             error.InvalidUrl, error.UnsupportedScheme => c.fail("malformed URL {s}", io, .{where}, error.MalformedUrl),
             error.InvalidHeader => c.fail("a header no request can carry: {s}", io, .{where}, error.InvalidHttpHeader),
-            // unreachable: a whole body is bytes, an object's is written as it comes, `finish` runs once, the proxy is fixed, and no redirect, retry, credential or hook is uplink's
-            error.InvalidBody, error.BodyReadFailed, error.ExchangeOver, error.InvalidProxy, error.BodyNotReplayable, error.TooManyRedirects, error.InsecureRedirect, error.InvalidRedirect, error.CredentialsUnavailable, error.PrepareFailed => unreachable,
+            // unreachable: a whole body is bytes, an object's is written as it comes, `finish` runs once, the proxy is fixed, no redirect, retry, credential or hook is uplink's, and no named pipe or extended CONNECT is asked for
+            error.InvalidBody, error.BodyReadFailed, error.ExchangeOver, error.InvalidProxy, error.BodyNotReplayable, error.TooManyRedirects, error.InsecureRedirect, error.InvalidRedirect, error.CredentialsUnavailable, error.PrepareFailed, error.NamedPipeUnsupported, error.ExtendedConnectUnsupported => unreachable,
         };
     }
 
@@ -1830,7 +1831,7 @@ pub const Client = struct {
         var owned = (store.open(io, pointer) catch |err| return if (err == error.Canceled) error.Canceled else c.fail("{s}", io, .{@errorName(err)}, error.ConnectionFailed)) orelse
             return c.fail("object {s} is not in the store", io, .{&pointer.oid}, error.HttpStatus);
         defer owned.deinit(io);
-        const file = owned.lend().get();
+        const file = owned.borrow().*;
         var head: [mime_sniff.sniff_len]u8 = undefined;
         const n = file.readPositionalAll(io, &head, 0) catch |err| return if (err == error.Canceled) error.Canceled else c.fail("upload: reading the object", io, .{}, error.ConnectionFailed);
         return mime_sniff.contentType(head[0..n]);
@@ -1855,7 +1856,7 @@ pub const Client = struct {
     /// git-lfs's own rules choose (`proxyFor`), and git-lfs's timeouts
     /// (`timeoutsFor`), and git-lfs's client certificate for the host
     /// (`clientCertificate`).
-    fn transportFor(c: *Client, scratch: Allocator, io: Io, request_url: []const u8, decompress: bool) ErrorNamespace.Error!*uplink.Client {
+    fn transportFor(c: *Client, scratch: Allocator, io: Io, request_url: []const u8) ErrorNamespace.Error!*uplink.Client {
         const url = url_mod.Url.parse(request_url) catch return c.fail("malformed URL {s}", io, .{stripQuery(request_url)}, error.MalformedUrl);
         const environ: ?*const std.process.Environ.Map = if (c.options.programs) |p| p.environ else null;
         const settings = http_settings.resolve(scratch, io, url, .{ .config = c.settings.config, .environ = environ }) catch |err| switch (err) {
@@ -1876,7 +1877,7 @@ pub const Client = struct {
         }
         const proxy = try c.proxyFor(scratch, request_url, url);
         const timeouts = try timeoutsFor(c.settings, scratch, url);
-        const key = try scratch.print("{s}\x00{s}\x00{s}\x00{}\x00{d}\x00{s}\x00{s}\x00{}", .{
+        const key = try scratch.print("{s}\x00{s}\x00{s}\x00{}\x00{d}\x00{s}\x00{s}", .{
             proxy orelse "",
             ca_info orelse "",
             ca_path orelse "",
@@ -1884,7 +1885,6 @@ pub const Client = struct {
             if (timeouts.activity) |d| @as(i128, d.raw()) else -1,
             if (cert_files) |f| f.cert else "",
             if (cert_files) |f| f.key orelse "" else "",
-            decompress,
         });
 
         var guard = try c.transports.acquire(io);
@@ -1933,10 +1933,10 @@ pub const Client = struct {
             .proxy = if (chosen) |p| .{ .fixed = p } else .none,
             .tls = tls_options,
             .timeouts = timeouts,
-            // LFS's zstd window is sized from the frame, under its own
-            // 512 MiB cap. Leave those bodies for Exchange.reader; a
-            // resumed range asks for no content coding at all.
-            .decompress = decompress,
+            // Every request names its own Accept-Encoding, as Go's
+            // transport and git-lfs write it, or none (a resumed range):
+            // the codings asked for are undone by Exchange.reader.
+            .decompress = false,
             .pool = .{ .max_idle_per_route = transfers, .max_idle = transfers },
             // git-lfs's redirects and retries are its own, decided here.
             .redirects = .none,
@@ -2004,7 +2004,7 @@ pub const Client = struct {
             if (!shared.key_passphrases.contains(key_path)) {
                 const key = try a.dupe(u8, key_path);
                 var kept = try secretCopy(c.gpa, p);
-                errdefer kept.deinit();
+                errdefer kept.deinit(c.gpa);
                 try shared.key_passphrases.put(a, key, kept);
             }
         };
@@ -2205,9 +2205,12 @@ pub const Exchange = struct {
     /// arena.
     url: []const u8 = "",
     in_flight: bool = false,
+    /// The codings the request asked for, which `reader` undoes.
+    accept: Client.Accept = .none,
+    /// A gzip body's decoder, over the client's undecoded bytes.
+    inflate: warp.Inflate.Reader = undefined,
     /// A zstd body's decoder, over the client's undecoded bytes.
     decompress: warp.zstd.Decompress.Reader = undefined,
-    decompress_buffer: []u8 = &.{},
     body: ?*Io.Reader = null,
 
     fn state(ex: *Exchange) *ExchangeState {
@@ -2279,25 +2282,30 @@ pub const Exchange = struct {
     }
 
     /// The body, read as it arrives, decompressed as its
-    /// `Content-Encoding` says.
+    /// `Content-Encoding` says. The HTTP client hands every body over as
+    /// it came, since each request names its own `Accept-Encoding`; the
+    /// codings are undone here. A body whose one coding is gzip is
+    /// inflated when the request asked for gzip, as Go's transport does
+    /// for git-lfs; one whose coding is zstd is decoded with the window
+    /// its first frame's header asks for, as git-lfs's decoder gives it,
+    /// up to the same limit. Any other coding is handed over as it came.
     pub fn reader(ex: *Exchange, io: Io) Self.Error!*Io.Reader {
         const raw = ex.state().response.reader(io);
         if (ex.body) |r| return r;
-        // A zstd body is asked for by `Request.Accept.zstd`, whose client
-        // leaves content codings undecoded. The window is the one the
-        // first frame's header asks for, as git-lfs's decoder gives it, up
-        // to the same limit. Any other coding is the HTTP client's to have
-        // decoded, or is handed over as it came.
         const codings = uplink.wire.coding.Codings.of(&ex.state().response.headers) catch uplink.wire.coding.Codings{};
-        if (codings.len != 1 or codings.items[0] != .zstd) {
-            ex.body = raw;
-            return raw;
-        }
-        const window = try zstdWindow(raw);
-        ex.decompress_buffer = try ex.arena.allocator().alloc(u8, window + (1 << 17) + 4096);
-        ex.decompress = .init(raw, ex.decompress_buffer, .{});
-        ex.body = &ex.decompress.interface;
-        return &ex.decompress.interface;
+        const only: ?uplink.wire.coding.ContentCoding = if (codings.len == 1) codings.items[0] else null;
+        if (only == .gzip and (ex.accept == .default or ex.accept == .gzip)) {
+            const options: warp.Inflate.Options = .{ .accept = .gzip };
+            const buffer = try ex.arena.allocator().alloc(u8, options.windowLen() + 4096);
+            ex.inflate = warp.Inflate.Reader.init(raw, buffer, options) catch aegis.assert.never("gzip's default window, and the buffer holds it and a read");
+            ex.body = &ex.inflate.interface;
+        } else if (only == .zstd) {
+            const window = try zstdWindow(raw);
+            const buffer = try ex.arena.allocator().alloc(u8, window + (1 << 17) + 4096);
+            ex.decompress = .init(raw, buffer, .{});
+            ex.body = &ex.decompress.interface;
+        } else ex.body = raw;
+        return ex.body.?;
     }
 
     /// The window a zstd body's first frame needs, read from its header
@@ -2416,7 +2424,7 @@ pub const Server = struct {
             .base_path = undefined,
             .remote = undefined,
         };
-        s.base_path = try (repo.workDirectory() orelse repo.commonDirectory()).get().realPathFileAlloc(io, ".", gpa);
+        s.base_path = try (repo.workDirectory() orelse repo.commonDirectory()).realPathFileAlloc(io, ".", gpa);
         errdefer gpa.free(s.base_path);
         s.settings = try .loadRepo(gpa, io, repo);
         errdefer s.settings.deinit();
@@ -2438,7 +2446,7 @@ pub const Server = struct {
         errdefer if (s.fetch_head) |f| gpa.free(f);
         s.download_ref = try downloadRef(gpa, io, repo, &s.settings);
         errdefer gpa.free(s.download_ref);
-        s.lfs = try lfs.Lfs.load(gpa, &s.settings, .{ .common_dir = repo.commonDirectory().get(), .shared = repo.sharedPermissions() });
+        s.lfs = try lfs.Lfs.load(gpa, &s.settings, .{ .common_dir = repo.commonDirectory(), .shared = repo.sharedPermissions() });
         errdefer s.lfs.deinit();
         s.alternates = try repo.objectDatabase().listAlternates(gpa, io);
         errdefer s.alternates.deinit();
@@ -2588,7 +2596,7 @@ const Userinfo = struct { user: []const u8, password: []const u8 };
 fn basicHeader(gpa: Allocator, user: []const u8, password: []const u8) Allocator.Error!aegis.SecretBytes {
     const plain_len = user.len + 1 + password.len;
     var plain = try aegis.SecretBytes.init(gpa, plain_len);
-    defer plain.deinit();
+    defer plain.deinit(gpa);
     // unreachable: the owner was made with exactly this capacity.
     plain.resizeWithinCapacity(plain_len) catch unreachable;
     const bytes = plain.exposeMut();
@@ -2937,12 +2945,12 @@ test "learned LFS policy writes the shared source without replacing worktree con
     defer client.deinit(io);
     try client.learnLocksVerify(io, "https://example.com/project", false);
     try client.remember(io, &repo);
-    var shared = try Config.openFile(gpa, io, .{ .dir = repo.commonDirectory().get(), .sub_path = "config" }, .local, .{});
+    var shared = try Config.openFile(gpa, io, .{ .dir = repo.commonDirectory(), .sub_path = "config" }, .local, .{});
     defer shared.deinit();
     try testing.expect(shared.get("fixture.shared") != null);
     try testing.expectEqualStrings("kept", shared.get("fixture.shared").?);
     try testing.expectEqualStrings("false", shared.get("lfs.https://example.com/project.locksverify").?);
-    const after = try repo.commonDirectory().get().readFileAlloc(io, "config.worktree", gpa, .limited(4096));
+    const after = try repo.commonDirectory().readFileAlloc(io, "config.worktree", gpa, .limited(4096));
     defer gpa.free(after);
     try testing.expectEqualStrings(worktree, after);
     _ = try repo.refreshConfig(io, .{});

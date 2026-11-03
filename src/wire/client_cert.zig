@@ -61,7 +61,7 @@ pub fn keyPath(files: Files) []const u8 {
 /// be read, which `load` names.
 pub fn keyIsEncrypted(gpa: Allocator, io: Io, files: Files) bool {
     var bytes = readSecret(gpa, io, keyPath(files)) catch return false;
-    defer bytes.deinit();
+    defer bytes.deinit(gpa);
     return cloak.PrivateKey.isEncrypted(bytes.expose());
 }
 
@@ -80,7 +80,7 @@ pub fn load(gpa: Allocator, io: Io, files: Files, options: LoadOptions) Self.Err
         error.Canceled => return error.Canceled,
         else => return error.SslClientCertificateUnreadable,
     };
-    defer cert_file.deinit();
+    defer cert_file.deinit(gpa);
     const cert_bytes = cert_file.expose();
     if (cert_der and std.mem.find(u8, cert_bytes, "-----BEGIN ") != null) return error.SslClientCertificateUnreadable;
     var key_file: ?aegis.SecretBytes = if (files.key) |path| readSecret(gpa, io, path) catch |err| switch (err) {
@@ -88,7 +88,7 @@ pub fn load(gpa: Allocator, io: Io, files: Files, options: LoadOptions) Self.Err
         error.Canceled => return error.Canceled,
         else => return error.SslClientKeyUnreadable,
     } else null;
-    defer if (key_file) |*k| k.deinit();
+    defer if (key_file) |*k| k.deinit(gpa);
     const key_bytes = if (key_file) |*k| k.expose() else cert_bytes;
     if (key_der and std.mem.find(u8, key_bytes, "-----BEGIN ") != null) return error.SslClientKeyUnreadable;
     const key = cloak.PrivateKey.parse(gpa, key_bytes, .{ .passphrase = options.passphrase }) catch |err| return switch (err) {

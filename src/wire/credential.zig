@@ -276,8 +276,8 @@ pub const Session = struct {
     }
 
     /// Let a secret go, wiping its bytes.
-    fn wipe(slot: *?SecretBytes) void {
-        if (slot.*) |*secret| secret.deinit();
+    fn wipe(gpa: Allocator, slot: *?SecretBytes) void {
+        if (slot.*) |*secret| secret.deinit(gpa);
         slot.* = null;
     }
 
@@ -299,9 +299,9 @@ pub const Session = struct {
 
     /// git's `credential_clear_secrets`.
     fn clearSecrets(s: *Session) void {
-        wipe(&s.password);
-        wipe(&s.credential);
-        wipe(&s.header);
+        wipe(s.gpa, &s.password);
+        wipe(s.gpa, &s.credential);
+        wipe(s.gpa, &s.header);
     }
 
     /// git's `credential_clear`: every part, setting and capability, as
@@ -312,7 +312,7 @@ pub const Session = struct {
             if (@field(s, name)) |v| s.gpa.free(v);
             @field(s, name) = null;
         }
-        wipe(&s.oauth_refresh_token);
+        wipe(s.gpa, &s.oauth_refresh_token);
         if (s.settings) |*settings| settings.deinit(s.gpa);
         s.settings = null;
         freeList(s.gpa, &s.challenges);
@@ -407,8 +407,8 @@ pub const Session = struct {
         if (reveal(&s.header)) |h| return h;
         if (s.authtype) |kind| if (reveal(&s.credential)) |value| {
             var header = SecretBytes.init(s.gpa, kind.len + 1 + value.len) catch return null;
-            parts_mod.appendParts(&header, &.{ kind, " ", value }) catch {
-                header.deinit();
+            parts_mod.appendParts(s.gpa, &header, &.{ kind, " ", value }) catch {
+                header.deinit(s.gpa);
                 return null;
             };
             s.header = header;
@@ -419,7 +419,7 @@ pub const Session = struct {
         const encoder = std.base64.standard.Encoder;
         const plain_len = user.len + 1 + password.len;
         var plain_secret = SecretBytes.init(s.gpa, plain_len) catch return null;
-        defer plain_secret.deinit();
+        defer plain_secret.deinit(s.gpa);
         // unreachable: the owner was made with exactly this capacity.
         plain_secret.resizeWithinCapacity(plain_len) catch unreachable;
         const plain = plain_secret.exposeMut();
@@ -456,7 +456,7 @@ pub const Session = struct {
     /// known; `false` means the person was asked and declined.
     pub fn fill(s: *Session, io: Io, opts: Options) Self.Error!bool {
         try s.fromOrigin();
-        wipe(&s.header);
+        wipe(s.gpa, &s.header);
         if (s.hasCredential()) return true;
         s.nextState();
         s.multistage = false;
@@ -501,7 +501,7 @@ pub const Session = struct {
         if (s.username == null) {
             const prompt = try s.promptText(arena, "Username");
             var said = try s.ask(io, opts, .username, prompt) orelse return false;
-            defer said.deinit();
+            defer said.deinit(s.gpa);
             s.username = try s.gpa.dupe(u8, said.expose());
         }
         if (s.password == null) {
@@ -583,7 +583,7 @@ pub const Session = struct {
         s.clearSecrets();
         if (s.username) |u| s.gpa.free(u);
         s.username = null;
-        wipe(&s.oauth_refresh_token);
+        wipe(s.gpa, &s.oauth_refresh_token);
         s.password_expiry_utc = no_expiry;
         s.approved = false;
         s.source = .none;
@@ -652,7 +652,7 @@ pub const Session = struct {
             else => return false,
         };
         // The arena frees unwiped; a password in a pattern is wiped first.
-        defer if (want.password) |*secret| secret.deinit();
+        defer if (want.password) |*secret| secret.deinit(arena);
         return want.matches(s);
     }
 
@@ -766,8 +766,8 @@ pub const Session = struct {
     /// is left in memory a growing buffer freed.
     fn helperInput(s: *Session, audience: Audience) Self.Error!SecretBytes {
         var input = try SecretBytes.init(s.gpa, 0);
-        errdefer input.deinit();
-        var into = SecretBytes.Writer.init(&input);
+        errdefer input.deinit(s.gpa);
+        var into = SecretBytes.Writer.init(&input, s.gpa);
         s.write(&into.interface, audience) catch |err| switch (err) {
             // The writer fails only for want of memory.
             error.WriteFailed => return error.OutOfMemory,
@@ -808,14 +808,14 @@ pub const Session = struct {
             try arena.print("git credential-{s} {t}", .{ helper, operation });
 
         var input = try s.helperInput(if (operation == .get) .helper else .response);
-        defer input.deinit();
+        defer input.deinit(s.gpa);
 
         var answer = try runSecret(s.gpa, io, programs, .{
             .argv = &.{command},
             .shell = true,
             .stderr = .inherit,
         }, .{ .input = input.expose(), .output = .limited(64 * 1024) });
-        defer answer.stdout.deinit();
+        defer answer.stdout.deinit(s.gpa);
         // Only `get` is listened to. A helper that fails, or that is not
         // there, is passed over, but what it wrote first is read, as git
         // reads it before it waits for the helper to end.
@@ -856,12 +856,12 @@ pub const Session = struct {
         var entry = found orelse return .{ .failed = false, .any = false };
         defer {
             s.gpa.free(entry.username);
-            entry.password.deinit();
+            entry.password.deinit(s.gpa);
         }
         // What git's `credential-store` prints, read as any helper's answer.
         var answer = try SecretBytes.init(s.gpa, 0);
-        defer answer.deinit();
-        try parts_mod.appendParts(&answer, &.{ "username=", entry.username, "\npassword=", entry.password.expose(), "\n" });
+        defer answer.deinit(s.gpa);
+        try parts_mod.appendParts(s.gpa, &answer, &.{ "username=", entry.username, "\npassword=", entry.password.expose(), "\n" });
         return .{ .failed = false, .any = try s.readAnswer(.init(answer.expose())) };
     }
 
@@ -888,7 +888,7 @@ pub const Session = struct {
         // git's "unable to find a suitable socket path; use --socket".
         const socket = helper.socket orelse (try cache.defaultSocket(arena, io, environ)) orelse return failed;
         var input = try s.helperInput(if (operation == .get) .helper else .response);
-        defer input.deinit();
+        defer input.deinit(s.gpa);
         return s.askCache(io, programs, cache_daemon, .{ .socket = socket, .operation = operation, .request = .{ .action = action, .timeout = helper.timeout, .input = input.expose() } });
     }
 
@@ -914,7 +914,7 @@ pub const Session = struct {
             } else if (!try startGitDaemon(s.gpa, io, programs, socket)) return failed;
             break :retry (cache.request(s.gpa, io, socket, req) catch |err| return cacheFailed(err)) orelse return failed;
         };
-        defer got.deinit();
+        defer got.deinit(s.gpa);
         // What the daemon prints is the helper's; only `get` is listened to.
         if (operation != .get) return .{ .failed = false, .any = false };
         return .{ .failed = false, .any = try s.readAnswer(.init(got.expose())) };
@@ -1059,13 +1059,13 @@ pub const Session = struct {
         const asker = p.asker orelse return error.CredentialsUnavailable;
         s.prompted = true;
         var answer = try SecretBytes.init(s.gpa, 0);
-        errdefer answer.deinit();
-        var into = SecretBytes.Writer.init(&answer);
+        errdefer answer.deinit(s.gpa);
+        var into = SecretBytes.Writer.init(&answer, s.gpa);
         // The writer fails only for want of memory.
         const answered = asker.ask(field, prompt, &into.interface) catch return error.OutOfMemory;
         into.interface.flush() catch return error.OutOfMemory;
         if (!answered) {
-            answer.deinit();
+            answer.deinit(s.gpa);
             return null;
         }
         return answer;
@@ -1098,7 +1098,7 @@ pub const Session = struct {
             .stderr = .inherit,
         }, .{ .output = .limited(64 * 1024) });
         if (!answer.succeeded()) {
-            answer.stdout.deinit();
+            answer.stdout.deinit(s.gpa);
             return null;
         }
         // Its first line, as git's `git_prompt` takes it.
@@ -1121,7 +1121,7 @@ fn replaceSecret(gpa: Allocator, slot: *?SecretBytes, value: []const u8) Allocat
     var fresh = try SecretBytes.init(gpa, value.len);
     // unreachable: a new allocation of the value's length, apart from it.
     fresh.replace(value) catch unreachable;
-    if (slot.*) |*old| old.deinit();
+    if (slot.*) |*old| old.deinit(gpa);
     slot.* = fresh;
 }
 
@@ -1147,8 +1147,8 @@ fn runSecret(
 ) ErrorNamespace.Error!Answer {
     // Room for a usual answer, so it seldom grows.
     var stdout = try SecretBytes.init(gpa, 256);
-    errdefer stdout.deinit();
-    var writer = SecretBytes.Writer.init(&stdout);
+    errdefer stdout.deinit(gpa);
+    var writer = SecretBytes.Writer.init(&stdout, gpa);
     var stderr = std.Io.Writer.Discarding.init(&.{});
     const term = program.runInto(gpa, io, programs, invocation, .{
         .sinks = .{ .stdout = &writer.interface, .stderr = &stderr.writer },

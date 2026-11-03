@@ -232,11 +232,16 @@ test "the tasks allocate nothing, and a batch holds no more than its budget" {
     try std.testing.expect(runs[1].peak > fixed + 48 * 64 * 1024);
 }
 
-/// Notes that the planned open was reached, before it stalls.
-fn noteParked(_: Io, context: *anyopaque) void {
-    const parked: *std.atomic.Value(bool) = @ptrCast(@alignCast(context)); // safe: the plan hands a *std.atomic.Value(bool) as the context
-    parked.store(true, .release);
-}
+/// Whether the planned open was reached, noted before it stalls.
+const Parked = struct {
+    hook: shakedown.Hook = .{ .run = note },
+    reached: std.atomic.Value(bool) = .init(false),
+
+    fn note(hook: *shakedown.Hook, _: Io) void {
+        const parked: *Parked = @alignCast(@fieldParentPtr("hook", hook));
+        parked.reached.store(true, .release);
+    }
+};
 
 fn writeWith(corpus: *Corpus, gpa: std.mem.Allocator, io: Io, options: odb_mod.PackOptions) anyerror!pack_mod.WriteReport {
     return corpus.write(gpa, io, options);
@@ -268,17 +273,17 @@ test "a pack write canceled or failed part way leaves nothing behind" {
     const interrupted = faults.io();
     // The thirtieth open, on whichever task makes it.
     const at: shakedown.IoPlan.At = .{ .nth = .{ .call = .dirOpenFile, .n = 30 } };
-    var parked: std.atomic.Value(bool) = .init(false);
+    var parked: Parked = .{};
     const stall: shakedown.IoFault = .stall;
-    const parks = [_]shakedown.IoPlan.Entry{.{ .at = at, .fault = .{ .call = .{ .ctx = &parked, .f = noteParked, .then = &stall } } }};
+    const parks = [_]shakedown.IoPlan.Entry{.{ .at = at, .fault = .{ .call = .{ .hook = &parked.hook, .then = &stall } } }};
     const fails = [_]shakedown.IoPlan.Entry{.{ .at = at, .fault = .{ .fail = error.AccessDenied } }};
 
     for ([_]u16{ 4, 3, 1 }) |threads| {
         // Canceled while a read waits: the write returns `Canceled`.
-        parked.store(false, .release);
+        parked.reached.store(false, .release);
         try faults.setPlan(&parks);
         var future = try io.concurrent(writeWith, .{ &corpus, gpa, interrupted, .{ .threads = threads } });
-        while (!parked.load(.acquire)) try io.sleep(.fromMilliseconds(1), .awake);
+        while (!parked.reached.load(.acquire)) try io.sleep(.fromMilliseconds(1), .awake);
         try std.testing.expectError(error.Canceled, future.cancel(io));
         try std.testing.expectEqual(@as(usize, 0), try leftovers(&corpus, io));
 

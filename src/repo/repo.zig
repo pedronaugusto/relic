@@ -572,15 +572,15 @@ pub const Repository = struct {
 
     /// The per-worktree directory, lent until this repository is
     /// deinitialized.
-    pub fn gitDirectory(repo: *const Repository) fs.LentDir {
-        return repo.data().git_dir.lend();
+    pub fn gitDirectory(repo: *const Repository) Io.Dir {
+        return repo.data().git_dir.borrow().*;
     }
 
     /// The shared directory, lent until this repository is deinitialized:
     /// the git directory itself but in a linked worktree.
-    pub fn commonDirectory(repo: *const Repository) fs.LentDir {
+    pub fn commonDirectory(repo: *const Repository) Io.Dir {
         const d = repo.data();
-        return if (d.common_dir) |*common| common.lend() else d.git_dir.lend();
+        return if (d.common_dir) |*common| common.borrow().* else d.git_dir.borrow().*;
     }
 
     /// Whether this is a linked worktree with a distinct common directory.
@@ -590,14 +590,14 @@ pub const Repository = struct {
 
     /// The working tree, lent until this repository is deinitialized, or
     /// `null` in a bare repository.
-    pub fn workDirectory(repo: *const Repository) ?fs.LentDir {
-        return if (repo.data().work_dir) |*work| work.lend() else null;
+    pub fn workDirectory(repo: *const Repository) ?Io.Dir {
+        return if (repo.data().work_dir) |*work| work.borrow().* else null;
     }
 
     /// Where git runs for this repository, and so where a relative path in
     /// a setting is found from: the top of the working tree, else the git
     /// directory. Lent, as `gitDirectory` is.
-    pub fn topDirectory(repo: *const Repository) fs.LentDir {
+    pub fn topDirectory(repo: *const Repository) Io.Dir {
         return repo.workDirectory() orelse repo.gitDirectory();
     }
 
@@ -629,7 +629,7 @@ pub const Repository = struct {
     /// what this handle keeps open, and must be deinited before it.
     pub fn openAgain(repo: *const Repository, io: Io) Self.Error!Repository {
         const config = repo.configuration();
-        return open(repo.data().gpa, io, repo.topDirectory().get(), .{
+        return open(repo.data().gpa, io, repo.topDirectory(), .{
             .discover = false,
             .ownership = .trust,
             .odb = repo.objectDatabase().settings(),
@@ -747,7 +747,7 @@ pub const Repository = struct {
                     error.Canceled => return error.Canceled,
                     else => false,
                 };
-                try checkOwnership(gpa, io, options, if (is_file) work.lend().get() else null, work.lend().get(), git_dir.lend().get());
+                try checkOwnership(gpa, io, options, if (is_file) work.borrow().* else null, work.borrow().*, git_dir.borrow().*);
                 return withCommon(io, git_dir, &work);
             }
 
@@ -756,8 +756,8 @@ pub const Repository = struct {
             if (try discover_directory.isGitDirectory(io, current)) {
                 var git_dir = fs.OwnedDir.init(try current.openDir(io, ".", .{ .iterate = true }));
                 errdefer git_dir.deinit(io);
-                try checkBare(gpa, io, options, git_dir.lend().get());
-                try checkOwnership(gpa, io, options, null, null, git_dir.lend().get());
+                try checkBare(gpa, io, options, git_dir.borrow().*);
+                try checkOwnership(gpa, io, options, null, null, git_dir.borrow().*);
                 return withCommon(io, &git_dir, null);
             }
 
@@ -830,7 +830,7 @@ pub const Repository = struct {
                 error.Canceled => return error.Canceled,
                 else => return null,
             });
-            const is_git = discover_directory.isGitDirectory(io, git_dir.lend().get()) catch |err| {
+            const is_git = discover_directory.isGitDirectory(io, git_dir.borrow().*) catch |err| {
                 git_dir.deinit(io);
                 return err;
             };
@@ -848,7 +848,7 @@ pub const Repository = struct {
             error.Canceled => return error.Canceled,
             else => return error.BrokenGitFile,
         };
-        const is_git = discover_directory.isGitDirectory(io, git_dir.lend().get()) catch |err| {
+        const is_git = discover_directory.isGitDirectory(io, git_dir.borrow().*) catch |err| {
             git_dir.deinit(io);
             return err;
         };
@@ -921,7 +921,7 @@ pub const Repository = struct {
     fn withCommon(io: Io, git_dir: *fs.OwnedDir, work_dir: ?*fs.OwnedDir) ErrorNamespace.Error!Discovered {
         // `commondir` makes this a linked worktree: everything shared lives
         // where it points.
-        const common = try discover_directory.openCommon(io, git_dir.lend().get());
+        const common = try discover_directory.openCommon(io, git_dir.borrow().*);
         return .{
             .git_dir = git_dir.move(),
             .common_dir = common,
@@ -964,21 +964,21 @@ pub const Repository = struct {
         // are and which branch `HEAD` is on, so all three are known before
         // the first file is read.
         var path_buffer: [4096]u8 = undefined;
-        const git_dir_path = try fs.realPath(io, repo.gitDirectory().get(), &path_buffer);
+        const git_dir_path = try fs.realPath(io, repo.gitDirectory(), &path_buffer);
         var work_buffer: [4096]u8 = undefined;
-        const work_tree_path = if (repo.workDirectory()) |work| try fs.realPath(io, work.get(), &work_buffer) else null;
+        const work_tree_path = if (repo.workDirectory()) |work| try fs.realPath(io, work, &work_buffer) else null;
         // The format is the repository's own file's to say, read alone, as
         // git's `read_repository_format` reads it: no include, no other
         // file and no `-c` decides which hash a repository's objects are
         // named with, or where its refs are kept.
-        const format = try repository_format.read(gpa, io, repo.commonDirectory().get(), options.diagnostic);
+        const format = try repository_format.read(gpa, io, repo.commonDirectory(), options.diagnostic);
         const branch = try currentBranch(gpa, io, repo.gitDirectory(), repo.commonDirectory(), format);
         defer if (branch) |b| gpa.free(b);
         const config = try repo.readConfig(io, .{
             .system = options.system_config,
             .xdg = options.xdg_config,
             .global = options.global_config,
-            .local = .{ .dir = repo.commonDirectory().get(), .sub_path = "config" },
+            .local = .{ .dir = repo.commonDirectory(), .sub_path = "config" },
             .command = options.config_overrides,
             .pairs = options.config_pairs,
         }, .{ .git_dir = git_dir_path, .work_tree = work_tree_path, .branch = branch, .home = options.home }, format, null);
@@ -993,7 +993,7 @@ pub const Repository = struct {
         repo.data().submodule_path_config = format.submodule_path_config;
         repo.data().unset_env_vars = try unsetEnvVarsOf(gpa, repo.configuration());
         errdefer freeNames(gpa, repo.data().unset_env_vars);
-        if (repo.workDirectory()) |work| repo.data().untracked_ident = try untrackedIdent(gpa, io, work.get());
+        if (repo.workDirectory()) |work| repo.data().untracked_ident = try untrackedIdent(gpa, io, work);
         errdefer if (repo.data().untracked_ident) |ident| gpa.free(ident);
         var odb_options = options.odb;
         odb_options.shared = repo.data().shared;
@@ -1001,10 +1001,10 @@ pub const Repository = struct {
         odb_options.pid_file = repo.data().settings.lockfile_pid;
         odb_options.create_object = repo.data().settings.create_object;
         odb_options.packing = try packingOf(repo.configuration());
-        repo.data().odb = try odb_mod.Odb.open(gpa, io, repo.commonDirectory().get(), format.kind, odb_options);
+        repo.data().odb = try odb_mod.Odb.open(gpa, io, repo.commonDirectory(), format.kind, odb_options);
         errdefer repo.data().odb.deinit(io);
-        repo.data().shallow_seen = try shallow.seen(io, repo.commonDirectory().get());
-        repo.data().odb.shallow = try shallow.read(gpa, io, repo.commonDirectory().get(), format.kind);
+        repo.data().shallow_seen = try shallow.seen(io, repo.commonDirectory());
+        repo.data().odb.shallow = try shallow.read(gpa, io, repo.commonDirectory(), format.kind);
         const store = try gpa.create(refs_mod.Store);
         errdefer gpa.destroy(store);
         var stack_options: reftable_stack.Options = if (format.ref_storage == .reftable) try reftableOptions(repo.configuration()) else .{};
@@ -1034,7 +1034,7 @@ pub const Repository = struct {
     fn readConfig(repo: *Repository, io: Io, sources: config_mod.Sources, context: config_mod.Context, format: RepositoryFormat, worktree_contents: ?[]const u8) ErrorNamespace.Error!config_mod.Config {
         var read = sources;
         read.worktree = if (format.worktree_config)
-            .{ .dir = repo.gitDirectory().get(), .sub_path = "config.worktree", .contents = worktree_contents }
+            .{ .dir = repo.gitDirectory(), .sub_path = "config.worktree", .contents = worktree_contents }
         else
             null;
         return config_mod.Config.open(repo.data().gpa, io, read, context);
@@ -1067,7 +1067,7 @@ pub const Repository = struct {
         if (same_branch and !try repo.configuration().isStale(io)) return false;
         var context = repo.configuration().context;
         context.branch = short;
-        const format = try repository_format.read(repo.data().gpa, io, repo.commonDirectory().get(), diagnostic);
+        const format = try repository_format.read(repo.data().gpa, io, repo.commonDirectory(), diagnostic);
         var fresh = try repo.readConfig(io, repo.configuration().sources, context, format, null);
         errdefer fresh.deinit();
         try repo.publishConfig(fresh, format, diagnostic);
@@ -1078,7 +1078,7 @@ pub const Repository = struct {
     /// `null` when it is detached: read through a ref store over the
     /// directories in `format`, before the repository has its own. An
     /// unborn branch counts, as it does for git's `onbranch:`.
-    fn currentBranch(gpa: Allocator, io: Io, git_dir: fs.LentDir, common_dir: fs.LentDir, format: RepositoryFormat) ErrorNamespace.Error!?[]u8 {
+    fn currentBranch(gpa: Allocator, io: Io, git_dir: Io.Dir, common_dir: Io.Dir, format: RepositoryFormat) ErrorNamespace.Error!?[]u8 {
         var store = try refs_mod.Store.init(gpa, format.kind, git_dir, common_dir, .{ .format = format.ref_storage });
         defer store.deinit();
         return branchOf(gpa, io, &store);
@@ -1249,10 +1249,10 @@ pub const Repository = struct {
             _ = std.mem.print(&name, "sharedindex.{s}", .{base.hex(&hex)}) catch unreachable;
             return name;
         };
-        const written_at = try index.writeShared(io, repo.gitDirectory().get(), options);
+        const written_at = try index.writeShared(io, repo.gitDirectory(), options);
         const text = config.get("splitindex.sharedindexexpire") orelse "2.weeks.ago";
         const expire = date_mod.parseExpiry(text, .{ .now = written_at }) orelse return error.MalformedValue;
-        index.removeSharedBefore(io, repo.gitDirectory().get(), expire);
+        index.removeSharedBefore(io, repo.gitDirectory(), expire);
         return null;
     }
 
@@ -1260,7 +1260,7 @@ pub const Repository = struct {
     /// dated now, so that it outlives its expiry while it is in use.
     fn freshenShared(repo: *Repository, io: Io, name: *const [hash.max_hex_len + 16]u8) void {
         const path = std.mem.sliceTo(name, 0);
-        fs.setTimestamps(io, repo.gitDirectory().get(), path, .{ .access_timestamp = .now, .modify_timestamp = .now }) catch |err|
+        fs.setTimestamps(io, repo.gitDirectory(), path, .{ .access_timestamp = .now, .modify_timestamp = .now }) catch |err|
             std.log.warn("could not freshen shared index '{s}': {t}", .{ path, err });
     }
 
@@ -1352,7 +1352,7 @@ pub const Repository = struct {
         }
         var owned = fs.OwnedDir.init(try dir.openDir(io, git_path, .{ .iterate = true }));
         errdefer owned.deinit(io);
-        const git_dir = owned.lend().get();
+        const git_dir = owned.borrow().*;
 
         // git copies the templates first, and reads the configuration they
         // leave before it writes its own
@@ -1395,7 +1395,7 @@ pub const Repository = struct {
         {
             const target = try std.mem.concat(gpa, u8, &.{ "refs/heads/", branch });
             defer gpa.free(target);
-            var store = try refs_mod.Store.init(gpa, object_format, owned.lend(), owned.lend(), .{
+            var store = try refs_mod.Store.init(gpa, object_format, owned.borrow().*, owned.borrow().*, .{
                 .format = ref_format,
                 .reftable = .{ .shared = shared },
                 .shared = shared,
@@ -1705,9 +1705,9 @@ pub const Repository = struct {
         const current = repo.configuration();
         const worktree_file = file == .worktree and current.sources.worktree != null;
         var pending = if (worktree_file)
-            try config_write.prepare(repo.data().gpa, io, repo.gitDirectory().get(), "config.worktree", .worktree, repo.configLock(), edits)
+            try config_write.prepare(repo.data().gpa, io, repo.gitDirectory(), "config.worktree", .worktree, repo.configLock(), edits)
         else
-            try config_write.prepare(repo.data().gpa, io, repo.commonDirectory().get(), "config", .local, repo.configLock(), edits);
+            try config_write.prepare(repo.data().gpa, io, repo.commonDirectory(), "config", .local, repo.configLock(), edits);
         defer pending.deinit(io);
 
         var sources = current.sources;
@@ -1715,7 +1715,7 @@ pub const Repository = struct {
         // The format is the shared file's to say: the bytes about to land
         // there, or the file as it is.
         const format = if (worktree_file)
-            try repository_format.read(repo.data().gpa, io, repo.commonDirectory().get(), diagnostic)
+            try repository_format.read(repo.data().gpa, io, repo.commonDirectory(), diagnostic)
         else
             try repository_format.parse(repo.data().gpa, pending.contents(), diagnostic);
         // `onbranch:` is decided against the branch `HEAD` is on now, as a
@@ -1937,9 +1937,9 @@ pub const Repository = struct {
         const case_fold = repo.data().settings.ignore_case;
         var rules = try ignore.Rules.init(repo.data().gpa, .{ .case_fold = case_fold });
         errdefer rules.deinit();
-        const excludes = try repo.configuration().getPath(repo.data().gpa, io, repo.topDirectory().get(), "core.excludesfile");
+        const excludes = try repo.configuration().getPath(repo.data().gpa, io, repo.topDirectory(), "core.excludesfile");
         defer if (excludes) |p| repo.data().gpa.free(p);
-        try rules.loadGlobal(io, repo.commonDirectory().get(), excludes, repo.topDirectory().get());
+        try rules.loadGlobal(io, repo.commonDirectory(), excludes, repo.topDirectory());
         return rules;
     }
 
@@ -1949,15 +1949,15 @@ pub const Repository = struct {
 
     /// The files `loadIgnore` reads, named.
     pub fn ignoreSources(repo: *const Repository, gpa: Allocator, io: Io) PathError!IgnoreSources {
-        const common = try repo.commonDirectory().get().realPathFileAlloc(io, ".", gpa);
+        const common = try repo.commonDirectory().realPathFileAlloc(io, ".", gpa);
         defer gpa.free(common);
         const info_exclude = try std.Io.Dir.path.join(gpa, &.{ common, "info", "exclude" });
         errdefer gpa.free(info_exclude);
-        const configured = try repo.configuration().getPath(gpa, io, repo.topDirectory().get(), "core.excludesfile");
+        const configured = try repo.configuration().getPath(gpa, io, repo.topDirectory(), "core.excludesfile");
         defer if (configured) |path| gpa.free(path);
         const excludes_file: ?[]u8 = if (configured) |path| blk: {
             if (std.Io.Dir.path.isAbsolute(path)) break :blk try gpa.dupe(u8, path);
-            const top = try repo.topDirectory().get().realPathFileAlloc(io, ".", gpa);
+            const top = try repo.topDirectory().realPathFileAlloc(io, ".", gpa);
             defer gpa.free(top);
             break :blk try std.Io.Dir.path.join(gpa, &.{ top, path });
         } else null;
@@ -1968,7 +1968,7 @@ pub const Repository = struct {
     /// in the per-worktree directory, so a linked worktree's own. It need
     /// not exist.
     pub fn indexPath(repo: *const Repository, gpa: Allocator, io: Io) PathError![]u8 {
-        const git_dir = try repo.gitDirectory().get().realPathFileAlloc(io, ".", gpa);
+        const git_dir = try repo.gitDirectory().realPathFileAlloc(io, ".", gpa);
         defer gpa.free(git_dir);
         return std.Io.Dir.path.join(gpa, &.{ git_dir, "index" });
     }
@@ -2040,9 +2040,9 @@ pub const Repository = struct {
         const case_fold = repo.data().settings.ignore_case;
         var attrs = try attributes.Attrs.init(repo.data().gpa, .{ .case_fold = case_fold });
         errdefer attrs.deinit();
-        const file = try repo.configuration().getPath(repo.data().gpa, io, repo.topDirectory().get(), "core.attributesfile");
+        const file = try repo.configuration().getPath(repo.data().gpa, io, repo.topDirectory(), "core.attributesfile");
         defer if (file) |p| repo.data().gpa.free(p);
-        try attrs.loadGlobal(io, repo.commonDirectory().get(), file, repo.topDirectory().get());
+        try attrs.loadGlobal(io, repo.commonDirectory(), file, repo.topDirectory());
         return attrs;
     }
 
@@ -2076,7 +2076,7 @@ pub const Repository = struct {
             text = try repo.lfsconfigText(io);
             with.config_text = text;
         }
-        return filter.Drivers.load(repo.data().gpa, io, repo.configuration(), .{ .common = repo.commonDirectory().get(), .work = if (repo.workDirectory()) |work| work.get() else null, .shared = repo.data().shared }, with);
+        return filter.Drivers.load(repo.data().gpa, io, repo.configuration(), .{ .common = repo.commonDirectory(), .work = repo.workDirectory(), .shared = repo.data().shared }, with);
     }
 
     /// Errors from `loadFilters`: the drivers', and those of finding
@@ -2120,8 +2120,7 @@ pub const Repository = struct {
 
     fn lfsconfigKey(repo: *Repository, io: Io) LfsconfigError!LfsconfigKey {
         var key: LfsconfigKey = .{};
-        if (repo.workDirectory()) |work| {
-            const wd = work.get();
+        if (repo.workDirectory()) |wd| {
             if (wd.statFile(io, ".lfsconfig", .{})) |st| {
                 if (st.kind != .directory) {
                     key.worktree = .of(st);
@@ -2131,7 +2130,7 @@ pub const Repository = struct {
                 error.FileNotFound, error.NotDir => {},
                 else => |e| return e,
             }
-            if (repo.gitDirectory().get().openFile(io, "index", .{})) |file| {
+            if (repo.gitDirectory().openFile(io, "index", .{})) |file| {
                 defer file.close(io);
                 const st = try file.stat(io);
                 var stamp: IndexStamp = .{ .file = .of(st) };
@@ -2151,8 +2150,7 @@ pub const Repository = struct {
     }
 
     fn lfsconfigTextUncached(repo: *Repository, io: Io, key: LfsconfigKey) LfsconfigError!?[]u8 {
-        if (repo.workDirectory()) |work| {
-            const wd = work.get();
+        if (repo.workDirectory()) |wd| {
             if (key.worktree != null) {
                 if (try fs.readFileAlloc(repo.data().gpa, io, wd, ".lfsconfig", 1 << 20)) |text| return text;
             }
@@ -2192,7 +2190,7 @@ pub const Repository = struct {
     /// refuses it.
     pub fn writeShallow(repo: *Repository, io: Io) WriteShallowError!void {
         const d = repo.data();
-        d.shallow_seen = try shallow.write(d.gpa, io, repo.commonDirectory().get(), &d.odb.shallow, .{ .seen = d.shallow_seen, .shared = d.shared, .pid_file = d.settings.lockfile_pid });
+        d.shallow_seen = try shallow.write(d.gpa, io, repo.commonDirectory(), &d.odb.shallow, .{ .seen = d.shallow_seen, .shared = d.shared, .pid_file = d.settings.lockfile_pid });
     }
 
     /// Errors from `lockIndex`.
@@ -2222,8 +2220,7 @@ pub const Repository = struct {
             var attrs: ?attributes.Attrs = null;
             defer if (attrs) |*a| a.deinit();
             var check: worktree.RacyCheck = undefined;
-            if (repo.workDirectory()) |work| {
-                const wt = work.get();
+            if (repo.workDirectory()) |wt| {
                 attrs = try repo.loadAttrs(io);
                 var rules = try repo.worktreeRules();
                 rules.attrs = &attrs.?;
@@ -2251,7 +2248,7 @@ pub const Repository = struct {
         const gpa = repo.data().gpa;
         const buffer = try gpa.alloc(u8, 64 * 1024);
         errdefer gpa.free(buffer);
-        var lock = try fs.LockFile.open(gpa, io, repo.gitDirectory().get(), .{ .sub_path = "index", .buffer = buffer }, repo.indexLock());
+        var lock = try fs.LockFile.open(gpa, io, repo.gitDirectory(), .{ .sub_path = "index", .buffer = buffer }, repo.indexLock());
         errdefer lock.deinit(io);
         const index = try repo.openIndex(io);
         return .{ .index = index, .lock = lock, .buffer = buffer, .repo = repo };
@@ -2259,7 +2256,7 @@ pub const Repository = struct {
 
     /// How this repository's index file is read.
     fn indexReadOptions(repo: *const Repository) index_mod.ReadOptions {
-        return .{ .git_dir = repo.gitDirectory().get(), .kind = repo.objectFormat(), .timestamp_resolution = repo.data().odb.timestamp_resolution, .protect = repo.settings().protect };
+        return .{ .git_dir = repo.gitDirectory(), .kind = repo.objectFormat(), .timestamp_resolution = repo.data().odb.timestamp_resolution, .protect = repo.settings().protect };
     }
 
     /// The stores a revision expression is read against (`rev_parse`).
@@ -2277,7 +2274,7 @@ pub const Repository = struct {
     /// Read the index, its untracked cache made, kept or dropped as
     /// `core.untrackedCache` says (git's `tweak_untracked_cache`).
     pub fn openIndex(repo: *Repository, io: Io) index_mod.ReadError!index_mod.Index {
-        var index = try index_mod.Index.read(repo.data().gpa, io, repo.gitDirectory().get(), "index", repo.indexReadOptions());
+        var index = try index_mod.Index.read(repo.data().gpa, io, repo.gitDirectory(), "index", repo.indexReadOptions());
         errdefer index.deinit();
         try repo.tweakUntrackedCache(&index);
         return index;
@@ -2316,7 +2313,7 @@ pub const Repository = struct {
         dir: Io.Dir,
         sub_path: []const u8,
     ) index_mod.ReadError!index_mod.Index {
-        var index = try index_mod.Index.read(repo.data().gpa, io, dir, sub_path, .{ .git_dir = repo.gitDirectory().get(), .kind = repo.objectFormat(), .protect = repo.settings().protect });
+        var index = try index_mod.Index.read(repo.data().gpa, io, dir, sub_path, .{ .git_dir = repo.gitDirectory(), .kind = repo.objectFormat(), .protect = repo.settings().protect });
         errdefer index.deinit();
         try repo.tweakUntrackedCache(&index);
         return index;
@@ -2489,7 +2486,7 @@ pub const Repository = struct {
             if (setting.len != 0) try refuseSetting(diagnostic, setting);
             return error.SigningRequiresPrograms;
         };
-        return signing.Signer.init(repo.data().gpa, io, repo.configuration(), repo.topDirectory().get(), programs) catch |err| {
+        return signing.Signer.init(repo.data().gpa, io, repo.configuration(), repo.topDirectory(), programs) catch |err| {
             switch (err) {
                 error.UnknownSignatureFormat => try refuseSetting(diagnostic, "gpg.format"),
                 error.UnknownTrustLevel => try refuseSetting(diagnostic, "gpg.minTrustLevel"),

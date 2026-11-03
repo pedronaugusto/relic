@@ -290,7 +290,7 @@ pub fn repack(gpa: Allocator, io: Io, repo: *Repository, asked: Options) Self.Er
     try db.refresh(io);
     var opened_pack_dir = try db.openPackDirectory(io);
     defer opened_pack_dir.deinit(io);
-    const pack_dir = opened_pack_dir.lend().get();
+    const pack_dir = opened_pack_dir.borrow().*;
     var run: Run = .{
         .gpa = gpa,
         .arena = arena,

@@ -661,12 +661,15 @@ fn zipStreamData(z: *Zip, body: Body, deflate: bool) Error!struct { crc: u32, wr
         try body.pump(Store{ .z = z, .crc = &crc }, Store.each);
         return .{ .crc = crc.final(), .written = body.size() };
     }
-    var state = try warp.Deflate.init(z.gpa, .{ .level = z.level orelse 6, .container = .raw });
+    var state = warp.Deflate.init(z.gpa, .{ .level = z.level orelse 6, .container = .raw }) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.InvalidOptions => aegis.assert.never("the default window and hash bits are valid"),
+    };
     defer state.deinit();
     var sink_buffer: [16 * 1024]u8 = undefined;
     var sink: ZipSink = .{ .z = z, .writer = .{ .buffer = &sink_buffer, .vtable = &.{ .drain = ZipSink.drain } } };
     var in_buffer: [16 * 1024]u8 = undefined;
-    var deflating: warp.Deflate.Writer = .init(&state, &sink.writer, &in_buffer);
+    var deflating = warp.Deflate.Writer.init(&state, &sink.writer, &in_buffer) catch aegis.assert.never("the 16 KiB stage is past the writer's least");
     const before = z.offset;
     const Deflate = struct {
         w: *Io.Writer,
@@ -850,7 +853,7 @@ const Walk = struct {
         if (wk.decorations == null and (hasPlaceholder(format, "", "dD") or std.mem.find(u8, format, "%(decorate") != null))
             wk.decorations = try pretty.Decorations.load(wk.gpa, wk.io, wk.repo, .{});
         if (wk.signer == null and hasPlaceholder(format, "", "G")) if (wk.options.programs) |programs| {
-            wk.signer = try signing.Signer.init(wk.gpa, wk.io, wk.repo.configuration(), wk.repo.topDirectory().get(), programs);
+            wk.signer = try signing.Signer.init(wk.gpa, wk.io, wk.repo.configuration(), wk.repo.topDirectory(), programs);
         };
         return .{
             .abbrev_len = wk.abbrev_len,
@@ -863,7 +866,7 @@ const Walk = struct {
 
     fn lookup(wk: *Walk, path: []const u8, is_dir: bool) Error!attributes.Attributes {
         if (wk.options.worktree_attributes) {
-            if (wk.repo.workDirectory()) |wt| try wk.attrs.enter(wk.io, wt.get(), path);
+            if (wk.repo.workDirectory()) |wt| try wk.attrs.enter(wk.io, wt, path);
         }
         return wk.attrs.lookup(wk.a, path, if (is_dir) .dir else .file);
     }
@@ -1099,7 +1102,7 @@ pub fn archive(gpa: Allocator, io: Io, w: *Io.Writer, inputs: Inputs, options: O
     }
     const rules = try repo.worktreeRules();
     var conv: convert.Session = .open(gpa, io, .{
-        .wt = repo.topDirectory().get(),
+        .wt = repo.topDirectory(),
         .kind = db.objectFormat(),
         .core = rules.core,
         .required_filters = try repo.requiredFilters(a),
@@ -1194,8 +1197,11 @@ const Filter = struct {
         }
         const level = options.level orelse 6;
         if (level > 9) return error.LevelNotSupported;
-        f.gzip = try warp.Deflate.init(gpa, .{ .level = level, .container = .gzip, .gzip = .{ .os = 3, .xfl = zlibXfl(level) } });
-        f.gzip_writer = .init(&f.gzip.?, w, &f.gzip_buffer);
+        f.gzip = warp.Deflate.init(gpa, .{ .level = level, .container = .gzip, .gzip = .{ .os = 3, .xfl = zlibXfl(level) } }) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidOptions => aegis.assert.never("the default window and hash bits are valid"),
+        };
+        f.gzip_writer = warp.Deflate.Writer.init(&f.gzip.?, w, &f.gzip_buffer) catch aegis.assert.never("the 16 KiB stage is past the writer's least");
         return &f.gzip_writer.interface;
     }
 

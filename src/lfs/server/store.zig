@@ -95,7 +95,7 @@ pub const Directory = struct {
             else => return error.LfsStoreFailed,
         }) orelse return false;
         defer owned.deinit(io);
-        const file = owned.lend().get();
+        const file = owned.borrow().*;
         var buf: [64 * 1024]u8 = undefined;
         var r = file.reader(io, &buf);
         _ = r.interface.streamRemaining(w) catch |err| switch (err) {

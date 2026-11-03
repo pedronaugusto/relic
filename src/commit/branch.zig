@@ -911,7 +911,7 @@ fn copyOrRename(gpa: Allocator, io: Io, repo: *Repository, inputs: RenameInputs,
         if (tree.head_ref != null) continue;
         var admin = try openAdmin(io, repo, tree.admin);
         defer if (admin) |*dir| dir.deinit(io);
-        const busy = try head_mod.busyIn(a, io, repo, (if (admin) |*dir| dir.lend() else repo.commonDirectory()).get());
+        const busy = try head_mod.busyIn(a, io, repo, if (admin) |*dir| dir.borrow().* else repo.commonDirectory());
         if (busy.rebasing) |ref| if (std.mem.eql(u8, ref, old_ref)) return error.BranchBeingRebased;
         if (busy.bisecting) |ref| if (std.mem.eql(u8, ref, old_ref)) return error.BranchBeingBisected;
     }
@@ -945,7 +945,7 @@ fn pointHeads(gpa: Allocator, io: Io, repo: *Repository, trees: []const Worktree
         if (!std.mem.eql(u8, tree.head_ref orelse continue, refs.old)) continue;
         var admin = try openAdmin(io, repo, tree.admin);
         defer if (admin) |*dir| dir.deinit(io);
-        var store = try repo.refStore().sibling(if (admin) |*dir| dir.lend() else repo.commonDirectory());
+        var store = try repo.refStore().sibling(if (admin) |*dir| dir.borrow().* else repo.commonDirectory());
         defer store.deinit();
         var tx = store.begin(gpa);
         defer tx.deinit(io);
@@ -970,5 +970,5 @@ fn pointHeads(gpa: Allocator, io: Io, repo: *Repository, trees: []const Worktree
 /// worktree's.
 fn openAdmin(io: Io, repo: *Repository, admin: []const u8) Self.Error!?fs.OwnedDir {
     if (admin.len == 0) return null;
-    return fs.OwnedDir.init(try repo.commonDirectory().get().openDir(io, admin, .{}));
+    return fs.OwnedDir.init(try repo.commonDirectory().openDir(io, admin, .{}));
 }
