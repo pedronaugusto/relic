@@ -831,14 +831,16 @@ pub const LockFile = struct {
 
         const pid_name: ?[]u8 = if (options.write_pid) try writePidFile(gpa, io, dir, sub_path, options.shared) else null;
 
+        const file_writer = pending.file().writer(io, buffer);
         return .{
-            .pending = pending,
+            // Its file was lent here: it moves to the lock's address.
+            .pending = pending.move(),
             .dir = dir,
             .target = sub_path,
             .lock_name = lock_name,
             .pid_name = pid_name,
             .gpa = gpa,
-            .file_writer = pending.file().writer(io, buffer),
+            .file_writer = file_writer,
             .sync = options.sync,
             .sync_directory = options.sync_directory,
         };
