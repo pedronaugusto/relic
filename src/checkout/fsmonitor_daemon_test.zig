@@ -190,7 +190,7 @@ const Pipe = struct {
     /// The next client's connection, the caller's to hang up.
     fn accept(p: *Pipe) error{Unexpected}!Io.File {
         // A client that came before the wait is connected already.
-        if (ConnectNamedPipe(p.waiting, null) == 0 and windows.GetLastError() != .PIPE_CONNECTED) return error.Unexpected;
+        if (!ConnectNamedPipe(p.waiting, null).toBool() and windows.GetLastError() != .PIPE_CONNECTED) return error.Unexpected;
         const connected = p.waiting;
         p.waiting = instance(p.name) catch |err| {
             windows.CloseHandle(connected);
@@ -375,9 +375,9 @@ fn control(gpa: Allocator, io: Io, r: *testgit.Repo) !Control {
         defer locked_index.deinit(io);
         var arena: std.heap.ArenaAllocator = .init(gpa);
         defer arena.deinit();
-        const source = (try fsmonitor.configured(arena.allocator(), io, repo.configuration(), .{ .git_dir = repo.gitDirectory().get(), .work_tree = repo.workDirectory().?.get() }, .{ .environ = &env })).?;
+        const source = (try fsmonitor.configured(arena.allocator(), io, repo.configuration(), .{ .git_dir = repo.gitDirectory(), .work_tree = repo.workDirectory().? }, .{ .environ = &env })).?;
         const index = &locked_index.index;
-        try fsmonitor.refresh(gpa, io, repo.workDirectory().?.get(), index, source);
+        try fsmonitor.refresh(gpa, io, repo.workDirectory().?, index, source);
         if (!index.find("control").?.fsmonitor_valid and index.find("a").?.fsmonitor_valid)
             return .{ .recorded = start.durationTo(Io.Clock.awake.now(io)).toMilliseconds() };
         try io.sleep(.fromMilliseconds(100), .awake);
