@@ -434,7 +434,7 @@ fn parseOpts(gpa: Allocator, arena: Allocator, text: []const u8, options: *Optio
 /// Write `abort-safety`: where `HEAD` is now, so an abort can tell whether
 /// something else has moved it since.
 fn updateAbortSafety(gpa: Allocator, io: Io, repo: *Repository) Error!void {
-    if (!try state_file.exists(io, repo.gitDirectory(), seq_dir)) return;
+    if (!state_file.exists(io, repo.gitDirectory(), seq_dir)) return;
     var head = try head_mod.read(gpa, io, repo);
     defer head.deinit(gpa);
     var buf: [hash.max_hex_len + 1]u8 = undefined;
@@ -954,7 +954,7 @@ pub fn proceed(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self
     try readOpts(gpa, arena, io, repo, &opts);
     var r = try newReplay(gpa, arena, io, repo, action, opts);
 
-    if (!try state_file.exists(io, repo.gitDirectory(), todo_path)) {
+    if (!state_file.exists(io, repo.gitDirectory(), todo_path)) {
         _ = try commitStaged(&r);
         return finishOutcome(&r, &arena_instance, .committed, null);
     }
@@ -1005,7 +1005,7 @@ pub fn skip(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Er
         if (!try abortIsSafe(gpa, io, repo)) return error.NothingToSkip;
     }
     try resetMerge(gpa, io, repo, try currentHead(gpa, io, repo), .{ .who = options.who, .blocked = options.blocked });
-    if (!try state_file.exists(io, repo.gitDirectory(), seq_dir)) {
+    if (!state_file.exists(io, repo.gitDirectory(), seq_dir)) {
         const arena_instance: std.heap.ArenaAllocator = .init(gpa);
         return .{ .gpa = gpa, .arena = arena_instance.state };
     }

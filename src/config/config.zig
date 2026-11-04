@@ -818,7 +818,7 @@ pub const Config = struct {
                 // directory's, absolute and with its links resolved.
                 var dir_buf: [4096]u8 = undefined;
                 const including_dir = if (std.mem.find(u8, entry.subsection, ":./") != null)
-                    absoluteDirOf(io, dir, config.files.items[entry.file_index.raw()].path, &dir_buf)
+                    try absoluteDirOf(io, dir, config.files.items[entry.file_index.raw()].path, &dir_buf)
                 else
                     null;
                 // A `gitdir:./` pattern needs a file to be relative to.

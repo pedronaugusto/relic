@@ -1690,7 +1690,8 @@ fn writeConflict(gpa: Allocator, io: Io, repo: *Repository, p: Pair, local_ref: 
     defer file.close(io);
     var wbuf: [4096]u8 = undefined;
     var w = file.writer(io, &wbuf);
-    try fs.writeAllFlushed(&w, bytes);
+    w.interface.writeAll(bytes) catch return w.err.?;
+    w.interface.flush() catch return w.err.?;
 }
 
 /// `git notes merge --commit`: the notes resolved in

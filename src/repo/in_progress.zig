@@ -48,15 +48,15 @@ pub fn read(io: Io, repo: *Repository) Io.Cancelable!InProgress {
     var p: InProgress = .{};
     if ((try repo.refStore().special().exists(io, .merge_head))) {
         p.merge = true;
-    } else if (try state.exists(io, dir, "rebase-apply")) {
-        if (try state.exists(io, dir, "rebase-apply/applying")) p.am = true else p.rebase = true;
-    } else if (try state.exists(io, dir, "rebase-merge")) {
+    } else if (state.exists(io, dir, "rebase-apply")) {
+        if (state.exists(io, dir, "rebase-apply/applying")) p.am = true else p.rebase = true;
+    } else if (state.exists(io, dir, "rebase-merge")) {
         p.rebase_merge = true;
-        p.interactive = try state.exists(io, dir, "rebase-merge/interactive");
+        p.interactive = state.exists(io, dir, "rebase-merge/interactive");
     }
     const root = repo.refStore().root();
     if ((try root.exists(repo.allocator(), io, .cherry_pick_head))) p.cherry_pick = true;
-    if (try state.exists(io, dir, "BISECT_START")) p.bisect = true;
+    if (state.exists(io, dir, "BISECT_START")) p.bisect = true;
     if ((try root.exists(repo.allocator(), io, .revert_head))) p.revert = true;
     if (lastSequenced(repo.allocator(), io, repo)) |last| switch (last) {
         .pick => p.cherry_pick = true,

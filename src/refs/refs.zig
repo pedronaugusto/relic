@@ -1238,7 +1238,7 @@ pub const Store = struct {
                 const bytes = (try fs.readFileAlloc(gpa, io, logs, old_log, std.math.maxInt(usize))) orelse return error.NoSuchRef;
                 defer gpa.free(bytes);
                 try fs.atomicWrite(io, logs, renamed_log, bytes, .{ .prefix = ".tmp-copied-log-" });
-                fs.adjustShared(io, logs, renamed_log, store.sharedPermissions());
+                try fs.adjustShared(io, logs, renamed_log, store.sharedPermissions());
             },
         };
         var log_placed = false;

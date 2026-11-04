@@ -1723,7 +1723,7 @@ pub const Odb = struct {
             error.FileNotFound => blk: {
                 if (source.directory().createDir(io, text[0..2], .default_dir)) |_| {
                     fan_out_made = true;
-                    fs.adjustShared(io, source.directory(), text[0..2], shared);
+                    try fs.adjustShared(io, source.directory(), text[0..2], shared);
                 } else |e| switch (e) {
                     error.PathAlreadyExists => {},
                     else => |other| return other,
@@ -1920,7 +1920,7 @@ pub const Odb = struct {
         // `out.abort`.
         out.* = begun: {
             const file = try source.directory().createFile(io, temp, .{ .exclusive = true, .permissions = object_permissions });
-            fs.adjustShared(io, source.directory(), temp, odb.backendData().options.shared);
+            try fs.adjustShared(io, source.directory(), temp, odb.backendData().options.shared);
             errdefer {
                 file.close(io);
                 // The write's error is the one to report; a temporary object left behind is what git gc prunes.
@@ -4024,7 +4024,7 @@ pub const Odb = struct {
     pub fn beginPack(odb: *Odb, io: Io, options: PackOptions) ErrorNamespace.Error!OpenPack {
         const source = odb.writableSource();
         if (source.directory().createDir(io, "pack", .default_dir)) |_| {
-            fs.adjustShared(io, source.directory(), "pack", odb.backendData().options.shared);
+            try fs.adjustShared(io, source.directory(), "pack", odb.backendData().options.shared);
         } else |err| switch (err) {
             error.PathAlreadyExists => {},
             else => |e| return e,
