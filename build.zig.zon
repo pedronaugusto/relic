@@ -50,13 +50,13 @@
             .lazy = true,
         },
         .xenoglyph = .{
-            .url = "git+https://github.com/pedronaugusto/xenoglyph#44027b1b9e3f95abe51997944ba62d37dbccdeb9",
-            .hash = "xenoglyph-0.5.1-YKXZlYT3RgDGVujB6BkWfO6XrIxQSv0T5r93sqUTBEvO",
+            .url = "git+https://github.com/pedronaugusto/xenoglyph#d6432607111da5deb5f0a481d1674da990872c96",
+            .hash = "xenoglyph-0.5.1-YKXZlXX6RgBGRl07HQns6W6M42ZLEP22hg8cEY37HouP",
         },
 
         .reactor = .{
-            .url = "git+https://github.com/pedronaugusto/reactor#f296956e3693cd7fb771a89dff1c6a99dc20b10e",
-            .hash = "reactor-0.9.0-MjQ-WLXVFgCzr4Zcx46cqG30Q8J8VOr3oasbpoU1I4Rk",
+            .url = "git+https://github.com/pedronaugusto/reactor#c6921bdde017341a685b3aae2f39642fdec64d4d",
+            .hash = "reactor-0.9.0-MjQ-WLTNFgAJhaEsbECl2JDTMMWGcYXRpHzfvfsPD701",
         },
     },
     .minimum_zig_version = "0.17.0",
