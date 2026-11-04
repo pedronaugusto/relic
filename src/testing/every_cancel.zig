@@ -188,7 +188,9 @@ const Sweep = struct {
     }
 };
 
-fn sweep(op: Op) !void {
+/// `op` swept at the points of `shard`: one test covers a short operation whole,
+/// a long one is three tests of a third of its points each.
+fn sweep(op: Op, shard: shakedown.Shard) !void {
     const gpa = testing.allocator;
     const io = testing.io;
     var git = try fixture(gpa, io);
@@ -201,72 +203,97 @@ fn sweep(op: Op) !void {
         .short = false,
         .alloc = false,
         .cancel = true,
+        .shard = shard,
         .trace = .all,
         .diagnostics = &report,
     }) catch |err| {
         if (report.failure) |f| std.debug.print("{t}: {t} at {any}, first difference at record {any}\n{s}\n", .{ op, f.err, f.injected, f.difference, f.trace });
         return err;
     };
-    std.debug.print("{t}: {d} steps, {d} runs, {d} cancels lost\n", .{ op, done.steps, done.runs, s.lost });
+    std.debug.print("{t} ({d} of {d}): {d} steps, {d} runs, {d} cancels lost\n", .{ op, shard.index + 1, shard.count, done.steps, done.runs, s.lost });
     try testing.expectEqual(0, s.lost);
 }
 
 test "every cancellation point of opening a repository returns error.Canceled (design §11)" {
-    try sweep(.open);
+    try sweep(.open, .{});
 }
 
 test "every cancellation point of status returns error.Canceled (design §11)" {
-    try sweep(.status);
+    try sweep(.status, .{});
 }
 
 test "every cancellation point of describe returns error.Canceled (design §11)" {
-    try sweep(.describe);
+    try sweep(.describe, .{});
 }
 
 test "every cancellation point of a revision walk returns error.Canceled (design §11)" {
-    try sweep(.log);
+    try sweep(.log, .{});
 }
 
 test "every cancellation point of rev-parse returns error.Canceled (design §11)" {
-    try sweep(.rev_parse);
+    try sweep(.rev_parse, .{});
 }
 
 test "every cancellation point of a merge base returns error.Canceled (design §11)" {
-    try sweep(.merge_base);
+    try sweep(.merge_base, .{});
 }
 
 test "every cancellation point of grep returns error.Canceled (design §11)" {
-    try sweep(.grep);
+    try sweep(.grep, .{});
 }
 
 test "every cancellation point of add returns error.Canceled (design §11)" {
-    try sweep(.add);
+    try sweep(.add, .{});
 }
 
 test "every cancellation point of a commit returns error.Canceled (design §11)" {
-    try sweep(.commit);
+    try sweep(.commit, .{});
 }
 
 test "every cancellation point of a checkout returns error.Canceled (design §11)" {
-    try sweep(.checkout);
+    try sweep(.checkout, .{});
 }
 
-test "every cancellation point of a repack -a -d returns error.Canceled (design §11)" {
-    try sweep(.repack);
+test "every cancellation point of a repack -a -d returns error.Canceled, the points' third 1 (design §11)" {
+    try sweep(.repack, .{ .index = 0, .count = 3 });
 }
 
-test "every cancellation point of a repack --cruft -d returns error.Canceled (design §11)" {
-    try sweep(.repack_cruft);
+test "every cancellation point of a repack -a -d returns error.Canceled, the points' third 2 (design §11)" {
+    try sweep(.repack, .{ .index = 1, .count = 3 });
+}
+
+test "every cancellation point of a repack -a -d returns error.Canceled, the points' third 3 (design §11)" {
+    try sweep(.repack, .{ .index = 2, .count = 3 });
+}
+
+test "every cancellation point of a repack --cruft -d returns error.Canceled, the points' third 1 (design §11)" {
+    try sweep(.repack_cruft, .{ .index = 0, .count = 3 });
+}
+
+test "every cancellation point of a repack --cruft -d returns error.Canceled, the points' third 2 (design §11)" {
+    try sweep(.repack_cruft, .{ .index = 1, .count = 3 });
+}
+
+test "every cancellation point of a repack --cruft -d returns error.Canceled, the points' third 3 (design §11)" {
+    try sweep(.repack_cruft, .{ .index = 2, .count = 3 });
 }
 
 test "every cancellation point of pack-refs returns error.Canceled (design §11)" {
-    try sweep(.pack_refs);
+    try sweep(.pack_refs, .{});
 }
 
 test "every cancellation point of reflog expire returns error.Canceled (design §11)" {
-    try sweep(.reflog_expire);
+    try sweep(.reflog_expire, .{});
 }
 
-test "every cancellation point of prune returns error.Canceled (design §11)" {
-    try sweep(.prune);
+test "every cancellation point of prune returns error.Canceled, the points' third 1 (design §11)" {
+    try sweep(.prune, .{ .index = 0, .count = 3 });
+}
+
+test "every cancellation point of prune returns error.Canceled, the points' third 2 (design §11)" {
+    try sweep(.prune, .{ .index = 1, .count = 3 });
+}
+
+test "every cancellation point of prune returns error.Canceled, the points' third 3 (design §11)" {
+    try sweep(.prune, .{ .index = 2, .count = 3 });
 }
