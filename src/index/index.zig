@@ -720,7 +720,9 @@ pub const WriteOptions = struct {
     /// See `racy`.
     /// A node its owner embeds, found again from the node by `changed`.
     pub const Racy = struct {
-        changed: *const fn (racy: *const Racy, index: *const Index, entry: Entry) bool,
+        /// Whether the entry's file holds something else; a cancel is the
+        /// writer's.
+        changed: *const fn (racy: *const Racy, index: *const Index, entry: Entry) Io.Cancelable!bool,
     };
 
     /// The version to write.
@@ -1934,7 +1936,7 @@ pub const Index = struct {
         // unchanged on the strength of a size that was never checked.
         var stat = entry.stat;
         if (index.isRacy(entry)) {
-            const changed = if (options.racy) |r| r.changed(r, index, entry) else true;
+            const changed = if (options.racy) |r| try r.changed(r, index, entry) else true;
             if (changed) stat.size = 0;
         }
 

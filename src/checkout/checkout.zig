@@ -3628,9 +3628,12 @@ pub const RacyCheck = struct {
         return &c.node;
     }
 
-    fn changed(node: *const index_mod.WriteOptions.Racy, index: *const Index, entry: index_mod.Entry) bool {
+    fn changed(node: *const index_mod.WriteOptions.Racy, index: *const Index, entry: index_mod.Entry) Io.Cancelable!bool {
         const c: *const RacyCheck = @alignCast(@fieldParentPtr("node", node)); // aegis: no-danger: changed is installed only on a RacyCheck's node
-        return differsFromIndex(c.gpa, c.io, c.wt, .{ .index = index, .entry = entry }, c.rules) catch true;
+        return differsFromIndex(c.gpa, c.io, c.wt, .{ .index = index, .entry = entry }, c.rules) catch |err| switch (err) {
+            error.Canceled => error.Canceled,
+            else => true,
+        };
     }
 };
 
@@ -3666,6 +3669,7 @@ pub fn differsFromIndex(
         if (try streamsIn(rules.big_file_bytes, found, null)) return !try namedAs(io, wt, path, entry);
         const bytes = aegis.own.readFile(io, wt, path.bytes, a, aegis.units.Bytes(u64).fromRaw(1 << 31)) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
+            error.Canceled => return error.Canceled,
             else => return true,
         };
         return !hash.Hasher.object(index.kind, "blob", bytes).eql(entry.oid);
@@ -3695,6 +3699,7 @@ pub fn differsFromIndex(
     if (try streamsIn(rules.big_file_bytes, found, .{ .session = &conv, .path = entry.path, .applied = applied })) return !try namedAs(io, wt, path, entry);
     const bytes = aegis.own.readFile(io, wt, path.bytes, a, aegis.units.Bytes(u64).fromRaw(1 << 31)) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
+        error.Canceled => return error.Canceled,
         else => return true,
     };
     const content = (try conv.toGit(a, .{ .path = entry.path, .bytes = bytes, .applied = applied }, .{ .storing = .hash_only })).bytes;
@@ -3706,6 +3711,7 @@ pub fn differsFromIndex(
 fn namedAs(io: Io, wt: Io.Dir, path: safe_path.Checked, entry: index_mod.Entry) Error!bool {
     const oid = hashFile(io, wt, entry.oid.kind, path) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
+        error.Canceled => return error.Canceled,
         else => return false,
     };
     return oid.eql(entry.oid);

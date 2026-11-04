@@ -232,7 +232,11 @@ pub const Describer = struct {
                     break :blk resolved.oid;
                 },
             };
-            const peeled = (entry.peeled orelse peelFully(io, d.repo, oid)) catch oid;
+            // A tag that does not peel names its own object, as git's does.
+            const peeled = (entry.peeled orelse peelFully(io, d.repo, oid)) catch |err| switch (err) {
+                error.OutOfMemory, error.Canceled => |e| return e,
+                else => oid,
+            };
             const annotated = !peeled.eql(oid);
             const prio: u2 = if (annotated) prio_annotated else if (is_tag) prio_lightweight else prio_head;
             const path = if (d.options.all) refname["refs/".len..] else refname["refs/tags/".len..];
