@@ -172,7 +172,7 @@ fn update(arena: Allocator, io: Io, dir: Io.Dir, sub_dir: []const u8, name: []co
         defer file.close(io);
         var buffer: [4096]u8 = undefined;
         var writer = file.writer(io, &buffer);
-        writer.interface.writeAll(bytes) catch |err| {
+        fs.writeAllFlushed(&writer, bytes) catch |err| {
             // The write's error is the one to report; a temporary left behind holds nothing anyone reads.
             fs.removeLeftover(io, dir, temp);
             return err;
