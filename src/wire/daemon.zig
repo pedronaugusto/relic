@@ -18,7 +18,6 @@ const Io = std.Io;
 const uplink = @import("uplink");
 const http_enabled = @import("relic_options").http;
 
-const fs = @import("../fs/fs.zig");
 const program = @import("../process.zig").program;
 const config_mod = @import("../config/config.zig");
 const pkt_line = @import("../codec.zig").pkt_line;

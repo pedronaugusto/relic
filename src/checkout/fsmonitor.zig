@@ -36,7 +36,6 @@ const index_mod = @import("../index/index.zig");
 const hash = @import("../hash/hash.zig");
 const program = @import("../process.zig").program;
 const config_mod = @import("../config/config.zig");
-const fs = @import("../fs/fs.zig");
 const pkt_line = @import("../codec.zig").pkt_line;
 const airlock = @import("airlock");
 const reactor = @import("reactor");

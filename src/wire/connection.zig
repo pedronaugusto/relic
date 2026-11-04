@@ -21,7 +21,6 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 
 const program = @import("../process.zig").program;
-const fs = @import("../fs/fs.zig");
 const warning = @import("../report.zig").warning;
 const pkt_line = @import("../codec.zig").pkt_line;
 const progress = @import("../report.zig").progress;

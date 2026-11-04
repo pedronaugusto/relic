@@ -35,7 +35,6 @@ const ctype = @import("../text.zig").ctype;
 const quote = @import("../text.zig").quote;
 const decimal = @import("../text.zig").decimal;
 const state_file = @import("../repo/state.zig");
-const fs = @import("../fs/fs.zig");
 const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
