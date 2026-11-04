@@ -786,7 +786,7 @@ pub const Store = struct {
             }
             if (at < listing.entries.len and std.mem.eql(u8, listing.entries[at].name, ref.name)) at += 1;
             const oid = ref.target.direct;
-            merged.appendAssumeCapacity(.{ .name = ref.name, .oid = oid, .peeled = options.objects.peel(io, oid) });
+            merged.appendAssumeCapacity(.{ .name = ref.name, .oid = oid, .peeled = try options.objects.peel(io, oid) });
         }
         merged.appendSliceAssumeCapacity(listing.entries[at..]);
         try store.writePackedLocked(io, &lock, merged.items);
@@ -806,7 +806,7 @@ pub const Store = struct {
                 .direct => |oid| oid,
                 .symbolic => continue,
             };
-            if (!options.objects.exists(io, oid)) continue;
+            if (!try options.objects.exists(io, oid)) continue;
             if (try anyMatches(arena, options.exclude, ref.name)) continue;
             if (!try anyMatches(arena, options.include, ref.name)) continue;
             try kept.append(arena, ref);

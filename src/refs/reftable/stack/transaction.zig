@@ -875,7 +875,7 @@ fn addTable(
         if (edit.via == null and edit.unchanged) continue;
         if (edit.via == null) {
             const value: reftable.RefValue = if (edit.new) |new| switch (new) {
-                .direct => |oid| if (tx.peeler) |p| (if (p.peel(io, oid)) |target|
+                .direct => |oid| if (tx.peeler) |p| (if (try p.peel(io, oid)) |target|
                     .{ .peeled = .{ .value = oid, .target = target } }
                 else
                     .{ .direct = oid }) else .{ .direct = oid },

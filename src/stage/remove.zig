@@ -11,6 +11,7 @@ const hash = @import("../hash/hash.zig");
 const Oid = hash.Oid;
 const repo_mod = @import("../repo/repo.zig");
 const checkout = @import("../checkout/checkout.zig");
+const fs = @import("../fs/fs.zig");
 const sparse_index = @import("../index/sparse_index.zig");
 const pathspec_mod = @import("../patterns.zig").pathspec;
 const submodule = @import("../submodule/submodule.zig");
@@ -176,7 +177,7 @@ pub fn remove(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.
                 if (try submodule.removeFromGitmodules(gpa, io, repo, index, path)) gitmodules_changed = true;
                 continue;
             }
-            if (removePath(io, work, path)) {
+            if (try removePath(io, work, path)) {
                 any_removed = true;
             } else if (!any_removed) return error.RemoveFailed;
         }
@@ -249,15 +250,16 @@ fn localChanges(
 }
 
 /// `remove_path`: the file, then each directory above it left empty.
-/// Whether the file went.
-fn removePath(io: Io, work: Io.Dir, path: []const u8) bool {
+/// Whether the file went; a cancel is the caller's.
+fn removePath(io: Io, work: Io.Dir, path: []const u8) Io.Cancelable!bool {
     work.deleteFile(io, path) catch |err| switch (err) {
         error.FileNotFound => {},
+        error.Canceled => return error.Canceled,
         else => return false,
     };
     var dir = std.Io.Dir.path.dirname(path);
     while (dir) |d| : (dir = std.Io.Dir.path.dirname(d)) {
-        work.deleteDir(io, d) catch break;
+        if (!try fs.removeIfEmpty(io, work, d)) break;
     }
     return true;
 }

@@ -97,19 +97,20 @@ pub const Peeler = struct {
 
     pub const VTable = struct {
         /// The object `oid` peels to when it is an annotated tag, or
-        /// `null` when it is not one or cannot be read.
-        peel: *const fn (peeler: *Peeler, io: Io, oid: Oid) ?Oid,
+        /// `null` when it is not one or cannot be read. A cancel is the
+        /// caller's.
+        peel: *const fn (peeler: *Peeler, io: Io, oid: Oid) Io.Cancelable!?Oid,
         /// Whether the database holds `oid`; `null` takes every object as
         /// held. `Store.pack` leaves a ref whose object is missing loose,
-        /// as git's `ref_resolves_to_object` does.
-        exists: ?*const fn (peeler: *Peeler, io: Io, oid: Oid) bool = null,
+        /// as git's `ref_resolves_to_object` does. A cancel is the caller's.
+        exists: ?*const fn (peeler: *Peeler, io: Io, oid: Oid) Io.Cancelable!bool = null,
     };
 
-    pub fn peel(p: *Peeler, io: Io, oid: Oid) ?Oid {
+    pub fn peel(p: *Peeler, io: Io, oid: Oid) Io.Cancelable!?Oid {
         return p.vtable.peel(p, io, oid);
     }
 
-    pub fn exists(p: *Peeler, io: Io, oid: Oid) bool {
+    pub fn exists(p: *Peeler, io: Io, oid: Oid) Io.Cancelable!bool {
         const held = p.vtable.exists orelse return true;
         return held(p, io, oid);
     }

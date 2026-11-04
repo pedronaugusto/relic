@@ -2183,7 +2183,7 @@ pub fn checkout(
     if (options.remove_empty_directories) {
         var dir_it = removed_dirs.valueIterator();
         while (dir_it.next()) |dir_path| {
-            removeEmptyDirectories(io, wt, dir_path.*);
+            try removeEmptyDirectories(io, wt, dir_path.*);
         }
     }
 
@@ -3146,7 +3146,7 @@ fn removePaths(
         }
         outcome.removed += 1;
         if (remove_empty_directories) {
-            if (path.dirname()) |parent| removeEmptyDirectories(io, wt, parent);
+            if (path.dirname()) |parent| try removeEmptyDirectories(io, wt, parent);
         }
     }
 }
@@ -3358,11 +3358,11 @@ pub fn removeEntry(io: Io, wt: Io.Dir, raw_path: []const u8, protect: safe_path.
     if (!try realLeadingPath(io, wt, path)) return;
     wt.deleteFile(io, path) catch |err| switch (err) {
         error.FileNotFound, error.NotDir => {},
-        // glint-ignore: Z026 -- as git's remove_path: a directory with something in it stays, and only an empty one goes
-        error.IsDir => wt.deleteDir(io, path) catch {},
+        // As git's remove_path: a directory with something in it stays, and only an empty one goes.
+        error.IsDir => _ = try fs.removeIfEmpty(io, wt, path),
         else => |e| return e,
     };
-    if (checked.dirname()) |parent| removeEmptyDirectories(io, wt, parent);
+    if (checked.dirname()) |parent| try removeEmptyDirectories(io, wt, parent);
 }
 
 /// The paths an update would lose work at, as git lists them.
@@ -3874,15 +3874,18 @@ fn writeFile(io: Io, wt: Io.Dir, path: safe_path.Checked, source: Source, execut
     failed = false;
 }
 
-fn removeEmptyDirectories(io: Io, wt: Io.Dir, path: safe_path.Checked) void {
+fn removeEmptyDirectories(io: Io, wt: Io.Dir, path: safe_path.Checked) Io.Cancelable!void {
     // Only directories of the working tree's own go: none reached through
     // a symbolic link.
     var leading: LeadingDirs = .{};
-    const real = leading.real(io, wt, path.bytes) catch false;
+    const real = leading.real(io, wt, path.bytes) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => false,
+    };
     if (!real) return;
     var current = path.bytes;
     while (current.len != 0) {
-        wt.deleteDir(io, current) catch return;
+        if (!try fs.removeIfEmpty(io, wt, current)) return;
         current = std.Io.Dir.path.dirnamePosix(current) orelse return;
     }
 }
@@ -3989,7 +3992,7 @@ pub fn applySparse(
                 };
                 if (options.remove_empty_directories) {
                     if (path.dirname()) |parent| {
-                        removeEmptyDirectories(io, wt, parent);
+                        try removeEmptyDirectories(io, wt, parent);
                     }
                 }
             }

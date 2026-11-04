@@ -1827,16 +1827,16 @@ fn removeFile(st: *State, entry: *Entry, rmdir_empty: bool) Error!void {
             };
         }
         if (rmdir_empty) {
-            if (checked.dirname()) |parent| removeEmptyDirectories(st.io, wt, parent);
+            if (checked.dirname()) |parent| try removeEmptyDirectories(st.io, wt, parent);
         }
     }
 }
 
-fn removeEmptyDirectories(io: Io, wt: Io.Dir, path: safe_path.Checked) void {
+fn removeEmptyDirectories(io: Io, wt: Io.Dir, path: safe_path.Checked) Io.Cancelable!void {
     var current: ?safe_path.Checked = path;
     while (current) |dir| : (current = dir.dirname()) {
         // As git's remove_path: the first directory that is not empty ends it.
-        wt.deleteDir(io, dir.bytes) catch return;
+        if (!try fs.removeIfEmpty(io, wt, dir.bytes)) return;
     }
 }
 

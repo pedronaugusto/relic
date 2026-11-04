@@ -1733,13 +1733,13 @@ pub const Odb = struct {
             },
             else => |e| return e,
         };
-        if (shared != .umask) fs.adjustShared(io, source.directory(), temp, shared);
         var failed = true;
         defer if (failed) {
             file.close(io);
             // The write's error is the one to report; a temporary object left behind is what git gc prunes.
             fs.removeLeftover(io, source.directory(), temp);
         };
+        try fs.adjustShared(io, source.directory(), temp, shared);
 
         // The reusable Warp state and both writer buffers belong to the
         // database. Each loose object starts a fresh independent stream.
@@ -2541,8 +2541,8 @@ pub const Odb = struct {
                     l.dir.?.deinit(io);
                     l.dir = null;
                     l.it = null;
-                    // glint-ignore: Z026 -- git's `prune_subdir` is an rmdir whose failure, a directory still holding files, is the answer
-                    if (l.remove_empty) l.odb.writableSource().directory().deleteDir(io, &l.hex) catch {};
+                    // git's `prune_subdir`: an rmdir whose failure, a directory still holding files, is the answer.
+                    if (l.remove_empty) _ = try fs.removeIfEmpty(io, l.odb.writableSource().directory(), &l.hex);
                     continue;
                 }
                 if (l.present == null) l.present = try l.listFans(io);
@@ -3755,7 +3755,7 @@ pub const Odb = struct {
 
         const source = odb.writableSource();
         if (source.directory().createDir(io, "pack", .default_dir)) |_| {
-            fs.adjustShared(io, source.directory(), "pack", odb.backendData().options.shared);
+            try fs.adjustShared(io, source.directory(), "pack", odb.backendData().options.shared);
         } else |err| switch (err) {
             error.PathAlreadyExists => {},
             else => |e| return e,

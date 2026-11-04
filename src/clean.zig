@@ -198,7 +198,7 @@ pub fn clean(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.E
         if (!walk.isOther(name)) continue;
         const bare = std.mem.trimEnd(u8, name, "/");
         const found = (fs.statAt(io, wt, bare) catch |err| {
-            try remover.failures.append(a, .{ .path = name, .err = err });
+            try remover.failed(name, err);
             continue;
         }) orelse continue;
         if (found.kind == .directory and !directories) continue;
@@ -210,7 +210,7 @@ pub fn clean(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.E
             if (gone) try remover.report(name, .removed);
         } else {
             if (!options.dry_run) fs.deleteFile(io, wt, bare) catch |err| {
-                try remover.failures.append(a, .{ .path = name, .err = err });
+                try remover.failed(name, err);
                 continue;
             };
             try remover.report(name, .removed);
@@ -488,6 +488,13 @@ const Remover = struct {
     reports: std.ArrayList(Report) = .empty,
     failures: std.ArrayList(Failure) = .empty,
 
+    /// `path` would not go, for `err`: recorded, and the clean goes on, as
+    /// git's does. A cancel is no failure of the path: it ends the clean.
+    fn failed(r: *Remover, path: []const u8, err: RemoveError) Error!void {
+        if (err == error.Canceled) return error.Canceled;
+        try r.failures.append(r.a, .{ .path = try r.a.dupe(u8, path), .err = err });
+    }
+
     fn report(r: *Remover, path: []const u8, kind: Kind) Error!void {
         try r.reports.append(r.a, .{ .path = try r.a.dupe(u8, path), .kind = kind });
         const w = r.out orelse return;
@@ -516,10 +523,11 @@ const Remover = struct {
             gone.* = false;
             return;
         }
-        var dir = r.wt.openDir(r.io, bare, .{ .iterate = true }) catch {
+        var dir = r.wt.openDir(r.io, bare, .{ .iterate = true }) catch |open_err| {
+            if (open_err == error.Canceled) return error.Canceled;
             // an empty directory can go even when it cannot be read
             if (!r.dry_run) r.wt.deleteDir(r.io, bare) catch |err| {
-                try r.failures.append(r.a, .{ .path = try r.a.dupe(u8, path.items), .err = err });
+                try r.failed(path.items, err);
                 gone.* = false;
             };
             return;
@@ -528,7 +536,11 @@ const Remover = struct {
         {
             defer dir.close(r.io);
             var it: fs.Names = .init(dir, r.precompose);
-            while (it.next(r.io) catch null) |entry| try names.append(r.a, try r.a.dupe(u8, entry.name));
+            // A listing that fails part way removes what it read.
+            while (it.next(r.io) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => null,
+            }) |entry| try names.append(r.a, try r.a.dupe(u8, entry.name));
         }
         std.mem.sort([]const u8, names.items, {}, lessThan);
 
@@ -539,7 +551,7 @@ const Remover = struct {
             path.shrinkRetainingCapacity(len);
             try path.appendSlice(r.a, name);
             const found = (fs.statAt(r.io, r.wt, path.items) catch |err| {
-                try r.failures.append(r.a, .{ .path = try r.a.dupe(u8, path.items), .err = err });
+                try r.failed(path.items, err);
                 gone.* = false;
                 break;
             }) orelse continue;
@@ -550,7 +562,7 @@ const Remover = struct {
                 continue;
             }
             if (!r.dry_run) fs.deleteFile(r.io, r.wt, path.items) catch |err| {
-                try r.failures.append(r.a, .{ .path = try r.a.dupe(u8, path.items), .err = err });
+                try r.failed(path.items, err);
                 gone.* = false;
                 continue;
             };
@@ -566,7 +578,7 @@ const Remover = struct {
             };
         }
         if (gone.* and !r.dry_run) r.wt.deleteDir(r.io, here) catch |err| {
-            try r.failures.append(r.a, .{ .path = try r.a.dupe(u8, path.items), .err = err });
+            try r.failed(path.items, err);
             gone.* = false;
         };
         if (!gone.*) for (dels.items) |d| try r.report(d, .removed);

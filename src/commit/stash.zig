@@ -766,7 +766,7 @@ fn resetAfterPush(
                 error.FileNotFound => {},
                 else => |e| return e,
             };
-            if (std.Io.Dir.path.dirnamePosix(path)) |parent| removeEmptyDirectories(io, ctx.wt, parent);
+            if (std.Io.Dir.path.dirnamePosix(path)) |parent| try removeEmptyDirectories(io, ctx.wt, parent);
         }
         _ = try worktree.checkout(ctx.gpa, io, ctx.wt, .{ .index = &ctx.locked.index, .db = db, .tree = head_tree }, checkout_options);
         if (options.keep_index and !isEmptyTree(ctx.repo.objectFormat(), index_tree)) {
@@ -811,10 +811,10 @@ fn isEmptyTree(kind: hash.Kind, oid: Oid) bool {
     return oid.eql(kind.emptyTree());
 }
 
-fn removeEmptyDirectories(io: Io, wt: Io.Dir, path: []const u8) void {
+fn removeEmptyDirectories(io: Io, wt: Io.Dir, path: []const u8) Io.Cancelable!void {
     var current = path;
     while (current.len != 0) {
-        wt.deleteDir(io, current) catch return;
+        if (!try fs.removeIfEmpty(io, wt, current)) return;
         current = std.Io.Dir.path.dirnamePosix(current) orelse return;
     }
 }

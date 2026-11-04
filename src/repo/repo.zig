@@ -2531,23 +2531,27 @@ pub const Repository = struct {
         return &repo.data().ref_objects;
     }
 
-    fn existsForRefs(peeler: *refs_mod.Peeler, io: Io, oid: Oid) bool {
+    fn existsForRefs(peeler: *refs_mod.Peeler, io: Io, oid: Oid) Io.Cancelable!bool {
         const d: *RepositoryData = @alignCast(@fieldParentPtr("ref_objects", peeler)); // aegis: no-danger: this function is installed only on a RepositoryData's ref_objects
-        return d.odb.exists(io, oid) catch false;
+        // An object the database cannot read is one a ref does not resolve to.
+        return d.odb.exists(io, oid) catch |err| switch (err) {
+            error.Canceled => error.Canceled,
+            else => false,
+        };
     }
 
-    fn peelForRefs(peeler: *refs_mod.Peeler, io: Io, oid: Oid) ?Oid {
+    fn peelForRefs(peeler: *refs_mod.Peeler, io: Io, oid: Oid) Io.Cancelable!?Oid {
         const d: *RepositoryData = @alignCast(@fieldParentPtr("ref_objects", peeler)); // aegis: no-danger: this function is installed only on a RepositoryData's ref_objects
         var repo: Repository = .{ .state = d };
-        // A cancel is put back for the task's next cancelation point.
-        const header = repo.data().odb.readHeader(io, oid) catch |err| {
-            if (err == error.Canceled) io.recancel();
-            return null;
+        // An object that cannot be read is recorded unpeeled.
+        const header = repo.data().odb.readHeader(io, oid) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => return null,
         };
         if (header.type != .tag) return null;
-        return repo.peel(io, oid) catch |err| {
-            if (err == error.Canceled) io.recancel();
-            return null;
+        return repo.peel(io, oid) catch |err| switch (err) {
+            error.Canceled => error.Canceled,
+            else => null,
         };
     }
 

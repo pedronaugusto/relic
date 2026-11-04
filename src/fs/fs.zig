@@ -1093,6 +1093,17 @@ pub fn removeLeftover(io: Io, dir: Io.Dir, name: []const u8) void {
     };
 }
 
+/// Removes the directory `sub_path` when it is empty, as git's rmdir whose
+/// failure is the answer: one still holding something, one gone, or one the
+/// system refuses stays. Returns whether it went; a cancel is the caller's.
+pub fn removeIfEmpty(io: Io, dir: Io.Dir, sub_path: []const u8) Io.Cancelable!bool {
+    dir.deleteDir(io, sub_path) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return false,
+    };
+    return true;
+}
+
 /// Rename over the name `new_name`, as git renames: with no sync, and on
 /// Windows retried while a scanner or indexer holds either name.
 pub fn rename(io: Io, dir: Io.Dir, old_name: []const u8, new_name: []const u8) Io.Dir.RenameError!void {

@@ -547,8 +547,8 @@ pub fn prune(gpa: Allocator, io: Io, refs: *const refs_mod.Store, options: Prune
                 else => |e| return e,
             };
         }
-        // glint-ignore: Z026 -- git's `delete_worktrees_dir_if_empty`: a directory that still holds something, or any other failure, is let be
-        common_dir.deleteDir(io, "worktrees") catch {};
+        // git's `delete_worktrees_dir_if_empty`: a directory that still holds something, or any other failure, is let be.
+        _ = try fs.removeIfEmpty(io, common_dir, "worktrees");
     }
     return .{ .gpa = gpa, .arena = arena_instance.state, .pruned = pruned.items, .skipped_locked = skipped_locked };
 }
