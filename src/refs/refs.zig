@@ -2427,15 +2427,17 @@ pub const Transaction = struct {
     /// Give up, leaving the repository exactly as it was. A transaction
     /// that announced itself to `reference-transaction` announces this too.
     pub fn abort(tx: *Transaction, io: Io) void {
-        if (!tx.finished) {
-            tx.releaseLocks(io);
-            tx.finished = true;
-            if (tx.packed_announced) {
-                tx.packed_announced = false;
-                tx.announceSettled(io, .aborted, true);
-            }
-            if (tx.announced) tx.announceSettled(io, .aborted, false);
+        // Each lock is an optional owner that its release clears, so what is
+        // still held is given up here whether or not the transaction
+        // finished: nothing rests on `finished` meaning the locks are gone.
+        tx.releaseLocks(io);
+        if (tx.finished) return;
+        tx.finished = true;
+        if (tx.packed_announced) {
+            tx.packed_announced = false;
+            tx.announceSettled(io, .aborted, true);
         }
+        if (tx.announced) tx.announceSettled(io, .aborted, false);
     }
 
     fn releaseLocks(tx: *Transaction, io: Io) void {
