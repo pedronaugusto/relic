@@ -480,6 +480,7 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
 
     if (options.write_fetch_head) try writeFetchHead(gpa, io, repo, plan.fetch_head, options.append);
     try brought.settle(io, repo, &outcome, options.keep or promisor or (checks != null and checks.?.strict));
+    try brought.finish(io, options.warnings);
 
     if (options.write_commit_graph orelse try repo.configuration().getBool("fetch.writecommitgraph", false)) try writeCommitGraph(gpa, io, repo, options.warnings);
     outcome.updates = plan.updates;
@@ -706,6 +707,13 @@ const Brought = struct {
     uri_packs: []transport.Session.UriPack = &.{},
     uri_gpa: ?Allocator = null,
     backfill: []MapEntry,
+
+    /// Once the refs name what came: each `.keep` gives its entry back, a
+    /// release that fails a warning, as git's `transport_unlock_pack` warns.
+    fn finish(b: *Brought, io: Io, warnings: ?*warning.Warnings) Allocator.Error!void {
+        for (&b.packs) |*came| if (came.keep) |*t| try t.finish(io, warnings);
+        for (b.uri_packs) |*p| if (p.keep) |*t| try t.finish(io, warnings);
+    }
 
     fn deinit(b: *Brought, io: Io) void {
         for (&b.packs) |*came| if (came.keep) |*t| t.deinit(io);

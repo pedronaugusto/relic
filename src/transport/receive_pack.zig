@@ -44,6 +44,7 @@ const object = @import("../object/object.zig");
 const odb_mod = @import("../odb/odb.zig");
 const pack = @import("../odb/pack.zig");
 const keep = @import("../odb/keep.zig");
+const warning = @import("../report.zig").warning;
 const index_pack = @import("../odb/index_pack.zig");
 const quarantine_mod = @import("../odb/quarantine.zig");
 const rev_index = @import("../odb/rev_index.zig");
@@ -500,9 +501,15 @@ pub const Server = struct {
         if (received) |*r| try s.settleLoose(r, &keeps);
         // The pack's `.keep` goes once the refs hold its objects, as git's
         // `delete_tempfile(&pack_lockfile)` removes it: before the hooks
-        // and the maintenance after them, which would leave it alone.
+        // and the maintenance after them, which would leave it alone. One
+        // that cannot be released is git's `unlink_or_warn`: a warning to
+        // the pusher, the push done.
+        var left: warning.Warnings = .init(s.gpa);
+        defer left.deinit();
+        for (keeps.items) |*token| try token.finish(s.io, &left);
         for (keeps.items) |*token| token.deinit(s.io);
         keeps.clearRetainingCapacity();
+        for (left.items.items) |w| try s.rpWarning("unable to unlink '{s}': {s}", .{ w.keep_left.path, w.keep_left.reason });
         try s.report(commands, unpack_status);
         _ = try s.runReceiveHook(arena, "post-receive", commands, true, push_options.items, null);
         try s.runPostUpdate(arena, commands);

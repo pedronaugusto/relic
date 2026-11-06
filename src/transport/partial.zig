@@ -176,6 +176,9 @@ pub const Lazy = struct {
         /// The promisor remotes a server's `promisor-remote` was answered
         /// with taking, which are asked first, as git asks them.
         accepted: []const []const u8 = &.{},
+        /// Where what git would print as a warning goes, as values: see
+        /// `warning.Warnings`.
+        warnings: ?*warning.Warnings = null,
     };
 
     /// A lazy fetch for `repo`, a partial clone.
@@ -312,6 +315,8 @@ pub const Lazy = struct {
         defer fetched.deinit(io);
         if (fetched.pack) |pack_name| try writePromisor(l.gpa, io, repo.objectDatabase(), pack_name, &.{});
         for (fetched.uri_packs) |p| try writePromisor(l.gpa, io, repo.objectDatabase(), p.name, &.{});
+        // The promisor files name the packs now: their `.keep`s give their entries back.
+        try fetched.finish(io, l.options.warnings);
     }
 
     /// Fetch, in one request, every blob below `tree` that the repository

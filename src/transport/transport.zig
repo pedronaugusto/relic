@@ -798,6 +798,13 @@ pub const Session = struct {
         uri_packs: []UriPack = &.{},
         uri_gpa: ?Allocator = null,
 
+        /// Once the refs name what came: each `.keep` gives its entry back, a
+        /// release that fails a warning, as git's `transport_unlock_pack` warns.
+        pub fn finish(f: *Fetched, io: Io, warnings: ?*warning.Warnings) Allocator.Error!void {
+            if (f.keep) |*token| try token.finish(io, warnings);
+            for (f.uri_packs) |*p| if (p.keep) |*token| try token.finish(io, warnings);
+        }
+
         pub fn deinit(f: *Fetched, io: Io) void {
             if (f.keep) |*token| token.deinit(io);
             for (f.uri_packs) |*p| if (p.keep) |*token| token.deinit(io);

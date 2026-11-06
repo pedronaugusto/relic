@@ -42,6 +42,10 @@ pub const Warning = union(enum) {
 
     /// A successful fetch could not update its optional commit-graph.
     commit_graph_write_failed: []const u8,
+    /// A received pack's `.keep` marker that could not be released once the
+    /// refs named the pack: it stays, still protecting the pack. git's
+    /// `unlink_or_warn`: the marker's path and why.
+    keep_left: struct { path: []const u8, reason: []const u8 },
     /// What git's fsck found and the rules make a warning: the object's
     /// name and git's message, `<msg-id>: <text>`.
     fsck: struct { object: []const u8, message: []const u8 },
@@ -163,6 +167,7 @@ pub const Warning = union(enum) {
             .shallow_update_rejected => |name| arena.print("rejected {s} because shallow roots are not allowed to be updated", .{name}),
             .proxy_auth_method_unknown => |name| arena.print("unsupported proxy authentication method {s}: using anyauth", .{name}),
             .commit_graph_write_failed => |err| arena.print("commit-graph write failed: {s}", .{err}),
+            .keep_left => |k| arena.print("unable to unlink '{s}': {s}", .{ k.path, k.reason }),
             .tag_known_as => |t| arena.print("tag '{s}' is externally known as '{s}'", .{ t.path, t.name }),
             .fsck => |f| arena.print("object {s}: {s}", .{ f.object, f.message }),
             .fsck_unknown_message => |name| arena.print("Skipping unknown msg id '{s}'", .{name}),
@@ -233,6 +238,7 @@ pub const Warnings = struct {
             .shallow_update_rejected => |t| .{ .shallow_update_rejected = try a.dupe(u8, t) },
             .proxy_auth_method_unknown => |t| .{ .proxy_auth_method_unknown = try a.dupe(u8, t) },
             .commit_graph_write_failed => |err| .{ .commit_graph_write_failed = try a.dupe(u8, err) },
+            .keep_left => |k| .{ .keep_left = .{ .path = try a.dupe(u8, k.path), .reason = try a.dupe(u8, k.reason) } },
             .tag_known_as => |t| .{ .tag_known_as = .{ .path = try a.dupe(u8, t.path), .name = try a.dupe(u8, t.name) } },
             .fsck => |f| .{ .fsck = .{ .object = try a.dupe(u8, f.object), .message = try a.dupe(u8, f.message) } },
             .fsck_unknown_message => |t| .{ .fsck_unknown_message = try a.dupe(u8, t) },

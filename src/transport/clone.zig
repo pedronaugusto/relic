@@ -576,6 +576,8 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, asked: Option
         .single_branch = single_branch,
         .recorded = target.recorded,
     }, options);
+    // The refs name the pack now: its `.keep` gives its entry back.
+    try received.fetched.finish(io, options.warnings);
     if (options.dissociate) try reference.dissociate(gpa, io, &repo);
     // The caller's configuration joins the repository's, as git reads
     // every level: the checkout's filters come from there.
