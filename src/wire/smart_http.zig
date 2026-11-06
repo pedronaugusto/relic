@@ -568,7 +568,7 @@ const Http = struct {
     };
 
     fn self(context: *anyopaque) *Http {
-        return @ptrCast(@alignCast(context)); // aegis: no-danger: the context handed out with this vtable is an Http
+        return @ptrCast(@alignCast(context)); // the context handed out with this vtable is an Http
     }
 
     /// The settings, and the client they make: certificates to trust
@@ -877,7 +877,7 @@ const Http = struct {
             const user = session.username orelse "";
             const password = session.exposePassword() orelse "";
             var kept = try aegis.SecretBytes.init(h.gpa, user.len + password.len);
-            // aegis: no-danger: the owner was made with exactly this capacity.
+            // the owner was made with exactly this capacity.
             kept.resizeWithinCapacity(user.len + password.len) catch unreachable;
             const bytes = kept.exposeMut();
             @memcpy(bytes[0..user.len], user);
@@ -1145,7 +1145,7 @@ const Http = struct {
             const value = std.mem.trim(u8, raw, " \t");
             const read = decimal.strtol(value, 10, 64);
             if (read.end != 0) {
-                asked = .fromRaw(@intCast(@max(read.value, 0))); // aegis: no-danger: strtol of 64 bits fits an i64
+                asked = .fromRaw(@intCast(@max(read.value, 0))); // strtol of 64 bits fits an i64
             } else if (h.options.now) |now| if (uplink.wire.date.parse(value)) |at| {
                 asked = .fromRaw(@max(at.raw() - date.seconds(now), 0));
             };
@@ -1359,7 +1359,7 @@ const Http = struct {
     /// The request writer's buffer is full: the request is too large to
     /// send whole, so it is sent in chunks from here on.
     fn drainPost(w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
-        const h: *Http = @alignCast(@fieldParentPtr("post", w)); // aegis: no-danger: this function is installed only on a Http's post
+        const h: *Http = @alignCast(@fieldParentPtr("post", w)); // this function is installed only on a Http's post
         if (h.streaming == null) {
             h.startStreaming() catch |err| {
                 h.write_error = err;

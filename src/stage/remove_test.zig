@@ -62,6 +62,7 @@ pub fn state(repo: *testgit.Repo) ![]u8 {
         }
     }.less);
     for (files.items) |f| try out.print(gpa, "{s}\n", .{f});
+    // glint-ignore: Z026 -- a repository with no .gitmodules has none to print
     if (repo.dir.readFileAlloc(io, ".gitmodules", gpa, .unlimited)) |modules| {
         defer gpa.free(modules);
         try out.print(gpa, ".gitmodules:\n{s}", .{modules});

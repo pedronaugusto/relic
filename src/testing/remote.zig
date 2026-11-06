@@ -274,6 +274,7 @@ pub const HttpServer = struct {
         s.stopping.store(true, .release);
         // Wake the accept with a connection of its own.
         const address = Io.net.IpAddress.parse("127.0.0.1", s.port) catch unreachable;
+        // glint-ignore: Z026 -- a wake that cannot connect finds the server already gone, which is what the stop waits for
         if (address.connect(io, .{ .mode = .stream })) |stream| stream.close(io) else |_| {}
         s.task.await(io);
         s.listener.deinit(io);
@@ -654,6 +655,7 @@ pub const DaemonServer = struct {
         s.stopping.store(true, .release);
         // Wake the accept with a connection of its own.
         const address = Io.net.IpAddress.parse("127.0.0.1", s.port) catch unreachable;
+        // glint-ignore: Z026 -- a wake that cannot connect finds the server already gone, which is what the stop waits for
         if (address.connect(io, .{ .mode = .stream })) |stream| stream.close(io) else |_| {}
         s.task.await(io);
         s.listener.deinit(io);
@@ -1120,6 +1122,7 @@ pub const Proxy = struct {
         const io = p.io;
         p.stopping.store(true, .release);
         const address = Io.net.IpAddress.parse("127.0.0.1", p.port) catch unreachable;
+        // glint-ignore: Z026 -- a wake that cannot connect finds the server already gone, which is what the stop waits for
         if (address.connect(io, .{ .mode = .stream })) |stream| stream.close(io) else |_| {}
         p.task.await(io);
         p.listener.deinit(io);

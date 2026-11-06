@@ -554,7 +554,7 @@ pub const Server = struct {
     /// The indexer's last object read is the pack's end: keepalives are
     /// due from there, as git's index-pack tells its muxer with a NUL.
     fn endOfInput(reporter: *progress_mod.Reporter, event: progress_mod.Event) void {
-        const s: *Server = @alignCast(@fieldParentPtr("end_of_input", reporter)); // aegis: no-danger: this function is installed only on a Server's end_of_input
+        const s: *Server = @alignCast(@fieldParentPtr("end_of_input", reporter)); // this function is installed only on a Server's end_of_input
         switch (event) {
             .indexed => |count| if (count.done == count.total) s.startKeepalive(),
             else => {},
@@ -2055,7 +2055,10 @@ pub fn checkHooks(io: Io, repo: *repo_mod.Repository) local.Error!void {
         if (dir.statFile(io, name, .{})) |stat| {
             if (stat.kind == .file and (builtin.target.os.tag == .windows or stat.permissions.toMode() & 0o111 != 0))
                 return error.RemoteHooksNotRun;
-        } else |_| {}
+        } else |err| switch (err) {
+            error.FileNotFound => {},
+            else => |other| return other,
+        }
         if (builtin.target.os.tag != .windows) continue;
         var name_buf: [64]u8 = undefined;
         // unreachable: the longest hook name above, reference-transaction, is 21 bytes, 25 with .exe

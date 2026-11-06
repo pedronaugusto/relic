@@ -154,7 +154,10 @@ pub fn list(gpa: Allocator, io: Io, refs: *const refs_mod.Store) Self.Error!List
         var prunable = true;
         if (std.Io.Dir.accessAbsolute(io, named.gitfile, .{})) |_| {
             prunable = false;
-        } else |_| {}
+        } else |err| switch (err) {
+            error.FileNotFound => {},
+            else => |other| return other,
+        }
 
         const lock_text = try fs.readFileAlloc(arena, io, admin, "locked", 4096);
         var branch: ?[]const u8 = null;
@@ -211,7 +214,7 @@ const Named = struct {
 /// null where there is none: where the working tree's `.git` file is, as
 /// `worktree add` wrote it.
 fn readGitdir(arena: Allocator, io: Io, admin: Io.Dir, max_bytes: u64) aegis.own.ReadFileError!?[]u8 {
-    // aegis: internal: the gitdir file this program, or git, wrote into the repository's own directory
+    // the gitdir file this program, or git, wrote into the repository's own directory
     return aegis.own.readFile(io, admin, "gitdir", arena, aegis.units.Bytes(u64).fromRaw(max_bytes)) catch |err| switch (err) {
         error.FileNotFound, error.NotDir, error.IsDir => return null,
         else => |e| return e,
@@ -422,7 +425,10 @@ pub fn remove(
     if (!options.force) {
         if (admin.access(io, "locked", .{})) |_| {
             return error.WorktreeLocked;
-        } else |_| {}
+        } else |err| switch (err) {
+            error.FileNotFound => {},
+            else => |other| return other,
+        }
     }
 
     // As git's delete_git_work_tree: a working tree that will not go is
@@ -701,7 +707,10 @@ pub fn move(
     defer worktrees_dir.close(io);
     var admin = worktrees_dir.openDir(io, name, .{}) catch return error.WorktreeNotFound;
     defer admin.close(io);
-    if (admin.access(io, "locked", .{})) |_| return error.WorktreeLocked else |_| {}
+    if (admin.access(io, "locked", .{})) |_| return error.WorktreeLocked else |err| switch (err) {
+        error.FileNotFound => {},
+        else => |other| return other,
+    }
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
     const arena = arena_instance.allocator();

@@ -215,6 +215,9 @@ fn packName(kind: hash.Kind, file: []const u8) ?hash.Oid {
 fn moveFile(io: Io, from: Io.Dir, from_name: []const u8, to: Io.Dir, to_name: []const u8) ErrorNamespace.Error!void {
     if (to.access(io, to_name, .{})) |_| {
         return;
-    } else |_| {}
+    } else |err| switch (err) {
+        error.FileNotFound => {},
+        else => |other| return other,
+    }
     try Io.Dir.rename(from, from_name, to, to_name, io);
 }

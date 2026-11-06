@@ -95,6 +95,7 @@ pub fn applyTo(
     try out.ensureUnusedCapacity(gpa, @min(target, producible(base.len, delta.len - sizes.len)));
 
     var r: std.Io.Reader = .fixed(delta[sizes.len..]);
+    // glint-ignore: Z026 -- takeByte fails only at the end of the delta's bytes, which ends its commands
     while (r.takeByte()) |op| {
         if (op == 0) return error.InvalidDeltaCommand;
         // What the target still has room for.

@@ -734,7 +734,7 @@ pub const Session = struct {
         try w.optional("oauth_refresh_token", reveal(&s.oauth_refresh_token));
         if (s.password_expiry_utc != no_expiry) {
             var buf: [24]u8 = undefined;
-            // aegis: no-danger: a u64 is at most 20 digits.
+            // a u64 is at most 20 digits.
             try w.item("password_expiry_utc", std.mem.print(&buf, "{d}", .{s.password_expiry_utc}) catch unreachable);
         }
         for (s.challenges.items) |c| try w.item("wwwauth[]", c);
@@ -1184,6 +1184,7 @@ fn interactive(config: ?*const config_mod.Config) bool {
     const c = config orelse return true;
     const entry = c.find("credential.interactive") orelse return true;
     const value = entry.value orelse return true;
+    // glint-ignore: Z026 -- a value that is no boolean is read as below: only `never` refuses
     if (config_mod.parseBool(value)) |yes| return yes else |_| {}
     return !std.mem.eql(u8, value, "never");
 }

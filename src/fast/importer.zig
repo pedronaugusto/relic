@@ -390,9 +390,9 @@ const Importer = struct {
     rejected: std.ArrayList(Rejected) = .empty,
     next_mark: u64 = 0,
 
-    date_format: DateFormat, // aegis: no-danger: an option, from the command line or a feature line
+    date_format: DateFormat, // an option, from the command line or a feature line
     signed_commits: SignMode,
-    signed_tags: SignMode, // aegis: no-danger: an option, from the command line or a feature line
+    signed_tags: SignMode, // an option, from the command line or a feature line
     force: bool,
     require_done: bool,
     relative_marks: bool,
@@ -989,6 +989,7 @@ const Importer = struct {
     /// A commit-ish that is not a branch or a mark: git's `get_oid`.
     fn resolve(imp: *Importer, text: []const u8) Error!Oid {
         if (text.len == imp.kind.hexLen()) {
+            // glint-ignore: Z026 -- text that is no full object id is resolved as a mark or a name below
             if (Oid.parse(imp.kind, text)) |oid| return oid else |_| {}
         }
         return rev_parse.resolve(imp.gpa, imp.io, imp.repo.revisionSource(), text) catch |err| switch (err) {

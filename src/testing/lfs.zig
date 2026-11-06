@@ -225,6 +225,7 @@ pub const Server = struct {
         const io = s.io;
         s.stopping.store(true, .release);
         const address = Io.net.IpAddress.parse("127.0.0.1", s.port) catch unreachable;
+        // glint-ignore: Z026 -- a wake that cannot connect finds the server already gone, which is what the stop waits for
         if (address.connect(io, .{ .mode = .stream })) |stream| stream.close(io) else |_| {}
         s.task.await(io);
         s.listener.deinit(io);
@@ -912,6 +913,7 @@ fn percentDecode(a: Allocator, text: []const u8) ![]const u8 {
     var i: usize = 0;
     while (i < text.len) : (i += 1) {
         if (text[i] == '%' and i + 2 < text.len) {
+            // glint-ignore: Z026 -- a percent sign followed by no hex is kept as it is
             if (std.fmt.parseInt(u8, text[i + 1 .. i + 3], 16)) |byte| {
                 try out.append(a, byte);
                 i += 2;

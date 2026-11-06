@@ -122,6 +122,7 @@ pub const Source = union(enum) {
 pub fn configured(arena: Allocator, io: Io, config: *const config_mod.Config, dirs: Dirs, programs: program.Programs) Self.Error!?Source {
     const entry = config.find("core.fsmonitor") orelse return null;
     const value = entry.value orelse return daemonConfigured(arena, io, config, dirs);
+    // glint-ignore: Z026 -- a value that is no boolean names a hook program, as git reads core.fsmonitor
     if (config_mod.parseBool(value)) |on| {
         return if (on) daemonConfigured(arena, io, config, dirs) else null;
     } else |_| {}

@@ -329,6 +329,7 @@ fn sideBySideWithout(gpa: Allocator, io: Io, front: *testremote.TlsFront, url: [
     try by_git.exec(io, &.{ "config", "http.sslCAInfo", front.cert_path });
     try by_git.exec(io, &.{ "config", "http.sslBackend", "openssl" });
     try testing.expectError(error.ClientCertificateRejected, relicFetch(gpa, io, by_git.dir, &env));
+    // glint-ignore: Z026 -- git's fetch may refuse the certificate too; the test checks relic's answer
     if (testremote.gitInputEnv(gpa, io, by_git.dir, &env, &.{ "fetch", "-q", "origin" }, "", false)) |out| {
         gpa.free(out);
         return error.TestUnexpectedResult;

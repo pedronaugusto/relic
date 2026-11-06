@@ -69,7 +69,7 @@ test "git 2.2.3 (strbuf for path buffers, no t/ test): a path longer than PATH_M
         .{ .mode = "40000", .name = "deep", .oid = tree },
         .{ .mode = "100644", .name = long, .oid = try h.blob(io, "long\n") },
     });
-    // Written, or refused with a name: either is an answer, a trap is not.
+    // glint-ignore: Z026 -- written, or refused with a name: either is an answer, a trap is not
     if (h.checkout(gpa, io, wide)) |_| {} else |_| {}
 
     // The archive git writes of the same commit, byte for byte.

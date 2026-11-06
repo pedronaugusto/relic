@@ -1136,6 +1136,7 @@ fn fuzzObject(_: void, case: *shakedown.Case) anyerror!void {
     const input = scratch[0..shakedown.gen.intRange(case.source, usize, 0, scratch.len)];
     case.source.bytes(input);
 
+    // glint-ignore: Z026 -- a fuzzed header may parse or not; the target checks only what parses
     if (parseHeader(input)) |parsed| {
         std.debug.assert(parsed.len <= input.len);
     } else |_| {}
@@ -1149,12 +1150,14 @@ fn fuzzObject(_: void, case: *shakedown.Case) anyerror!void {
         // glint-ignore: Z026 -- refusing a malformed input is the expected outcome; only a crash or a leak fails the fuzzer
         _ = tree.find("a") catch {};
 
+        // glint-ignore: Z026 -- a fuzzed commit may parse or not; the target checks only what parses
         if (Commit.parse(gpa, kind, input)) |parsed| {
             var commit = parsed;
             defer commit.deinit();
             _ = commit.extraHeader("gpgsig");
         } else |_| {}
 
+        // glint-ignore: Z026 -- a fuzzed tag may parse or not; the target checks only what parses
         if (Tag.parse(gpa, kind, input)) |parsed| {
             var tag = parsed;
             defer tag.deinit();

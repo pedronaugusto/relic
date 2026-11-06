@@ -198,6 +198,7 @@ pub const Daemon = struct {
 
     fn cancelRest(d: *Daemon, select: *Io.Select(Woken)) void {
         while (select.cancel()) |rest| switch (rest) {
+            // glint-ignore: Z026 -- a late accept that failed made no stream to close
             .accepted => |r| if (r) |s| s.close(d.io) else |_| {},
             .slept => {},
         };

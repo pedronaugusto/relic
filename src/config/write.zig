@@ -70,7 +70,7 @@ pub const Pending = struct {
     }
 
     /// Errors from `commit`.
-    pub const CommitError = fs.CommitError || error{WriteFailed};
+    pub const CommitError = fs.CommitError || Io.Dir.StatFileError || error{WriteFailed};
 
     /// Put the new file in place, with the mode the old one had, as git
     /// gives it.
@@ -80,7 +80,11 @@ pub const Pending = struct {
                 p.dir.setFilePermissions(io, p.lock.lock_name, st.permissions, .{}) catch |err| {
                     std.log.warn("cannot preserve configuration permissions: {s}", .{@errorName(err)});
                 };
-            } else |_| {}
+            } else |err| switch (err) {
+                // A file not there yet has no mode to carry over: the lock keeps its own.
+                error.FileNotFound => {},
+                else => |other| return other,
+            }
         }
         try p.lock.writeAll(p.bytes);
         try p.lock.commit(io);

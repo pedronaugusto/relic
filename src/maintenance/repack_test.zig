@@ -665,6 +665,7 @@ test "pack.window, pack.depth, pack.compression and pack.indexVersion shape the 
                 // The kept pack stays as the fixture wrote it.
                 var keep_buf: [128]u8 = undefined;
                 const keep = try std.mem.print(&keep_buf, "{s}.keep", .{entry.name[0 .. entry.name.len - 4]});
+                // glint-ignore: Z026 -- a pack with no reachable .keep is not kept, as git's file_exists reads it
                 if (pack_dir.access(io, keep, .{})) |_| continue else |_| {}
                 var head: [4]u8 = undefined;
                 _ = try pack_dir.readFile(io, entry.name, &head);

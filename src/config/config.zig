@@ -1313,7 +1313,7 @@ pub const Config = struct {
                     line.text[name_end..],
                 });
             };
-            // aegis: no-danger: the name was read from this line and the escaped value closes every quote it opens
+            // the name was read from this line and the escaped value closes every quote it opens
             const parsed = parseVariableLine(replacement) catch unreachable;
             // The line reads back as the variable it replaced, with a value.
             assert(parsed.has_value);
@@ -1341,7 +1341,7 @@ pub const Config = struct {
         writeValue(&text.writer, value) catch return error.OutOfMemory;
         text.writer.writeByte('\n') catch return error.OutOfMemory;
         const new_text = try text.toOwnedSlice();
-        // aegis: no-danger: checkKey passed the name and writeValue closes every quote it opens
+        // checkKey passed the name and writeValue closes every quote it opens
         const parsed = parseVariableLine(new_text) catch unreachable;
         // The line reads back as the variable written, its value running to
         // the newline: writeValue quotes any space it would otherwise lose.
@@ -2531,6 +2531,7 @@ test "path settings read as git config --type=path reads them" {
         defer config.deinit();
         config.context.home = home;
         const ours = config.getPath(gpa, io, git.dir, "p.v");
+        // glint-ignore: Z026 -- a path relic refuses has nothing to free; the switch below compares the refusal with git's
         defer if (ours) |path| {
             if (path) |p| gpa.free(p);
         } else |_| {};
@@ -2561,6 +2562,7 @@ test "integers and booleans read as git config --type reads them" {
             const flag = try gpa.print("--type={s}", .{kind});
             defer gpa.free(flag);
             const theirs = git.run(io, &.{ "config", "-f", "probe.config", flag, "a.x" });
+            // glint-ignore: Z026 -- a run of git that failed has nothing to free; its code is compared below
             defer if (theirs) |t| gpa.free(t) else |_| {};
             var config = try Config.parseText(gpa, text, .local);
             defer config.deinit();
@@ -2638,6 +2640,7 @@ test "path settings read as git_config_pathname: :(optional), bare names, a stat
         defer config.deinit();
         config.context.home = "/home/ada";
         const got = config.getPath(gpa, io, tmp.dir, "p.v");
+        // glint-ignore: Z026 -- a path relic refuses has nothing to free; the case's expectation is checked below
         defer if (got) |path| {
             if (path) |p| gpa.free(p);
         } else |_| {};

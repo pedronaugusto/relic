@@ -133,7 +133,7 @@ pub fn deflate(gpa: Allocator, data: []const u8) Allocator.Error![]u8 {
     defer compress.deinit();
     const out = try gpa.alloc(u8, warp.Compressor.bound(data.len, .{}));
     errdefer gpa.free(out);
-    const n = compress.compress(data, out, .{}) catch unreachable; // aegis: no-danger: bound reserves the complete stream
+    const n = compress.compress(data, out, .{}) catch unreachable; // bound reserves the complete stream
     return gpa.realloc(out, n);
 }
 
@@ -238,6 +238,7 @@ test "fuzz: any base 85 line and any deflated hunk decode or are refused by name
             var dst: [52]u8 = undefined;
             // usize: @min with a comptime 52 is a u6, which `want / 4 * 5` overflows.
             const want: usize = @min(dst.len, input.len / 5 * 4);
+            // glint-ignore: Z026 -- fuzzed base85 may decode or not; the target asks only that neither crashes
             decode85(dst[0..want], input[0 .. want / 4 * 5]) catch |err| switch (err) {
                 error.InvalidBase85 => {},
             };

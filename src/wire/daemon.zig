@@ -79,7 +79,7 @@ pub fn connect(gpa: Allocator, io: Io, url: url_mod.Url, service: connection.Ser
         const programs = options.programs orelse return error.ProgramsNotGranted;
         if (host.len != 0 and host[0] == '-') return error.SuspiciousHostname;
         var port_buf: [8]u8 = undefined;
-        // aegis: no-danger: a u16 is at most five digits
+        // a u16 is at most five digits
         const port_text = std.mem.print(&port_buf, "{d}", .{port}) catch unreachable;
         break :proxied try connection.Process.start(gpa, io, programs, .{
             .argv = &.{ command, host, port_text },
@@ -197,7 +197,7 @@ const Socket = struct {
     }
 
     fn of(context: *anyopaque) *Socket {
-        return @ptrCast(@alignCast(context)); // aegis: no-danger: this vtable's context, a Socket, from start
+        return @ptrCast(@alignCast(context)); // this vtable's context, a Socket, from start
     }
 
     fn advertisement(context: *anyopaque, _: *Connection) connection.Error!*Io.Reader {

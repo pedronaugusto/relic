@@ -2138,6 +2138,7 @@ pub const Listing = struct {
         if (trimmed.len == 0) return null;
         if (std.mem.startsWith(u8, trimmed, "refs/heads/")) return trimmed["refs/heads/".len..];
         if (std.mem.startsWith(u8, trimmed, "refs/")) return trimmed;
+        // glint-ignore: Z026 -- text that is no object id is shown as it is, below
         if (Oid.parse(l.repo.objectFormat(), trimmed)) |oid| {
             const value = try l.showOid(.short, oid);
             return value;

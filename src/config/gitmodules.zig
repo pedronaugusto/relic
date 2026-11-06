@@ -110,6 +110,7 @@ pub const FetchRecurse = enum {
     /// `on-demand`.
     pub fn parse(value: ?[]const u8) error{InvalidFetchRecurse}!FetchRecurse {
         const v = value orelse return .on;
+        // glint-ignore: Z026 -- a value that is no boolean is read as one of the names below, as git reads it
         if (config_mod.parseBool(v)) |b| {
             return if (b) .on else .off;
         } else |_| {}

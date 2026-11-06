@@ -22,6 +22,7 @@ pub fn path(arena: std.mem.Allocator, io: Io, env: *const std.process.Environ.Ma
             const dir = std.mem.trim(u8, raw, "\"");
             if (dir.len == 0) continue;
             const candidate = try std.Io.Dir.path.join(arena, &.{ dir, executable });
+            // glint-ignore: Z026 -- a candidate that cannot be opened is not the program: the next is tried
             if (Io.Dir.cwd().openFile(io, candidate, .{})) |file| {
                 file.close(io);
                 return candidate;
@@ -31,6 +32,7 @@ pub fn path(arena: std.mem.Allocator, io: Io, env: *const std.process.Environ.Ma
     if (std.mem.eql(u8, name, "git")) {
         if (env.get("GIT_EXEC_PATH")) |dir| {
             const candidate = try std.Io.Dir.path.join(arena, &.{ dir, executable });
+            // glint-ignore: Z026 -- a candidate that cannot be opened is not the program: the path is searched next
             if (Io.Dir.cwd().openFile(io, candidate, .{})) |file| {
                 file.close(io);
                 return candidate;

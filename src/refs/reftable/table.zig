@@ -174,7 +174,7 @@ pub const Table = struct {
     version: u8,
     block_size: u32,
     min_update_index: u64,
-    // aegis: no-danger: the two bounds of one range of update indices, of one kind
+    // the two bounds of one range of update indices, of one kind
     max_update_index: u64,
     /// Where the footer begins; no block reaches past it.
     size: usize,
@@ -843,7 +843,7 @@ pub const WriteOptions = struct {
     index_objects: bool = true,
 };
 
-// aegis: no-danger: the two bounds of one range of update indices, of one kind
+// the two bounds of one range of update indices, of one kind
 pub const WriteInputs = struct { min_update_index: u64, max_update_index: u64, refs: []const RefRecord, logs: []const LogRecord };
 
 /// Write one table holding `inputs.refs`, sorted by name, and `inputs.logs`, sorted by
@@ -1049,7 +1049,7 @@ const Writer = struct {
         var state = try warp.Compressor.init(w.gpa, .{ .level = 9, .max_input = .fromRaw(o.next - skip) });
         defer state.deinit();
         const output = compressed.writer.writableSliceGreedy(warp.Compressor.bound(o.next - skip, .{})) catch return error.OutOfMemory;
-        const n = state.compress(w.block[skip..o.next], output, .{}) catch unreachable; // aegis: no-danger: `output` was sized by `Compressor.bound(o.next - skip, .{})`, which holds the complete stream
+        const n = state.compress(w.block[skip..o.next], output, .{}) catch unreachable; // `output` was sized by `Compressor.bound(o.next - skip, .{})`, which holds the complete stream
         compressed.writer.advance(n);
         const bytes = compressed.written();
         // A log block is not bounded by the block size once deflated, and
@@ -1611,6 +1611,7 @@ fn readEverything(bytes: []const u8) !void {
         // glint-ignore: Z026 -- refusing a malformed input is the expected outcome; only a crash or a leak fails the fuzzer
         table.verify(gpa) catch {};
         inline for (.{ BlockType.ref, BlockType.log }) |typ| {
+            // glint-ignore: Z026 -- a fuzzed table may iterate or not; the target asks only that neither crashes
             if (table.iterate(gpa, typ)) |it_value| {
                 var it = it_value;
                 defer it.deinit();
@@ -1621,6 +1622,7 @@ fn readEverything(bytes: []const u8) !void {
                 }
             } else |_| {}
             for ([_][]const u8{ "", "HEAD", "refs/heads/b030", "zzz" }) |key| {
+                // glint-ignore: Z026 -- a fuzzed table may seek or not; the target asks only that neither crashes
                 if (table.seek(gpa, typ, key)) |it_value| {
                     var it = it_value;
                     defer it.deinit();

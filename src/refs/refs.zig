@@ -3253,6 +3253,7 @@ test "a cancel that lands in the hook a committed transaction runs is put back f
     };
     var task = io.concurrent(Commit.run, .{ io, &store, &runner, first }) catch return error.SkipZigTest;
     while (true) {
+        // glint-ignore: Z026 -- the hook has not started yet: the loop looks again
         if (twin.relic.dir.access(io, ".git/hook-started", .{})) |_| break else |_| {}
         try io.sleep(.fromMilliseconds(5), .awake);
     }

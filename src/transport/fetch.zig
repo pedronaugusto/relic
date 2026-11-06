@@ -2768,7 +2768,7 @@ pub const Prefetcher = struct {
     }
 
     fn run(prefetch: *maintenance_mod.Prefetch, io: Io, repo: *Repository) error{PrefetchFailed}!void {
-        const p: *Prefetcher = @alignCast(@fieldParentPtr("interface", prefetch)); // aegis: no-danger: this function is installed only on a Prefetcher's interface
+        const p: *Prefetcher = @alignCast(@fieldParentPtr("interface", prefetch)); // this function is installed only on a Prefetcher's interface
         prefetchAll(p.gpa, io, repo, p.options) catch |err| {
             p.failure = err;
             return error.PrefetchFailed;

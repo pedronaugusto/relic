@@ -243,6 +243,7 @@ fn bisectedFrom(arena: Allocator, io: Io, repo: *Repository, dir: Io.Dir) Checke
     const text = (try state_file.read(arena, io, dir, "BISECT_START")) orelse return null;
     const name = std.mem.trim(u8, text, " \t\r\n");
     if (name.len == 0) return null;
+    // glint-ignore: Z026 -- text that is no object id is a branch name, below
     if (Oid.parse(repo.objectFormat(), name)) |_| return null else |_| {}
     return try arena.print("refs/heads/{s}", .{name});
 }

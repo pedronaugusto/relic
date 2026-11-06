@@ -431,7 +431,7 @@ const Run = struct {
     /// The fork point found: git's `restrict_revision`.
     restrict: ?Oid = null,
     /// Which backend, and so which directory the state is in.
-    backend: Backend = .merge, // aegis: no-danger: chosen when the rebase starts and kept to its end
+    backend: Backend = .merge, // chosen when the rebase starts and kept to its end
     /// `autosquash`, `update_refs` and `reschedule_failed_exec`, or the
     /// settings behind them, which are read and checked whichever decides.
     autosquash: bool,

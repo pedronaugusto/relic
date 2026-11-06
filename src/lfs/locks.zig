@@ -933,6 +933,7 @@ pub const Cache = struct {
         const dir = try dirPath(a, store, ref);
         const remote_path = try a.print("{s}/remote", .{dir});
         if (try fs.readFileAlloc(a, io, store.base, remote_path, 64 << 20)) |bytes| {
+            // glint-ignore: Z026 -- a cached page that does not parse is no cache: the locks are asked for again
             if (parseListPage(a, .init(bytes))) |page| {
                 c.remote = page.locks;
                 c.have_remote = true;
@@ -940,6 +941,7 @@ pub const Cache = struct {
         }
         const verifiable_path = try a.print("{s}/verifiable", .{dir});
         if (try fs.readFileAlloc(a, io, store.base, verifiable_path, 64 << 20)) |bytes| {
+            // glint-ignore: Z026 -- a cached page that does not parse is no cache: the locks are asked for again
             if (parseVerifyPage(a, .init(bytes))) |page| {
                 c.ours = page.ours;
                 c.theirs = page.theirs;

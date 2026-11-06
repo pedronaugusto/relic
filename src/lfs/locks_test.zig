@@ -151,6 +151,7 @@ test "locks relic takes git lfs locks lists, and the other way round, with the o
     const held = try lfslocks.lock(arena, io, server, &repo, .{ .path = "y.bin", .request = .{} });
     try testing.expectEqualStrings("bob", held.held.owner.?);
     try testing.expectError(error.LockOwnedByOther, lfslocks.unlockPath(arena, io, server, &repo, .{ .path = "y.bin", .request = .{ .force = false } }));
+    // glint-ignore: Z026 -- git-lfs's own unlock may refuse; the test checks relic's answer, not git-lfs's
     if (testlfs.git(gpa, io, pair.theirs, &fx.env, &.{ "lfs", "unlock", "x.bin" }, false)) |out| {
         gpa.free(out);
         return error.TestUnexpectedResult;

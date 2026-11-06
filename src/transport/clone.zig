@@ -1156,11 +1156,14 @@ fn postCheckout(gpa: Allocator, io: Io, repo: *Repository, hook_options: hooks_m
 
 /// Whether the repository at `path` is shallow, which git clones through
 /// upload-pack even from a path.
-fn isShallowSource(io: Io, path: []const u8) Io.Cancelable!bool {
+fn isShallowSource(io: Io, path: []const u8) Io.Dir.AccessError!bool {
     var dir = Io.Dir.cwd().openDir(io, path, .{}) catch return false;
     defer dir.close(io);
     for ([_][]const u8{ "shallow", ".git/shallow" }) |name| {
-        if (dir.access(io, name, .{})) |_| return true else |_| {}
+        if (dir.access(io, name, .{})) |_| return true else |err| switch (err) {
+            error.FileNotFound => {},
+            else => |other| return other,
+        }
     }
     return false;
 }
@@ -1428,6 +1431,7 @@ pub const SubmoduleTransport = struct {
             if (request.within) |w| own.reference = reference.forSubmodule(arena, io, w.superproject, w.name, own.warnings) catch |err| break :made err;
             break :made clone(gpa, io, request.url, request.git_dir, own);
         };
+        // glint-ignore: Z026 -- a clone that failed has nothing to free; its error is returned below
         defer if (made) |*repo| repo.deinit(io) else |_| {};
         try t.settle(io, &apart, if (made) |_| .clone else |_| .neither);
         const repo = if (made) |*r| r else |err| return err;
@@ -1478,6 +1482,7 @@ pub const SubmoduleTransport = struct {
             .depth = o.depth,
             .from_user = false,
         });
+        // glint-ignore: Z026 -- a fetch that failed has nothing to free; its error is returned below
         defer if (made) |*outcome| outcome.deinit() else |_| {};
         try t.settle(io, &apart, if (made) |_| .fetch else |_| .neither);
         _ = try made;

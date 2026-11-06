@@ -251,7 +251,7 @@ fn fuzzTimes(_: void, case: *shakedown.Case) anyerror!void {
     if (GoTime.parse(scratch[0..len])) |t| {
         var buf: [64]u8 = undefined;
         var w: Io.Writer = .fixed(&buf);
-        // An offset Go refuses to write is an answer, not a crash.
+        // glint-ignore: Z026 -- an offset Go refuses to write is an answer, not a crash
         if (t.format(&w)) |_| {} else |_| {}
     }
     _ = parseHttpDate(scratch[0..len]);

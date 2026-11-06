@@ -640,6 +640,7 @@ test "a refused credential is erased, as git-lfs erases it, and the transfer say
     var theirs = try fx.cloneRepo("theirs", wrong_git);
     defer theirs.close(io);
     const out = testlfs.git(gpa, io, theirs, &fx.env, &.{ "lfs", "fetch" }, false);
+    // glint-ignore: Z026 -- git-lfs's fetch may fail here; the test checks the objects it left
     if (out) |o| {
         gpa.free(o);
         return error.TestUnexpectedResult;
@@ -2146,6 +2147,7 @@ test "a redirect to another host leaves the request's own Authorization behind, 
         const location = try to.url(gpa, route);
         defer gpa.free(location);
         try fx.server.fail(.{ .route = .download, .status = 307, .location = location });
+        // glint-ignore: Z026 -- the redirect may be refused; the test checks the request the server saw
         if (server.client.send(io, .{ .method = .GET, .url = from, .headers = headers, .authenticated = true })) |ex| {
             ex.deinit(io);
         } else |_| {}

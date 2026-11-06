@@ -1187,6 +1187,7 @@ pub fn migrateGitDirConfigs(gpa: Allocator, io: Io, repo: *Repository) Self.Erro
     const arena = arena_instance.allocator();
     var edits: LocalEdits = .{ .arena = arena };
     var migrated: usize = 0;
+    // glint-ignore: Z026 -- a repository with no modules directory has no submodule to migrate
     if (repo.gitDirectory().openDir(io, "modules", .{ .iterate = true })) |modules_const| {
         var modules = modules_const;
         defer modules.close(io);
@@ -1478,6 +1479,7 @@ fn relocate(
 ) Error!void {
     const wt = repo.workDirectory() orelse return error.BareRepository;
     const dot_git = try arena.print("{s}/.git", .{path});
+    // glint-ignore: Z026 -- a submodule with no worktrees directory has no worktree to move
     if (wt.openDir(io, try arena.print("{s}/worktrees", .{dot_git}), .{ .iterate = true })) |dir_const| {
         var dir = dir_const;
         defer dir.close(io);

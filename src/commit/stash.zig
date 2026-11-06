@@ -50,6 +50,7 @@ const ignore = @import("../patterns.zig").ignore;
 const attributes = @import("../patterns.zig").attributes;
 const pathspec_mod = @import("../patterns.zig").pathspec;
 const odb_mod = @import("../odb/odb.zig");
+const abbrev_mod = @import("../odb/abbrev.zig");
 const parallax = @import("parallax");
 const convert = @import("../checkout/convert.zig");
 const filter = @import("../checkout/filter.zig");
@@ -713,7 +714,10 @@ fn collectUntracked(ctx: *Ctx, options: PushOptions, out: *std.ArrayList([]const
             if (ctx.wt.access(ctx.io, try ctx.arena.print("{s}/.git", .{e.path}), .{})) |_| {
                 if (options.refusal) |r| r.set(e.path);
                 return error.NestedRepository;
-            } else |_| {}
+            } else |err| switch (err) {
+                error.FileNotFound => {},
+                else => |other| return other,
+            }
             try walkFiles(ctx, e.path, options.paths, out, 0);
             continue;
         }
@@ -836,13 +840,11 @@ fn writeCommit(io: Io, repo: *Repository, tree: Oid, parents: []const Oid, who: 
 
 /// The shortest prefix of `oid`, seven digits or more, that names nothing
 /// else: git's default abbreviation for a repository of this size, or
-/// `core.abbrev` when it is a number.
+/// `core.abbrev` as git reads it (a number, `auto` or a boolean), then longer
+/// until the prefix names one object.
 fn abbreviate(io: Io, repo: *Repository, oid: Oid, buf: *[hash.max_hex_len]u8) Error![]const u8 {
     const hex = oid.hex(buf);
-    var len: usize = 7;
-    if (repo.configuration().getInt(c_int, "core.abbrev", 7)) |configured| {
-        if (configured >= 4) len = @intCast(@min(configured, @as(i64, @intCast(hex.len))));
-    } else |_| {}
+    var len = @min(abbrev_mod.defaultLength(repo.configuration(), repo.objectDatabase()), hex.len);
     while (len < hex.len) : (len += 1) {
         _ = repo.objectDatabase().findPrefix(io, hex[0..len]) catch |err| switch (err) {
             error.AmbiguousPrefix => continue,

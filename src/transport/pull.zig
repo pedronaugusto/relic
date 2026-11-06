@@ -388,6 +388,7 @@ fn defaultAction(arena: Allocator, remote: ?[]const u8, refspecs: []const []cons
 fn configuredFastForward(config: *const config_mod.Config) Self.Error!?merging.FastForward {
     const entry = config.find("pull.ff") orelse return null;
     const value = entry.value orelse return .allow;
+    // glint-ignore: Z026 -- a value that is no boolean is read as one of the names below, as git reads pull.ff
     if (config_mod.parseBool(value)) |on| return if (on) .allow else .never else |_| {}
     if (std.mem.eql(u8, value, "only")) return .only;
     return error.InvalidFastForwardSetting;
@@ -396,6 +397,7 @@ fn configuredFastForward(config: *const config_mod.Config) Self.Error!?merging.F
 /// git's `rebase_parse_value`; a bare name is true.
 fn parseMode(raw: ?[]const u8) Self.Error!Mode {
     const value = raw orelse return .rebase;
+    // glint-ignore: Z026 -- a value that is no boolean is read as one of the names below, as git reads pull.rebase
     if (config_mod.parseBool(value)) |on| return if (on) .rebase else .merge else |_| {}
     if (std.mem.eql(u8, value, "merges") or std.mem.eql(u8, value, "m")) return .rebase_merges;
     if (std.mem.eql(u8, value, "interactive") or std.mem.eql(u8, value, "i")) return .rebase_interactive;

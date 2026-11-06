@@ -204,6 +204,7 @@ const Resolver = struct {
     fn basic(r: *Resolver, name: []const u8) Error!Oid {
         const kind = r.src.refs.objectFormat();
         if (name.len == kind.hexLen()) {
+            // glint-ignore: Z026 -- text that is no full object id is resolved as a name below, as git's get_oid_basic reads it
             if (Oid.parse(kind, name)) |oid| return oid else |_| {}
         }
         if (std.mem.findLast(u8, name, "@{")) |at| {
@@ -465,6 +466,7 @@ const Resolver = struct {
         // revision: a log line naming `@{-1}` would otherwise name
         // itself without end. git's `get_oid_basic` reads it so.
         if (from.len == r.src.refs.objectFormat().hexLen()) {
+            // glint-ignore: Z026 -- text that is no full object id is resolved as a name below, as git's get_oid_basic reads it
             if (Oid.parse(r.src.refs.objectFormat(), from)) |oid| return oid else |_| {}
         }
         if (try r.refMaybe(try r.a.print("refs/heads/{s}", .{from}))) |oid| return oid;

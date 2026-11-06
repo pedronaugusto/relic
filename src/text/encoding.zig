@@ -458,10 +458,10 @@ pub fn fromUtf8(a: Allocator, e: Encoding, src: []const u8) Self.Error![]const u
         switch (e.unit()) {
             .u16 => if (cp >= 0x10000) {
                 const v = cp - 0x10000;
-                try appendInt(u16, a, &out, @intCast(0xd800 + (v >> 10)), endian); // aegis: no-danger: v is below 2^20
-                try appendInt(u16, a, &out, @intCast(0xdc00 + (v & 0x3ff)), endian); // aegis: no-danger: ten bits
+                try appendInt(u16, a, &out, @intCast(0xd800 + (v >> 10)), endian); // v is below 2^20
+                try appendInt(u16, a, &out, @intCast(0xdc00 + (v & 0x3ff)), endian); // ten bits
             } else {
-                try appendInt(u16, a, &out, @intCast(cp), endian); // aegis: no-danger: below 0x10000
+                try appendInt(u16, a, &out, @intCast(cp), endian); // below 0x10000
             },
             .u32 => try appendInt(u32, a, &out, cp, endian),
         }

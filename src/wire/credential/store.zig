@@ -166,7 +166,7 @@ fn rewrite(gpa: Allocator, io: Io, path: []const u8, timeout_ms: u32, how: Rewri
     defer dir.close(io);
     var buffer: [4096]u8 = undefined;
     var lock = fs.LockFile.open(gpa, io, dir, .{ .sub_path = Io.Dir.path.basename(path), .buffer = &buffer }, .{
-        .on_contention = .{ .wait = .fromMilliseconds(timeout_ms) },
+        .on_contention = .{ .wait = aegis.units.Duration(.millisecond, u32).fromRaw(timeout_ms).toIoDuration() },
         .sync = .none,
         .shared = .{ .mode = 0o600 },
     }) catch |err| return switch (err) {

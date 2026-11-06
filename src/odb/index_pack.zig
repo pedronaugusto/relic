@@ -515,7 +515,10 @@ fn publish(gpa: Allocator, io: Io, db: anytype, p: Publication, options: Options
 
     if (pack_dir.access(io, idx_name, .{})) |_| {
         return false;
-    } else |_| {}
+    } else |err| switch (err) {
+        error.FileNotFound => {},
+        else => |other| return other,
+    }
 
     var idx_temp_buf: [64]u8 = undefined;
     const idx_temp = fs.tempName(io, &idx_temp_buf, "tmp_idx_");
@@ -667,7 +670,7 @@ const Tee = struct {
     }
 
     fn stream(r: *Io.Reader, w: *Io.Writer, limit: Io.Limit) Io.Reader.StreamError!usize {
-        const t: *Tee = @alignCast(@fieldParentPtr("interface", r)); // aegis: no-danger: this function is installed only on a Tee's interface
+        const t: *Tee = @alignCast(@fieldParentPtr("interface", r)); // this function is installed only on a Tee's interface
         const dest = limit.slice(try w.writableSliceGreedy(1));
         const n = t.pull(dest) catch |err| {
             t.err = err;
@@ -2334,28 +2337,28 @@ const Peak = struct {
     }
 
     fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
-        const p: *Peak = @ptrCast(@alignCast(ctx)); // aegis: boundary: std.mem.Allocator erases its context; only `allocator` hands this Peak out
+        const p: *Peak = @ptrCast(@alignCast(ctx)); // std.mem.Allocator erases its context; only `allocator` hands this Peak out
         const out = p.child.rawAlloc(len, alignment, ret) orelse return null;
         p.note(len, 0);
         return out;
     }
 
     fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, len: usize, ret: usize) bool {
-        const p: *Peak = @ptrCast(@alignCast(ctx)); // aegis: boundary: std.mem.Allocator erases its context; only `allocator` hands this Peak out
+        const p: *Peak = @ptrCast(@alignCast(ctx)); // std.mem.Allocator erases its context; only `allocator` hands this Peak out
         if (!p.child.rawResize(memory, alignment, len, ret)) return false;
         p.note(len, memory.len);
         return true;
     }
 
     fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, len: usize, ret: usize) ?[*]u8 {
-        const p: *Peak = @ptrCast(@alignCast(ctx)); // aegis: boundary: std.mem.Allocator erases its context; only `allocator` hands this Peak out
+        const p: *Peak = @ptrCast(@alignCast(ctx)); // std.mem.Allocator erases its context; only `allocator` hands this Peak out
         const out = p.child.rawRemap(memory, alignment, len, ret) orelse return null;
         p.note(len, memory.len);
         return out;
     }
 
     fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret: usize) void {
-        const p: *Peak = @ptrCast(@alignCast(ctx)); // aegis: boundary: std.mem.Allocator erases its context; only `allocator` hands this Peak out
+        const p: *Peak = @ptrCast(@alignCast(ctx)); // std.mem.Allocator erases its context; only `allocator` hands this Peak out
         p.child.rawFree(memory, alignment, ret);
         p.note(0, memory.len);
     }

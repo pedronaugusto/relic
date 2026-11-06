@@ -120,7 +120,7 @@ pub const Result = struct {
     oid: [64]u8,
     size: u64,
     name: []const u8,
-    status: Status, // aegis: no-danger: an object's outcome, every value final; the latest attempt's is kept
+    status: Status, // an object's outcome, every value final; the latest attempt's is kept
     /// Why it failed: the server's words, or the transfer's.
     message: ?[]const u8 = null,
 
@@ -652,6 +652,7 @@ fn fromReference(io: Io, store: *const lfs.Store, references: []const []const u8
         const stat = store.base.statFile(io, ref_path, .{}) catch continue;
         if (stat.kind != .file or stat.size != pointer.size) continue;
         try store.base.createDirPath(io, std.Io.Dir.path.dirnamePosix(object_path).?);
+        // glint-ignore: Z026 -- a store that cannot take a hard link gets a copy below
         if (fs.hardLink(io, store.base, ref_path, object_path)) {
             return true;
         } else |_| {}
@@ -705,7 +706,9 @@ pub fn sweepTmp(gpa: Allocator, io: Io, store: *const lfs.Store, now_at: Io.Time
         const name = entry.basename;
         if (name.len > 65 and name[64] == '-') {
             var object_buf: [lfs.Store.max_path]u8 = undefined;
+            // glint-ignore: Z026 -- a name that is no object's leaves the entry to the steps below
             if (store.objectPath(&object_buf, name[0..64])) |object_path| {
+                // glint-ignore: Z026 -- an object the store does not have leaves the entry to the steps below
                 if (store.base.statFile(io, object_path, .{})) |st| {
                     if (st.kind != .directory) {
                         try tmp.deleteFile(io, entry.path);
@@ -1683,7 +1686,7 @@ const Counting = struct {
     }
 
     fn stream(r: *Io.Reader, w: *Io.Writer, limit: Io.Limit) Io.Reader.StreamError!usize {
-        const c: *Counting = @alignCast(@fieldParentPtr("interface", r)); // aegis: boundary: std.Io vtable: this function is installed only on a Counting's interface
+        const c: *Counting = @alignCast(@fieldParentPtr("interface", r)); // std.Io vtable: this function is installed only on a Counting's interface
         const n = c.inner.stream(w, limit) catch |err| {
             c.flush();
             return err;
@@ -2019,7 +2022,7 @@ const SshData = struct {
     }
 
     fn stream(r: *Io.Reader, w: *Io.Writer, limit: Io.Limit) Io.Reader.StreamError!usize {
-        const d: *SshData = @alignCast(@fieldParentPtr("interface", r)); // aegis: boundary: std.Io vtable: this function is installed only on a SshData's interface
+        const d: *SshData = @alignCast(@fieldParentPtr("interface", r)); // std.Io vtable: this function is installed only on a SshData's interface
         while (d.pending.len == 0) {
             if (d.done) return error.EndOfStream;
             const next = d.conn.nextData(d.operation.io()) catch |err| {
@@ -2419,6 +2422,7 @@ const Resolved = struct { oid: Oid, ref: ?[]const u8 };
 fn resolve(arena: Allocator, io: Io, repo: *Repository, name: []const u8) FetchError!Resolved {
     if (try repo.refStore().resolveShort(arena, io, name)) |found| return .{ .oid = found.oid, .ref = found.name };
     if (name.len == repo.objectFormat().hexLen()) {
+        // glint-ignore: Z026 -- text that is no full object id is no object here: the name resolves no further
         if (Oid.parse(repo.objectFormat(), name)) |oid| {
             if (try repo.objectDatabase().exists(io, oid)) return .{ .oid = oid, .ref = null };
         } else |_| {}

@@ -56,7 +56,7 @@ pub const Fetcher = struct {
     }
 
     fn fetchFn(seam: *lfs.Fetcher, io: Io, store: *const lfs.Store, settings: *const lfs.Settings, wanted: []const lfs.Wanted) lfs.FetchError!void {
-        const f: *Fetcher = @alignCast(@fieldParentPtr("interface", seam)); // aegis: no-danger: this function is installed only on a Fetcher's interface
+        const f: *Fetcher = @alignCast(@fieldParentPtr("interface", seam)); // this function is installed only on a Fetcher's interface
         if (f.server == null) {
             f.server = lfsapi.Server.open(f.gpa, io, f.repo, f.remote, f.options) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
@@ -97,7 +97,7 @@ fn loadFilters(_: *const clone_mod.FilterLoader, gpa: Allocator, io: Io, reposit
     };
 }
 fn releaseFetcher(held: *clone_mod.Filters.Held, io: Io) void {
-    const fetch: *Fetcher = @alignCast(@fieldParentPtr("held", held)); // aegis: no-danger: this function is installed only on a Fetcher's held
+    const fetch: *Fetcher = @alignCast(@fieldParentPtr("held", held)); // this function is installed only on a Fetcher's held
     const gpa = fetch.gpa;
     fetch.deinit(io);
     gpa.destroy(fetch);

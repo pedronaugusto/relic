@@ -201,6 +201,7 @@ fn blockOn(h: *const Hook) !u8 {
     defer input.deinit(h.arena);
     try Io.Dir.cwd().writeFile(h.io, .{ .sub_path = started, .data = "" });
     while (true) {
+        // glint-ignore: Z026 -- the release has not come yet: the loop looks again
         if (Io.Dir.cwd().access(h.io, release, .{})) |_| return 0 else |_| {}
         try h.io.sleep(.fromMilliseconds(5), .awake);
     }
@@ -308,6 +309,7 @@ fn historyRecord(h: *const Hook) !u8 {
     });
     for ([_][]const u8{ "MERGE_HEAD", "MERGE_MSG", "CHERRY_PICK_HEAD", "REVERT_HEAD", "REBASE_HEAD", "COMMIT_EDITMSG" }) |state| {
         const path = try arena.print(".git/{s}", .{state});
+        // glint-ignore: Z026 -- a state file the hook cannot open is not there, which is what it reports
         if (Io.Dir.cwd().openFile(io, path, .{})) |file| {
             file.close(io);
             try entry.print(arena, " {s}", .{state});

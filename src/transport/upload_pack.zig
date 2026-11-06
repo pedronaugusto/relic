@@ -1572,7 +1572,7 @@ const Paced = struct {
     }
 
     fn drain(w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
-        const p: *Paced = @alignCast(@fieldParentPtr("interface", w)); // aegis: no-danger: this function is installed only on a Paced's interface
+        const p: *Paced = @alignCast(@fieldParentPtr("interface", w)); // this function is installed only on a Paced's interface
         try p.forwardWhole();
         // Then what fits: what is not taken is offered again.
         var taken: usize = 0;
@@ -1599,7 +1599,7 @@ const Paced = struct {
 
     /// Every whole packet buffered; a packet begun waits for its end.
     fn flush(w: *Io.Writer) Io.Writer.Error!void {
-        const p: *Paced = @alignCast(@fieldParentPtr("interface", w)); // aegis: no-danger: this function is installed only on a Paced's interface
+        const p: *Paced = @alignCast(@fieldParentPtr("interface", w)); // this function is installed only on a Paced's interface
         try p.forwardWhole();
     }
 

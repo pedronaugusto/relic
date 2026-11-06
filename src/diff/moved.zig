@@ -31,6 +31,7 @@ pub const ColorMoved = enum {
     /// mode by its name. `null` for a value git refuses.
     pub fn parse(value: ?[]const u8) ?ColorMoved {
         const text = value orelse return .zebra;
+        // glint-ignore: Z026 -- a value that is no boolean is read as one of the names below, as git reads it
         if (config_mod.parseBool(text)) |on| return if (on) .zebra else .no else |_| {}
         const names = [_]struct { []const u8, ColorMoved }{
             .{ "no", .no },                     .{ "plain", .plain },

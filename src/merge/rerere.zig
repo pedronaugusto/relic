@@ -1107,6 +1107,7 @@ fn mtimeOf(r: *Run, sub: []const u8) Error!i64 {
 fn expiryInDays(repo: *Repository, key: []const u8, cutoff: *i64, now: i64) Error!void {
     const text = repo.configuration().get(key) orelse return;
     // An `int` of days, as `git_parse_int` reads one.
+    // glint-ignore: Z026 -- a value that is no number is read as one of the names below, as git reads it
     if (config_mod.parseInteger(c_int, text)) |days| {
         cutoff.* = now - @as(i64, days) * 86400;
         return;

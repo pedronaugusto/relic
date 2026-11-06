@@ -1432,6 +1432,7 @@ fn pathConfigState(gpa: Allocator, io: Io, repo: *testgit.Repo) ![]u8 {
         if (std.mem.endsWith(u8, std.mem.sliceTo(line, '='), ".gitdir") or std.mem.startsWith(u8, line, "extensions.") or
             std.mem.startsWith(u8, line, "core.repositoryformatversion")) try out.print(gpa, "{s}\n", .{line});
     }
+    // glint-ignore: Z026 -- a repository with no modules directory has none to print
     if (repo.dir.openDir(io, ".git/modules", .{ .iterate = true })) |modules_const| {
         var modules = modules_const;
         defer modules.close(io);

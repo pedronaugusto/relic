@@ -607,7 +607,7 @@ pub const SshAuth = struct {
 pub fn expiresWithin(now_at: Io.Timestamp, in_s: i64, at: time_text.GoTime, margin_s: i64) bool {
     // Go's time.Duration: int64 nanoseconds, wrapping as Go wraps them.
     const in_ns = in_s *% std.time.ns_per_s;
-    // aegis: no-danger: Go's nanoseconds, compared as git-lfs compares them
+    // Go's nanoseconds, compared as git-lfs compares them
     if (in_ns != 0) return in_ns < margin_s * std.time.ns_per_s;
     if (at.isZero()) return false;
     const margin = aegis.units.Duration(.second, i64).fromRaw(margin_s).convert(.nanosecond, i128, .exact);
@@ -2529,7 +2529,7 @@ fn timeoutsFor(settings: *const Settings, scratch: Allocator, url: url_mod.Url) 
 /// longest there is.
 fn seconds(n: i64) uplink.Duration {
     const whole = std.math.cast(u64, n) orelse 0;
-    return .fromRaw(std.math.mul(u64, whole, std.time.ns_per_s) catch std.math.maxInt(u64));
+    return aegis.units.Duration(.second, u64).fromRaw(whole).convert(.nanosecond, u64, .exact) catch .fromRaw(std.math.maxInt(u64));
 }
 
 /// How long a `Retry-After` value asks to wait, as git-lfs reads it: whole
@@ -2542,7 +2542,7 @@ pub fn parseRetryAfter(value: []const u8, now: ?Io.Timestamp) ?Io.Duration {
     if (decimal.goInt(u64, text)) |n| return aegis.units.Duration(.second, u64).fromRaw(n).toIoDuration();
     const at = time_text.parseHttpDate(text) orelse return null;
     const from = gitdate.seconds(now orelse return null);
-    return .fromSeconds(@max(0, at - from));
+    return aegis.units.Duration(.second, i64).fromRaw(@max(0, at - from)).toIoDuration();
 }
 
 /// A private directory for OpenSSH's control socket, as git-lfs makes one:

@@ -2118,7 +2118,9 @@ fn fuzzNotes(repo: *Repository, case: *shakedown.Case) anyerror!void {
         defer t.deinit();
         const tree = try repo.objectDatabase().write(io, .tree, input);
         var leaf: Leaf = .{ .key = @splat(0), .val = tree };
+        // glint-ignore: Z026 -- fuzzed notes may load or not; the test asks only that neither crashes
         if (t.loadSubtree(io, &leaf, t.root, 0)) {
+            // glint-ignore: Z026 -- fuzzed notes may list or not; the test asks only that neither crashes
             if (t.list(gpa, io)) |entries| gpa.free(entries) else |_| {}
         } else |_| {}
     }

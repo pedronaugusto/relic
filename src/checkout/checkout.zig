@@ -958,7 +958,7 @@ pub const StatusEntry = struct {
     /// HEAD against the index.
     staged: Change,
     /// The index against the working tree.
-    unstaged: Change, // aegis: no-danger: a comparison's answer, computed once and read; no lifecycle
+    unstaged: Change, // a comparison's answer, computed once and read; no lifecycle
     /// Set when the path has entries at stages 1 to 3.
     conflicted: bool = false,
     /// Where a `renamed` or `copied` path came from, and how alike the two
@@ -1191,6 +1191,7 @@ pub const StatusOptions = struct {
         /// `null` for anything else.
         pub fn parse(text: ?[]const u8) ?Untracked {
             const value = text orelse return .normal;
+            // glint-ignore: Z026 -- a value that is no boolean is read as one of the names below, as git reads it
             if (config_mod.parseBool(value)) |on| return if (on) .normal else .no else |_| {}
             return std.meta.stringToEnum(Untracked, value);
         }
@@ -2664,7 +2665,8 @@ fn writeLink(io: Io, wt: Io.Dir, path: safe_path.Checked, target: []const u8, sy
         else => {},
     };
     if (symlinks) {
-        // aegis: design: a link's target is what the link holds, written as git writes it: nothing is opened through it here
+        // a link's target is what the link holds, written as git writes it: nothing is opened through it here
+        // glint-ignore: Z026 -- a filesystem that refuses the link gets a file holding the target below, as git writes one
         if (wt.symLink(io, target, path.bytes, .{})) |_| return false else |_| {}
     }
     try writeFile(io, wt, path, .{ .bytes = target }, false);
@@ -3629,7 +3631,7 @@ pub const RacyCheck = struct {
     }
 
     fn changed(node: *const index_mod.WriteOptions.Racy, index: *const Index, entry: index_mod.Entry) Io.Cancelable!bool {
-        const c: *const RacyCheck = @alignCast(@fieldParentPtr("node", node)); // aegis: no-danger: changed is installed only on a RacyCheck's node
+        const c: *const RacyCheck = @alignCast(@fieldParentPtr("node", node)); // changed is installed only on a RacyCheck's node
         return differsFromIndex(c.gpa, c.io, c.wt, .{ .index = index, .entry = entry }, c.rules) catch |err| switch (err) {
             error.Canceled => error.Canceled,
             else => true,

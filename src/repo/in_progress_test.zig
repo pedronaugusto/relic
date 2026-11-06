@@ -91,8 +91,9 @@ test "what is in progress is what git status says: merge, rebase, interactive re
         defer r.deinit();
         const patch = try r.run(io, &.{ "format-patch", "-1", "--stdout", "side" });
         defer gpa.free(patch);
-        // `am` stops on the conflict and exits with an error.
-        if (r.runInput(io, &.{ "am", "--quiet" }, patch)) |out| gpa.free(out) else |_| {}
+        // `am` stops on the conflict and exits with an error, which runInput
+        // does not read: the state it leaves is what the test reads.
+        gpa.free(try r.runInput(io, &.{ "am", "--quiet" }, patch));
         const read = try readOf(gpa, io, &r);
         try std.testing.expect(read.am and !read.rebase);
         try agrees(gpa, io, &r, read);

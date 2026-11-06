@@ -275,7 +275,7 @@ pub const RefResult = struct {
     old: Oid,
     /// The value pushed, zero for a deletion.
     new: Oid,
-    status: Status, // aegis: no-danger: a ref's report, as git's push_refs sets it: each value an outcome
+    status: Status, // a ref's report, as git's push_refs sets it: each value an outcome
     /// Whether an update that would otherwise be refused was forced.
     forced: bool = false,
     /// The remote's reason, for `rejected_by_remote`, or what it added to

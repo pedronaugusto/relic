@@ -901,6 +901,7 @@ const CannedServer = struct {
         // The accept is woken by a connection of the server's own.
         s.stopping.store(true, .release);
         const address = Io.net.IpAddress.parse("127.0.0.1", s.port) catch unreachable; // unreachable: a literal address
+        // glint-ignore: Z026 -- a wake that cannot connect finds the server already gone, which is what the stop waits for
         if (address.connect(s.io, .{ .mode = .stream })) |stream| stream.close(s.io) else |_| {}
         s.task.await(s.io);
         s.listener.deinit(s.io);

@@ -298,7 +298,7 @@ const PushContext = struct {
     failure: ?Error = null,
     interface: push_mod.BeforeSend = .{ .vtable = &.{ .run = run } },
     fn run(prepare: *push_mod.BeforeSend, gpa: Allocator, io: Io, repository: *Repository, input: push_mod.BeforeSendInput) push_mod.BeforeSendError!void {
-        const c: *PushContext = @alignCast(@fieldParentPtr("interface", prepare)); // aegis: no-danger: this function is installed only on a PushContext's interface
+        const c: *PushContext = @alignCast(@fieldParentPtr("interface", prepare)); // this function is installed only on a PushContext's interface
         if (c.previous) |previous| try previous.run(gpa, io, repository, input);
         beforePush(gpa, io, repository, .{ .remote = input.remote, .remote_refs = input.refs, .pushed = input.objects, .reach = c.reach }, c.options) catch |err| {
             c.failure = err;

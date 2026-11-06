@@ -334,7 +334,7 @@ pub const Settings = struct {
                 try unparsed.append(arena, entry[0]);
                 continue;
             }
-            const value: i64 = @intCast(read.value); // aegis: no-danger: strtol of 64 bits fits an i64
+            const value: i64 = @intCast(read.value); // strtol of 64 bits fits an i64
             switch (entry[1]) {
                 .count => |to| to.* = value,
                 .time => |to| to.* = .fromRaw(value),

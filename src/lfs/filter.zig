@@ -69,15 +69,15 @@ const Backend = struct {
     }
     fn open(gpa: Allocator, _: Io, context: *anyopaque, options: native.SessionOptions) native.Error!native.Session {
         const session = try gpa.create(Session);
-        session.* = .{ .gpa = gpa, .backend = @ptrCast(@alignCast(context)), .options = options, .arena = .init(gpa) }; // aegis: no-danger: the driver context is the Backend its loader created
+        session.* = .{ .gpa = gpa, .backend = @ptrCast(@alignCast(context)), .options = options, .arena = .init(gpa) }; // the driver context is the Backend its loader created
         return .{ .context = session, .vtable = &Session.vtable };
     }
     fn retarget(context: *anyopaque, dir: Io.Dir) void {
-        const b: *Backend = @ptrCast(@alignCast(context)); // aegis: no-danger: the driver context is the Backend its loader created
+        const b: *Backend = @ptrCast(@alignCast(context)); // the driver context is the Backend its loader created
         b.lfs.store = .{ .base = dir, .root = "lfs" };
     }
     fn releaseContext(_: Io, context: *anyopaque) void {
-        const b: *Backend = @ptrCast(@alignCast(context)); // aegis: no-danger: the driver context is the Backend its loader created
+        const b: *Backend = @ptrCast(@alignCast(context)); // the driver context is the Backend its loader created
         const gpa = b.gpa;
         b.lfs.deinit();
         gpa.destroy(b);
@@ -96,7 +96,7 @@ const Session = struct {
     const Deferred = struct { path: []const u8, pointer: lfs.Pointer, pointer_bytes: []const u8 };
     const vtable: native.Session.VTable = .{ .clean = clean, .clean_file = cleanFile, .smudge = smudge, .canonical = canonical, .next_ready = nextReady, .fallbacks = fallbacks, .deinit = releaseContext };
     fn get(context: *anyopaque) *Session {
-        const s: *Session = @ptrCast(@alignCast(context)); // aegis: no-danger: the session context is the Session open created
+        const s: *Session = @ptrCast(@alignCast(context)); // the session context is the Session open created
         return s;
     }
     fn clean(a: Allocator, io: Io, context: *anyopaque, input: native.CleanInput) native.Error![]const u8 {
@@ -118,11 +118,11 @@ const Session = struct {
         return get(context).nextDeferred(io);
     }
     fn fallbacks(context: *const anyopaque) u32 {
-        const s: *const Session = @ptrCast(@alignCast(context)); // aegis: no-danger: the session context is the Session open created
+        const s: *const Session = @ptrCast(@alignCast(context)); // the session context is the Session open created
         return s.lfs_pointers;
     }
     fn releaseContext(_: Io, context: *anyopaque) void {
-        const s: *Session = @ptrCast(@alignCast(context)); // aegis: no-danger: the session context is the Session open created
+        const s: *Session = @ptrCast(@alignCast(context)); // the session context is the Session open created
         const gpa = s.gpa;
         s.deferred.deinit(gpa);
         s.arena.deinit();
@@ -131,6 +131,7 @@ const Session = struct {
     /// A file already a pointer is stored as it is, which is git-lfs's rule:
     /// cleaning twice changes nothing.
     fn lfsClean(s: *Session, a: Allocator, io: Io, bytes: []const u8, storing: native.Storing) native.Error![]const u8 {
+        // glint-ignore: Z026 -- bytes that are no pointer are content, cleaned below
         if (lfs.Pointer.decode(bytes)) |_| return bytes else |_| {}
         const l = &s.backend.lfs;
         if (l.extensions) return error.NativeFilterExtensionUnsupported;
@@ -153,6 +154,7 @@ const Session = struct {
         defer file.close(io);
         var head: [lfs.pointer_size_cutoff]u8 = undefined;
         const n = try file.readPositionalAll(io, &head, 0);
+        // glint-ignore: Z026 -- a head that is no pointer is content, cleaned below
         if (lfs.Pointer.decode(head[0..n])) |_| {
             if (n < head.len) return a.dupe(u8, head[0..n]);
             return aegis.own.readFile(io, s.options.wt, path, a, aegis.units.Bytes(u64).fromRaw(1 << 31));
@@ -173,7 +175,7 @@ const Session = struct {
 
     fn encodePointer(a: Allocator, pointer: *const lfs.Pointer) Allocator.Error![]const u8 {
         var buf: [lfs.Pointer.max_encoded_len]u8 = undefined;
-        // aegis: internal: a pointer clean makes carries no extensions, and its version, oid and size lines always fit
+        // a pointer clean makes carries no extensions, and its version, oid and size lines always fit
         return a.dupe(u8, pointer.encodeBuf(&buf) catch unreachable);
     }
 
@@ -296,7 +298,7 @@ test "git-lfs's own commands are recognised and a person's own are not" {
 pub fn settings(drivers: *const filter.Drivers) *const lfs.Settings {
     const driver = drivers.native_driver.?;
     assert(driver.vtable == &Backend.vtable);
-    const b: *const Backend = @ptrCast(@alignCast(driver.context)); // aegis: no-danger: the driver was checked against Backend.vtable, so its context is a Backend
+    const b: *const Backend = @ptrCast(@alignCast(driver.context)); // the driver was checked against Backend.vtable, so its context is a Backend
     return &b.lfs.settings;
 }
 

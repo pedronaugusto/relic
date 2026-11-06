@@ -304,7 +304,7 @@ const Prefetch = struct {
 
         /// The lane free again, its task awaited or canceled.
         fn end(lane: *Lane, io: Io) void {
-            // What it came to is of no use now.
+            // glint-ignore: Z026 -- what it came to is of no use now
             if (lane.task) |*task| _ = task.cancel(io) catch |err| switch (err) {
                 error.OutOfMemory, error.Canceled => {},
             };

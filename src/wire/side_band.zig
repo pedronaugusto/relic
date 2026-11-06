@@ -105,7 +105,7 @@ pub const Demux = struct {
     }
 
     fn stream(r: *Io.Reader, w: *Io.Writer, limit: Io.Limit) Io.Reader.StreamError!usize {
-        const d: *Demux = @alignCast(@fieldParentPtr("interface", r)); // aegis: no-danger: this function is installed only on a Demux's interface
+        const d: *Demux = @alignCast(@fieldParentPtr("interface", r)); // this function is installed only on a Demux's interface
         while (true) {
             if (d.pending.len != 0) {
                 const n = limit.minInt(d.pending.len);
@@ -296,6 +296,7 @@ pub fn allowedControl(gpa: Allocator, config: *const config_mod.Config, url: ?[]
 /// `true` and `false` separated by commas.
 fn parseControl(value: ?[]const u8) ?progress_mod.Control {
     const text = value orelse return .everything;
+    // glint-ignore: Z026 -- a value that is no boolean is read as one of the names below, as git reads it
     if (config_mod.parseBool(text)) |on| return if (on) .everything else .none else |_| {}
     var out: progress_mod.Control = .none;
     var rest = text;
@@ -364,7 +365,7 @@ pub const Mux = struct {
     }
 
     fn drain(w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
-        const sb: *Mux = @alignCast(@fieldParentPtr("w", w)); // aegis: no-danger: this function is installed only on a Mux's w
+        const sb: *Mux = @alignCast(@fieldParentPtr("w", w)); // this function is installed only on a Mux's w
         try sb.emit(w.buffered());
         w.end = 0;
         var consumed: usize = 0;

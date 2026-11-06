@@ -99,8 +99,8 @@ pub const Rule = struct {
     /// argument, whose output is the value.
     cmd: ?[]const u8 = null,
     where: Where,
-    if_exists: IfExists, // aegis: no-danger: a trailer's configured action, an option
-    if_missing: IfMissing, // aegis: no-danger: a trailer's configured action, an option
+    if_exists: IfExists, // a trailer's configured action, an option
+    if_missing: IfMissing, // a trailer's configured action, an option
 };
 
 /// How trailers are read and added: the `trailer.*` configuration and the

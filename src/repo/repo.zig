@@ -563,7 +563,7 @@ pub const Repository = struct {
     state: *anyopaque,
 
     fn data(repo: *const Repository) *RepositoryData {
-        return @ptrCast(@alignCast(repo.state)); // aegis: no-danger: a Repository's state is the RepositoryData its open allocated
+        return @ptrCast(@alignCast(repo.state)); // a Repository's state is the RepositoryData its open allocated
     }
 
     pub fn allocator(repo: *const Repository) Allocator {
@@ -1018,7 +1018,7 @@ pub const Repository = struct {
             .precompose_unicode = repo.data().settings.precompose_unicode,
             .prefer_symlink_refs = repo.data().settings.prefer_symlink_refs,
         });
-        repo.data().refs_state = @ptrCast(store); // aegis: no-danger: the opaque owner retains this allocated Store.
+        repo.data().refs_state = @ptrCast(store); // the opaque owner retains this allocated Store.
         repo.data().odb.replacements = .{
             .lister = &repo.data().replacement_lister,
             .enabled = options.replace_objects and repo.data().settings.use_replace_refs,
@@ -1305,7 +1305,7 @@ pub const Repository = struct {
         const timeout = try config.getInt(c_int, key, default);
         if (timeout == 0) return .fail;
         if (timeout < 0) return .{ .wait = .max };
-        return .{ .wait = .fromMilliseconds(timeout) };
+        return .{ .wait = aegis.units.Duration(.millisecond, c_int).fromRaw(timeout).toIoDuration() };
     }
 
     fn refuseSetting(diagnostic: ?*Diagnostic, text: []const u8) Allocator.Error!void {
@@ -1604,7 +1604,7 @@ pub const Repository = struct {
     /// nowhere, replaces with no object, so a read of what it replaces finds
     /// nothing, as git's does.
     fn listReplacements(lister: *odb_mod.Odb.Replacements.Lister, io: Io, gpa: Allocator, map: *Oid.Map(Oid)) odb_mod.Odb.Replacements.ListError!void {
-        const d: *RepositoryData = @alignCast(@fieldParentPtr("replacement_lister", lister)); // aegis: no-danger: this function is installed only on a RepositoryData's replacement_lister
+        const d: *RepositoryData = @alignCast(@fieldParentPtr("replacement_lister", lister)); // this function is installed only on a RepositoryData's replacement_lister
         const repo: Repository = .{ .state = d };
         const store = repo.refStore();
         const kind = repo.objectFormat();
@@ -1655,7 +1655,7 @@ pub const Repository = struct {
     /// The repository owns this store; callers borrow it for ref operations.
     /// Its backend and cache cannot be assigned separately.
     pub fn refStore(repo: *const Repository) *refs_mod.Store {
-        return @ptrCast(@alignCast(repo.data().refs_state)); // aegis: no-danger: finish allocates refs_state as an aligned Store.
+        return @ptrCast(@alignCast(repo.data().refs_state)); // finish allocates refs_state as an aligned Store.
     }
 
     /// The last published configuration, borrowed until an edit, a write,
@@ -2532,7 +2532,7 @@ pub const Repository = struct {
     }
 
     fn existsForRefs(peeler: *refs_mod.Peeler, io: Io, oid: Oid) Io.Cancelable!bool {
-        const d: *RepositoryData = @alignCast(@fieldParentPtr("ref_objects", peeler)); // aegis: no-danger: this function is installed only on a RepositoryData's ref_objects
+        const d: *RepositoryData = @alignCast(@fieldParentPtr("ref_objects", peeler)); // this function is installed only on a RepositoryData's ref_objects
         // An object the database cannot read is one a ref does not resolve to.
         return d.odb.exists(io, oid) catch |err| switch (err) {
             error.Canceled => error.Canceled,
@@ -2541,7 +2541,7 @@ pub const Repository = struct {
     }
 
     fn peelForRefs(peeler: *refs_mod.Peeler, io: Io, oid: Oid) Io.Cancelable!?Oid {
-        const d: *RepositoryData = @alignCast(@fieldParentPtr("ref_objects", peeler)); // aegis: no-danger: this function is installed only on a RepositoryData's ref_objects
+        const d: *RepositoryData = @alignCast(@fieldParentPtr("ref_objects", peeler)); // this function is installed only on a RepositoryData's ref_objects
         var repo: Repository = .{ .state = d };
         // An object that cannot be read is recorded unpeeled.
         const header = repo.data().odb.readHeader(io, oid) catch |err| switch (err) {

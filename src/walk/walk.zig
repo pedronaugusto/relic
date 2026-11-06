@@ -229,7 +229,9 @@ pub const Walk = struct {
         // have, so a shallow walk reads the commits themselves.
         if (walk.db.shallow.count() == 0) if (walk.graph) |graph| {
             if (graph.find(n.oid) catch null) |position| {
+                // glint-ignore: Z026 -- the commit graph is a shortcut: a commit it cannot give is read from the object below
                 if (graph.commitAt(position)) |entry| {
+                    // glint-ignore: Z026 -- the commit graph is a shortcut: parents it cannot give are read from the object below
                     if (graph.parentsOf(walk.gpa, position)) |parents| {
                         n.parents = parents;
                         n.time = entry.time;
@@ -816,7 +818,9 @@ const Painter = struct {
         }
         if (p.db.shallow.count() == 0) if (p.graph) |graph| {
             if (graph.find(oid) catch null) |position| {
+                // glint-ignore: Z026 -- the commit graph is a shortcut: a commit it cannot give is read from the object below
                 if (graph.commitAt(position)) |entry| {
+                    // glint-ignore: Z026 -- the commit graph is a shortcut: parents it cannot give are read from the object below
                     if (graph.parentsOf(p.gpa, position)) |parents| {
                         const loaded: Loaded = .{ .parents = parents, .time = entry.time, .generation = entry.generation orelse infinity };
                         errdefer p.gpa.free(loaded.parents);
