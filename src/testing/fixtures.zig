@@ -1,6 +1,7 @@
 //! Tests against repositories the real `git` builds on the machine at test
 //! time. Where the format is exact, the comparison is byte for byte.
 
+const builtin = @import("builtin");
 const std = @import("std");
 const Io = std.Io;
 const testgit = @import("git.zig");
@@ -1223,8 +1224,12 @@ test "a repository with a multi-pack index looks objects up through it" {
     try repo.exec(io, &.{ "multi-pack-index", "--object-dir=.git/objects", "expire" });
     var pack_dir = try git_dir.openDir(io, "objects/pack", .{ .iterate = true });
     defer pack_dir.close(io);
-    // glint-ignore: Z026 -- the expire may have taken it, and Windows keeps a file the open database holds; the reads below agree either way
-    pack_dir.deleteFile(io, "multi-pack-index") catch {};
+    // The expire may have taken it, and Windows keeps a file the open database holds (busy, or denied); the reads below agree either way.
+    pack_dir.deleteFile(io, "multi-pack-index") catch |err| switch (err) {
+        error.FileNotFound, error.FileBusy => {},
+        error.AccessDenied => if (builtin.target.os.tag != .windows) return err,
+        else => |other| return other,
+    };
 
     var plain = try odb_mod.Odb.open(gpa, io, git_dir, .sha1, .{});
     defer plain.deinit(io);
