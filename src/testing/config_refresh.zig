@@ -13,8 +13,6 @@ const Io = std.Io;
 const testgit = @import("git.zig");
 const repo_mod = @import("../repo/repo.zig");
 const sparse_checkout = @import("../worktree/sparse_checkout.zig");
-const lfsapi = @import("../lfs/api.zig");
-const lfs_settings = @import("../lfs/settings.zig");
 
 const Repository = repo_mod.Repository;
 const testing = std.testing;
@@ -474,25 +472,4 @@ test "sparse-checkout leaves the repository's configuration what the files say" 
     _ = try sparse_checkout.disable(io, &repo);
     try expectValue(&repo, "core.sparsecheckout", "false");
     try testing.expect(!try repo.refreshConfig(io, .{}));
-}
-
-test "what an LFS server teaches is written without another process's settings lost or memory's written" {
-    const gpa = testing.allocator;
-    const io = testing.io;
-    var git = try testgit.Repo.init(gpa, io, &.{});
-    defer git.deinit();
-    var repo = try Repository.open(gpa, io, git.dir, .{ .discover = false });
-    defer repo.deinit(io);
-    try repo.editConfig(io, &.{.{ .name = "fixture.memory", .value = "only" }}, .{});
-    try git.exec(io, &.{ "config", "fixture.external", "yes" });
-    const settings: lfs_settings.Settings = .{ .gpa = gpa, .config = repo.configuration() };
-    var client = try lfsapi.Client.open(gpa, io, &settings, .{ .remote = "origin", .where = .{}, .reach = .{} });
-    defer client.deinit(io);
-    try client.learnLocksVerify(io, "https://example.com/project", false);
-    try client.remember(io, &repo);
-    const file = try git.run(io, &.{ "config", "--file", ".git/config", "--get-regexp", "^(fixture|lfs)\\." });
-    defer gpa.free(file);
-    try testing.expectEqualStrings("fixture.external yes\nlfs.https://example.com/project.locksverify false\n", file);
-    try expectValue(&repo, "lfs.https://example.com/project.locksverify", "false");
-    try expectValue(&repo, "fixture.memory", "only");
 }

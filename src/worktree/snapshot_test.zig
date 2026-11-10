@@ -1,5 +1,4 @@
 const std = @import("std");
-const filter_mod = @import("../lfs/filter.zig");
 const shakedown = @import("shakedown");
 const builtin = @import("builtin");
 const testing = std.testing;
@@ -11,7 +10,6 @@ const object = @import("../object/object.zig");
 const hash = @import("../hash/hash.zig");
 const diff_mod = @import("../diff/diff.zig");
 const fs = @import("../fs/fs.zig");
-const lfs = @import("../lfs/lfs.zig");
 const storage = @import("../odb/state.zig");
 const testgit = @import("../testing/git.zig");
 
@@ -223,36 +221,6 @@ fn allocationCase(gpa: std.mem.Allocator, source: Io.Dir) !void {
     _ = try store.restore(io, captured.snapshot, dest.dir, .{});
     var changes = try store.diff(io, null, captured.snapshot, .{});
     defer changes.deinit();
-}
-
-test "snapshot keeps native LFS writes inside the private store" {
-    const gpa = testing.allocator;
-    const io = testing.io;
-    var source = try testgit.Repo.init(gpa, io, &.{});
-    defer source.deinit();
-    const source_path = try source.dir.realPathFileAlloc(io, ".", gpa);
-    defer gpa.free(source_path);
-    const external = try std.Io.Dir.path.join(gpa, &.{ source_path, "external-lfs" });
-    defer gpa.free(external);
-    try source.exec(io, &.{ "config", "lfs.storage", external });
-    try source.writeFile(io, ".gitattributes", "*.bin filter=lfs\n");
-    try source.writeFile(io, "large.bin", "the LFS content\n");
-    var r = try repo.Repository.open(gpa, io, source.dir, .{ .odb = .{ .probe_timestamp_resolution = false } });
-    defer r.deinit(io);
-    var private = testing.tmpDir(.{ .iterate = true });
-    defer private.cleanup();
-    var store = try snapshot.Store.open(gpa, io, private.dir, .{});
-    defer store.deinit(io);
-    const captured = try store.capture(io, .{ .repository = &r }, .{ .native_provider = filter_mod.provider(&.{}) });
-    try testing.expectError(error.FileNotFound, source.dir.access(io, "external-lfs", .{}));
-    var dest = testing.tmpDir(.{ .iterate = true });
-    defer dest.cleanup();
-    _ = try store.restore(io, captured.snapshot, dest.dir, .{});
-    const pointer_text = try dest.dir.readFileAlloc(io, "large.bin", gpa, .limited(1024));
-    defer gpa.free(pointer_text);
-    const pointer = try lfs.Pointer.decode(pointer_text);
-    const payloads: lfs.Store = .{ .base = store.dir.borrow().*, .root = "lfs" };
-    try testing.expect(try payloads.contains(io, &pointer));
 }
 
 test "snapshot plain folders keep executable modes symlinks and SHA256 names" {

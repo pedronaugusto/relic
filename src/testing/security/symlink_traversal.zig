@@ -11,7 +11,6 @@
 
 const local = @import("../../transport/local.zig");
 const std = @import("std");
-const filter_mod = @import("../../lfs/filter.zig");
 const path_mod = @import("../../names.zig").path;
 const suite = @import("../helpers.zig");
 const builtin = @import("builtin");
@@ -186,7 +185,7 @@ test "CVE-2021-21300, t0021-conversion 'delayed checkout with case-collision don
             defer repo.deinit(io);
             var attrs = try repo.loadAttrs(io);
             defer attrs.deinit();
-            var drivers = try filter_mod.load(gpa, io, &repo, .{});
+            var drivers = try repo.loadFilters(io, .{});
             defer drivers.deinit(io);
             var rules = try repo.worktreeRules();
             rules.attrs = &attrs;

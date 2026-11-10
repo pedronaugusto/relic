@@ -8,9 +8,10 @@ const Io = std.Io;
 
 const aegis = @import("aegis");
 const uplink = @import("uplink");
-const decimal = @import("../../text.zig").decimal;
-const date = @import("../../text.zig").date;
-const fs = @import("../../fs/fs.zig");
+const core = @import("relic_core");
+const decimal = core.text.decimal;
+const date = core.text.date;
+const fs = core.fs.engine;
 const lfs = @import("../lfs.zig");
 const lfsapi = @import("../api.zig");
 

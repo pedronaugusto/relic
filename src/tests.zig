@@ -1,29 +1,54 @@
-pub const repo = @import("repo/repo.zig");
-pub const hash = @import("hash/hash.zig");
-pub const object = @import("object/object.zig");
-pub const odb = @import("odb/odb.zig");
-pub const refs = @import("refs/refs.zig");
-pub const config = @import("config/config.zig");
-pub const index = @import("index/index.zig");
-pub const worktree = @import("checkout/checkout.zig");
-pub const diff = @import("diff/diff.zig");
-pub const rev_walk = @import("walk/walk.zig");
-pub const merge = @import("merge/merge.zig");
-pub const commit = @import("commit/commit.zig");
-pub const transport = @import("transport/transport.zig");
-pub const submodule = @import("submodule/submodule.zig");
-pub const lfs = @import("lfs/lfs.zig");
-pub const patch = @import("patch/patch.zig");
-pub const grep = @import("grep.zig");
-pub const archive = @import("archive.zig");
-pub const pretty = @import("pretty/pretty.zig");
-pub const clean = @import("clean.zig");
-pub const fast = @import("fast.zig");
-pub const maintenance = @import("maintenance/maintenance.zig");
+//! The core's tests: the root of the test binary that holds the core's files
+//! and their tests, and relic's public root compiled among them. A helper
+//! the LFS tests share reaches the core as `relic_core`, which here is this
+//! file: it has every name of `core.zig`, as `core.zig` has it.
+const core = @import("core.zig");
 
+pub const repo = core.repo;
+pub const hash = core.hash;
+pub const object = core.object;
+pub const odb = core.odb;
+pub const refs = core.refs;
+pub const config = core.config;
+pub const index = core.index;
+pub const worktree = core.worktree;
+pub const diff = core.diff;
+pub const rev_walk = core.rev_walk;
+pub const merge = core.merge;
+pub const commit = core.commit;
+pub const transport = core.transport;
+pub const submodule = core.submodule;
+pub const patch = core.patch;
+pub const grep = core.grep;
+pub const archive = core.archive;
+pub const pretty = core.pretty;
+pub const clean = core.clean;
+pub const fast = core.fast;
+pub const maintenance = core.maintenance;
+pub const checkout = core.checkout;
+pub const codec = core.codec;
+pub const discover = core.discover;
+pub const fs = core.fs;
+pub const hooks = core.hooks;
+pub const mail = core.mail;
+pub const names = core.names;
+pub const patterns = core.patterns;
+pub const process = core.process;
+pub const report = core.report;
+pub const stage = core.stage;
+pub const text = core.text;
+pub const walk = core.walk;
+pub const wire = core.wire;
+pub const http_backend = core.http_backend;
+pub const contract = core.contract;
+
+comptime {
+    for (@typeInfo(core).@"struct".decl_names) |name| if (!@hasDecl(@This(), name)) @compileError("src/tests.zig lacks core's `" ++ name ++ "`");
+    for (@typeInfo(@This()).@"struct".decl_names) |name| if (!@hasDecl(core, name)) @compileError("src/tests.zig's `" ++ name ++ "` is not core's");
+}
 const std = @import("std");
-const api_mod = @import("lfs/api.zig");
 const builtin = @import("builtin");
+const features = @import("relic_options");
 const relic = @import("relic.zig");
 
 test "the plumbing is relic's own: no public name reaches it" {
@@ -31,19 +56,15 @@ test "the plumbing is relic's own: no public name reaches it" {
     try std.testing.expect(!@hasDecl(index, "ewah"));
     try std.testing.expect(!@hasDecl(rev_walk, "ere"));
     try std.testing.expect(!@hasDecl(worktree, "platstat"));
-    try std.testing.expect(!@hasDecl(lfs, "time_text"));
-    try std.testing.expect(!@hasDecl(lfs, "mime_sniff"));
     try std.testing.expect(!@hasDecl(transport, "httpclient"));
     try std.testing.expect(!@hasDecl(transport, "httpauth"));
     try std.testing.expect(!@hasDecl(transport, "tls"));
     try std.testing.expect(!@hasDecl(transport, "client_cert"));
-    try std.testing.expect(!@hasDecl(api_mod, "timeoutsFor"));
-    try std.testing.expect(!@hasField(api_mod.Exchange, "response"));
-    try std.testing.expect(!@hasField(api_mod.Exchange, "diagnostics"));
-    // An exchange's network state and the client's transports are the
-    // module's own types, named by no public declaration.
-    try std.testing.expect(!@hasDecl(api_mod, "ExchangeState"));
-    try std.testing.expect(!@hasDecl(api_mod, "TransportPool"));
+}
+
+// relic_lfs's tests, where it is built.
+test {
+    if (features.lfs) _ = @import("lfs_tests.zig");
 }
 
 test {
@@ -52,7 +73,7 @@ test {
     // so that every file under the root is compiled and its tests run.
     std.testing.refAllDecls(relic);
     inline for (@typeInfo(relic).@"struct".decl_names) |name| {
-        std.testing.refAllDecls(@field(relic, name));
+        if (@TypeOf(@field(relic, name)) == type) std.testing.refAllDecls(@field(relic, name));
     }
     if (builtin.is_test) {
         // the plumbing the API keeps to itself: reached by no public name,
@@ -74,9 +95,6 @@ test {
         _ = @import("text/ctype.zig");
         _ = @import("text/quote.zig");
         _ = @import("fs/stat.zig");
-        _ = @import("lfs/time_text.zig");
-        _ = @import("lfs/mime_sniff.zig");
-        _ = @import("lfs/settings.zig");
         _ = @import("config/write.zig");
         _ = @import("testing/git.zig");
         _ = @import("testing/git_release.zig");
@@ -107,7 +125,6 @@ test {
         _ = @import("submodule/diff_test.zig");
         _ = @import("submodule/branch_test.zig");
         _ = @import("checkout/filter_test.zig");
-        _ = @import("lfs/lfs_test.zig");
         _ = @import("testing/eol.zig");
         _ = @import("testing/encoding.zig");
         _ = @import("testing/remote.zig");
@@ -118,12 +135,6 @@ test {
         _ = @import("object/signing_test.zig");
         _ = @import("testing/embedded_repo.zig");
         _ = @import("testing/config_refresh.zig");
-        _ = @import("testing/lfs.zig");
-        _ = @import("lfs/transfer_test.zig");
-        _ = @import("lfs/locks_test.zig");
-        _ = @import("lfs/json_test.zig");
-        _ = @import("lfs/push_test.zig");
-        _ = @import("lfs/ssh_test.zig");
         _ = @import("wire/auth_test.zig");
         _ = @import("walk/walk_test.zig");
         _ = @import("walk/shallow_test.zig");
@@ -169,7 +180,6 @@ test {
         _ = @import("transport/upload_pack_test.zig");
         _ = @import("transport/receive_pack_test.zig");
         _ = @import("transport/http_backend_test.zig");
-        _ = @import("lfs/server_test.zig");
         _ = @import("testing/clone_config.zig");
         _ = @import("wire/client_cert_test.zig");
         _ = @import("wire/pinned_key.zig");
@@ -187,7 +197,6 @@ test {
         _ = @import("fast/importer_test.zig");
         _ = @import("fast/exporter_test.zig");
         _ = @import("transport/remote_helper_test.zig");
-        _ = @import("lfs/custom_test.zig");
         _ = @import("checkout/fsmonitor_test.zig");
         _ = @import("checkout/fsmonitor_daemon_test.zig");
         _ = @import("patch/range_diff_test.zig");
@@ -246,10 +255,6 @@ test {
     _ = @import("fast/importer.zig");
     _ = @import("grep.zig");
     _ = @import("hash/sha1dc.zig");
-    _ = @import("lfs/clone.zig");
-    _ = @import("lfs/filter.zig");
-    _ = @import("lfs/locks.zig");
-    _ = @import("lfs/transfer.zig");
     _ = @import("merge/rerere.zig");
     _ = @import("merge/three_way.zig");
     _ = @import("odb/bitmap.zig");
@@ -276,8 +281,6 @@ test {
     _ = @import("wire/auth.zig");
     _ = @import("wire/client_cert.zig");
     _ = @import("wire/url.zig");
-    _ = @import("lfs/netrc.zig");
-    _ = @import("lfs/ssh.zig");
     _ = @import("merge/strategy.zig");
     _ = @import("merge/subtree_shift.zig");
     _ = @import("object/fsck.zig");
@@ -318,8 +321,6 @@ test {
     _ = @import("archive/archive.zig");
     _ = @import("archive/remote.zig");
     _ = @import("transport/http_backend.zig");
-    _ = @import("lfs/server.zig");
-    _ = @import("lfs/server/transfer.zig");
     _ = @import("text/unicode_width.zig");
     _ = @import("checkout/convert.zig");
     _ = @import("checkout/dir_scan.zig");
@@ -328,7 +329,6 @@ test {
     _ = @import("worktree/sparse_checkout.zig");
     _ = @import("diff/driver.zig");
     _ = @import("diff/words.zig");
-    _ = @import("lfs/custom.zig");
     _ = @import("merge/octopus.zig");
     _ = @import("transport/remote_helper.zig");
     _ = @import("wire/policy.zig");

@@ -11,12 +11,13 @@ const std = @import("std");
 const Io = std.Io;
 const testing = std.testing;
 
-const repo_mod = @import("../repo/repo.zig");
-const push_mod = @import("../transport/push.zig");
+const core = @import("relic_core");
+const repo_mod = core.repo;
+const push_mod = core.transport.push;
 const lfspush = @import("push.zig");
 const testlfs = @import("../testing/lfs.zig");
 const lt = @import("transfer_test.zig");
-const object = @import("../object/object.zig");
+const object = core.object;
 
 const Fixture = lt.Fixture;
 

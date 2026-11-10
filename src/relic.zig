@@ -136,7 +136,7 @@
 //! | `transport.pkt_line` | Module within `transport`. |
 //! | `transport.upload_pack` | Module within `transport`. |
 //! | `transport.receive_pack` | Module within `transport`. |
-//! | `transport.http_backend` | Module within `transport`. |
+//! | `transport.http_backend` | Module within `transport`. Only with `http`. |
 //! | `transport.bundle` | Module within `transport`. |
 //! | `transport.bundle_uri` | Module within `transport`. |
 //! | `transport.progress` | Module within `transport`. |
@@ -145,19 +145,6 @@
 //! | `submodule` | Public concern. |
 //! | `submodule.gitmodules` | Module within `submodule`. |
 //! | `submodule.gitlink` | Module within `submodule`. |
-//! | `lfs` | Public concern. |
-//! | `lfs.filter` | Native LFS filters selected by an operation owner. |
-//! | `lfs.clone` | Clone with native LFS checkout and downloads. |
-//! | `lfs.netrc` | Module within `lfs`. |
-//! | `lfs.ssh` | Module within `lfs`. |
-//! | `lfs.hooks` | Module within `lfs`. |
-//! | `lfs.push` | Module within `lfs`. |
-//! | `lfs.locks` | Module within `lfs`. |
-//! | `lfs.transfer` | Module within `lfs`. |
-//! | `lfs.custom` | Module within `lfs`. |
-//! | `lfs.api` | Module within `lfs`. |
-//! | `lfs.settings` | git-lfs's configuration and `.lfsconfig`, read as git-lfs reads them. |
-//! | `lfs.server` | Module within `lfs`. |
 //! | `patch` | Public concern. |
 //! | `patch.am` | Module within `patch`. |
 //! | `patch.commit_diff` | Module within `patch`. |
@@ -178,194 +165,115 @@
 //! | `fast.exporter` | Module within `fast`. |
 //! | `maintenance` | Public concern. |
 
-pub const repo = @import("repo.zig");
-pub const hash = @import("hash.zig");
-pub const object = @import("object.zig");
-pub const odb = @import("odb.zig");
-pub const refs = @import("refs.zig");
-pub const config = @import("config.zig");
-pub const index = @import("index.zig");
-pub const worktree = @import("worktree.zig");
-pub const diff = @import("diff.zig");
-pub const rev_walk = @import("rev_walk.zig");
-pub const merge = @import("merge.zig");
-pub const commit = @import("commit.zig");
-pub const transport = @import("transport.zig");
-pub const submodule = @import("submodule.zig");
-pub const lfs = @import("lfs.zig");
-pub const patch = @import("patch.zig");
-pub const grep = @import("grep.zig");
-pub const archive = @import("archive.zig");
-pub const pretty = @import("pretty.zig");
-pub const clean = @import("clean.zig");
-pub const fast = @import("fast.zig");
+const core = @import("relic_core");
 
-pub const maintenance = @import("maintenance.zig");
+pub const repo = core.repo;
+pub const hash = core.hash;
+pub const object = core.object;
+pub const odb = core.odb;
+pub const refs = core.refs;
+pub const config = core.config;
+pub const index = core.index;
+pub const worktree = core.worktree;
+pub const diff = core.diff;
+pub const rev_walk = core.rev_walk;
+pub const merge = core.merge;
+pub const commit = core.commit;
+pub const transport = if (features.http) transport_with_http else core.transport;
+pub const submodule = core.submodule;
+pub const patch = core.patch;
+pub const grep = core.grep;
+pub const archive = core.archive;
+pub const pretty = core.pretty;
+pub const clean = core.clean;
+pub const fast = core.fast;
 
-// The contract relic's public surface keeps, checked as relic compiles, on
-// any target, so that no build of it breaks one:
-// - every namespace three levels down has exactly one row in the table
-//   above and one in the README's, and neither table a row for anything
-//   else;
-// - each such namespace is its own, offers no test access and names its
-//   errors (`Error`, an error set), as does each type it owns that a caller
-//   releases with `deinit`;
-// - a facade publishes every declaration of its implementation, as the
-//   implementation's type;
-// - no public function takes more than five positional inputs;
-// - how a program ended is conduit's `Term` wherever relic shows it, and a
-//   program's working directory is relic's own `Cwd`.
+pub const maintenance = core.maintenance;
+
+/// The features this build has: `http` (uplink and cloak) and `lfs` (strand).
+const features = @import("relic_options");
+
+/// Which optional features relic was built with.
+pub const Features = struct {
+    /// Fetching and pushing over HTTP(S), with uplink and cloak.
+    http: bool,
+    /// Git LFS's transfers, locks and agents, with strand: the `relic_lfs`
+    /// module, which exists only with it.
+    lfs: bool,
+};
+
+/// This build's features, as the dependency's `.http` and `.lfs` options set them.
+pub const built_with: Features = .{ .http = features.http, .lfs = features.lfs };
+
+// A declaration exists exactly when its types do: a namespace with a module
+// only one feature holds is chosen whole, the name absent without it, so
+// `@hasDecl` tells the truth and a consumer is told "no member" when it
+// compiles. The choice lists every name of its namespace and the one it
+// adds, which `sameNamesBut` holds to.
+/// `transport` with `http`: every name of its namespace, and git's http-backend served on uplink's server.
+const transport_with_http = struct {
+    const base = core.transport;
+    pub const filter_spec = base.filter_spec;
+    pub const partial = base.partial;
+    pub const side_band = base.side_band;
+    pub const http_settings = base.http_settings;
+    pub const hidden = base.hidden;
+    pub const promisors = base.promisors;
+    pub const push = base.push;
+    pub const clone = base.clone;
+    pub const fetch = base.fetch;
+    pub const pull = base.pull;
+    pub const backfill = base.backfill;
+    pub const refspec = base.refspec;
+    pub const remote = base.remote;
+    pub const url = base.url;
+    pub const fetch_pack = base.fetch_pack;
+    pub const send_pack = base.send_pack;
+    pub const local = base.local;
+    pub const ssh = base.ssh;
+    pub const smart_http = base.smart_http;
+    pub const credential = base.credential;
+    pub const credential_cache_daemon = base.credential_cache_daemon;
+    pub const auth = base.auth;
+    pub const protocol = base.protocol;
+    pub const connection = base.connection;
+    pub const pkt_line = base.pkt_line;
+    pub const upload_pack = base.upload_pack;
+    pub const receive_pack = base.receive_pack;
+    pub const bundle = base.bundle;
+    pub const bundle_uri = base.bundle_uri;
+    pub const progress = base.progress;
+    pub const remote_helper = base.remote_helper;
+    pub const policy = base.policy;
+    pub const Error = base.Error;
+    pub const Options = base.Options;
+    pub const wantsV2 = base.wantsV2;
+    pub const Session = base.Session;
+    pub const download = base.download;
+    pub const http_backend = core.http_backend;
+};
+
 comptime {
-    @setEvalBranchQuota(50_000_000);
-    const own = tableNames(@embedFile("relic.zig"), "//! | `");
-    const readme = @embedFile("README.md");
-    const begin = std.mem.find(u8, readme, "<!-- BEGIN MODULES -->") orelse @compileError("README.md: no <!-- BEGIN MODULES --> marker");
-    const end = std.mem.find(u8, readme, "<!-- END MODULES -->") orelse @compileError("README.md: no <!-- END MODULES --> marker");
-    const documented = tableNames(readme[begin..end], "| `");
-    const count = checkNamespaces(@This(), "", 3, own, documented);
-    if (own.len != count) @compileError(std.fmt.comptimePrint("src/relic.zig's module table has {d} rows for {d} namespaces", .{ own.len, count }));
-    if (documented.len != count) @compileError(std.fmt.comptimePrint("README.md's module table has {d} rows for {d} namespaces", .{ documented.len, count }));
-    checkErrors(@This(), "", 3);
-    checkInputs(@This(), "", 7);
-    for (facades) |facade| covers(facade[0], facade[1], facade[2]);
+    core.contract.sameNamesBut(core.transport, transport_with_http, "http_backend");
+}
+
+// The contract relic's public surface keeps (`core.contract`), checked as
+// relic compiles, on any target, so that no build of it breaks one; and how
+// a program ended is conduit's `Term` wherever relic shows it, and a
+// program's working directory is relic's own `Cwd`.
+comptime {
+    core.contract.check(@This(), .{
+        .source = @embedFile("relic.zig"),
+        .path = "src/relic.zig",
+        .readme = @embedFile("README.md"),
+        .begin = "<!-- BEGIN MODULES -->",
+        .end = "<!-- END MODULES -->",
+        .depth = 3,
+    });
     checkPrograms();
 }
 
-const std = @import("std");
 const conduit = @import("conduit");
-const fs = @import("fs/fs.zig");
-
-/// The module names a table's rows begin with: each line starting with
-/// `row`, its name to the closing backtick.
-fn tableNames(comptime text: []const u8, comptime row: []const u8) []const []const u8 {
-    var names: []const []const u8 = &.{};
-    var lines = std.mem.splitScalar(u8, text, '\n');
-    while (lines.next()) |line| {
-        if (!std.mem.startsWith(u8, line, row)) continue;
-        const rest = line[row.len..];
-        const close = std.mem.findScalar(u8, rest, '`') orelse continue;
-        names = names ++ .{rest[0..close]};
-    }
-    return names;
-}
-
-fn isNamespace(comptime ns: type, comptime name: []const u8) bool {
-    if (name.len == 0 or !std.ascii.isLower(name[0])) return false;
-    const value = @field(ns, name);
-    if (@TypeOf(value) != type) return false;
-    return switch (@typeInfo(value)) {
-        .@"struct" => |s| s.field_names.len == 0 and !s.is_tuple,
-        else => false,
-    };
-}
-
-fn rowsOf(comptime names: []const []const u8, comptime path: []const u8) usize {
-    var count: usize = 0;
-    for (names) |name| {
-        if (std.mem.eql(u8, name, path)) count += 1;
-    }
-    return count;
-}
-
-/// Each namespace under `ns` to `depth` levels, held to one row in each
-/// table, to being its own and to offering no test access; how many there
-/// are.
-fn checkNamespaces(comptime ns: type, comptime prefix: []const u8, comptime depth: usize, comptime own: []const []const u8, comptime documented: []const []const u8) usize {
-    var count: usize = 0;
-    for (@typeInfo(ns).@"struct".decl_names) |name| {
-        if (!isNamespace(ns, name)) continue;
-        const path = if (prefix.len == 0) name else prefix ++ "." ++ name;
-        if (rowsOf(own, path) != 1) @compileError("`" ++ path ++ "` needs one row in src/relic.zig's module table: //! | `" ++ path ++ "` | <purpose> |");
-        if (rowsOf(documented, path) != 1) @compileError("`" ++ path ++ "` needs one row in README.md's module table, between its BEGIN MODULES and END MODULES markers");
-        if (@hasDecl(@field(ns, name), "test_access")) @compileError("`" ++ path ++ "` offers test access");
-        for (@typeInfo(ns).@"struct".decl_names) |other| {
-            if (!std.mem.eql(u8, name, other) and isNamespace(ns, other) and @field(ns, name) == @field(ns, other))
-                @compileError("`" ++ path ++ "` is the same namespace as `" ++ other ++ "`");
-        }
-        count += 1;
-        if (depth > 1) count += checkNamespaces(@field(ns, name), path, depth - 1, own, documented);
-    }
-    return count;
-}
-
-/// Types relic publishes as the family package's own, whose conventions
-/// are that package's.
-const foreign = .{ conduit.Child, fs.OwnedDir, fs.OwnedFile, fs.OwnedStream, fs.OwnedServer };
-
-fn isForeign(comptime T: type) bool {
-    inline for (foreign) |F| if (T == F) return true;
-    return false;
-}
-
-/// Each namespace under `ns` to `depth` levels, and each type of one that
-/// a caller releases with `deinit`, names its errors: `Error`, an error
-/// set with names.
-fn checkErrors(comptime ns: type, comptime prefix: []const u8, comptime depth: usize) void {
-    for (@typeInfo(ns).@"struct".decl_names) |name| {
-        const value = @field(ns, name);
-        if (@TypeOf(value) != type or isForeign(value) or @typeInfo(value) != .@"struct") continue;
-        const path = if (prefix.len == 0) name else prefix ++ "." ++ name;
-        if (isNamespace(ns, name) or @hasDecl(value, "deinit")) {
-            if (!@hasDecl(value, "Error")) @compileError("`" ++ path ++ "` names no errors: it needs `pub const Error`, an error set");
-            if (@typeInfo(value.Error) != .error_set or @typeInfo(value.Error).error_set.error_names == null)
-                @compileError("`" ++ path ++ ".Error` is not an error set with names");
-        }
-        if (isNamespace(ns, name) and depth > 1) checkErrors(value, path, depth - 1);
-    }
-}
-
-/// No public function under `ns`, to `depth` levels of namespaces and
-/// types, takes more than five positional inputs; more go in an options
-/// or inputs struct.
-fn checkInputs(comptime ns: type, comptime prefix: []const u8, comptime depth: usize) void {
-    if (depth == 0) return;
-    const names = switch (@typeInfo(ns)) {
-        .@"struct" => |s| s.decl_names,
-        .@"union" => |s| s.decl_names,
-        .@"enum" => |s| s.decl_names,
-        else => return,
-    };
-    for (names) |name| {
-        const value = @field(ns, name);
-        const path = if (prefix.len == 0) name else prefix ++ "." ++ name;
-        if (@TypeOf(value) == type) {
-            checkInputs(value, path, depth - 1);
-        } else if (@typeInfo(@TypeOf(value)) == .@"fn") {
-            const inputs = @typeInfo(@TypeOf(value)).@"fn".param_types.len;
-            if (inputs > 5) @compileError(std.fmt.comptimePrint("`{s}` takes {d} positional inputs; at most five, the rest in an options or inputs struct", .{ path, inputs }));
-        }
-    }
-}
-
-/// Each facade, its path, and the implementation it publishes.
-const facades = .{
-    .{ repo, "repo", @import("repo/repo.zig") },
-    .{ hash, "hash", @import("hash/hash.zig") },
-    .{ object, "object", @import("object/object.zig") },
-    .{ odb, "odb", @import("odb/odb.zig") },
-    .{ refs, "refs", @import("refs/refs.zig") },
-    .{ config, "config", @import("config/config.zig") },
-    .{ index, "index", @import("index/index.zig") },
-    .{ worktree, "worktree", @import("checkout/checkout.zig") },
-    .{ diff, "diff", @import("diff/diff.zig") },
-    .{ rev_walk, "rev_walk", @import("walk/walk.zig") },
-    .{ merge, "merge", @import("merge/merge.zig") },
-    .{ commit, "commit", @import("commit/commit.zig") },
-    .{ transport, "transport", @import("transport/transport.zig") },
-    .{ submodule, "submodule", @import("submodule/submodule.zig") },
-    .{ lfs, "lfs", @import("lfs/lfs.zig") },
-    .{ patch, "patch", @import("patch/patch.zig") },
-    .{ pretty, "pretty", @import("pretty/pretty.zig") },
-    .{ maintenance, "maintenance", @import("maintenance/maintenance.zig") },
-};
-
-/// `facade` publishes every declaration of `implementation`, as its type.
-fn covers(comptime facade: type, comptime path: []const u8, comptime implementation: type) void {
-    for (@typeInfo(implementation).@"struct".decl_names) |name| {
-        if (!@hasDecl(facade, name)) @compileError("`" ++ path ++ "` does not publish `" ++ name ++ "` of its implementation");
-        if (@TypeOf(@field(facade, name)) != @TypeOf(@field(implementation, name))) @compileError("`" ++ path ++ "." ++ name ++ "` is not its implementation's");
-    }
-}
 
 /// How a program ended is conduit's `Term` wherever relic shows it, never
 /// the standard library's, and a program's working directory is relic's

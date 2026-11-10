@@ -11,6 +11,7 @@ var smoke = false;
 var benchmark_io: Io = undefined;
 
 const relic = @import("relic").api;
+const relic_lfs = @import("relic").lfs;
 const testgit = @import("scratchgit.zig");
 const hash = relic.hash;
 const odb_mod = relic.odb;
@@ -1037,7 +1038,7 @@ fn row10() !void {
     defer server.stop();
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(content, &digest, .{});
-    const objects = [_]relic.lfs.transfer.Object{.{ .oid = std.fmt.bytesToHex(digest, .lower), .size = size }};
+    const objects = [_]relic_lfs.transfer.Object{.{ .oid = std.fmt.bytesToHex(digest, .lower), .size = size }};
     var repo_git = try testgit.Repo.init(gpa, io);
     defer repo_git.deinit();
     const url = try gpa.print("http://127.0.0.1:{d}/repo.git", .{server.port});
@@ -1045,16 +1046,16 @@ fn row10() !void {
     try repo_git.exec(io, &.{ "remote", "add", "origin", url });
     var repo = try repo_mod.Repository.open(gpa, io, repo_git.dir, .{});
     defer repo.deinit(io);
-    const lfs_server = try relic.lfs.api.Server.open(gpa, io, &repo, "origin", .{});
+    const lfs_server = try relic_lfs.api.Server.open(gpa, io, &repo, "origin", .{});
     defer lfs_server.deinit(io);
     const Pass = struct {
-        server: *relic.lfs.api.Server,
+        server: *relic_lfs.api.Server,
         dir: Io.Dir,
         io: Io,
-        objects: []const relic.lfs.transfer.Object,
+        objects: []const relic_lfs.transfer.Object,
         fn run(p: @This()) !void {
             try p.dir.deleteTree(p.io, ".git/lfs/objects");
-            var outcome = try relic.lfs.transfer.download(p.io, p.server, p.objects, .{ .concurrency = 1 });
+            var outcome = try relic_lfs.transfer.download(p.io, p.server, p.objects, .{ .concurrency = 1 });
             defer outcome.deinit();
             std.debug.assert(outcome.failures() == 0);
             std.debug.assert(outcome.results[0].status == .transferred);

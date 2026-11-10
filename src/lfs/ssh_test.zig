@@ -8,7 +8,8 @@
 
 const lfspush = @import("push.zig");
 const testremote = @import("../testing/remote.zig");
-const object_walk = @import("../walk/object/walk.zig");
+const core = @import("relic_core");
+const object_walk = core.walk.object.walk;
 const std = @import("std");
 const build_options_mod = @import("build_options");
 const lfs_mod = @import("lfs.zig");
@@ -16,7 +17,7 @@ const shakedown_mod = @import("shakedown");
 const Io = std.Io;
 const testing = std.testing;
 
-const repo_mod = @import("../repo/repo.zig");
+const repo_mod = core.repo;
 const lfstransfer = @import("transfer.zig");
 const lfslocks = @import("locks.zig");
 const testlfs = @import("../testing/lfs.zig");

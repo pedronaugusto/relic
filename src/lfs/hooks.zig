@@ -24,11 +24,12 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const hash = @import("../hash/hash.zig");
-const object = @import("../object/object.zig");
-const repo_mod = @import("../repo/repo.zig");
-const diff = @import("../diff/diff.zig");
-const hooks = @import("../hooks/hooks.zig");
+const core = @import("relic_core");
+const hash = core.hash;
+const object = core.object;
+const repo_mod = core.repo;
+const diff = core.diff;
+const hooks = core.hooks;
 const lfslocks = @import("locks.zig");
 
 const Oid = hash.Oid;

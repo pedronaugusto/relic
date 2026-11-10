@@ -13,163 +13,24 @@ const Io = std.Io;
 
 const testgit = @import("../testing/git.zig");
 const testing_io = @import("../testing/io.zig");
-const hash = @import("../hash/hash.zig");
 const repo_mod = @import("../repo/repo.zig");
 const worktree = @import("checkout.zig");
 const filter = @import("filter.zig");
 const program = @import("../process.zig").program;
-const index_mod = @import("../index/index.zig");
-const lfs = @import("../lfs/lfs.zig");
-const lfs_filter = @import("../lfs/filter.zig");
 const fs = @import("../fs/fs.zig");
 
-const Oid = hash.Oid;
 const testing = std.testing;
 
-/// The test process's environment with nothing of the person's in it,
-/// which is what a filter program is started from.
-pub fn environ(gpa: std.mem.Allocator) !std.process.Environ.Map {
-    return testgit.isolatedEnviron(gpa, testgit.no_home);
-}
-
-/// What relic is handed for one operation.
-pub const Run = struct {
-    programs: ?program.Programs = null,
-    report: ?*filter.Report = null,
-    native_lfs: bool = true,
-    fetch: ?*lfs.Fetcher = null,
-};
-
-/// Stage the working tree with relic, as `git add -A` does, write the index
-/// and return the tree.
-pub fn relicAdd(gpa: std.mem.Allocator, io: Io, dir: Io.Dir, run: Run) !Oid {
-    var repo = try repo_mod.Repository.open(gpa, io, dir, .{});
-    defer repo.deinit(io);
-    var ignore_rules = try repo.loadIgnore(io);
-    defer ignore_rules.deinit();
-    var attrs = try repo.loadAttrs(io);
-    defer attrs.deinit();
-    var drivers = if (run.native_lfs) try lfs_filter.load(gpa, io, &repo, .{ .fetch = run.fetch }) else try repo.loadFilters(io, .{});
-    defer drivers.deinit(io);
-    var rules = try repo.worktreeRules();
-    rules.ignore = &ignore_rules;
-    rules.attrs = &attrs;
-    rules.filters = &drivers;
-    var index = try repo.openIndex(io);
-    defer index.deinit();
-    _ = try worktree.addAll(gpa, io, dir, .{ .index = &index, .db = repo.objectDatabase() }, .{
-        .rules = rules,
-        .programs = run.programs,
-        .filter_report = run.report,
-    });
-    const tree = try worktree.writeTree(gpa, io, &index, repo.objectDatabase());
-    try index.write(io, repo.gitDirectory(), "index", .{});
-    return tree;
-}
-
-/// Check `tree` out with relic into a working tree emptied of everything
-/// but `.git`, from an empty index.
-pub fn relicCheckout(gpa: std.mem.Allocator, io: Io, dir: Io.Dir, tree: Oid, run: Run) !worktree.CheckoutOutcome {
-    var repo = try repo_mod.Repository.open(gpa, io, dir, .{});
-    defer repo.deinit(io);
-    var attrs = try repo.loadAttrs(io);
-    defer attrs.deinit();
-    var drivers = if (run.native_lfs) try lfs_filter.load(gpa, io, &repo, .{ .fetch = run.fetch }) else try repo.loadFilters(io, .{});
-    defer drivers.deinit(io);
-    var rules = try repo.worktreeRules();
-    rules.attrs = &attrs;
-    rules.filters = &drivers;
-    var index = index_mod.Index.initEmpty(gpa, repo.objectFormat());
-    defer index.deinit();
-    const outcome = try worktree.checkout(gpa, io, dir, .{ .index = &index, .db = repo.objectDatabase(), .tree = tree }, .{
-        .rules = rules,
-        .programs = run.programs,
-        .filter_report = run.report,
-    });
-    try index.write(io, repo.gitDirectory(), "index", .{});
-    return outcome;
-}
-
-/// relic's status of the working tree against the index and `HEAD`.
-pub fn relicStatus(gpa: std.mem.Allocator, io: Io, dir: Io.Dir, run: Run) !worktree.Status {
-    var repo = try repo_mod.Repository.open(gpa, io, dir, .{});
-    defer repo.deinit(io);
-    var ignore_rules = try repo.loadIgnore(io);
-    defer ignore_rules.deinit();
-    var attrs = try repo.loadAttrs(io);
-    defer attrs.deinit();
-    var drivers = if (run.native_lfs) try lfs_filter.load(gpa, io, &repo, .{ .fetch = run.fetch }) else try repo.loadFilters(io, .{});
-    defer drivers.deinit(io);
-    var rules = try repo.worktreeRules();
-    rules.ignore = &ignore_rules;
-    rules.attrs = &attrs;
-    rules.filters = &drivers;
-    var index = try repo.openIndex(io);
-    defer index.deinit();
-    return worktree.status(gpa, io, dir, .{ .index = &index, .db = repo.objectDatabase() }, .{
-        .rules = rules,
-        .head_tree = try repo.headTree(io),
-        .untracked = .no,
-        .programs = run.programs,
-        .filter_report = run.report,
-    });
-}
-
-/// Remove everything in the working tree but `.git`.
-pub fn emptyWorktree(io: Io, dir: Io.Dir) !void {
-    var it = dir.iterate();
-    var names: std.ArrayList([]u8) = .empty;
-    defer {
-        for (names.items) |n| testing.allocator.free(n);
-        names.deinit(testing.allocator);
-    }
-    while (try it.next(io)) |entry| {
-        if (std.mem.eql(u8, entry.name, ".git")) continue;
-        try names.append(testing.allocator, try testing.allocator.dupe(u8, entry.name));
-    }
-    for (names.items) |name| try dir.deleteTree(io, name);
-}
-
-pub fn treeOf(gpa: std.mem.Allocator, io: Io, repo: *testgit.Repo) !Oid {
-    const text = try repo.line(io, &.{"write-tree"});
-    defer gpa.free(text);
-    return Oid.parse(.sha1, text);
-}
-
-pub fn expectSameFile(gpa: std.mem.Allocator, io: Io, ours: *testgit.Repo, theirs: *testgit.Repo, path: []const u8) !void {
-    const a = try ours.readFile(io, path);
-    defer gpa.free(a);
-    const b = try theirs.readFile(io, path);
-    defer gpa.free(b);
-    testing.expectEqualStrings(b, a) catch |err| {
-        std.debug.print("{s} differs from git's\n", .{path});
-        return err;
-    };
-}
-
-/// Two repositories with one configuration and one set of files.
-pub const Twin = struct {
-    ours: testgit.Repo,
-    theirs: testgit.Repo,
-
-    pub fn init(gpa: std.mem.Allocator, io: Io, config: []const [2][]const u8, files: []const [2][]const u8) !Twin {
-        var ours = try testgit.Repo.init(gpa, io, &.{});
-        errdefer ours.deinit();
-        var theirs = try testgit.Repo.init(gpa, io, &.{});
-        errdefer theirs.deinit();
-        for ([_]*testgit.Repo{ &ours, &theirs }) |r| {
-            for (config) |pair| try r.exec(io, &.{ "config", pair[0], pair[1] });
-            for (files) |pair| try r.writeFile(io, pair[0], pair[1]);
-        }
-        return .{ .ours = ours, .theirs = theirs };
-    }
-
-    pub fn deinit(t: *Twin) void {
-        t.ours.deinit();
-        t.theirs.deinit();
-        t.* = undefined;
-    }
-};
+const ft = @import("../testing/filters.zig");
+const environ = ft.environ;
+const Run = ft.Run;
+const relicAdd = ft.relicAdd;
+const relicCheckout = ft.relicCheckout;
+const relicStatus = ft.relicStatus;
+const emptyWorktree = ft.emptyWorktree;
+const treeOf = ft.treeOf;
+const expectSameFile = ft.expectSameFile;
+const Twin = ft.Twin;
 
 test "command-line filters store what git stores and check out what git checks out" {
     const gpa = testing.allocator;

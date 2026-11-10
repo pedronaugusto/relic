@@ -26,7 +26,7 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const relic = @import("relic");
 const pkt_line = relic.transport.pkt_line;
-const server = relic.lfs.server;
+const server = @import("relic_lfs").server;
 const Transfer = server.Transfer;
 
 const locked_at_unix = 1790244000; // 2026-09-24T10:00:00Z

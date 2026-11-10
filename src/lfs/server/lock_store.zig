@@ -9,7 +9,8 @@ const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const fs = @import("../../fs/fs.zig");
+const core = @import("relic_core");
+const fs = core.fs.engine;
 const locks = @import("../locks.zig");
 
 /// Errors from reading and replacing the locks.

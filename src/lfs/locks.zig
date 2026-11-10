@@ -31,15 +31,16 @@ const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const repo_mod = @import("../repo/repo.zig");
-const attributes = @import("../patterns.zig").attributes;
-const fs = @import("../fs/fs.zig");
+const core = @import("relic_core");
+const repo_mod = core.repo;
+const attributes = core.patterns.attributes;
+const fs = core.fs.engine;
 const lfs = @import("lfs.zig");
 const lfsapi = @import("api.zig");
 const lfs_settings = @import("settings.zig");
 const lfsssh = @import("ssh.zig");
 const time_text = @import("time_text.zig");
-const index_mod = @import("../index/index.zig");
+const index_mod = core.index;
 
 const Repository = repo_mod.Repository;
 

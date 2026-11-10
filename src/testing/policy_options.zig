@@ -1,5 +1,8 @@
 const std = @import("std");
 const relic = @import("../relic.zig");
+/// relic_lfs's root, where relic is built with `lfs`.
+const relic_lfs = @import("../lfs.zig");
+const features = @import("relic_options");
 test "pattern constructors take defaulted policy options" {
     inline for (.{ relic.worktree.ignore.Rules, relic.worktree.attributes.Attrs, relic.worktree.sparse.Patterns }) |T| {
         const options = @typeInfo(@TypeOf(T.init)).@"fn".param_types[1].?;
@@ -11,7 +14,9 @@ test "pattern constructors take defaulted policy options" {
 }
 
 test "public operations keep policy in option fields" {
-    inline for (.{ relic.repo.hooks.Runner.postMerge, relic.commit.hooks.Hooks.init, relic.commit.trailer.block, relic.rev_walk.mailmap.Mailmap.addFileAt, relic.lfs.api.gitRemoteUrl, relic.lfs.FetchPattern.compile, relic.transport.remote_helper.Helper.list, relic.pretty.refs.Listing.write, relic.transport.policy.allowed }) |operation| {
+    const operations = .{ relic.repo.hooks.Runner.postMerge, relic.commit.hooks.Hooks.init, relic.commit.trailer.block, relic.rev_walk.mailmap.Mailmap.addFileAt, relic.transport.remote_helper.Helper.list, relic.pretty.refs.Listing.write, relic.transport.policy.allowed } ++
+        if (features.lfs) .{ relic_lfs.api.gitRemoteUrl, relic_lfs.FetchPattern.compile } else .{};
+    inline for (operations) |operation| {
         inline for (@typeInfo(@TypeOf(operation)).@"fn".param_types) |parameter| {
             if (parameter) |T| try std.testing.expect(T != bool and T != ?bool);
         }

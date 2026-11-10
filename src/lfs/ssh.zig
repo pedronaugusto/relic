@@ -28,13 +28,14 @@ const Self = @This();
 
 const std = @import("std");
 const aegis = @import("aegis");
-const decimal = @import("../text.zig").decimal;
+const core = @import("relic_core");
+const decimal = core.text.decimal;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const program = @import("../process.zig").program;
-const pkt_line = @import("../codec.zig").pkt_line;
-const connection = @import("../wire.zig").connection;
+const program = core.process.program;
+const pkt_line = core.codec.pkt_line;
+const connection = core.wire.connection;
 
 /// Errors from the protocol.
 pub const Error = error{

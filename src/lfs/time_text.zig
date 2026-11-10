@@ -7,7 +7,8 @@ const std = @import("std");
 const aegis = @import("aegis");
 const shakedown = @import("shakedown");
 const Io = std.Io;
-const date = @import("../text.zig").date;
+const core = @import("relic_core");
+const date = core.text.date;
 
 /// A time as Go's `time.Time` holds one that was read from RFC 3339 text:
 /// the instant, and the offset it was written with. Go's zero time,

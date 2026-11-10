@@ -15,14 +15,15 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const testing = std.testing;
 
-const repo_mod = @import("../repo/repo.zig");
+const core = @import("relic_core");
+const repo_mod = core.repo;
 const lfsapi = @import("api.zig");
 const lfslocks = @import("locks.zig");
 const testlfs = @import("../testing/lfs.zig");
 const lt = @import("transfer_test.zig");
 const lfs = @import("lfs.zig");
-const hash = @import("../hash/hash.zig");
-const fs = @import("../fs/fs.zig");
+const hash = core.hash;
+const fs = core.fs.engine;
 
 const Fixture = lt.Fixture;
 
@@ -351,7 +352,7 @@ test "a server with no locking API is named" {
 test "a repository with git-lfs's hooks works on a machine without git-lfs" {
     const gpa = testing.allocator;
     const io = testing.io;
-    const hooks = @import("../hooks/hooks.zig");
+    const hooks = core.hooks;
     const lfshooks = @import("hooks.zig");
     var pair = try Pair.init(gpa, io);
     defer pair.deinit();

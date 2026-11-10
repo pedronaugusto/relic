@@ -28,18 +28,19 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const odb_mod = @import("../odb/odb.zig");
-const repo_mod = @import("../repo/repo.zig");
-const program = @import("../process.zig").program;
-const credential = @import("../wire.zig").credential;
-const progress_mod = @import("../report.zig").progress;
+const core = @import("relic_core");
+const odb_mod = core.odb;
+const repo_mod = core.repo;
+const program = core.process.program;
+const credential = core.wire.credential;
+const progress_mod = core.report.progress;
 const lfs = @import("lfs.zig");
 const lfsapi = @import("api.zig");
 const lfs_settings = @import("settings.zig");
 const lfstransfer = @import("transfer.zig");
 const lfslocks = @import("locks.zig");
-const auth = @import("../wire.zig").auth;
-const push_mod = @import("../transport/push.zig");
+const auth = core.wire.auth;
+const push_mod = core.transport.push;
 
 const Repository = repo_mod.Repository;
 

@@ -7,9 +7,10 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const config_mod = @import("../config/config.zig");
-const decimal = @import("../text.zig").decimal;
-const repo_mod = @import("../repo/repo.zig");
+const core = @import("relic_core");
+const config_mod = core.config;
+const decimal = core.text.decimal;
+const repo_mod = core.repo;
 
 const Config = config_mod.Config;
 

@@ -9,6 +9,9 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const relic = @import("../relic.zig");
+/// relic_lfs's root, where relic is built with `lfs`.
+const relic_lfs = @import("../lfs.zig");
+const features = @import("relic_options");
 const testgit = @import("git.zig");
 const platstat = @import("../fs/stat.zig");
 
@@ -225,13 +228,15 @@ test "core.sharedRepository reaches the shallow file, MERGE_RR, and LFS objects 
         outcome.deinit();
         try std.testing.expectEqual(file_mode, try modeOf(io, git_dir, "MERGE_RR"));
 
-        var lfs = try relic.lfs.Lfs.load(gpa, &.{ .gpa = gpa, .config = repo.configuration() }, .{ .common_dir = repo.commonDirectory(), .shared = repo.sharedPermissions() });
-        defer lfs.deinit();
-        var source: Io.Reader = .fixed("object\n");
-        const pointer = try lfs.store.install(io, &source, null);
-        var path_buf: [relic.lfs.Store.max_path]u8 = undefined;
-        const object_path = try lfs.store.objectPath(&path_buf, &pointer.oid);
-        try std.testing.expectEqual(file_mode & 0o666, try modeOf(io, git_dir, object_path) & 0o666);
-        try std.testing.expectEqual(dir_mode, try modeOf(io, git_dir, std.Io.Dir.path.dirnamePosix(object_path).?));
+        if (features.lfs) {
+            var lfs = try relic_lfs.Lfs.load(gpa, &.{ .gpa = gpa, .config = repo.configuration() }, .{ .common_dir = repo.commonDirectory(), .shared = repo.sharedPermissions() });
+            defer lfs.deinit();
+            var source: Io.Reader = .fixed("object\n");
+            const pointer = try lfs.store.install(io, &source, null);
+            var path_buf: [relic_lfs.Store.max_path]u8 = undefined;
+            const object_path = try lfs.store.objectPath(&path_buf, &pointer.oid);
+            try std.testing.expectEqual(file_mode & 0o666, try modeOf(io, git_dir, object_path) & 0o666);
+            try std.testing.expectEqual(dir_mode, try modeOf(io, git_dir, std.Io.Dir.path.dirnamePosix(object_path).?));
+        }
     }
 }

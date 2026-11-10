@@ -31,8 +31,9 @@
 //! smudged without it.
 
 const ErrorNamespace = @This();
-const glob_mod = @import("../text.zig").glob;
-const fs = @import("../fs/fs.zig");
+const core = @import("relic_core");
+const glob_mod = core.text.glob;
+const fs = core.fs.engine;
 const Self = @This();
 
 // The modules relic's API puts under this one, as `relic.lfs.<name>`.
@@ -46,7 +47,7 @@ const Io = std.Io;
 const assert = std.debug.assert;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
-const config_mod = @import("../config/config.zig");
+const config_mod = core.config;
 const settings_mod = @import("settings.zig");
 
 /// The version line every pointer written carries.

@@ -26,9 +26,10 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const config_mod = @import("../config/config.zig");
-const program = @import("../process.zig").program;
-const connection = @import("../wire.zig").connection;
+const core = @import("relic_core");
+const config_mod = core.config;
+const program = core.process.program;
+const connection = core.wire.connection;
 const lfs_settings = @import("settings.zig");
 const lfsapi = @import("api.zig");
 const time_text = @import("time_text.zig");

@@ -8,30 +8,31 @@
 //! the person's — helpers, keychain, agents — is reached. The tests want
 //! git-lfs as well as git, and stand aside without it.
 
-const fs = @import("../fs/fs.zig");
-const progress_mod = @import("../report.zig").progress;
+const core = @import("relic_core");
+const fs = core.fs.engine;
+const progress_mod = core.report.progress;
 const testgit = @import("../testing/git.zig");
 const std = @import("std");
-const gitdate = @import("../text.zig").date;
+const gitdate = core.text.date;
 const filter_mod = @import("filter.zig");
 const suite = @import("../testing/helpers.zig");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const testing = std.testing;
 
-const repo_mod = @import("../repo/repo.zig");
+const repo_mod = core.repo;
 const lfs = @import("lfs.zig");
 const lfsapi = @import("api.zig");
 const http = std.http;
 const lfstransfer = @import("transfer.zig");
-const object_walk = @import("../walk/object/walk.zig");
+const object_walk = core.walk.object.walk;
 const testlfs = @import("../testing/lfs.zig");
 const testremote = @import("../testing/remote.zig");
 const testing_io = @import("../testing/io.zig");
 const shakedown = @import("shakedown");
-const program = @import("../process.zig").program;
-const auth = @import("../wire.zig").auth;
-const worktree = @import("../checkout/checkout.zig");
+const program = core.process.program;
+const auth = core.wire.auth;
+const worktree = core.checkout.engine;
 const builtin = @import("builtin");
 
 /// A server, a home, and a place for tools and repositories.

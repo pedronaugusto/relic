@@ -44,11 +44,12 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const uplink = @import("uplink");
-const fs = @import("../fs/fs.zig");
-const percent = @import("../text.zig").percent;
-const decimal = @import("../text.zig").decimal;
-const http_backend = @import("../transport/http_backend.zig");
-const local = @import("../transport/local.zig");
+const core = @import("relic_core");
+const fs = core.fs.engine;
+const percent = core.text.percent;
+const decimal = core.text.decimal;
+const http_backend = core.http_backend;
+const local = core.transport.local;
 const lfs = @import("lfs.zig");
 const lfsapi = @import("api.zig");
 const transfer = @import("transfer.zig");

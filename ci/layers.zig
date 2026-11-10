@@ -38,38 +38,65 @@ pub const layers: []const gantry.rules.Layer = &.{
     .{ .name = "archive", .patterns = &.{ "src/archive.zig", "src/archive/**" } },
     .{ .name = "clean", .patterns = &.{"src/clean.zig"} },
     .{ .name = "grep", .patterns = &.{"src/grep.zig"} },
-    .{ .name = "lfs", .patterns = &.{"src/lfs/**"} },
-    .{ .name = "public", .patterns = &.{ "src/commit.zig", "src/config.zig", "src/diff.zig", "src/hash.zig", "src/index.zig", "src/lfs.zig", "src/merge.zig", "src/maintenance.zig", "src/object.zig", "src/odb.zig", "src/patch.zig", "src/pretty.zig", "src/refs.zig", "src/relic.zig", "src/repo.zig", "src/rev_walk.zig", "src/submodule.zig", "src/transport.zig", "src/worktree.zig" } },
+    .{ .name = "facades", .patterns = &.{ "src/commit.zig", "src/config.zig", "src/diff.zig", "src/hash.zig", "src/index.zig", "src/merge.zig", "src/maintenance.zig", "src/object.zig", "src/odb.zig", "src/patch.zig", "src/pretty.zig", "src/refs.zig", "src/repo.zig", "src/rev_walk.zig", "src/submodule.zig", "src/transport.zig", "src/worktree.zig" } },
+    // The core module's root and the contract the public roots keep: the
+    // core is everything up to here, and imports nothing above.
+    .{ .name = "core", .patterns = &.{ "src/core.zig", "src/contract.zig" } },
+    // relic_lfs, over the core.
+    .{ .name = "lfs", .patterns = &.{ "src/lfs/**", "src/lfs.zig", "src/lfs_with_http.zig" } },
+    .{ .name = "public", .patterns = &.{"src/relic.zig"} },
 };
 
-pub const required = [_][]const u8{ "src/relic.zig", "src/tests.zig", "src/clean_test.zig", "src/commit.zig", "src/config.zig", "src/diff.zig", "src/grep_test.zig", "src/hash.zig", "src/index.zig", "src/lfs.zig", "src/merge.zig", "src/maintenance.zig", "src/object.zig", "src/odb.zig", "src/patch.zig", "src/pretty.zig", "src/refs.zig", "src/repo.zig", "src/rev_walk.zig", "src/submodule.zig", "src/transport.zig", "src/worktree.zig" };
+pub const required = [_][]const u8{ "src/relic.zig", "src/core.zig", "src/contract.zig", "src/lfs_with_http.zig", "src/lfs_tests.zig", "src/tests.zig", "src/clean_test.zig", "src/commit.zig", "src/config.zig", "src/diff.zig", "src/grep_test.zig", "src/hash.zig", "src/index.zig", "src/lfs.zig", "src/merge.zig", "src/maintenance.zig", "src/object.zig", "src/odb.zig", "src/patch.zig", "src/pretty.zig", "src/refs.zig", "src/repo.zig", "src/rev_walk.zig", "src/submodule.zig", "src/transport.zig", "src/worktree.zig" };
 pub const entries: []const []const u8 = &.{};
 pub const modules: []const gantry.NamedModule = &.{
     .{ .name = "root", .path = "src/tests.zig", .from = "src/testing/concurrency.zig" },
     .{ .name = "relic", .path = "src/relic.zig", .from = "src/testing/**" },
+    // The core, as its roots and the helpers the LFS tests share name it.
+    .{ .name = "relic_core", .path = "src/core.zig" },
+    .{ .name = "relic_lfs", .path = "src/lfs.zig", .from = "src/testing/**" },
+    .{ .name = "relic", .path = "src/relic.zig", .from = "src/benchmark.zig" },
+    .{ .name = "relic_lfs", .path = "src/lfs.zig", .from = "src/benchmark.zig" },
 };
 pub const references: []const gantry.rules.ReferenceRule = &.{
     .{ .name = "named dependencies", .unresolved_only = true, .except_targets = &.{ "aegis", "build_options", "builtin", "conduit", "reactor", "root", "std", "sweep", "parallax", "relic_options", "uplink", "cloak", "strand", "airlock", "airlock.testing", "warp", "xenoglyph", "shakedown" } },
     .{ .name = "source siblings", .suffix = ".zig", .relative = true, .except_targets = &.{"src/**"} },
-    .{ .name = "facade imports", .target = "src/commit.zig", .relative = true, .except_from = &.{ "src/relic.zig", "src/testing/**", "src/tests.zig", "src/**/*_test.zig" } },
-    .{ .name = "facade imports", .target = "src/config.zig", .relative = true, .except_from = &.{ "src/relic.zig", "src/testing/**", "src/tests.zig", "src/**/*_test.zig" } },
-    .{ .name = "facade imports", .target = "src/diff.zig", .relative = true, .except_from = &.{ "src/relic.zig", "src/testing/**", "src/tests.zig", "src/**/*_test.zig" } },
-    .{ .name = "facade imports", .target = "src/hash.zig", .relative = true, .except_from = &.{ "src/relic.zig", "src/testing/**", "src/tests.zig", "src/**/*_test.zig" } },
-    .{ .name = "facade imports", .target = "src/index.zig", .relative = true, .except_from = &.{ "src/relic.zig", "src/testing/**", "src/tests.zig", "src/**/*_test.zig" } },
-    .{ .name = "facade imports", .target = "src/lfs.zig", .relative = true, .except_from = &.{ "src/relic.zig", "src/testing/**", "src/tests.zig", "src/**/*_test.zig" } },
-    .{ .name = "facade imports", .target = "src/merge.zig", .relative = true, .except_from = &.{ "src/relic.zig", "src/testing/**", "src/tests.zig", "src/**/*_test.zig" } },
-    .{ .name = "facade imports", .target = "src/maintenance.zig", .relative = true, .except_from = &.{ "src/relic.zig", "src/testing/**", "src/tests.zig", "src/**/*_test.zig" } },
-    .{ .name = "facade imports", .target = "src/object.zig", .relative = true, .except_from = &.{ "src/relic.zig", "src/testing/**", "src/tests.zig", "src/**/*_test.zig" } },
-    .{ .name = "facade imports", .target = "src/odb.zig", .relative = true, .except_from = &.{ "src/relic.zig", "src/testing/**", "src/tests.zig", "src/**/*_test.zig" } },
-    .{ .name = "facade imports", .target = "src/patch.zig", .relative = true, .except_from = &.{ "src/relic.zig", "src/testing/**", "src/tests.zig", "src/**/*_test.zig" } },
-    .{ .name = "facade imports", .target = "src/pretty.zig", .relative = true, .except_from = &.{ "src/relic.zig", "src/testing/**", "src/tests.zig", "src/**/*_test.zig" } },
-    .{ .name = "facade imports", .target = "src/refs.zig", .relative = true, .except_from = &.{ "src/relic.zig", "src/testing/**", "src/tests.zig", "src/**/*_test.zig" } },
-    .{ .name = "facade imports", .target = "src/repo.zig", .relative = true, .except_from = &.{ "src/relic.zig", "src/testing/**", "src/tests.zig", "src/**/*_test.zig" } },
-    .{ .name = "facade imports", .target = "src/rev_walk.zig", .relative = true, .except_from = &.{ "src/relic.zig", "src/testing/**", "src/tests.zig", "src/**/*_test.zig" } },
-    .{ .name = "facade imports", .target = "src/submodule.zig", .relative = true, .except_from = &.{ "src/relic.zig", "src/testing/**", "src/tests.zig", "src/**/*_test.zig" } },
-    .{ .name = "facade imports", .target = "src/transport.zig", .relative = true, .except_from = &.{ "src/relic.zig", "src/testing/**", "src/tests.zig", "src/**/*_test.zig" } },
-    .{ .name = "facade imports", .target = "src/worktree.zig", .relative = true, .except_from = &.{ "src/relic.zig", "src/testing/**", "src/tests.zig", "src/**/*_test.zig" } },
+    .{ .name = "facade imports", .target = "src/commit.zig", .relative = true, .except_from = &.{ "src/core.zig", "src/testing/**", "src/tests.zig", "src/**/*_test.zig" } },
+    .{ .name = "facade imports", .target = "src/config.zig", .relative = true, .except_from = &.{ "src/core.zig", "src/testing/**", "src/tests.zig", "src/**/*_test.zig" } },
+    .{ .name = "facade imports", .target = "src/diff.zig", .relative = true, .except_from = &.{ "src/core.zig", "src/testing/**", "src/tests.zig", "src/**/*_test.zig" } },
+    .{ .name = "facade imports", .target = "src/hash.zig", .relative = true, .except_from = &.{ "src/core.zig", "src/testing/**", "src/tests.zig", "src/**/*_test.zig" } },
+    .{ .name = "facade imports", .target = "src/index.zig", .relative = true, .except_from = &.{ "src/core.zig", "src/testing/**", "src/tests.zig", "src/**/*_test.zig" } },
+    .{ .name = "facade imports", .target = "src/merge.zig", .relative = true, .except_from = &.{ "src/core.zig", "src/testing/**", "src/tests.zig", "src/**/*_test.zig" } },
+    .{ .name = "facade imports", .target = "src/maintenance.zig", .relative = true, .except_from = &.{ "src/core.zig", "src/testing/**", "src/tests.zig", "src/**/*_test.zig" } },
+    .{ .name = "facade imports", .target = "src/object.zig", .relative = true, .except_from = &.{ "src/core.zig", "src/testing/**", "src/tests.zig", "src/**/*_test.zig" } },
+    .{ .name = "facade imports", .target = "src/odb.zig", .relative = true, .except_from = &.{ "src/core.zig", "src/testing/**", "src/tests.zig", "src/**/*_test.zig" } },
+    .{ .name = "facade imports", .target = "src/patch.zig", .relative = true, .except_from = &.{ "src/core.zig", "src/testing/**", "src/tests.zig", "src/**/*_test.zig" } },
+    .{ .name = "facade imports", .target = "src/pretty.zig", .relative = true, .except_from = &.{ "src/core.zig", "src/testing/**", "src/tests.zig", "src/**/*_test.zig" } },
+    .{ .name = "facade imports", .target = "src/refs.zig", .relative = true, .except_from = &.{ "src/core.zig", "src/testing/**", "src/tests.zig", "src/**/*_test.zig" } },
+    .{ .name = "facade imports", .target = "src/repo.zig", .relative = true, .except_from = &.{ "src/core.zig", "src/testing/**", "src/tests.zig", "src/**/*_test.zig" } },
+    .{ .name = "facade imports", .target = "src/rev_walk.zig", .relative = true, .except_from = &.{ "src/core.zig", "src/testing/**", "src/tests.zig", "src/**/*_test.zig" } },
+    .{ .name = "facade imports", .target = "src/submodule.zig", .relative = true, .except_from = &.{ "src/core.zig", "src/testing/**", "src/tests.zig", "src/**/*_test.zig" } },
+    .{ .name = "facade imports", .target = "src/transport.zig", .relative = true, .except_from = &.{ "src/core.zig", "src/testing/**", "src/tests.zig", "src/**/*_test.zig" } },
+    .{ .name = "facade imports", .target = "src/worktree.zig", .relative = true, .except_from = &.{ "src/core.zig", "src/testing/**", "src/tests.zig", "src/**/*_test.zig" } },
+    // The three modules' layering (designs: relic's core, `relic` and
+    // `relic_lfs`): the core imports neither public root nor LFS; LFS
+    // reaches the core through `relic_core`, never by path and never the
+    // public root; the public root reaches the core through `relic_core`
+    // alone. The tests are one module and reach across.
+    .{ .name = "the core imports no public root", .target = "src/relic.zig", .except_from = &(test_files ++ .{"src/relic.zig"}) },
+    .{ .name = "the core imports no LFS", .target = "src/lfs/**", .except_from = &(test_files ++ lfs_files) },
+    .{ .name = "the core imports no LFS", .target = "src/lfs.zig", .except_from = &(test_files ++ lfs_files) },
+    .{ .name = "the core imports no LFS", .target = "src/lfs_with_http.zig", .except_from = &(test_files ++ lfs_files) },
+    .{ .name = "LFS reaches the core by relic_core", .from = "src/lfs/**", .relative = true, .suffix = ".zig", .except_targets = &.{"src/lfs/**"}, .except_from = &.{"src/lfs/**/*_test.zig"} },
+    .{ .name = "LFS reaches the core by relic_core", .from = "src/lfs.zig", .relative = true, .suffix = ".zig", .except_targets = &.{ "src/lfs/**", "src/lfs.zig" } },
+    .{ .name = "LFS reaches the core by relic_core", .from = "src/lfs_with_http.zig", .relative = true, .suffix = ".zig", .except_targets = &.{ "src/lfs/**", "src/lfs.zig" } },
+    .{ .name = "the public root reaches the core by relic_core", .from = "src/relic.zig", .relative = true, .suffix = ".zig", .except_targets = &.{"src/relic.zig"} },
 };
+
+/// Files of the one test module, which holds the core's files and LFS's.
+const test_files = .{ "src/testing/**", "src/tests.zig", "src/lfs_tests.zig", "src/**/*_test.zig", "src/benchmark.zig" };
+/// relic_lfs's own files.
+const lfs_files = .{ "src/lfs/**", "src/lfs.zig", "src/lfs_with_http.zig" };
 
 const tests = [_][]const u8{ "src/testing/**", "src/**/*_test.zig" };
 

@@ -13,11 +13,12 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const testing = std.testing;
 
-const repo_mod = @import("../repo/repo.zig");
+const core = @import("relic_core");
+const repo_mod = core.repo;
 const lfs = @import("lfs.zig");
 const lfsapi = @import("api.zig");
 const lfstransfer = @import("transfer.zig");
-const object_walk = @import("../walk/object/walk.zig");
+const object_walk = core.walk.object.walk;
 const testlfs = @import("../testing/lfs.zig");
 const testremote = @import("../testing/remote.zig");
 

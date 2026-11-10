@@ -3,8 +3,13 @@ const std = @import("std");
 const airlock_build = @import("airlock");
 
 /// What a project that depends on relic builds: the `relic` module, on aegis,
-/// conduit, reactor, sweep, parallax, airlock, warp and xenoglyph, and with `http` (the default) uplink,
-/// cloak and strand. The tests, examples, benchmarks and gate are `dev`'s.
+/// conduit, reactor, sweep, parallax, airlock, warp and xenoglyph; with `http`
+/// (the default) uplink and cloak; with `lfs` (the default) strand. The four
+/// combinations: both on fetches all three, today's default; `.http = false`
+/// fetches strand alone, for Git LFS over ssh and custom transfer agents;
+/// `.lfs = false` fetches uplink and cloak, for HTTP(S) remotes without Git LFS;
+/// both off fetches none of them. The tests, examples, benchmarks and gate are
+/// `dev`'s.
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -16,41 +21,125 @@ pub fn build(b: *std.Build) void {
     // airlock makes writes durable and xenoglyph composes the names macOS
     // hands back decomposed.
     //
-    // Fetching and pushing over HTTP and HTTPS, and Git LFS, take three more:
-    // uplink speaks HTTP, cloak holds the certificates, keys and trust TLS
-    // uses, and strand reads the JSON servers send, within limits. They are
-    // lazy, fetched only while `http` is on, which it is by default; a
-    // program that works on local repositories, or over ssh and the file
-    // system alone, turns it off and fetches none of them.
+    // Fetching and pushing over HTTP and HTTPS take two more: uplink speaks
+    // HTTP and cloak holds the certificates, keys and trust TLS uses. Git LFS
+    // takes strand, which reads the JSON its servers and custom transfer
+    // agents send, within limits. Each is lazy, fetched only while the
+    // feature that needs it is on: uplink and cloak with `http`, strand with
+    // `lfs`, both on by default. LFS over HTTP needs both; over ssh or a
+    // custom agent, `lfs` alone. A program that works on local repositories,
+    // or over ssh and the file system alone, turns both off and fetches none.
     //=====================================================================
 
-    const http = b.option(bool, "http", "Fetch and push over HTTP(S) and Git LFS, with uplink, cloak and strand (default on)") orelse true;
-    _ = b.addModule("relic", .{
-        .root_source_file = b.path("src/relic.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = moduleImports(b, target, optimize, http),
-    });
+    const http = b.option(bool, "http", http_description) orelse true;
+    const lfs = b.option(bool, "lfs", lfs_description) orelse true;
+    const on: Features = .{ .http = http, .lfs = lfs };
+    // One core under both: what `relic_lfs` hands out is `relic`'s own type.
+    const core = coreModule(b, target, optimize, on);
+    _ = b.addModule("relic", relicModule(b, target, optimize, core, on));
+    if (lfs) _ = b.addModule("relic_lfs", lfsModule(b, target, optimize, core, on));
 }
 
-/// What the `relic` module imports, from `p`, relic's own build, for `target`
-/// and `optimize`: aegis, conduit, reactor, sweep, parallax, airlock, warp and xenoglyph, the
-/// `relic_options` that say whether `http` is on, `README.md` for its module
-/// table, and with `http` uplink, cloak and strand, each once the build has
-/// fetched it. The tests and the
-/// benchmarks build their roots on the same.
-fn moduleImports(p: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, http: bool) []const std.Build.Module.Import {
+const http_description = "Fetch and push over HTTP(S), with uplink and cloak (default on)";
+const lfs_description = "Git LFS: its filters, transfers, locks and servers, with strand (default on)";
+
+/// The optional features, each with the packages it fetches.
+const Features = struct { http: bool, lfs: bool };
+
+/// relic's core, from `p`, relic's own build, for `target` and `optimize`:
+/// every file but the public roots and LFS's, rooted at `src/core.zig`,
+/// made with `createModule` so that no consumer can name it. It imports
+/// aegis, conduit, reactor, sweep, parallax, airlock, warp and xenoglyph,
+/// the `relic_options` that say which features are on, and with `http`
+/// uplink and cloak, each once the build has fetched it.
+fn coreModule(p: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, on: Features) Core {
+    const options = featureOptions(p, on);
+    return .{
+        .module = p.createModule(.{
+            .root_source_file = p.path("src/core.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = moduleImports(p, target, optimize, options, on, &.{}),
+        }),
+        .options = options,
+        .readme = p.createModule(.{ .root_source_file = p.path("README.md") }),
+    };
+}
+
+/// The core, and the modules the roots over it share with it: a file
+/// belongs to one module in a compilation, and two options modules with
+/// the same contents are one file.
+const Core = struct {
+    module: *std.Build.Module,
+    /// `relic_options`: which features are on.
+    options: *std.Build.Module,
+    /// `README.md`, whose module tables the public roots check.
+    readme: *std.Build.Module,
+};
+
+/// `relic_options`, saying which features `on` turns on.
+fn featureOptions(p: *std.Build, on: Features) *std.Build.Module {
     const features = p.addOptions();
-    features.addOption(bool, "http", http);
+    features.addOption(bool, "http", on.http);
+    features.addOption(bool, "lfs", on.lfs);
+    return features.createModule();
+}
+
+/// The `relic` module over `core`: `src/relic.zig`, which reaches every
+/// namespace through the core and checks the README's module table against
+/// the API as it compiles.
+fn relicModule(p: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, core: Core, on: Features) std.Build.Module.CreateOptions {
+    return .{
+        .root_source_file = p.path("src/relic.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = rootImports(p, target, optimize, core, on, &.{}),
+    };
+}
+
+/// The `relic_lfs` module over `core` and strand, which exists only with
+/// `lfs`: rooted at `src/lfs.zig`, and with `http` at `src/lfs_with_http.zig`,
+/// whose `server` is on uplink's server. Two roots on purpose: a file's
+/// declarations cannot be made absent one by one in Zig, and `server` must
+/// be absent without `http` (a declaration exists exactly when its types
+/// do), so the build chooses the root whole, as `src/relic.zig` chooses
+/// `transport`. `lfs_with_http.zig` re-exports every name of `lfs.zig` and
+/// adds `server`; `sameNamesBut` holds the two lists equal.
+fn lfsModule(p: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, core: Core, on: Features) std.Build.Module.CreateOptions {
+    return .{
+        .root_source_file = p.path(if (on.http) "src/lfs_with_http.zig" else "src/lfs.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = rootImports(p, target, optimize, core, on, &lfs_packages),
+    };
+}
+
+/// What a public root imports: the core's own imports and `extra`, the core
+/// itself as `relic_core`, and `README.md`, whose module table it checks
+/// against its API as it compiles.
+fn rootImports(p: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, core: Core, on: Features, extra: []const []const u8) []const std.Build.Module.Import {
+    var imports: std.ArrayList(std.Build.Module.Import) = .empty;
+    imports.appendSlice(p.allocator, moduleImports(p, target, optimize, core.options, on, extra)) catch @panic("out of memory");
+    imports.append(p.allocator, .{ .name = "relic_core", .module = core.module }) catch @panic("out of memory");
+    imports.append(p.allocator, .{ .name = "README.md", .module = core.readme }) catch @panic("out of memory");
+    return imports.items;
+}
+
+/// What the core imports, from `p`, relic's own build, for `target`
+/// and `optimize`: aegis, conduit, reactor, sweep, parallax, airlock, warp and xenoglyph,
+/// `options` as the `relic_options` that say which features are on, with
+/// `http` uplink and cloak, and `extra`, each optional package once the
+/// build has fetched it. A public root takes the same.
+fn moduleImports(p: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, options: *std.Build.Module, on: Features, extra: []const []const u8) []const std.Build.Module.Import {
     var imports: std.ArrayList(std.Build.Module.Import) = .empty;
     for ([_][]const u8{ "aegis", "conduit", "reactor", "sweep", "parallax", "airlock", "warp", "xenoglyph" }) |name| {
         imports.append(p.allocator, .{ .name = name, .module = p.dependency(name, .{ .target = target, .optimize = optimize }).module(name) }) catch @panic("out of memory");
     }
-    imports.append(p.allocator, .{ .name = "relic_options", .module = features.createModule() }) catch @panic("out of memory");
-    // `src/relic.zig` checks the README's module table against the API as
-    // it compiles.
-    imports.append(p.allocator, .{ .name = "README.md", .module = p.createModule(.{ .root_source_file = p.path("README.md") }) }) catch @panic("out of memory");
-    if (http) for (http_packages) |name| if (lazyModule(p, name, target, optimize)) |m| {
+    imports.append(p.allocator, .{ .name = "relic_options", .module = options }) catch @panic("out of memory");
+    if (on.http) for (http_packages) |name| if (lazyModule(p, name, target, optimize)) |m| {
+        imports.append(p.allocator, .{ .name = name, .module = m }) catch @panic("out of memory");
+    };
+    for (extra) |name| if (lazyModule(p, name, target, optimize)) |m| {
         imports.append(p.allocator, .{ .name = name, .module = m }) catch @panic("out of memory");
     };
     return imports.items;
@@ -63,7 +152,10 @@ pub fn dev(b: *std.Build, tools: type) void {
     const optimize = b.standardOptimizeOption(.{});
     const preflight = tools.preflight;
     // The option of `build`, passed on to relic.
-    http_option = b.option(bool, "http", "Fetch and push over HTTP(S) and Git LFS, with uplink, cloak and strand (default on)") orelse true;
+    features_option = .{
+        .http = b.option(bool, "http", http_description) orelse true,
+        .lfs = b.option(bool, "lfs", lfs_description) orelse true,
+    };
     const package = relicPackage(b, target, optimize);
     const p = package.builder;
     const module = package.module("relic");
@@ -251,19 +343,33 @@ pub fn dev(b: *std.Build, tools: type) void {
     build_options.addOptionPath("process_fixture_path", process_fixture.getEmittedBin());
     build_options.addOptionPath("remote_helper_path", remote_helper.getEmittedBin());
     build_options.addOptionPath("lfs_agent_path", lfs_agent.getEmittedBin());
-    const test_module = b.createModule(.{
+    // The tests: `src/tests.zig`, which holds the core's files and names
+    // their tests, with relic's public root compiled among them, and with
+    // `lfs` relic_lfs's root, files and tests (`src/lfs_tests.zig`). It has
+    // every name of `src/core.zig` and is its own `relic_core`, so the
+    // files that reach the core through it reach these; its comptime check
+    // holds its list to the core's. One module on purpose, where a
+    // consumer's build is three: Zig tracks a file's `@import`s of files
+    // eagerly, test blocks' included, and a file belongs to one module; the
+    // core's production files import test helpers by path for their in-file
+    // tests, and LFS's tests share those helpers, so a separate LFS test
+    // module over the core module holds them twice and does not compile.
+    const test_module = p.createModule(.{
         .root_source_file = p.path("src/tests.zig"),
         .target = target,
         .optimize = optimize,
         // The imports of the module a consumer gets, the options among them.
-        .imports = moduleImports(p, target, optimize, http_option),
+        .imports = moduleImports(p, target, optimize, featureOptions(p, features_option), features_option, if (features_option.lfs) &lfs_packages else &.{}),
     });
+    test_module.addImport("relic_core", test_module);
+    test_module.addImport("README.md", p.createModule(.{ .root_source_file = p.path("README.md") }));
     // shakedown, and airlock's seam built on it.
     const shakedown = b.dependency("shakedown", .{ .target = target, .optimize = optimize });
     test_module.addImport("airlock.testing", airlock_build.testing(airlock_dependency, shakedown.module("shakedown")));
     test_module.addImport("shakedown", shakedown.module("shakedown"));
     filter_helper.root_module.addImport("relic", module);
     lfs_transfer_helper.root_module.addImport("relic", module);
+    if (features_option.lfs) lfs_transfer_helper.root_module.addImport("relic_lfs", package.module("relic_lfs"));
     hook_fixture.root_module.addImport("relic", module);
     upload_pack_helper.root_module.addImport("relic", module);
     receive_pack_helper.root_module.addImport("relic", module);
@@ -388,15 +494,20 @@ pub fn dev(b: *std.Build, tools: type) void {
             .optimize = optimize,
         },
     });
-    // A project that depends on relic by path with `.http = false`: the
-    // build a consumer gets, with aegis, conduit, reactor, sweep, parallax, airlock,
-    // warp and xenoglyph to fetch, and none of uplink,
-    // cloak and strand. Its program names the entry points that may speak
-    // HTTP, so each must compile without them.
+    // A project that depends on relic as a fetch gives it, in each of the
+    // four builds the options make: the build a consumer gets, with aegis,
+    // conduit, reactor, sweep, parallax, airlock, warp and xenoglyph, and
+    // uplink, cloak and strand for the builds that take them. Its program
+    // names the entry points that may speak HTTP, so each compiles without
+    // uplink and cloak; imports `relic_lfs` where `.lfs` builds it; and
+    // asserts with `@hasDecl` that what a build leaves out is absent. A
+    // build that named a package it left out would fail: the module is not
+    // among relic's imports there.
     const conduit_dependency = p.dependency("conduit", .{ .target = target, .optimize = optimize });
     preflight.addConsumerCheck(b, p, .{
         .package = "relic",
         .program = p.path("ci/consumer.zig"),
+        .modules = &.{ "relic", "relic_lfs" },
         .packages = &.{
             conduit_dependency,
             p.dependency("aegis", .{}),
@@ -406,8 +517,16 @@ pub fn dev(b: *std.Build, tools: type) void {
             airlock_dependency,
             p.dependency("warp", .{}),
             p.dependency("xenoglyph", .{}),
+            p.dependency("strand", .{}),
+            p.dependency("uplink", .{}),
+            p.dependency("cloak", .{}),
         },
-        .options = &.{.{ .name = "http", .value = .{ .flag = false } }},
+        .configurations = &.{
+            .{ .options = &.{ .{ .name = "http", .value = .{ .flag = true } }, .{ .name = "lfs", .value = .{ .flag = true } } } },
+            .{ .options = &.{ .{ .name = "http", .value = .{ .flag = false } }, .{ .name = "lfs", .value = .{ .flag = true } } } },
+            .{ .options = &.{ .{ .name = "http", .value = .{ .flag = true } }, .{ .name = "lfs", .value = .{ .flag = false } } }, .modules = &.{"relic"} },
+            .{ .options = &.{ .{ .name = "http", .value = .{ .flag = false } }, .{ .name = "lfs", .value = .{ .flag = false } } }, .modules = &.{"relic"} },
+        },
     });
     const setup = b.addExecutable(.{ .name = "ci-setup", .root_module = b.createModule(.{ .root_source_file = p.path("ci/setup.zig"), .target = b.graph.host, .optimize = .safe }) });
     // The release the comparisons are held to, which setup installs.
@@ -449,9 +568,10 @@ pub fn dev(b: *std.Build, tools: type) void {
     b.step("encodings", "Write src/text/legacy/tables.zig from Apple's libiconv and glibc's source (-Dglibc-source)").dependOn(&measure.step);
 }
 
-/// What fetching and pushing over HTTP and Git LFS need, fetched only while
-/// the `http` option is on.
-const http_packages = [_][]const u8{ "uplink", "cloak", "strand" };
+/// What fetching and pushing over HTTP need, fetched only while `http` is on.
+const http_packages = [_][]const u8{ "uplink", "cloak" };
+/// What Git LFS needs, fetched only while `lfs` is on.
+const lfs_packages = [_][]const u8{"strand"};
 
 /// `name`'s module of the same name, or `null` until the build has fetched
 /// the package, when it asks again.
@@ -468,19 +588,24 @@ const example_sources = [_][]const u8{
     "examples/usage.zig",
 };
 
-/// `-Dhttp`, as `dev` read it, passed on to relic.
+/// `-Dhttp` and `-Dlfs`, as `dev` read them, passed on to relic.
 // aegis: no-danger(A007): the build runner configures on one thread; `dev` sets it before anything reads it, and preflight's bench imports callback takes no value to carry it
-var http_option: bool = true;
+var features_option: Features = .{ .http = true, .lfs = true };
 
 /// relic as the development build has it: the package, with the option passed on.
 fn relicPackage(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) *std.Build.Dependency {
-    return b.dependency("relic", .{ .target = target, .optimize = optimize, .http = http_option });
+    return b.dependency("relic", .{ .target = target, .optimize = optimize, .http = features_option.http, .lfs = features_option.lfs });
 }
 
-/// The benchmarks' relic: the library's imports over src/benchmark.zig, in the
-/// mode the benchmark builds in, and shakedown.
+/// The benchmarks' relic: `src/benchmark.zig`, in the mode the benchmark
+/// builds in, over the `relic` and `relic_lfs` modules and the core beneath
+/// them, as a consumer gets them, and shakedown.
 fn benchImports(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) []const std.Build.Module.Import {
     const p = relicPackage(b, target, optimize).builder;
-    const module = b.createModule(.{ .root_source_file = p.path("src/benchmark.zig"), .target = target, .optimize = optimize, .imports = moduleImports(p, target, optimize, http_option) });
+    const core = coreModule(p, target, optimize, features_option);
+    const module = b.createModule(.{ .root_source_file = p.path("src/benchmark.zig"), .target = target, .optimize = optimize, .imports = moduleImports(p, target, optimize, core.options, features_option, &.{}) });
+    module.addImport("relic_core", core.module);
+    module.addImport("relic", p.createModule(relicModule(p, target, optimize, core, features_option)));
+    module.addImport("relic_lfs", p.createModule(lfsModule(p, target, optimize, core, features_option)));
     return b.allocator.dupe(std.Build.Module.Import, &.{.{ .name = "relic", .module = module }}) catch @panic("out of memory");
 }

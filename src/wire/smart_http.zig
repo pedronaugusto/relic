@@ -207,7 +207,8 @@ pub const Opened = union(enum) {
     pub const Error = Self.Error;
 
     smart: *Connection,
-    dumb: Files,
+    /// Only with `http`: without it nothing is opened.
+    dumb: if (http_enabled) Files else void,
 };
 
 /// Open a conversation with the service at `url`: smart HTTP, or for
@@ -254,6 +255,7 @@ pub const Files = struct {
     }
 
     pub fn deinit(f: *Files, io: Io) void {
+        if (comptime !http_enabled) aegis.assert.never("a Files is made only with http");
         Http.deinit(io, f.h);
         f.* = undefined;
     }
@@ -263,6 +265,7 @@ pub const Files = struct {
     /// missing target. Any other status is refused as the conversation
     /// refuses it.
     pub fn get(f: *Files, suffix: []const u8) Self.Error!?*Io.Reader {
+        if (comptime !http_enabled) aegis.assert.never("a Files is made only with http");
         const h = f.h;
         const res = try h.get(suffix);
         if (res.status == .not_found) return null;
@@ -272,6 +275,7 @@ pub const Files = struct {
 
     /// How many requests `begin` keeps under way: `http.maxRequests`.
     pub fn requests(f: *const Files) usize {
+        if (comptime !http_enabled) aegis.assert.never("a Files is made only with http");
         return f.h.max_requests;
     }
 
@@ -281,6 +285,7 @@ pub const Files = struct {
     /// with the session's URL and credentials as they are, and the
     /// session is not changed by it.
     pub fn begin(f: *Files, e: *Early, suffix: []const u8) Allocator.Error!void {
+        if (comptime !http_enabled) aegis.assert.never("a Files is made only with http");
         const h = f.h;
         e.reset(h.io);
         const a = e.arena.allocator();
@@ -301,17 +306,20 @@ pub const Files = struct {
     /// The repository's URL, where the first request's redirect led, in
     /// `arena`.
     pub fn baseUrl(f: *const Files, arena: Allocator) Allocator.Error![]const u8 {
+        if (comptime !http_enabled) aegis.assert.never("a Files is made only with http");
         return f.h.origin.join(arena, f.h.base_path);
     }
 
     /// What failed last, in words: a status, a reason.
     pub fn message(f: *const Files) []const u8 {
+        if (comptime !http_enabled) aegis.assert.never("a Files is made only with http");
         return f.h.connection.message();
     }
 
     /// Whether the last read of the body `get` handed out failed for a
     /// cancel.
     pub fn canceled(f: *const Files) bool {
+        if (comptime !http_enabled) aegis.assert.never("a Files is made only with http");
         const res = &(f.h.in_flight orelse return false);
         return res.failure() == error.Canceled;
     }
@@ -327,14 +335,14 @@ pub const Early = struct {
     pub const Answer = enum { ok, missing, again };
 
     arena: std.heap.ArenaAllocator,
-    client: ?*uplink.Client = null,
+    client: if (http_enabled) ?*uplink.Client else void = if (http_enabled) null else {},
     url: []const u8 = "",
     headers: []const http.Header = &.{},
     /// The request's `Authorization`, wiped when it ends.
     authorization: ?aegis.SecretBytes = null,
-    diagnostics: uplink.Diagnostics = .{},
+    diagnostics: if (http_enabled) uplink.Diagnostics else void = if (http_enabled) .{} else {},
     /// An `ok` answer's, its body unread.
-    response: ?uplink.Response = null,
+    response: if (http_enabled) ?uplink.Response else void = if (http_enabled) null else {},
 
     pub fn init(gpa: Allocator) Early {
         return .{ .arena = .init(gpa) };
@@ -343,6 +351,8 @@ pub const Early = struct {
     /// Send the request and read the head of its answer. The client is
     /// one several tasks may use at once.
     pub fn send(e: *Early, io: Io) Early.Error!Answer {
+        // Without http no session gives an Early its client.
+        if (comptime !http_enabled) return .again;
         const client = e.client orelse return .again;
         var res = client.send(io, .{ .url = e.url, .headers = e.headers, .diagnostics = &e.diagnostics }) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
@@ -360,26 +370,30 @@ pub const Early = struct {
 
     /// An `ok` answer's body, read through `buffer`.
     pub fn body(e: *Early, io: Io, buffer: []u8) ?*Io.Reader {
+        if (comptime !http_enabled) return null;
         const res = &(e.response orelse return null);
         return res.readerBuffered(io, buffer);
     }
 
     /// Whether the last read of `body` failed for a cancel.
     pub fn canceled(e: *const Early) bool {
+        if (comptime !http_enabled) return false;
         const res = &(e.response orelse return false);
         return res.failure() == error.Canceled;
     }
 
     /// The request ended, ready for the next.
     pub fn reset(e: *Early, io: Io) void {
-        if (e.response) |*res| res.deinit(io);
-        e.response = null;
+        if (comptime http_enabled) {
+            if (e.response) |*res| res.deinit(io);
+            e.response = null;
+            e.client = null;
+        }
         if (e.authorization) |*copy| copy.deinit(e.arena.child_allocator);
         e.authorization = null;
-        e.client = null;
         e.url = "";
         e.headers = &.{};
-        e.diagnostics = .{};
+        if (comptime http_enabled) e.diagnostics = .{};
         _ = e.arena.reset(.retain_capacity);
     }
 
@@ -486,9 +500,9 @@ const Http = struct {
     gpa: Allocator,
     io: Io,
     arena: std.heap.ArenaAllocator,
-    client: uplink.Client,
+    client: if (http_enabled) uplink.Client else void,
     /// Why the exchange under way failed, in detail.
-    diagnostics: uplink.Diagnostics = .{},
+    diagnostics: if (http_enabled) uplink.Diagnostics else void = if (http_enabled) .{} else {},
     /// Where the repository is, and the path of its URL without a
     /// trailing slash; a redirect of the first request moves both.
     origin: Origin,
@@ -509,8 +523,8 @@ const Http = struct {
     proxied: bool = false,
     /// `http.maxRequests`: how many a dumb fetch keeps under way.
     max_requests: usize = 1,
-    in_flight: ?uplink.Response = null,
-    streaming: ?uplink.Outgoing = null,
+    in_flight: if (http_enabled) ?uplink.Response else void = if (http_enabled) null else {},
+    streaming: if (http_enabled) ?uplink.Outgoing else void = if (http_enabled) null else {},
     post_buffer: []u8,
     post: Io.Writer,
     /// What a response's body is read through: room for the longest
@@ -526,21 +540,21 @@ const Http = struct {
     proxy_secret: ?aegis.SecretBytes = null,
     /// `http.sslCAInfo` and `http.sslCAPath`, when they name authorities;
     /// `http.proxySSLCAInfo`, when it does.
-    trust: ?cloak.Trust.Snapshot = null,
-    proxy_trust: ?cloak.Trust.Snapshot = null,
+    trust: if (http_enabled) ?cloak.Trust.Snapshot else void = if (http_enabled) null else {},
+    proxy_trust: if (http_enabled) ?cloak.Trust.Snapshot else void = if (http_enabled) null else {},
     /// `http.sslCert` and its key, and the passphrase's credential when
     /// `http.sslCertPasswordProtected` asks for one.
-    client_auth: ?cloak.ClientAuth = null,
+    client_auth: if (http_enabled) ?cloak.ClientAuth else void = if (http_enabled) null else {},
     cert_credentials: ?credential.Session = null,
     /// The same for an `https` proxy.
-    proxy_client_auth: ?cloak.ClientAuth = null,
+    proxy_client_auth: if (http_enabled) ?cloak.ClientAuth else void = if (http_enabled) null else {},
     proxy_cert_credentials: ?credential.Session = null,
     /// A failure met inside a writer, which can only say that it failed.
     write_error: ?Error = null,
     /// `http.cookieFile`'s cookies, sent and kept by the client; written
     /// back to `cookie_jar_file` when the conversation ends, as curl
     /// writes its jar for git's `http.saveCookies`.
-    cookies: ?uplink.CookieJar = null,
+    cookies: if (http_enabled) ?uplink.CookieJar else void = if (http_enabled) null else {},
     cookie_jar_file: ?[]const u8 = null,
     /// How a 429 is answered: `http.retryAfter`, `http.maxRetries`,
     /// `http.maxRetryTime`.
@@ -556,7 +570,7 @@ const Http = struct {
     /// What `configure` read: the settings, and the client they make.
     const Configured = struct {
         settings: http_settings.Settings,
-        client: uplink.Client.Options,
+        client: if (http_enabled) uplink.Client.Options else void,
     };
 
     const vtable: Connection.VTable = .{

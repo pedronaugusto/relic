@@ -15,7 +15,8 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const Environ = std.process.Environ;
 
-const program = @import("../process.zig").program;
+const core = @import("relic_core");
+const program = core.process.program;
 const testgit = @import("git.zig");
 const uplink = @import("uplink");
 

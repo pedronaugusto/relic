@@ -37,6 +37,8 @@ const ssh = @import("../wire.zig").ssh;
 const daemon = @import("../wire.zig").daemon;
 const smart_http = @import("../wire.zig").smart_http;
 const dumb_http = @import("../wire.zig").dumb_http;
+const aegis = @import("aegis");
+const http_enabled = @import("relic_options").http;
 
 const credential = @import("../wire.zig").credential;
 const auth = @import("../wire.zig").auth;
@@ -241,8 +243,9 @@ pub const Session = struct {
             creates: []const promisors.Create = &.{},
             stores: []const promisors.Store = &.{},
         },
-        /// A server that speaks git's dumb HTTP protocol: its files.
-        dumb: *dumb_http.Remote,
+        /// A server that speaks git's dumb HTTP protocol: its files. Only
+        /// with `http`: without it no session is one.
+        dumb: if (http_enabled) *dumb_http.Remote else void,
         /// A remote helper spoken to in its own commands.
         helper: struct {
             h: *remote_helper.Helper,
@@ -446,6 +449,7 @@ pub const Session = struct {
     /// http-backend does, else the dumb listing and files. `error.HttpUnavailable`
     /// where relic was built without HTTP.
     fn openHttp(gpa: Allocator, io: Io, parsed: url.Url, service: Service, kind: ?hash.Kind, options: Options) ErrorNamespace.Error!Session {
+        if (comptime !http_enabled) return error.HttpUnavailable;
         switch (try smart_http.connect(gpa, io, parsed, service, httpOptions(options))) {
             .smart => |conn| {
                 errdefer conn.deinit(io);
@@ -566,7 +570,7 @@ pub const Session = struct {
                 s.gpa.destroy(here);
             },
             .bundle => |f| f.deinit(io),
-            .dumb => |remote| remote.deinit(io),
+            .dumb => |remote| if (comptime http_enabled) remote.deinit(io),
             .helper => |helper| helper.h.deinit(io),
             .smart => |*smart| {
                 // A conversation over a pipe that the server still waits on
@@ -601,7 +605,7 @@ pub const Session = struct {
             .local => |here| here.repo.objectFormat(),
             .bundle => |f| f.header.object_format,
             .smart => |smart| smart.advertisement.kind,
-            .dumb => |remote| remote.kind,
+            .dumb => |remote| if (comptime http_enabled) remote.kind else neverDumb(),
             .helper => |helper| helper.h.kind,
         };
     }
@@ -640,7 +644,7 @@ pub const Session = struct {
         return switch (s.impl) {
             .local => |here| here.listRefs(gpa, io, prefixes),
             .bundle => |f| bundleRefs(gpa, f),
-            .dumb => |remote| remote.listRefs(gpa, prefixes),
+            .dumb => |remote| if (comptime http_enabled) remote.listRefs(gpa, prefixes) else neverDumb(),
             .smart => |*smart| protocol.listRefs(gpa, smart.conn, &smart.advertisement, .{ .prefixes = prefixes, .server_options = s.server_options }),
             .helper => |helper| helper.h.list(gpa, helper.repository, .{ .for_push = s.service == .receive_pack }),
         };
@@ -878,6 +882,7 @@ pub const Session = struct {
                 return .{ .pack = null, .objects = 0 };
             },
             .dumb => |remote| {
+                if (comptime !http_enabled) neverDumb();
                 // git's `fetch_dumb`: no depth and no date, and a filter
                 // is never read, so everything comes. An exclusion git
                 // drops without a word (remote-curl.c:1175), and a caller
@@ -1006,4 +1011,9 @@ fn bundleRefs(gpa: Allocator, f: *bundle.File) Error!protocol.RefList {
     for (f.header.references, 0..) |ref, i| refs[refs.len - 1 - i] = .{ .name = try a.dupe(u8, ref.name), .oid = ref.oid };
     list.refs = refs;
     return list;
+}
+
+/// A dumb session's arm without `http`, where none is made.
+fn neverDumb() noreturn {
+    aegis.assert.never("a dumb HTTP session is made only with http");
 }

@@ -19,8 +19,9 @@ const sigv4 = uplink.wire.sigv4;
 const testgit = @import("../testing/git.zig");
 const testlfs = @import("../testing/lfs.zig");
 const testremote = @import("../testing/remote.zig");
-const program = @import("../process.zig").program;
-const http_backend = @import("../transport/http_backend.zig");
+const core = @import("relic_core");
+const program = core.process.program;
+const http_backend = core.http_backend;
 const server = @import("server.zig");
 const lt = @import("transfer_test.zig");
 

@@ -66,14 +66,15 @@
 //! against the time when they are loaded, as `smart_http` checks them.
 
 const ErrorNamespace = @This();
-const refs_mod = @import("../refs/refs.zig");
-const config_mod = @import("../config/config.zig");
+const core = @import("relic_core");
+const refs_mod = core.refs;
+const config_mod = core.config;
 const Self = @This();
 
 const std = @import("std");
-const decimal = @import("../text.zig").decimal;
-const gitdate = @import("../text.zig").date;
-const percent = @import("../text.zig").percent;
+const decimal = core.text.decimal;
+const gitdate = core.text.date;
+const percent = core.text.percent;
 const warp = @import("warp");
 test "a URL's host is looked up in .netrc as git-lfs's getNetrcHostname takes it" {
     const cases = [_]struct { []const u8, ?[]const u8 }{
@@ -143,30 +144,30 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const http = std.http;
 
-const program = @import("../process.zig").program;
-const credential = @import("../wire.zig").credential;
-const auth_mod = @import("../wire.zig").auth;
-const http_settings = @import("../wire.zig").http_settings;
-const url_mod = @import("../wire.zig").url;
-const remote_mod = @import("../wire.zig").remote;
-const repo_mod = @import("../repo/repo.zig");
-const odb_mod = @import("../odb/odb.zig");
+const program = core.process.program;
+const credential = core.wire.credential;
+const auth_mod = core.wire.auth;
+const http_settings = core.wire.http_settings;
+const url_mod = core.wire.url;
+const remote_mod = core.wire.remote;
+const repo_mod = core.repo;
+const odb_mod = core.odb;
 const lfs = @import("lfs.zig");
 const settings_mod = @import("settings.zig");
 const Settings = settings_mod.Settings;
 const UrlParts = settings_mod.UrlParts;
 const mime_sniff = @import("mime_sniff.zig");
-const fs = @import("../fs/fs.zig");
+const fs = core.fs.engine;
 const aegis = @import("aegis");
 /// What a server, a client, a program or a cache file holds, read only by
 /// a parser.
 pub const Unparsed = aegis.input.Untrusted([]const u8);
-const object = @import("../object/object.zig");
+const object = core.object;
 const netrc_mod = @import("netrc.zig");
 const time_text = @import("time_text.zig");
 const lfsssh = @import("ssh.zig");
-const client_cert = @import("../wire.zig").client_cert;
-const authorities = @import("../wire.zig").authorities;
+const client_cert = core.wire.client_cert;
+const authorities = core.wire.authorities;
 const uplink = @import("uplink");
 const cloak = @import("cloak");
 const strand = @import("strand");

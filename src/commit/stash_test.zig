@@ -9,7 +9,6 @@
 
 const std = @import("std");
 const ref_mod = @import("../names.zig").ref;
-const filter_mod = @import("../lfs/filter.zig");
 const suite = @import("../testing/helpers.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -554,7 +553,7 @@ test "a stash goes through the clean and smudge filters as git's does" {
         try twin.git.exec(io, &.{ "stash", "push", "-q", "-u" });
         var repo = try twin.open(gpa, io);
         defer repo.deinit(io);
-        var drivers = try filter_mod.load(gpa, io, &repo, .{});
+        var drivers = try repo.loadFilters(io, .{});
         defer drivers.deinit(io);
         const programs: program.Programs = .{ .environ = &twin.environ };
         // Without the permission to run the required filter, nothing is stashed.
