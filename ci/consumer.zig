@@ -33,5 +33,7 @@ pub fn main() void {
     _ = &relic.lfs.hooks.Native.lfsHooks;
     _ = &relic.transport.smart_http.connect;
     _ = &relic.transport.http_settings.resolve;
-    _ = &relic.transport.http_settings.resolveForRemote;
+    // A named remote's settings (its `remote.<name>.proxy`) through the same entry point.
+    const sources: relic.transport.http_settings.Sources = .{ .remote_name = "origin" };
+    _ = sources;
 }
