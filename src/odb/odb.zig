@@ -1662,7 +1662,7 @@ pub const Odb = struct {
         from.reader().streamExact64(to.writer(), from.size) catch |err| return switch (err) {
             error.ReadFailed => from.err() orelse error.ReadFailed,
             error.EndOfStream => error.CorruptLooseObject,
-            error.WriteFailed => error.WriteFailed,
+            error.WriteFailed => to.failure orelse error.WriteFailed,
         };
         // Bytes that hash to another name were not the object asked for.
         if (!(try to.finish(io)).eql(oid)) return error.ObjectNameMismatch;
@@ -3822,7 +3822,12 @@ pub const Odb = struct {
                 fn work(task_io: Io, c: Self, _: usize, i: usize) ErrorNamespace.Error!void {
                     var path_buf: [hash.max_hex_len + 2]u8 = undefined;
                     const path = c.odb.loosePath(c.doomed[i], &path_buf);
-                    c.dir.deleteFile(task_io, path) catch return;
+                    // A file not removed stays loose, which is no harm; a
+                    // cancel is not that.
+                    c.dir.deleteFile(task_io, path) catch |err| switch (err) {
+                        error.Canceled => return error.Canceled,
+                        else => return,
+                    };
                     _ = c.removed.fetchAddWrapping(Oids.fromRaw(1), .monotonic);
                 }
             };
@@ -3929,8 +3934,9 @@ pub const Odb = struct {
         }
         if (doomed.items.len == 0) return 0;
         odb.closePacks(0, io);
-        // glint-ignore: Z026 -- the removal's error is the one to report; a read that misses re-scans the packs left
-        errdefer odb.scanPacks(io, 0) catch {};
+        // The removal's error is the one to report; a read that misses re-scans
+        // the packs left. A cancel that lands in the scan is put back.
+        errdefer odb.scanPacks(io, 0) catch |err| if (err == error.Canceled) io.recancel();
         for (doomed.items) |name| try deleteIfThere(io, pack_dir, name);
         try odb.scanPacks(io, 0);
         return @intCast(doomed.items.len);
@@ -3955,8 +3961,9 @@ pub const Odb = struct {
             };
         };
         odb.closePacks(0, io);
-        // glint-ignore: Z026 -- the removal's error is the one to report; a read that misses re-scans the packs left
-        errdefer odb.scanPacks(io, 0) catch {};
+        // The removal's error is the one to report; a read that misses re-scans
+        // the packs left. A cancel that lands in the scan is put back.
+        errdefer odb.scanPacks(io, 0) catch |err| if (err == error.Canceled) io.recancel();
         if (in_midx) {
             var it = pack_dir.iterate();
             var doomed: std.ArrayList([]u8) = .empty;
@@ -4200,15 +4207,16 @@ pub const ObjectStream = struct {
         if (bytes.len > s.remaining) return error.CorruptLooseObject;
         s.hasher.update(bytes);
         s.remaining -= bytes.len;
-        try s.compressed_writer.interface.writeAll(bytes);
+        // A writer says only that it failed; the file's writer keeps why.
+        s.compressed_writer.interface.writeAll(bytes) catch return s.file_writer.err orelse error.WriteFailed;
     }
 
     /// Close the object and put it in the database. Returns its name.
     pub fn finish(s: *ObjectStream, io: Io) ErrorNamespace.Error!Oid {
         std.debug.assert(!s.finished);
         if (s.remaining != 0) return error.CorruptLooseObject;
-        try s.compressed_writer.finish();
-        try s.file_writer.interface.flush();
+        s.compressed_writer.finish() catch return s.file_writer.err orelse error.WriteFailed;
+        s.file_writer.interface.flush() catch return s.file_writer.err orelse error.WriteFailed;
         try fs.syncFile(io, s.file.?.borrow().*, .{ .policy = s.odb.looseSync() });
         s.file.?.deinit(io);
         s.file = null;
@@ -6201,6 +6209,79 @@ test "a stream whose installation fails remains abortable" {
     while (try it.next(io)) |entry| {
         try std.testing.expect(!std.mem.startsWith(u8, entry.name, "tmp_obj_"));
     }
+}
+
+test "a cancel that lands in a streamed object's file writes is returned, not taken for a failed write" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "objects/pack");
+    const objects = try tmp.dir.openDir(io, "objects", .{ .iterate = true });
+    defer objects.close(io);
+    // Bytes that do not compress, past the stream's 16 KiB file buffer: the
+    // file is written while they are fed, and again at the finish.
+    var bytes: [64 * 1024]u8 = undefined;
+    var prng: std.Random.DefaultPrng = .init(1);
+    prng.random().bytes(&bytes);
+    const Write = struct {
+        objects: Io.Dir,
+        bytes: []const u8,
+        pub fn setUp(_: *@This(), _: *shakedown.FaultIo) !void {}
+        pub fn run(w: *@This(), task_io: Io) !void {
+            var odb = try Odb.openAt(std.testing.allocator, std.testing.io, w.objects, .sha1, .{});
+            defer odb.deinit(std.testing.io);
+            var stream: ObjectStream = undefined;
+            try odb.writeStream(task_io, .blob, w.bytes.len, &stream);
+            defer stream.deinit(task_io);
+            stream.writer().writeAll(w.bytes) catch return stream.failure orelse error.WriteFailed;
+            _ = try stream.finish(task_io);
+        }
+        pub fn check(_: *@This(), task_io: Io, result: anyerror!void, injected: ?shakedown.Injected) !void {
+            try io_mod.cancelKept(task_io, result, injected);
+        }
+        /// The object, its fan-out directory and any temporary a canceled
+        /// run left go, so each run writes it afresh.
+        pub fn tearDown(w: *@This()) void {
+            var names: [8][64]u8 = undefined;
+            var lens: [8]usize = undefined;
+            var n: usize = 0;
+            var it = w.objects.iterate();
+            while (it.next(std.testing.io) catch null) |entry| {
+                if (std.mem.eql(u8, entry.name, "pack") or n == names.len) continue;
+                @memcpy(names[n][0..entry.name.len], entry.name);
+                lens[n] = entry.name.len;
+                n += 1;
+            }
+            for (names[0..n], lens[0..n]) |*name, len| w.objects.deleteTree(std.testing.io, name[0..len]) catch {};
+        }
+    };
+    var write: Write = .{ .objects = objects, .bytes = &bytes };
+    try io_mod.everyCancel(gpa, io, &write);
+}
+
+test "a cancel that lands in removing a packed loose object is returned, not taken for a file left" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "objects/pack");
+    const objects = try tmp.dir.openDir(io, "objects", .{ .iterate = true });
+    defer objects.close(io);
+    const Pack = struct {
+        objects: Io.Dir,
+        pub fn run(p: *@This(), task_io: Io) !void {
+            // A database of three loose objects and no pack, each run.
+            try p.objects.deleteTree(std.testing.io, "pack");
+            try p.objects.createDir(std.testing.io, "pack", .default_dir);
+            var odb = try Odb.openAt(std.testing.allocator, std.testing.io, p.objects, .sha1, .{});
+            defer odb.deinit(std.testing.io);
+            for ([_][]const u8{ "one\n", "two\n", "three\n" }) |text| _ = try odb.write(std.testing.io, .blob, text);
+            _ = try odb.packLoose(task_io, .{ .pack = .{ .threads = 1 } });
+        }
+    };
+    var p: Pack = .{ .objects = objects };
+    try io_mod.eachCallCanceled(gpa, io, &p, .dirDeleteFile);
 }
 
 test "loose inflate preserves allocation resource failures" {
