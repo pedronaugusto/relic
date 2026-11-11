@@ -1018,6 +1018,15 @@ const Http = struct {
         return h.fail(error.ConnectionFailed, "the body was cut short");
     }
 
+    /// A body that ended before the packets it must begin with: canceled,
+    /// or the remote hung up.
+    fn hungUp(res: *const uplink.Response, err: Io.Reader.Error) Error {
+        return switch (err) {
+            error.EndOfStream => error.RemoteHungUp,
+            error.ReadFailed => if (res.failure() == error.Canceled) error.Canceled else error.RemoteHungUp,
+        };
+    }
+
     /// What the client can fail with: a request, or the end of one whose
     /// body was written as it came.
     const ClientError = uplink.Client.SendError || uplink.Outgoing.FinishError;
@@ -1339,13 +1348,13 @@ const Http = struct {
         const body = res.readerBuffered(h.io, h.body_buffer);
         // A v0 answer begins `# service=<name>` and a flush, which say what
         // the body is and nothing else.
-        const first = body.peekArray(4) catch return error.RemoteHungUp;
+        const first = body.peekArray(4) catch |err| return hungUp(res, err);
         const len = pkt_line.parseLength(first) orelse return error.ProtocolError;
         if (len > 4) {
-            const whole = body.peek(len) catch return error.RemoteHungUp;
+            const whole = body.peek(len) catch |err| return hungUp(res, err);
             if (std.mem.startsWith(u8, whole[4..], "# service=")) {
                 body.toss(len);
-                const flush = body.takeArray(4) catch return error.RemoteHungUp;
+                const flush = body.takeArray(4) catch |err| return hungUp(res, err);
                 if (!std.mem.eql(u8, flush, "0000")) return error.ProtocolError;
             }
         }
@@ -1374,23 +1383,45 @@ const Http = struct {
     /// send whole, so it is sent in chunks from here on.
     fn drainPost(w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
         const h: *Http = @alignCast(@fieldParentPtr("post", w)); // this function is installed only on a Http's post
+        // A request that failed is not begun again: `failure` says why.
+        if (h.write_error != null) return error.WriteFailed;
         if (h.streaming == null) {
             h.startStreaming() catch |err| {
                 h.write_error = err;
                 return error.WriteFailed;
             };
         }
+        return streamPost(h, w, data, splat) catch {
+            // Why a write failed is `finish`'s answer, a cancel among the
+            // reasons, kept for `failure`.
+            h.write_error = if (h.finishStreaming()) |_| error.ConnectionFailed else |err| err;
+            return error.WriteFailed;
+        };
+    }
+
+    fn streamPost(h: *Http, w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
         const out = h.streaming.?.writer();
-        out.writeAll(w.buffered()) catch return error.WriteFailed;
+        try out.writeAll(w.buffered());
         w.end = 0;
         var consumed: usize = 0;
         for (data[0 .. data.len - 1]) |slice| {
-            out.writeAll(slice) catch return error.WriteFailed;
+            try out.writeAll(slice);
             consumed += slice.len;
         }
         const pattern = data[data.len - 1];
-        for (0..splat) |_| out.writeAll(pattern) catch return error.WriteFailed;
+        for (0..splat) |_| try out.writeAll(pattern);
         return consumed + pattern.len * splat;
+    }
+
+    /// End the streamed request: its response in flight, or why it failed.
+    /// A write to it that failed is answered here, as uplink's `finish`
+    /// answers it, a cancel among the reasons.
+    fn finishStreaming(h: *Http) Error!void {
+        const s = &h.streaming.?;
+        const finished = s.finish(h.io);
+        s.deinit(h.io);
+        h.streaming = null;
+        h.in_flight = finished catch |err| return h.clientFailed(err);
     }
 
     fn startStreaming(h: *Http) Error!void {
@@ -1419,12 +1450,10 @@ const Http = struct {
     fn responseInner(h: *Http) Error!*Io.Reader {
         if (h.write_error) |err| return err;
         if (h.streaming) |*s| {
-            s.writer().writeAll(h.post.buffered()) catch return h.fail(error.ConnectionFailed, "write failed");
+            const wrote = s.writer().writeAll(h.post.buffered());
             h.post.end = 0;
-            const finished = s.finish(h.io);
-            s.deinit(h.io);
-            h.streaming = null;
-            h.in_flight = finished catch |err| return h.clientFailed(err);
+            try h.finishStreaming();
+            wrote catch return h.fail(error.ConnectionFailed, "write failed");
         } else {
             var suffix_buf: [64]u8 = undefined;
             // unreachable: a service name is at most 16 bytes
@@ -1467,6 +1496,8 @@ const Http = struct {
 
     fn failure(context: *anyopaque, c: *Connection) connection.Error {
         const h = self(context);
+        // A request whose body could not be streamed keeps why.
+        if (h.write_error) |err| return narrow(h, err);
         const res = &(h.in_flight orelse return error.ConnectionFailed);
         const err = res.failure();
         if (err == error.Canceled) return error.Canceled;
@@ -1562,4 +1593,58 @@ test "an https proxy is checked against http.proxySSLCAInfo, or the system's, wh
         }
         try testing.expectEqual(with_files, proxy.tls.client_auth != null);
     }
+}
+
+test "a cancel that lands in a request too large to send whole is returned, not taken for a broken connection" {
+    if (comptime !http_enabled) return error.SkipZigTest;
+    const testremote = @import("../testing/remote.zig");
+    const testing_io = @import("../testing/io.zig");
+    const protocol = @import("protocol.zig");
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var root = testing.tmpDir(.{ .iterate = true });
+    defer root.cleanup();
+    var source = try testremote.historyRepo(gpa, io, 1);
+    defer source.deinit();
+    const source_path = try testremote.absolutePath(gpa, io, source.dir);
+    defer gpa.free(source_path);
+    const root_path = try testremote.absolutePath(gpa, io, root.dir);
+    defer gpa.free(root_path);
+    const bare = try std.Io.Dir.path.join(gpa, &.{ root_path, "repo.git" });
+    defer gpa.free(bare);
+    try source.exec(io, &.{ "clone", "-q", "--bare", source_path, bare });
+    const server = try testremote.HttpServer.start(gpa, io, root.dir, .{ .keep_alive = true });
+    defer server.stop();
+    const text = try server.url(gpa, "repo.git");
+    defer gpa.free(text);
+    // git's smallest buffer, and an ls-refs of more prefixes than it
+    // holds: the request is streamed, its writes the stream's.
+    var config = try config_mod.Config.parseText(gpa, "[http]\n\tpostBuffer = 65520\n", .local);
+    defer config.deinit();
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const prefixes = try arena_state.allocator().alloc([]const u8, 4000);
+    for (prefixes, 0..) |*p, i| p.* = try arena_state.allocator().print("refs/heads/streamed-{d:0>6}/", .{i});
+    const List = struct {
+        url: url_mod.Url,
+        config: *const config_mod.Config,
+        prefixes: []const []const u8,
+        pub fn run(l: *const @This(), run_io: Io) !void {
+            const conn = switch (try connect(testing.allocator, run_io, l.url, .upload_pack, .{ .config = l.config })) {
+                .smart => |c| c,
+                .dumb => |files| {
+                    var f = files;
+                    f.deinit(run_io);
+                    return error.TestUnexpectedResult;
+                },
+            };
+            defer conn.deinit(run_io);
+            var adv = try protocol.readAdvertisement(testing.allocator, conn, null);
+            defer adv.deinit();
+            var refs = try protocol.listRefs(testing.allocator, conn, &adv, .{ .prefixes = l.prefixes });
+            refs.deinit();
+        }
+    };
+    const list: List = .{ .url = try url_mod.Url.parse(text), .config = &config, .prefixes = prefixes };
+    try testing_io.eachCallCanceled(gpa, io, &list, .net_write);
 }

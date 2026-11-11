@@ -135,7 +135,7 @@ pub fn store(gpa: Allocator, io: Io, files: Files, c: Credential) Self.Error!voi
     defer line.deinit(gpa);
     try writeLine(gpa, &line, c);
     const target = for (files.paths) |path| {
-        if (exists(io, path)) break path;
+        if (try exists(io, path)) break path;
     } else files.paths[0];
     try rewrite(gpa, io, target, files.lock_timeout_ms, .{ .first = line.expose(), .drop = c, .match_password = false });
 }
@@ -146,13 +146,18 @@ pub fn store(gpa: Allocator, io: Io, files: Files, c: Credential) Self.Error!voi
 pub fn erase(gpa: Allocator, io: Io, files: Files, c: Credential) Self.Error!void {
     if (c.protocol == null and c.host == null and c.path == null and c.username == null) return;
     for (files.paths) |path| {
-        if (!exists(io, path)) continue;
+        if (!try exists(io, path)) continue;
         try rewrite(gpa, io, path, files.lock_timeout_ms, .{ .first = null, .drop = c, .match_password = true });
     }
 }
 
-fn exists(io: Io, path: []const u8) bool {
-    Io.Dir.cwd().access(io, path, .{}) catch return false;
+/// Whether `path` is there; a cancel that lands in asking is returned, where
+/// it would pick another file to store in or leave one unerased.
+fn exists(io: Io, path: []const u8) Io.Cancelable!bool {
+    Io.Dir.cwd().access(io, path, .{}) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return false,
+    };
     return true;
 }
 
@@ -227,4 +232,33 @@ fn encode(gpa: Allocator, line: *SecretBytes, text: []const u8, reserved_too: bo
             try parts_mod.appendParts(gpa, line, &.{ "%", &hex });
         }
     }
+}
+
+const shakedown = @import("shakedown");
+const testing_io = @import("../../testing/io.zig");
+
+test "a cancel that lands in asking whether a credentials file is there is returned, not taken for no file" {
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const base = try tmp.dir.realPathFileAlloc(std.testing.io, ".", gpa);
+    defer gpa.free(base);
+    const path = try Io.Dir.path.join(gpa, &.{ base, "credentials" });
+    defer gpa.free(path);
+    const Erase = struct {
+        dir: Io.Dir,
+        paths: []const []const u8,
+        pub fn setUp(e: *@This(), _: *shakedown.FaultIo) !void {
+            try e.dir.writeFile(std.testing.io, .{ .sub_path = "credentials", .data = "https://u:p@example.com\n" });
+        }
+        pub fn run(e: *@This(), io: Io) !void {
+            try erase(std.testing.allocator, io, .{ .paths = e.paths }, .{ .protocol = "https", .host = "example.com" });
+        }
+        pub fn check(_: *@This(), io: Io, result: anyerror!void, injected: ?shakedown.Injected) !void {
+            try testing_io.cancelKept(io, result, injected);
+        }
+        pub fn tearDown(_: *@This()) void {}
+    };
+    var e: Erase = .{ .dir = tmp.dir, .paths = &.{path} };
+    try testing_io.everyCancel(gpa, std.testing.io, &e);
 }

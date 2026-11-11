@@ -58,9 +58,13 @@ pub fn keyPath(files: Files) []const u8 {
 }
 
 /// Whether the key's file holds an encrypted key; `false` when it cannot
-/// be read, which `load` names.
-pub fn keyIsEncrypted(gpa: Allocator, io: Io, files: Files) bool {
-    var bytes = readSecret(gpa, io, keyPath(files)) catch return false;
+/// be read, which `load` names. A cancel that lands in reading it is
+/// returned.
+pub fn keyIsEncrypted(gpa: Allocator, io: Io, files: Files) Io.Cancelable!bool {
+    var bytes = readSecret(gpa, io, keyPath(files)) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return false,
+    };
     defer bytes.deinit(gpa);
     return cloak.PrivateKey.isEncrypted(bytes.expose());
 }
@@ -159,7 +163,7 @@ test "a certificate and key are read from one file or two, and each refusal has 
     one.deinit();
     const opened = try load(gpa, io, .{ .cert = at(arena, base, "cert.pem"), .key = at(arena, base, "enc.pem") }, .{ .passphrase = "correct-horse" });
     opened.deinit();
-    try testing.expect(keyIsEncrypted(gpa, io, .{ .cert = at(arena, base, "cert.pem"), .key = at(arena, base, "enc.pem") }));
+    try testing.expect(try keyIsEncrypted(gpa, io, .{ .cert = at(arena, base, "cert.pem"), .key = at(arena, base, "enc.pem") }));
 
     try testing.expectError(error.SslClientKeyPassphraseRequired, load(gpa, io, .{ .cert = at(arena, base, "cert.pem"), .key = at(arena, base, "enc.pem") }, .{ .passphrase = null }));
     try testing.expectError(error.SslClientKeyPassphraseWrong, load(gpa, io, .{ .cert = at(arena, base, "cert.pem"), .key = at(arena, base, "enc.pem") }, .{ .passphrase = "nope" }));

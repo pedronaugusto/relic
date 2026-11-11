@@ -1976,7 +1976,7 @@ pub const Client = struct {
         var session: ?credential.Session = null;
         defer if (session) |*s| s.deinit();
         var passphrase: ?[]const u8 = null;
-        if (client_cert.keyIsEncrypted(c.gpa, io, files)) {
+        if (try client_cert.keyIsEncrypted(c.gpa, io, files)) {
             // Git LFS names the key with slashes on Windows, unlike Git's
             // own certificate helper request.
             if (c.knownPassphrase(io, key_path)) |known| {

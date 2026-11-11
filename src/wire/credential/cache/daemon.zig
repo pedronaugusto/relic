@@ -87,6 +87,7 @@ pub const Daemon = struct {
                 if (Io.Dir.path.dirname(dir)) |parent| try Io.Dir.cwd().createDirPath(io, parent);
                 Io.Dir.cwd().createDir(io, dir, private_dir) catch |e| switch (e) {
                     error.PathAlreadyExists => {},
+                    error.Canceled => return error.Canceled,
                     else => return error.CacheSocketUnbound,
                 };
             },
@@ -430,6 +431,7 @@ pub const InProcess = struct {
 };
 
 const shakedown = @import("shakedown");
+const testing_io = @import("../../../testing/io.zig");
 const url_mod = @import("../../url.zig");
 
 test "a cancel that lands in sending an answer is the daemon's end, not lost with the client" {
@@ -471,4 +473,32 @@ test "a cancel that stops the read of a request is the daemon's end, not a clien
     var d: Daemon = .{ .gpa = gpa, .io = faults.io(), .server = undefined, .socket_path = &.{} };
     defer d.entries.deinit(gpa);
     try std.testing.expectError(error.Canceled, d.serveOne(served));
+}
+
+test "a cancel that lands in making the socket's directory is returned, not taken for a socket unbound" {
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const base = try tmp.dir.realPathFileAlloc(std.testing.io, ".", gpa);
+    defer gpa.free(base);
+    const socket = try Io.Dir.path.join(gpa, &.{ base, "run", "sock" });
+    defer gpa.free(socket);
+    const Listen = struct {
+        dir: Io.Dir,
+        socket: []const u8,
+        pub fn setUp(l: *@This(), _: *shakedown.FaultIo) !void {
+            // Each run makes the directory afresh.
+            try l.dir.deleteTree(std.testing.io, "run");
+        }
+        pub fn run(l: *@This(), io: Io) !void {
+            var d = try Daemon.listen(std.testing.allocator, io, l.socket);
+            d.deinit();
+        }
+        pub fn check(_: *@This(), io: Io, result: anyerror!void, injected: ?shakedown.Injected) !void {
+            try testing_io.cancelKept(io, result, injected);
+        }
+        pub fn tearDown(_: *@This()) void {}
+    };
+    var listen: Listen = .{ .dir = tmp.dir, .socket = socket };
+    try testing_io.everyCancel(gpa, std.testing.io, &listen);
 }
