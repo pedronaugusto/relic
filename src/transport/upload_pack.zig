@@ -711,7 +711,12 @@ pub const Server = struct {
                 if (ref.unborn) continue;
                 const tip = ref.peeled orelse ref.oid;
                 if ((try s.db().readHeader(s.io, tip)).type != .commit) continue;
-                if (rev_walk.isAncestor(s.gpa, s.io, s.db(), .{ .ancestor = oid, .descendant = tip }, .{}) catch false) return true;
+                const reaches = rev_walk.isAncestor(s.gpa, s.io, s.db(), .{ .ancestor = oid, .descendant = tip }, .{}) catch |err| switch (err) {
+                    // A cancel is not "unreachable": the want is not refused for it.
+                    error.Canceled => return error.Canceled,
+                    else => false,
+                };
+                if (reaches) return true;
             }
         }
         return false;

@@ -566,13 +566,20 @@ const SubmoduleRun = struct {
     fn fail(run: *SubmoduleRun, err: Error) void {
         if (run.failed == null) run.failed = err;
     }
+
+    /// A submodule's fetch that met a cancel stops the others: it is
+    /// returned.
+    fn canceled(run: *const SubmoduleRun) Io.Cancelable!void {
+        if (run.failed) |err| if (err == error.Canceled) return error.Canceled;
+    }
 };
 
 /// git's `fetch_submodules`: each submodule `sub_changes.planFetch`
 /// chooses fetched from its default remote as `options` and its own
 /// recursion say, `plan.jobs` at once; then, for one still without a
 /// commit the fetched history records, those commits asked for by name.
-/// A submodule's failure is kept with it, and the fetch goes on.
+/// A submodule's failure is kept with it, and the fetch goes on; a cancel
+/// is returned.
 fn fetchSubmodules(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, range: sub_changes.Range, options: Options) Error![]const SubmoduleFetch {
     const explicit = try recursion(repo.configuration(), options.recurse_submodules);
     if (explicit == .off) return &.{};
@@ -638,10 +645,16 @@ fn runSubmoduleFetches(gpa: Allocator, io: Io, runs: []SubmoduleRun, jobs: u32, 
                 group.concurrent(io, fetchSubmodule, .{ gpa, io, run, apart, pass }) catch fetchSubmodule(gpa, io, run, options, pass);
             }
             try group.await(io);
+            // A submodule fetched on this task, as the Io ran no task
+            // beside it, met the caller's cancel: the rest are not fetched.
+            for (runs[next..end]) |*run| try run.canceled();
             next = end;
         }
         for (runs) |*run| try run.apart.merge(options);
-    } else for (runs) |*run| fetchSubmodule(gpa, io, run, options, pass);
+    } else for (runs) |*run| {
+        fetchSubmodule(gpa, io, run, options, pass);
+        try run.canceled();
+    }
 }
 
 fn fetchSubmodule(gpa: Allocator, io: Io, run: *SubmoduleRun, options: Options, pass: u1) void {
@@ -952,9 +965,10 @@ pub const Many = struct {
 /// `FETCH_HEAD` emptied first unless `options.append` and each remote's
 /// lines added to it, the commit graph written once after them all as
 /// `fetch.writeCommitGraph` says; one remote failing is noted and the rest
-/// still fetched. `jobs` at once (`null` takes `fetch.parallel`, 0 is one
-/// per processor) when the `Io` runs tasks beside each other, each on its
-/// own handle on the repository (`Repository.openAgain`).
+/// still fetched, but a cancel is returned. `jobs` at once (`null` takes
+/// `fetch.parallel`, 0 is one per processor) when the `Io` runs tasks
+/// beside each other, each on its own handle on the repository
+/// (`Repository.openAgain`).
 pub const ManyOptions = struct {
     /// How each remote is fetched.
     fetch: Options,
@@ -967,8 +981,14 @@ pub fn fetchMany(gpa: Allocator, io: Io, repo: *Repository, names: []const []con
     const options = many.fetch;
     const jobs = many.jobs;
     const results = try gpa.alloc(Fetched, names.len);
-    errdefer gpa.free(results);
     for (results) |*r| r.* = .{ .failed = error.Canceled };
+    errdefer {
+        for (results) |*r| switch (r.*) {
+            .fetched => |*outcome| outcome.deinit(),
+            .failed => {},
+        };
+        gpa.free(results);
+    }
     if (!options.append and options.write_fetch_head) try writeFetchHead(gpa, io, repo, &.{}, false);
     var each = options;
     each.append = true;
@@ -990,12 +1010,26 @@ pub fn fetchMany(gpa: Allocator, io: Io, repo: *Repository, names: []const []con
                 fetchOne(gpa, io, repo, names[i], each, &results[i]);
             };
             try group.await(io);
+            // A remote fetched on this task, as the Io ran no task beside
+            // it, met the caller's cancel: the rest are not fetched.
+            for (results[next..batch_end]) |r| try canceled(r);
             next = batch_end;
         }
         for (apart) |*a| try a.merge(each);
-    } else for (names, results) |name, *result| fetchOne(gpa, io, repo, name, each, result);
+    } else for (names, results) |name, *result| {
+        fetchOne(gpa, io, repo, name, each, result);
+        try canceled(result.*);
+    }
     if (options.write_commit_graph orelse try repo.configuration().getBool("fetch.writecommitgraph", false)) try writeCommitGraph(gpa, io, repo, options.warnings);
     return .{ .names = names, .results = results, .gpa = gpa };
+}
+
+/// A remote's fetch that met a cancel stops the others: it is returned.
+fn canceled(result: Fetched) Io.Cancelable!void {
+    switch (result) {
+        .fetched => {},
+        .failed => |err| if (err == error.Canceled) return error.Canceled,
+    }
 }
 
 fn fetchOne(gpa: Allocator, io: Io, repo: *Repository, name: []const u8, options: Options, result: *Fetched) void {
@@ -2754,8 +2788,8 @@ test "a linked reftable fetch sees the main worktree branch through its backend"
 /// configured remote but those with `remote.<name>.skipDefaultUpdate`
 /// fetched as `git fetch <remote> --prefetch --prune --no-tags
 /// --no-write-fetch-head --recurse-submodules=no`, `template` giving the
-/// rest. The first failure
-/// is returned once every remote is tried, as git's loop runs on.
+/// rest. The first failure is returned once every remote is tried, as
+/// git's loop runs on; a cancel at once.
 pub fn prefetchAll(gpa: Allocator, io: Io, repo: *Repository, template: Options) Self.Error!void {
     const names = try remote_mod.names(gpa, repo.configuration());
     defer gpa.free(names);
@@ -2772,6 +2806,7 @@ pub fn prefetchAll(gpa: Allocator, io: Io, repo: *Repository, template: Options)
         options.write_fetch_head = false;
         options.recurse_submodules = .off;
         var outcome = fetch(gpa, io, repo, name, options) catch |err| {
+            if (err == error.Canceled) return error.Canceled;
             if (first == null) first = err;
             continue;
         };

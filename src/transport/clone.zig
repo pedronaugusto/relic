@@ -1132,7 +1132,7 @@ fn checkOutCloned(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, s
     defer lazy.deinit();
     if (partial_clone) {
         lazy.install();
-        lazy.prefetchTree(io, try repo.commitTree(io, repo.peel(io, commit) catch commit)) catch |err| return lazyFailed(err);
+        lazy.prefetchTree(io, try repo.commitTree(io, try peelOrSelf(io, repo, commit))) catch |err| return lazyFailed(err);
     }
     try checkOut(gpa, io, repo, commit, options);
 }
@@ -1159,7 +1159,10 @@ fn postCheckout(gpa: Allocator, io: Io, repo: *Repository, hook_options: hooks_m
 /// Whether the repository at `path` is shallow, which git clones through
 /// upload-pack even from a path.
 fn isShallowSource(io: Io, path: []const u8) Io.Dir.AccessError!bool {
-    var dir = Io.Dir.cwd().openDir(io, path, .{}) catch return false;
+    var dir = Io.Dir.cwd().openDir(io, path, .{}) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return false,
+    };
     defer dir.close(io);
     for ([_][]const u8{ "shallow", ".git/shallow" }) |name| {
         if (dir.access(io, name, .{})) |_| return true else |err| switch (err) {
@@ -1168,6 +1171,15 @@ fn isShallowSource(io: Io, path: []const u8) Io.Dir.AccessError!bool {
         }
     }
     return false;
+}
+
+/// What `oid` peels to; one that does not peel is taken as it is, for the
+/// tree read after it to judge. A cancel is returned.
+fn peelOrSelf(io: Io, repo: *Repository, oid: Oid) Io.Cancelable!Oid {
+    return repo.peel(io, oid) catch |err| switch (err) {
+        error.Canceled => error.Canceled,
+        else => oid,
+    };
 }
 
 fn lazyFailed(err: anyerror) Error {
@@ -1221,7 +1233,7 @@ fn initRepository(gpa: Allocator, io: Io, dir: Io.Dir, options: Options, object_
 /// The operation owner supplies native formats through `native_filters`.
 fn checkOut(gpa: Allocator, io: Io, repo: *Repository, commit: Oid, options: Options) Error!void {
     const programs = options.programs;
-    const tree = try repo.commitTree(io, repo.peel(io, commit) catch commit);
+    const tree = try repo.commitTree(io, try peelOrSelf(io, repo, commit));
     var attrs = try repo.loadAttrs(io);
     defer attrs.deinit();
     const skip_smudge = if (programs) |p|
@@ -2453,4 +2465,31 @@ fn objectsHeld(gpa: Allocator, io: Io, env: *const std.process.Environ.Map, dir:
         };
     }
     return total;
+}
+
+test "a cancel that lands in asking whether a lender can lend is returned, not taken for a file that is not there" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var lender = try testgit.Repo.init(gpa, io, &.{});
+    defer lender.deinit();
+    const path = try testremote.absolutePath(gpa, io, lender.dir);
+    defer gpa.free(path);
+    const Ask = struct {
+        path: []const u8,
+        pub fn setUp(_: *@This(), _: *@import("shakedown").FaultIo) !void {}
+        pub fn run(a: *@This(), task_io: Io) !void {
+            var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+            defer arena.deinit();
+            switch (try reference.lenderAt(arena.allocator(), task_io, a.path)) {
+                .git_dir => {},
+                .refused => return error.Refused,
+            }
+        }
+        pub fn check(_: *@This(), task_io: Io, result: anyerror!void, injected: ?@import("shakedown").Injected) !void {
+            try io_mod.cancelKept(task_io, result, injected);
+        }
+        pub fn tearDown(_: *@This()) void {}
+    };
+    var ask: Ask = .{ .path = path };
+    try io_mod.everyCancel(gpa, io, &ask);
 }

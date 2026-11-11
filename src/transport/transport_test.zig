@@ -3378,3 +3378,45 @@ test "a push to a remote group pushes each of its remotes in turn, as git 2.55's
         try testing.expectEqualStrings(listed[0], listed[1]);
     }
 }
+
+test "a cancel that lands in one of several remotes' fetches is returned, and the rest are not fetched" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var env = try testremote.environ(gpa);
+    defer env.deinit();
+    var sources: [2]testgit.Repo = undefined;
+    var paths: [2][]u8 = undefined;
+    for (&sources, &paths, 0..) |*source, *path, i| {
+        source.* = try testgit.Repo.init(gpa, io, &.{});
+        try testremote.addCommits(gpa, io, source, i * 10, 2);
+        path.* = try testremote.absolutePath(gpa, io, source.dir);
+    }
+    defer for (&sources, paths) |*source, path| {
+        source.deinit();
+        gpa.free(path);
+    };
+    var into = try testgit.Repo.init(gpa, io, &.{});
+    defer into.deinit();
+    for ([_][]const u8{ "a", "b" }, paths) |name, path| {
+        const url = try gpa.print("file://{s}", .{path});
+        defer gpa.free(url);
+        try into.exec(io, &.{ "remote", "add", name, url });
+    }
+    var repo = try repo_mod.Repository.open(gpa, io, into.dir, .{});
+    defer repo.deinit(io);
+    // The first call that names the first remote's repository is canceled:
+    // inside its fetch, before the second remote's.
+    const plan = [_]shakedown.IoPlan.Entry{.{ .at = .{ .nth = .{ .n = 1, .path = .{ .contains = Io.Dir.path.basename(paths[0]) } } }, .fault = .cancel, .times = 1 }};
+    const faults = try shakedown.FaultIo.init(gpa, io, .{ .plan = &plan });
+    defer faults.deinit();
+    const names = [_][]const u8{ "a", "b" };
+    if (fetch_mod.fetchMany(gpa, faults.io(), &repo, &names, .{ .jobs = 1, .fetch = .{ .who = test_who, .programs = .{ .environ = &env } } })) |done| {
+        var many = done;
+        defer many.deinit();
+        try testing.expect(faults.fired().len != 0);
+        return error.CancelLost;
+    } else |err| try testing.expectEqual(error.Canceled, err);
+    const fetched = try into.run(io, &.{ "for-each-ref", "refs/remotes/b/" });
+    defer gpa.free(fetched);
+    try testing.expectEqualStrings("", fetched);
+}

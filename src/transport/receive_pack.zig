@@ -464,7 +464,7 @@ pub const Server = struct {
         var received: ?Received = null;
         defer if (received) |*r| r.deinit(s.io);
         if (!deleteOnly(commands)) unpacking: {
-            const count = switch (packHeader(in)) {
+            const count = switch (try packHeader(in)) {
                 .count => |n| n,
                 .refused => |why| {
                     unpack_status = why;
@@ -1941,8 +1941,13 @@ fn certificateOptionsMatch(cert: []const u8, options: []const []const u8) bool {
 
 /// git's `parse_pack_header`, looking at the pack without taking it: how
 /// many objects it says it holds, or git's words for why it is no pack.
-fn packHeader(in: *Io.Reader) union(enum) { count: u32, refused: []const u8 } {
-    const head = in.peek(12) catch return .{ .refused = "eof before pack header was fully read" };
+fn packHeader(in: *Io.Reader) error{ReadFailed}!union(enum) { count: u32, refused: []const u8 } {
+    const head = in.peek(12) catch |err| switch (err) {
+        // The cause stays in the reader's owner, who asks it: a cancel is
+        // not a short pack.
+        error.ReadFailed => return error.ReadFailed,
+        error.EndOfStream => return .{ .refused = "eof before pack header was fully read" },
+    };
     if (!std.mem.eql(u8, head[0..4], "PACK")) return .{ .refused = "protocol error (pack signature mismatch detected)" };
     const version = std.mem.readInt(u32, head[4..8], .big);
     if (version != 2 and version != 3) return .{ .refused = "protocol error (pack version unsupported)" };
@@ -2202,7 +2207,7 @@ test "a pack's header is read as git's parse_pack_header reads it, and left for 
     };
     for (cases) |case| {
         var in: Io.Reader = .fixed(case.bytes);
-        switch (packHeader(&in)) {
+        switch (try packHeader(&in)) {
             .count => |n| {
                 try std.testing.expect(case.refused == null);
                 try std.testing.expectEqual(case.count, n);
@@ -2268,4 +2273,41 @@ test "a cancel that lands in looking for a remote's hooks is returned, not taken
     };
     var look: Look = .{ .git = &git };
     try testing_io.everyCancel(gpa, io, &look);
+}
+
+test "a read that fails where the pack's header is is returned for its reader's owner, not refused as a short pack" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var repo = try repo_mod.Repository.create(gpa, io, tmp.dir, .{ .default_branch = "main", .bare = true });
+    repo.deinit(io);
+    const path = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(path);
+    var remote = try local.Remote.open(gpa, io, path, .{});
+    defer remote.deinit(io);
+    var server: Server = try .init(gpa, io, &remote, .v0, .{ .stateless = true, .who = .{ .name = "t", .email = "t@example.com", .when_secs = 0, .offset_minutes = 0 } });
+    defer server.deinit();
+    // A command that needs a pack, then a read that fails: a cancel, say,
+    // whose cause the reader's owner keeps.
+    const Then = struct {
+        rest: []const u8,
+        interface: Io.Reader,
+        fn stream(r: *Io.Reader, w: *Io.Writer, limit: Io.Limit) Io.Reader.StreamError!usize {
+            const t: *@This() = @alignCast(@fieldParentPtr("interface", r)); // installed only on this reader
+            if (t.rest.len == 0) return error.ReadFailed;
+            const n = try w.write(t.rest[0..limit.minInt(t.rest.len)]);
+            t.rest = t.rest[n..];
+            return n;
+        }
+    };
+    var commands: Io.Writer.Allocating = .init(gpa);
+    defer commands.deinit();
+    try pkt_line.print(&commands.writer, "{f} {f} refs/heads/main\x00report-status\n", .{ Oid.zero(.sha1), try Oid.parse(.sha1, "1111111111111111111111111111111111111111") });
+    try pkt_line.flush(&commands.writer);
+    var buffer: [pkt_line.max_line]u8 = undefined;
+    var in: Then = .{ .rest = commands.written(), .interface = .{ .vtable = &.{ .stream = Then.stream }, .buffer = &buffer, .seek = 0, .end = 0 } };
+    var out: Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    try std.testing.expectError(error.ReadFailed, server.serveRequest(&out.writer, &in.interface));
 }

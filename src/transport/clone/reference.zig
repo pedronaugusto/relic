@@ -99,14 +99,14 @@ pub fn lenderAt(arena: Allocator, io: Io, path: []const u8) Self.Error!Lender {
     };
     const named = (try gitfileAt(arena, io, real, null)) orelse try gitfileAt(arena, io, real, ".git");
     var git_dir = named orelse real;
-    if (named == null and isDirectory(io, try arena.print("{s}/.git/objects", .{real}))) {
+    if (named == null and try isDirectory(io, try arena.print("{s}/.git/objects", .{real}))) {
         git_dir = try arena.print("{s}/.git", .{real});
-    } else if (!isDirectory(io, try arena.print("{s}/objects", .{git_dir}))) {
-        const linked = exists(io, try arena.print("{s}/commondir", .{git_dir}));
+    } else if (!try isDirectory(io, try arena.print("{s}/objects", .{git_dir}))) {
+        const linked = try exists(io, try arena.print("{s}/commondir", .{git_dir}));
         return .{ .refused = if (linked) .linked_checkout else .not_a_repository };
     }
-    if (exists(io, try arena.print("{s}/shallow", .{git_dir}))) return .{ .refused = .shallow };
-    if (exists(io, try arena.print("{s}/info/grafts", .{git_dir}))) return .{ .refused = .grafted };
+    if (try exists(io, try arena.print("{s}/shallow", .{git_dir}))) return .{ .refused = .shallow };
+    if (try exists(io, try arena.print("{s}/info/grafts", .{git_dir}))) return .{ .refused = .grafted };
     return .{ .git_dir = git_dir };
 }
 
@@ -126,14 +126,23 @@ fn gitfileAt(arena: Allocator, io: Io, dir: []const u8, name: ?[]const u8) Self.
     };
 }
 
-fn isDirectory(io: Io, path: []const u8) bool {
-    var dir = Io.Dir.cwd().openDir(io, path, .{}) catch return false;
+/// Whether `path` opens as a directory; a cancel is returned, not taken
+/// for none.
+fn isDirectory(io: Io, path: []const u8) Io.Cancelable!bool {
+    var dir = Io.Dir.cwd().openDir(io, path, .{}) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return false,
+    };
     dir.close(io);
     return true;
 }
 
-fn exists(io: Io, path: []const u8) bool {
-    Io.Dir.cwd().access(io, path, .{}) catch return false;
+/// Whether `path` is there; a cancel is returned, not taken for absent.
+fn exists(io: Io, path: []const u8) Io.Cancelable!bool {
+    Io.Dir.cwd().access(io, path, .{}) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return false,
+    };
     return true;
 }
 

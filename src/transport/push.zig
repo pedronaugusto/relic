@@ -681,7 +681,8 @@ fn pushSubmodules(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, n
             .warnings = options.warnings,
             .progress = options.progress,
             .from_user = options.from_user,
-        }) catch {
+        }) catch |err| {
+            if (err == error.Canceled) return error.Canceled;
             try warning.note(options.warnings, .{ .submodule_push_failed = u.path });
             failed = true;
             continue;
@@ -1266,7 +1267,7 @@ fn addMissingTags(
     const Tips = struct {
         fn add(a: Allocator, i: Io, r: *Repository, list: *std.ArrayList(Oid), set: *Oid.Set, oid: Oid) Error!void {
             if (oid.isZero()) return;
-            const commit = commitOf(i, r, oid) orelse return;
+            const commit = (try commitOf(i, r, oid)) orelse return;
             if ((try set.getOrPut(a, commit)).found_existing) return;
             try list.append(a, commit);
         }
@@ -1295,7 +1296,7 @@ fn addMissingTags(
             .symbolic => continue,
         };
         if ((try repo.objectDatabase().readHeader(io, oid)).type != .tag) continue;
-        const commit = commitOf(io, repo, oid) orelse continue;
+        const commit = (try commitOf(io, repo, oid)) orelse continue;
         try names.append(arena, try arena.dupe(u8, entry.name));
         try tags.append(arena, oid);
         try commits.append(arena, commit);
@@ -1357,8 +1358,8 @@ fn judge(
         } else if (!try repo.objectDatabase().exists(io, result.old)) {
             reject = .rejected_fetch_first;
         } else {
-            const old_commit = commitOf(io, repo, result.old);
-            const new_commit = commitOf(io, repo, result.new);
+            const old_commit = try commitOf(io, repo, result.old);
+            const new_commit = try commitOf(io, repo, result.new);
             if (old_commit == null or new_commit == null) {
                 reject = .rejected_needs_force;
             } else if (!try rev_walk.isAncestor(gpa, io, repo.objectDatabase(), .{ .ancestor = old_commit.?, .descendant = new_commit.? }, .{})) {
@@ -1373,9 +1374,16 @@ fn judge(
     }
 }
 
-fn commitOf(io: Io, repo: *Repository, oid: Oid) ?Oid {
-    const peeled = repo.peel(io, oid) catch return null;
-    const header = repo.objectDatabase().readHeader(io, peeled) catch return null;
+/// The commit `oid` is or peels to, or `null`; a cancel is returned.
+fn commitOf(io: Io, repo: *Repository, oid: Oid) Io.Cancelable!?Oid {
+    const peeled = repo.peel(io, oid) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return null,
+    };
+    const header = repo.objectDatabase().readHeader(io, peeled) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return null,
+    };
     return if (header.type == .commit) peeled else null;
 }
 
@@ -1387,7 +1395,7 @@ fn commitOf(io: Io, repo: *Repository, oid: Oid) ?Oid {
 fn includesRemote(gpa: Allocator, io: Io, repo: *Repository, remote: *const remote_mod.Remote, result: *const RefResult) Error!bool {
     const store = repo.refStore();
     if ((try store.readOid(gpa, io, result.remote_ref)) == null) return true;
-    const theirs = commitOf(io, repo, result.old) orelse return false;
+    const theirs = (try commitOf(io, repo, result.old)) orelse return false;
     const tracking = (try remote.trackingRef(gpa, result.remote_ref)) orelse return false;
     defer gpa.free(tracking);
     var tracking_log = try store.readLog(gpa, io, tracking);
@@ -1402,7 +1410,7 @@ fn includesRemote(gpa: Allocator, io: Io, repo: *Repository, remote: *const remo
         i -= 1;
         const entry = local_log.entries[i];
         if (entry.new.eql(theirs)) return true;
-        if (commitOf(io, repo, entry.new)) |commit| try seen.append(gpa, commit);
+        if (try commitOf(io, repo, entry.new)) |commit| try seen.append(gpa, commit);
         if (entry.who.when_secs < since) break;
     }
     for (seen.items) |commit| {

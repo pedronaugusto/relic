@@ -373,6 +373,8 @@ pub const Session = struct {
             defer identity.deinit();
             const f = bundle.File.open(gpa, io, Io.Dir.cwd(), identity.url.path) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
+                // A cancel is not "no bundle here".
+                error.Canceled => return error.Canceled,
                 else => break :bundled,
             };
             if (kind) |k| if (k != f.header.object_format) {
