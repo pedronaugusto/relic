@@ -474,6 +474,7 @@ const Validity = struct {
     fn of(io: Io, parent: Io.Dir) Error!Validity {
         const st = parent.statFile(io, "reftable/tables.list", .{}) catch |err| switch (err) {
             error.FileNotFound, error.NotDir => return .{ .present = false },
+            error.Canceled => return error.Canceled,
             else => return error.ReftableMissing,
         };
         return .{ .present = true, .inode = st.inode, .size = st.size, .mtime = st.mtime };

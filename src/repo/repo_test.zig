@@ -2396,3 +2396,34 @@ test "a cancel that lands in finding a repository is returned, never taken for n
         try testing_io.everyCancel(gpa, io, &open);
     }
 }
+
+test "a cancel that lands in finding the branches the worktrees hold is returned, not taken for a worktree that is not there" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    const head_mod = @import("head.zig");
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    try git.exec(io, &.{ "commit", "-q", "--allow-empty", "-m", "one" });
+    try git.exec(io, &.{ "worktree", "add", "-q", "-b", "held", "held-wt" });
+    var repo = try repo_mod.Repository.open(gpa, io, git.dir, .{});
+    defer repo.deinit(io);
+
+    const Find = struct {
+        repo: *repo_mod.Repository,
+        pub fn setUp(_: *@This(), _: *shakedown.FaultIo) !void {}
+        pub fn run(f: *@This(), run_io: Io) !void {
+            var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer arena.deinit();
+            const held = try head_mod.checkedOutBranches(arena.allocator(), run_io, f.repo);
+            // Both worktrees' branches, the main one's and the linked one's.
+            try std.testing.expect(held.contains("refs/heads/main"));
+            try std.testing.expect(held.contains("refs/heads/held"));
+        }
+        pub fn check(_: *@This(), check_io: Io, result: anyerror!void, injected: ?shakedown.Injected) !void {
+            try testing_io.cancelKept(check_io, result, injected);
+        }
+        pub fn tearDown(_: *@This()) void {}
+    };
+    var find: Find = .{ .repo = &repo };
+    try testing_io.everyCancel(gpa, io, &find);
+}

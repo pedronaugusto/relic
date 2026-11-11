@@ -825,10 +825,11 @@ fn install(gpa: Allocator, io: Io, locked: *Pending.Locked, stack: *const Stack,
     var name_buf: [64]u8 = undefined;
     const name = tableName(io, &name_buf, min, max).bytes;
     try writeTable(gpa, io, locked.dir.borrow().*, name, bytes, locked.shared, locked.sync);
-    const w = locked.lock.writer();
-    w.writeAll(stack.list) catch return error.WriteFailed;
-    if (stack.list.len != 0 and stack.list[stack.list.len - 1] != '\n') w.writeByte('\n') catch return error.WriteFailed;
-    w.print("{s}\n", .{name}) catch return error.WriteFailed;
+    // The lock's own writes, so a write that fails returns the file's
+    // error, a cancel among them, not a bare WriteFailed.
+    try locked.lock.writeAll(stack.list);
+    if (stack.list.len != 0 and stack.list[stack.list.len - 1] != '\n') try locked.lock.writeByte('\n');
+    try locked.lock.print("{s}\n", .{name});
     try locked.lock.commit(io);
     locked.lock.deinit(io);
     locked.written = true;

@@ -1258,10 +1258,13 @@ pub const Repository = struct {
 
     /// git's `freshen_shared_index`: the shared index a write stood on is
     /// dated now, so that it outlives its expiry while it is in use.
-    fn freshenShared(repo: *Repository, io: Io, name: *const [hash.max_hex_len + 16]u8) void {
+    /// A failure is a warning, as git's; a cancel is returned.
+    fn freshenShared(repo: *Repository, io: Io, name: *const [hash.max_hex_len + 16]u8) Io.Cancelable!void {
         const path = std.mem.sliceTo(name, 0);
-        fs.setTimestamps(io, repo.gitDirectory(), path, .{ .access_timestamp = .now, .modify_timestamp = .now }) catch |err|
-            std.log.warn("could not freshen shared index '{s}': {t}", .{ path, err });
+        fs.setTimestamps(io, repo.gitDirectory(), path, .{ .access_timestamp = .now, .modify_timestamp = .now }) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => std.log.warn("could not freshen shared index '{s}': {t}", .{ path, err }),
+        };
     }
 
     /// Which writes are synced, and how.
@@ -1550,8 +1553,14 @@ pub const Repository = struct {
                 .sym_link => {
                     if (exists) continue;
                     var buf: [Io.Dir.max_path_bytes]u8 = undefined;
-                    const n = from.readLink(io, entry.name, &buf) catch continue;
-                    to.symLink(io, buf[0..n], entry.name, .{}) catch continue;
+                    const n = from.readLink(io, entry.name, &buf) catch |err| switch (err) {
+                        error.Canceled => return error.Canceled,
+                        else => continue,
+                    };
+                    to.symLink(io, buf[0..n], entry.name, .{}) catch |err| switch (err) {
+                        error.Canceled => return error.Canceled,
+                        else => continue,
+                    };
                 },
                 .file => {
                     if (exists) continue;
@@ -2230,7 +2239,7 @@ pub const Repository = struct {
             const freshen = try repo.writeSharedIfDue(io, &locked.index, options);
             try locked.index.commitTo(io, &locked.lock, options);
             // Only once the file that stands on it is in place, as git's.
-            if (freshen) |name| repo.freshenShared(io, &name);
+            if (freshen) |name| try repo.freshenShared(io, &name);
         }
 
         /// Give the lock up, the index file as it was unless `commit` put
