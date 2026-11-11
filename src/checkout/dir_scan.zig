@@ -107,12 +107,18 @@ pub const Scan = struct {
 };
 
 /// Which arm a walk over this directory takes. A benchmark says so in its
-/// output; nothing in the package branches on it.
+/// output; nothing in the package branches on it. A cancel that lands in
+/// looking is put back for the task's next cancelation point.
 pub fn armFor(gpa: Allocator, io: Io, dir: Io.Dir) []const u8 {
-    var scan = Scan.init(gpa, io, dir, .{}) catch return "unknown";
+    var scan = Scan.init(gpa, io, dir, .{}) catch |err| return unknownArm(io, err);
     defer scan.deinit();
-    _ = scan.next() catch return "unknown";
+    _ = scan.next() catch |err| return unknownArm(io, err);
     return if (scan.isBulk()) "getattrlistbulk" else "one stat per entry";
+}
+
+fn unknownArm(io: Io, err: anyerror) []const u8 {
+    if (err == error.Canceled) io.recancel();
+    return "unknown";
 }
 
 test "a scan describes every entry as a stat of its name does" {

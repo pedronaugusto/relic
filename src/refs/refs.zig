@@ -2630,7 +2630,7 @@ test "an expected value that does not hold changes nothing" {
     }
     const found = (try store.read(gpa, io, "refs/heads/main")).?;
     try std.testing.expect(found.direct.eql(one));
-    try std.testing.expect(!fs.lockHeld(io, tmp.dir, "refs/heads/main"));
+    try std.testing.expect(!try fs.lockHeld(io, tmp.dir, "refs/heads/main"));
 
     {
         var tx = store.begin(gpa);
@@ -2667,7 +2667,7 @@ test "a whole transaction rolls back when one lock is held" {
     try std.testing.expect((try store.read(gpa, io, "refs/heads/a")) == null);
     try std.testing.expect((try store.read(gpa, io, "refs/heads/b")) == null);
     try tmp.dir.access(io, "refs/heads/b.lock", .{});
-    try std.testing.expect(!fs.lockHeld(io, tmp.dir, "refs/heads/a"));
+    try std.testing.expect(!try fs.lockHeld(io, tmp.dir, "refs/heads/a"));
 }
 
 test "packed refs read, shadow and write" {
@@ -3384,7 +3384,7 @@ test "an edit named twice, once through HEAD, is refused before anything moves" 
     try std.testing.expectError(error.DuplicateEdit, tx.commit(io, null));
     const main = (try store.read(gpa, io, "refs/heads/main")).?;
     try std.testing.expect(main.direct.eql(try Oid.parse(.sha1, &@as([40]u8, @splat('1')))));
-    try std.testing.expect(!fs.lockHeld(io, tmp.dir, "HEAD"));
+    try std.testing.expect(!try fs.lockHeld(io, tmp.dir, "HEAD"));
 }
 
 test "a reference-transaction hook refusing a transaction leaves every ref as it was" {
@@ -3429,7 +3429,7 @@ test "a reference-transaction hook refusing a transaction leaves every ref as it
         }
         try std.testing.expectEqualStrings("reference-transaction", runner.failure.event());
         try std.testing.expect((try store.read(gpa, io, "refs/heads/topic")) == null);
-        try std.testing.expect(!fs.lockHeld(io, git_dir.borrow().*, "refs/heads/topic"));
+        try std.testing.expect(!try fs.lockHeld(io, git_dir.borrow().*, "refs/heads/topic"));
         try twin.expectSameLog(io);
     }
 }

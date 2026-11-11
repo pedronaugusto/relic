@@ -892,7 +892,7 @@ pub const LockFile = struct {
         try syncFile(io, lock.pending.file(), .{ .policy = lock.sync });
         _ = try lock.pending.commit(io, .{ .level = .none });
         lock.finished = true;
-        lock.removePidFile(io);
+        try lock.removePidFile(io);
         if (lock.sync_directory) {
             // `target` may be refs/heads/main relative to the repository: it
             // is heads, not the repository directory, that was changed.
@@ -911,14 +911,20 @@ pub const LockFile = struct {
         const protection = io.swapCancelProtection(.blocked);
         defer _ = io.swapCancelProtection(protection);
         lock.pending.discard(io);
-        lock.removePidFile(io);
+        // Under the protection no cancel lands; one that did is put back.
+        lock.removePidFile(io) catch io.recancel();
         lock.gpa.free(lock.lock_name);
         lock.* = undefined;
     }
 
-    fn removePidFile(lock: *LockFile, io: Io) void {
+    /// The pid file goes with the lock; one that will not go is said. A
+    /// cancel is returned and the name kept, for `deinit` to remove it.
+    fn removePidFile(lock: *LockFile, io: Io) Io.Cancelable!void {
         const name = lock.pid_name orelse return;
-        lock.dir.deleteFile(io, name) catch |err| std.log.warn("unable to remove '{s}': {t}", .{ name, err });
+        lock.dir.deleteFile(io, name) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => std.log.warn("unable to remove '{s}': {t}", .{ name, err }),
+        };
         lock.gpa.free(name);
         lock.pid_name = null;
     }
@@ -946,7 +952,11 @@ fn writePidFile(gpa: Allocator, io: Io, dir: Io.Dir, sub_path: []const u8, share
     file.writePositionalAll(io, line, 0) catch |err| {
         if (err == error.Canceled) return error.Canceled;
         std.log.warn("could not write lock pid file '{s}': {t}", .{ name, err });
-        dir.deleteFile(io, name) catch |e| std.log.warn("unable to remove '{s}': {t}", .{ name, e });
+        dir.deleteFile(io, name) catch |e| switch (e) {
+            // The errdefers above remove the file and free the name.
+            error.Canceled => return error.Canceled,
+            else => std.log.warn("unable to remove '{s}': {t}", .{ name, e }),
+        };
         gpa.free(name);
         return null;
     };
@@ -979,24 +989,35 @@ pub const HideDotFiles = enum {
 
 /// Give `sub_path` Windows' hidden attribute where `hide` asks for it, as
 /// git for Windows' `set_hidden_flag` does after it makes a file or a
-/// directory; a failure is said and the file kept. Nothing elsewhere.
+/// directory; a failure is said and the file kept. Nothing elsewhere. A
+/// cancel that lands here is put back for the task's next cancelation point.
 pub fn hideIfAsked(io: Io, dir: Io.Dir, sub_path: []const u8, hide: HideDotFiles) void {
     if (builtin.target.os.tag != .windows or !hide.hides(sub_path)) return;
-    const found = (permissionsAt(io, dir, sub_path) catch |err| return std.log.warn("could not hide '{s}': {t}", .{ sub_path, err })) orelse return;
+    const found = (permissionsAt(io, dir, sub_path) catch |err| return attributeFailed(io, "hide", sub_path, err)) orelse return;
     const hidden: u32 = @as(u32, @backingInt(found.permissions)) | 0x2; // FILE_ATTRIBUTE_HIDDEN
     setFilePermissions(io, dir, sub_path, @fromBackingInt(@intCast(hidden))) catch |err|
-        std.log.warn("could not hide '{s}': {t}", .{ sub_path, err });
+        attributeFailed(io, "hide", sub_path, err);
+}
+
+/// A hidden attribute not given or taken: said, and a cancel put back.
+fn attributeFailed(io: Io, comptime what: []const u8, sub_path: []const u8, err: anyerror) void {
+    if (err == error.Canceled) return io.recancel();
+    std.log.warn("could not " ++ what ++ " '{s}': {t}", .{ sub_path, err });
 }
 
 /// Take Windows' hidden attribute off `sub_path` where `hide` would give
 /// it, before a write that replaces the file, which Windows refuses over a
-/// hidden one: git for Windows' `set_hidden_flag(path, 0)`.
+/// hidden one: git for Windows' `set_hidden_flag(path, 0)`. A cancel is
+/// put back.
 pub fn showIfAsked(io: Io, dir: Io.Dir, sub_path: []const u8, hide: HideDotFiles) void {
     if (builtin.target.os.tag != .windows or !hide.hides(sub_path)) return;
-    const found = (permissionsAt(io, dir, sub_path) catch return) orelse return;
+    const found = (permissionsAt(io, dir, sub_path) catch |err| {
+        if (err == error.Canceled) io.recancel();
+        return;
+    }) orelse return;
     const shown: u32 = @as(u32, @backingInt(found.permissions)) & ~@as(u32, 0x2);
     setFilePermissions(io, dir, sub_path, @fromBackingInt(@intCast(if (shown == 0) 0x80 else shown))) catch |err|
-        std.log.warn("could not show '{s}': {t}", .{ sub_path, err });
+        attributeFailed(io, "show", sub_path, err);
 }
 
 test "core.hideDotFiles hides what git's needs_hiding says" {
@@ -1540,19 +1561,25 @@ pub const StaleReport = struct {
 /// What is known about the lock on `sub_path`.
 ///
 /// A caller shows this to a person. Nothing in this package ever removes a
-/// lock it did not take, whatever the report says.
-pub fn staleReport(io: Io, dir: Io.Dir, sub_path: []const u8) StaleReport {
+/// lock it did not take, whatever the report says. A cancel is returned,
+/// never taken for a lock that is not there.
+pub fn staleReport(io: Io, dir: Io.Dir, sub_path: []const u8) Io.Cancelable!StaleReport {
     var name_buf: [512]u8 = undefined;
     const lock_name = std.mem.print(&name_buf, "{s}.lock", .{sub_path}) catch return .{ .held = false, .pid = null, .holder_alive = null };
-    dir.access(io, lock_name, .{}) catch return .{ .held = false, .pid = null, .holder_alive = null };
+    dir.access(io, lock_name, .{}) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return .{ .held = false, .pid = null, .holder_alive = null },
+    };
 
     // git's `read_lock_pid`: `<sub_path>~pid.lock`, at most 32 bytes,
     // `pid <n>` once the trailing space is gone.
     var pid_buf: [512]u8 = undefined;
     const pid_name = std.mem.print(&pid_buf, "{s}~pid.lock", .{sub_path}) catch return .{ .held = true, .pid = null, .holder_alive = null };
     var contents: [32]u8 = undefined;
-    const text = dir.readFile(io, pid_name, &contents) catch
-        return .{ .held = true, .pid = null, .holder_alive = null };
+    const text = dir.readFile(io, pid_name, &contents) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return .{ .held = true, .pid = null, .holder_alive = null },
+    };
     const line = std.mem.trimEnd(u8, text, " \t\n\r");
     if (!std.mem.startsWith(u8, line, "pid ")) return .{ .held = true, .pid = null, .holder_alive = null };
     const pid = decimal.digits(u32, line[4..]) orelse
@@ -1599,9 +1626,9 @@ pub fn hostName(buf: *[max_host_name]u8) HostNameError![]const u8 {
     return conduit.hostName(buf);
 }
 
-/// Whether `<sub_path>.lock` exists in `dir`.
-pub fn lockHeld(io: Io, dir: Io.Dir, sub_path: []const u8) bool {
-    return staleReport(io, dir, sub_path).held;
+/// Whether `<sub_path>.lock` exists in `dir`. A cancel is returned.
+pub fn lockHeld(io: Io, dir: Io.Dir, sub_path: []const u8) Io.Cancelable!bool {
+    return (try staleReport(io, dir, sub_path)).held;
 }
 
 /// Errors from replacing a file whole.
@@ -1722,27 +1749,28 @@ pub const TempFile = struct {
             holder = try std.Io.Dir.path.join(arena, &.{ dir_abs, random });
             try Io.Dir.createDirAbsolute(io, holder.?, .default_dir);
         }
-        // glint-ignore: Z026 -- the write's error is the one to report; a scratch directory left behind is in the temporary directory
-        errdefer if (holder) |h| Io.Dir.deleteDirAbsolute(io, h) catch {};
+        // The write's error is the one to report; a scratch directory left
+        // behind is in the temporary directory. A cancel is put back.
+        errdefer if (holder) |h| Io.Dir.deleteDirAbsolute(io, h) catch |err| if (err == error.Canceled) io.recancel();
         const path = if (holder) |h|
             try std.Io.Dir.path.join(arena, &.{ h, name.suffix })
         else
             try std.Io.Dir.path.join(arena, &.{ dir_abs, try std.mem.concat(arena, u8, &.{ random, name.suffix }) });
         const file = try Io.Dir.createFileAbsolute(io, path, .{ .exclusive = true });
         defer file.close(io);
-        // glint-ignore: Z026 -- the write's error is the one to report; a scratch file left behind is in the temporary directory
-        errdefer Io.Dir.deleteFileAbsolute(io, path) catch {};
+        // The write's error is the one to report; a scratch file left behind
+        // is in the temporary directory. A cancel is put back.
+        errdefer Io.Dir.deleteFileAbsolute(io, path) catch |err| if (err == error.Canceled) io.recancel();
         try file.writePositionalAll(io, bytes, 0);
         return .{ .path = path, .dir = holder };
     }
 
     /// Remove the file, as git's `delete_tempfile`: one left behind holds
-    /// only what a program was given to read.
+    /// only what a program was given to read, and the directory it made
+    /// goes too. A cancel that lands here is put back.
     pub fn remove(f: *TempFile, io: Io) void {
-        // glint-ignore: Z026 -- as git's delete_tempfile: what the file held is already read
-        Io.Dir.deleteFileAbsolute(io, f.path) catch {};
-        // glint-ignore: Z026 -- as git's delete_tempfile, which removes the directory it made
-        if (f.dir) |d| Io.Dir.deleteDirAbsolute(io, d) catch {};
+        Io.Dir.deleteFileAbsolute(io, f.path) catch |err| if (err == error.Canceled) io.recancel();
+        if (f.dir) |d| Io.Dir.deleteDirAbsolute(io, d) catch |err| if (err == error.Canceled) io.recancel();
     }
 };
 
@@ -2173,7 +2201,7 @@ test "a lock is refused, not broken, and says who holds it" {
         error.LockHeld,
         LockFile.open(gpa, io, dir, .{ .sub_path = "thing", .buffer = &buf2 }, .{ .sync = .none }),
     );
-    const report = staleReport(io, dir, "thing");
+    const report = try staleReport(io, dir, "thing");
     try std.testing.expect(report.held);
     if (builtin.target.os.tag != .wasi) try std.testing.expectEqual(@as(?u32, currentPid()), report.pid);
     if (report.holder_alive) |alive| try std.testing.expect(alive);
@@ -2183,7 +2211,7 @@ test "a lock is refused, not broken, and says who holds it" {
 
     var read_buf: [16]u8 = undefined;
     try std.testing.expectEqualStrings("new\n", try dir.readFile(io, "thing", &read_buf));
-    try std.testing.expect(!lockHeld(io, dir, "thing"));
+    try std.testing.expect(!try lockHeld(io, dir, "thing"));
 }
 
 test "a lock names its holder in ~pid.lock beside it only when asked, as git's core.lockfilePid, and the name goes with it" {
@@ -2251,7 +2279,7 @@ test "a lock syncs the target's directory after rename only when asked" {
                 try std.testing.expectEqual(@as(u32, @intFromBool(policy != .none) + @as(u32, @intFromBool(sync_directory))), h.syncs());
                 var read_buf: [16]u8 = undefined;
                 try std.testing.expectEqualStrings("new\n", try tmp.dir.readFile(io, target, &read_buf));
-                try std.testing.expect(!lockHeld(io, tmp.dir, target));
+                try std.testing.expect(!try lockHeld(io, tmp.dir, target));
             }
         }
     }
@@ -2277,9 +2305,9 @@ test "airlock file failure prevents lock publication and directory failure is ex
             try std.testing.expectError(error.InputOutput, lock.commit(io));
             var read_buf: [16]u8 = undefined;
             try std.testing.expectEqualStrings(if (directory_failure) "new\n" else "old\n", try tmp.dir.readFile(io, "thing", &read_buf));
-            try std.testing.expectEqual(!directory_failure, lockHeld(io, tmp.dir, "thing"));
+            try std.testing.expectEqual(!directory_failure, try lockHeld(io, tmp.dir, "thing"));
         }
-        try std.testing.expect(!lockHeld(io, tmp.dir, "thing"));
+        try std.testing.expect(!try lockHeld(io, tmp.dir, "thing"));
         try std.testing.expectEqual(@as(u32, 1), h.count(if (directory_failure) .sync_dir else seam.data_sync));
     }
 }
@@ -2319,7 +2347,7 @@ test "a rolled-back lock changes nothing" {
     }
     var read_buf: [16]u8 = undefined;
     try std.testing.expectEqualStrings("old\n", try dir.readFile(io, "thing", &read_buf));
-    try std.testing.expect(!lockHeld(io, dir, "thing"));
+    try std.testing.expect(!try lockHeld(io, dir, "thing"));
 }
 
 test "a failed lock rename removes the closed lock file" {
@@ -2501,3 +2529,41 @@ test "a cancel that lands in removing a leftover is put back for the task, not l
     // The cancel landed at the removal, which left the file.
     try tmp.dir.access(io, "left.lock", .{});
 }
+
+test "a cancel that lands in removing a temporary file is put back, not dropped" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const base = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(base);
+    var environ: std.process.Environ.Map = .init(gpa);
+    defer environ.deinit();
+    try environ.put("TMPDIR", base);
+    const Remove = struct {
+        environ: *const std.process.Environ.Map,
+        dir: Io.Dir,
+        pub fn setUp(_: *@This(), _: *shakedown.FaultIo) !void {}
+        pub fn run(r: *@This(), run_io: Io) !void {
+            var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer arena.deinit();
+            var temp = try TempFile.create(arena.allocator(), run_io, r.environ, .{ .prefix = "t-", .directory = true, .suffix = "f" }, "x");
+            temp.remove(run_io);
+        }
+        pub fn check(_: *@This(), check_io: Io, result: anyerror!void, injected: ?shakedown.Injected) !void {
+            try testing_io.cancelKept(check_io, result, injected);
+        }
+        // What a canceled run left goes, so the next one makes the same
+        // name: the faulted Io's random bytes are the same every run.
+        pub fn tearDown(r: *@This()) void {
+            const real = std.testing.io;
+            var it = r.dir.iterate();
+            while (it.next(real) catch return) |entry| r.dir.deleteTree(real, entry.name) catch return;
+        }
+    };
+    var remove: Remove = .{ .environ = &environ, .dir = tmp.dir };
+    try testing_io.everyCancel(gpa, io, &remove);
+}
+
+const shakedown = @import("shakedown");
+const testing_io = @import("../testing/io.zig");

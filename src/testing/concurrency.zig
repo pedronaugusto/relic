@@ -90,7 +90,7 @@ test "a lock a second process holds is refused, and left exactly as it was" {
         index.write(io, git_dir, "index", .{}),
     );
 
-    const report = fs.staleReport(io, git_dir, "index");
+    const report = try fs.staleReport(io, git_dir, "index");
     try std.testing.expect(report.held);
     if (report.pid) |pid| try std.testing.expect(pid != 0);
 
@@ -120,7 +120,7 @@ test "a stale lock is reported and never broken" {
     try tmp.dir.writeFile(io, .{ .sub_path = "thing.lock", .data = "" });
     try tmp.dir.writeFile(io, .{ .sub_path = "thing~pid.lock", .data = "pid 4294967294\n" });
 
-    const report = fs.staleReport(io, tmp.dir, "thing");
+    const report = try fs.staleReport(io, tmp.dir, "thing");
     try std.testing.expect(report.held);
     try std.testing.expectEqual(@as(?u32, 4294967294), report.pid);
     if (report.holder_alive) |alive| try std.testing.expect(!alive);
