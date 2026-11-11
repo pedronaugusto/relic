@@ -297,7 +297,12 @@ pub const Session = struct {
         const pointer: lfs.Pointer = .{ .oid = oid[0..64].*, .size = size };
         // The status has gone: an object that vanished since its size was
         // read can only be cut short, which the client finds by its size.
-        _ = try read(store.context, s.io, s.repository, &pointer, &data.interface);
+        _ = read(store.context, s.io, s.repository, &pointer, &data.interface) catch |err| {
+            // A write to the client that failed is the store's failure to
+            // it: why is `out`'s own, a cancel among the reasons.
+            if (data.failed) return error.WriteFailed;
+            return err;
+        };
         data.interface.flush() catch return error.WriteFailed;
         s.write(pkt_line.flush(s.out)) catch return error.WriteFailed;
         s.out.flush() catch return error.WriteFailed;
@@ -545,6 +550,8 @@ const DataReader = struct {
 const DataWriter = struct {
     out: *Io.Writer,
     interface: Io.Writer,
+    /// `out` failed; why is its own to say.
+    failed: bool = false,
 
     fn init(out: *Io.Writer, buffer: []u8) DataWriter {
         return .{ .out = out, .interface = .{ .vtable = &.{ .drain = drain }, .buffer = buffer } };
@@ -571,7 +578,10 @@ const DataWriter = struct {
         var left = bytes;
         while (left.len != 0) {
             const n = @min(left.len, pkt_line.max_data);
-            pkt_line.write(d.out, left[0..n]) catch return error.WriteFailed;
+            pkt_line.write(d.out, left[0..n]) catch {
+                d.failed = true;
+                return error.WriteFailed;
+            };
             left = left[n..];
         }
     }

@@ -379,7 +379,13 @@ const Call = struct {
         try c.response.header("Content-Type", "application/octet-stream");
         try c.response.setLength(size);
         const w = try c.response.writer(c.io);
-        if (!try read(s.context, c.io, c.repository, &pointer, w)) {
+        const held = read(s.context, c.io, c.repository, &pointer, w) catch |err| {
+            // A write to the client that failed is the store's failure to
+            // it: a cancel is the response's to say.
+            if (c.response.failure() == error.Canceled) return error.Canceled;
+            return err;
+        };
+        if (!held) {
             // Gone between the two questions: nothing has been sent yet
             // unless the object was, so the length said is what is owed.
             return message(c.io, c.response, .not_found, "Object does not exist");
@@ -396,7 +402,9 @@ const Call = struct {
         const pointer: lfs.Pointer = .{ .oid = oid.*, .size = size };
         write(s.context, c.io, c.repository, &pointer, c.request.reader(c.io)) catch |err| switch (err) {
             error.LfsObjectMismatch => return message(c.io, c.response, .unprocessable_entity, "The upload is not the object it names"),
-            else => |e| return e,
+            // A read of the body that failed is the store's failure to
+            // read it: a cancel is the request's to say.
+            else => |e| return if (c.request.failure() == error.Canceled) error.Canceled else e,
         };
         return json(c.io, c.response, .ok, "");
     }

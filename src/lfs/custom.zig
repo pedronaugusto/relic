@@ -268,8 +268,10 @@ pub const Agent = struct {
 
     /// `terminate`, and the process waited for.
     pub fn deinit(a: *Agent, io: Io) void {
-        // glint-ignore: Z026 -- terminate is a courtesy; resource release ends the agent whether or not it heard it
-        a.send(io, "{\"event\":\"terminate\"}\n") catch {};
+        // terminate is a courtesy; resource release ends the agent whether
+        // or not it heard it, and a cancel stays for the caller's next
+        // cancelation point.
+        a.send(io, "{\"event\":\"terminate\"}\n") catch |err| if (err == error.Canceled) io.recancel();
         a.releaseResources(io);
         const gpa = a.gpa;
         a.* = undefined;

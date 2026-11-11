@@ -56,6 +56,9 @@ pub const Native = struct {
         n.fixed = null;
         n.failure = null;
         n.handle(io, event, handed.args, handed.environ) catch |err| {
+            // The hook's answer is a bool: a cancel stays for the caller's
+            // next cancelation point.
+            if (err == error.Canceled) io.recancel();
             n.failure = @errorName(err);
             // git-lfs's post-checkout and post-merge warn and go on; its
             // post-commit fails.
@@ -118,3 +121,32 @@ fn treeOf(arena: Allocator, io: Io, repo: *Repository, commit_oid: Oid) !Oid {
 
 /// All errors reported by this namespace.
 pub const Error = error{};
+
+const shakedown = @import("shakedown");
+const testing_io = @import("../testing/io.zig");
+
+test "a cancel that lands in a hook's work is put back, not taken for the hook's answer" {
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var repo = try Repository.create(gpa, std.testing.io, tmp.dir, .{ .default_branch = "main" });
+    defer repo.deinit(std.testing.io);
+    var environ: std.process.Environ.Map = .init(gpa);
+    defer environ.deinit();
+    const Merge = struct {
+        native: Native,
+        environ: *const std.process.Environ.Map,
+        pub fn setUp(_: *@This(), _: *shakedown.FaultIo) !void {}
+        // The hook answers with a bool: a cancel is the task's next
+        // cancelation point's to say.
+        pub fn run(m: *@This(), io: Io) !void {
+            _ = m.native.lfsHooks().run(io, "post-merge", .{ .args = &.{}, .input = "", .environ = m.environ });
+        }
+        pub fn check(_: *@This(), io: Io, result: anyerror!void, injected: ?shakedown.Injected) !void {
+            try testing_io.cancelKept(io, result, injected);
+        }
+        pub fn tearDown(_: *@This()) void {}
+    };
+    var merge: Merge = .{ .native = .{ .gpa = gpa, .repo = &repo }, .environ = &environ };
+    try testing_io.everyCancel(gpa, std.testing.io, &merge);
+}

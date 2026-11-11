@@ -623,7 +623,7 @@ const Run = struct {
 /// directory the repository's alternates name — what `git clone
 /// --reference` and `--shared` leave — where one is there. A relative path
 /// is taken from `objects`, as git takes it.
-fn referenceDirs(arena: Allocator, io: Io, store: *const lfs.Store, alternates: []const []const u8) Allocator.Error![]const []const u8 {
+fn referenceDirs(arena: Allocator, io: Io, store: *const lfs.Store, alternates: []const []const u8) (Allocator.Error || Io.Cancelable)![]const []const u8 {
     var out: std.ArrayList([]const u8) = .empty;
     for (alternates) |path| {
         const line = std.mem.trimEnd(u8, path, "/");
@@ -632,7 +632,10 @@ fn referenceDirs(arena: Allocator, io: Io, store: *const lfs.Store, alternates: 
             try arena.print("{s}/lfs/objects", .{parent})
         else
             try arena.print("objects/{s}/lfs/objects", .{parent});
-        const stat = store.base.statFile(io, dir, .{}) catch continue;
+        const stat = store.base.statFile(io, dir, .{}) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => continue,
+        };
         if (stat.kind == .directory) try out.append(arena, dir);
     }
     return out.items;
@@ -650,14 +653,20 @@ fn fromReference(io: Io, store: *const lfs.Store, references: []const []const u8
     for (references) |dir| {
         var ref_buf: [lfs.Store.max_path]u8 = undefined;
         const ref_path = std.mem.print(&ref_buf, "{s}/{s}/{s}/{s}", .{ dir, pointer.oid[0..2], pointer.oid[2..4], &pointer.oid }) catch continue;
-        const stat = store.base.statFile(io, ref_path, .{}) catch continue;
+        const stat = store.base.statFile(io, ref_path, .{}) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => continue,
+        };
         if (stat.kind != .file or stat.size != pointer.size) continue;
         try store.base.createDirPath(io, std.Io.Dir.path.dirnamePosix(object_path).?);
         // glint-ignore: Z026 -- a store that cannot take a hard link gets a copy below
         if (fs.hardLink(io, store.base, ref_path, object_path)) {
             return true;
-        } else |_| {}
-        const file = store.base.openFile(io, ref_path, .{}) catch continue;
+        } else |err| if (err == error.Canceled) return error.Canceled;
+        const file = store.base.openFile(io, ref_path, .{}) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => continue,
+        };
         defer file.close(io);
         var buf: [64 * 1024]u8 = undefined;
         var reader = file.reader(io, &buf);
@@ -676,6 +685,10 @@ fn run(io: Io, server: *lfsapi.Server, operation: lfsapi.Operation, objects: []c
     // git-lfs sweeps its temporary files when a command ends.
     if (server.client.options.now) |now| {
         sweepTmp(server.gpa, io, server.store(), now) catch |err| {
+            if (err == error.Canceled) {
+                outcome.deinit();
+                return error.Canceled;
+            }
             outcome.sweep_failed = @errorName(err);
         };
     }
@@ -715,14 +728,20 @@ pub fn sweepTmp(gpa: Allocator, io: Io, store: *const lfs.Store, now_at: Io.Time
                         try tmp.deleteFile(io, entry.path);
                         continue;
                     }
-                } else |_| {}
+                } else |err| if (err == error.Canceled) return error.Canceled;
             } else |_| {}
         }
         if (std.Io.Dir.path.dirname(entry.path)) |parent| {
-            const dir_stat = tmp.statFile(io, parent, .{}) catch continue;
+            const dir_stat = tmp.statFile(io, parent, .{}) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => continue,
+            };
             if (date.instant(dir_stat.mtime).saturatingDurationTo(now).compare(hour) != .gt) continue;
         }
-        const st = tmp.statFile(io, entry.path, .{}) catch continue;
+        const st = tmp.statFile(io, entry.path, .{}) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => continue,
+        };
         if (date.instant(st.mtime).saturatingDurationTo(now).compare(hour) == .gt) try tmp.deleteFile(io, entry.path);
     }
 }
@@ -1751,14 +1770,14 @@ fn batchRequest(
         if (status == .too_many_requests and retries < limits.max_retries) {
             retries += 1;
             const delay = limits.retryDelay(retries, ex.retryAfter()) orelse {
-                server.client.noteStatus(io, ex, "batch");
+                try server.client.noteStatus(io, ex, "batch");
                 return error.LfsBatchFailed;
             };
             if (delay.nanoseconds != 0) try io.sleep(delay, .awake);
             continue;
         }
         if (status != .ok) {
-            server.client.noteStatus(io, ex, "batch");
+            try server.client.noteStatus(io, ex, "batch");
             return error.LfsBatchFailed;
         }
         const bytes = try ex.readJson(io, 64 << 20);

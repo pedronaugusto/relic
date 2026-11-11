@@ -447,7 +447,7 @@ pub fn lock(arena: Allocator, io: Io, server: *lfsapi.Server, repo: *Repository,
     defer ex.deinit(io);
     const status = ex.status();
     if (status == .not_found or status == .not_implemented) {
-        server.client.noteStatus(io, ex, "lock");
+        try server.client.noteStatus(io, ex, "lock");
         return error.LockingUnsupported;
     }
     if (status == .unauthorized or status == .forbidden) return server.client.failStatus(io, ex, "lock");
@@ -457,7 +457,7 @@ pub fn lock(arena: Allocator, io: Io, server: *lfsapi.Server, repo: *Repository,
         return error.LockRefused;
     }
     const taken = answer.lock orelse {
-        server.client.noteStatus(io, ex, answer.message orelse "lock");
+        try server.client.noteStatus(io, ex, answer.message orelse "lock");
         return error.LockRefused;
     };
     if (status.class() != .success) return error.LockRefused;
@@ -509,15 +509,15 @@ fn unlockAsked(arena: Allocator, io: Io, server: *lfsapi.Server, repo: *Reposito
     const status = ex.status();
     switch (status) {
         .not_implemented => {
-            server.client.noteStatus(io, ex, "unlock");
+            try server.client.noteStatus(io, ex, "unlock");
             return error.LockingUnsupported;
         },
         .not_found => {
-            server.client.noteStatus(io, ex, "unlock");
+            try server.client.noteStatus(io, ex, "unlock");
             return error.LockNotFound;
         },
         .forbidden => {
-            server.client.noteStatus(io, ex, "unlock");
+            try server.client.noteStatus(io, ex, "unlock");
             return error.LockOwnedByOther;
         },
         .unauthorized => return server.client.failStatus(io, ex, "unlock"),
@@ -526,7 +526,7 @@ fn unlockAsked(arena: Allocator, io: Io, server: *lfsapi.Server, repo: *Reposito
     const answer = try parseLockAnswer(arena, try ex.readJson(io, 1 << 20));
     if (answer.message) |m| {
         if (answer.lock == null or status.class() != .success) {
-            server.client.noteStatus(io, ex, m);
+            try server.client.noteStatus(io, ex, m);
             return error.LockRefused;
         }
     }
@@ -642,13 +642,13 @@ pub fn list(io: Io, server: *lfsapi.Server, repo: *Repository, filter: Filter, o
         defer ex.deinit(io);
         const status = ex.status();
         if (status == .not_found or status == .not_implemented) {
-            server.client.noteStatus(io, ex, "locks");
+            try server.client.noteStatus(io, ex, "locks");
             return error.LockingUnsupported;
         }
         if (status != .ok) return server.client.failStatus(io, ex, "locks");
         const page = try parseListPage(arena, try ex.readJson(io, 64 << 20));
         if (page.message) |m| {
-            server.client.noteStatus(io, ex, m);
+            try server.client.noteStatus(io, ex, m);
             return error.LockRefused;
         }
         for (page.locks) |l| {
@@ -708,13 +708,13 @@ pub fn verify(io: Io, server: *lfsapi.Server, repo: *Repository, options: Option
         defer ex.deinit(io);
         const status = ex.status();
         if (status == .not_found or status == .not_implemented) {
-            server.client.noteStatus(io, ex, "locks/verify");
+            try server.client.noteStatus(io, ex, "locks/verify");
             return error.LockingUnsupported;
         }
         if (status != .ok) return server.client.failStatus(io, ex, "locks/verify");
         const page = try parseVerifyPage(arena, try ex.readJson(io, 64 << 20));
         if (page.message) |m| {
-            server.client.noteStatus(io, ex, m);
+            try server.client.noteStatus(io, ex, m);
             return error.LockRefused;
         }
         try ours.appendSlice(arena, page.ours);

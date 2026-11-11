@@ -976,20 +976,31 @@ pub const Client = struct {
 
     /// `$HOME/.netrc`, or `_netrc` on Windows when there is no `.netrc`, as
     /// git-lfs reads it. One that does not parse is not used, as git-lfs
-    /// does not use it.
-    fn loadNetrc(gpa: Allocator, io: Io, options: Options) Allocator.Error!?netrc_mod.Netrc {
+    /// does not use it. A cancel that lands in reading it is returned.
+    fn loadNetrc(gpa: Allocator, io: Io, options: Options) (Allocator.Error || Io.Cancelable)!?netrc_mod.Netrc {
         const programs = options.programs orelse return null;
         const home = programs.environ.get("HOME") orelse return null;
         if (home.len == 0) return null;
-        var dir = Io.Dir.cwd().openDir(io, home, .{}) catch return null;
+        var dir = Io.Dir.cwd().openDir(io, home, .{}) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => return null,
+        };
         defer dir.close(io);
-        var text = (fs.readSecretFile(gpa, io, dir, ".netrc", 1 << 20) catch null) orelse
-            (if (builtin.target.os.tag == .windows) (fs.readSecretFile(gpa, io, dir, "_netrc", 1 << 20) catch null) else null) orelse
+        var text = (try readNetrc(gpa, io, dir, ".netrc")) orelse
+            (if (builtin.target.os.tag == .windows) try readNetrc(gpa, io, dir, "_netrc") else null) orelse
             return null;
         defer text.deinit(gpa);
         return netrc_mod.Netrc.parse(gpa, text.expose()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.MalformedNetrc => null,
+        };
+    }
+
+    /// The file's text, `null` when it cannot be read, but for a cancel.
+    fn readNetrc(gpa: Allocator, io: Io, dir: Io.Dir, name: []const u8) Io.Cancelable!?aegis.SecretBytes {
+        return fs.readSecretFile(gpa, io, dir, name, 1 << 20) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => return null,
         };
     }
 
@@ -1242,8 +1253,9 @@ pub const Client = struct {
             else => {
                 // Not there, or not speaking it: git-lfs-authenticate and
                 // HTTP, as git-lfs falls back.
-                // glint-ignore: Z026 -- a control directory left behind holds only a dead socket, in the system's temporary space
-                if (control_dir) |d| Io.Dir.cwd().deleteTree(io, d) catch {};
+                // A control directory left behind holds only a dead socket,
+                // in the system's temporary space; a cancel is returned.
+                if (control_dir) |d| Io.Dir.cwd().deleteTree(io, d) catch |e2| if (e2 == error.Canceled) return error.Canceled;
                 return null;
             },
         };
@@ -1638,8 +1650,9 @@ pub const Client = struct {
     ) ErrorNamespace.Error!void {
         const offers = ex.authenticateOffers();
         refusal.challenges = try ex.challenges(scratch);
-        refusal.said = ex.refusalText(scratch, io);
+        const said = ex.refusalText(scratch, io);
         ex.deinit(io);
+        refusal.said = try said;
         var guard = try c.shared.acquire(io);
         defer guard.deinit(io);
         const shared = guard.value();
@@ -2132,7 +2145,7 @@ pub const Client = struct {
     /// names it.
     pub fn failStatus(c: *Client, io: Io, ex: *Exchange, what: []const u8) Self.Error {
         const status = ex.status();
-        const said = c.noteStatusText(io, ex, what);
+        const said = try c.noteStatusText(io, ex, what);
         if (status == .forbidden) {
             var guard = c.shared.acquireUncancelable(io);
             defer guard.deinit(io);
@@ -2142,16 +2155,19 @@ pub const Client = struct {
     }
 
     /// Keep an answer's status and the server's reason as the client's
-    /// message.
-    pub fn noteStatus(c: *Client, io: Io, ex: *Exchange, what: []const u8) void {
-        _ = c.noteStatusText(io, ex, what);
+    /// message. A cancel that lands in reading the reason is returned.
+    pub fn noteStatus(c: *Client, io: Io, ex: *Exchange, what: []const u8) Io.Cancelable!void {
+        _ = try c.noteStatusText(io, ex, what);
     }
 
     /// `noteStatus`, returning the server's reason, in the exchange's
     /// arena.
-    fn noteStatusText(c: *Client, io: Io, ex: *Exchange, what: []const u8) []const u8 {
+    fn noteStatusText(c: *Client, io: Io, ex: *Exchange, what: []const u8) Io.Cancelable![]const u8 {
         const status = ex.status();
-        const body = ex.readAll(io, 64 * 1024) catch Unparsed.init("");
+        const body = ex.readAll(io, 64 * 1024) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => Unparsed.init(""),
+        };
         const reason = if (isJsonType(ex.header("content-type") orelse "")) parseJson(Reason, ex.arena.allocator(), body, .http) catch Reason{} else Reason{};
         var buf: [512]u8 = undefined;
         c.setMessage(io, std.mem.print(&buf, "{s}: HTTP {d}{s}{s}", .{
@@ -2254,10 +2270,13 @@ pub const Exchange = struct {
 
     /// What the server said in refusing, into `a`: the API's `message`, or
     /// a `text/plain` body, at most 4 KiB. Empty when it said nothing
-    /// readable.
-    fn refusalText(ex: *Exchange, a: Allocator, io: Io) []const u8 {
+    /// readable; a cancel that lands in reading it is returned.
+    fn refusalText(ex: *Exchange, a: Allocator, io: Io) Io.Cancelable![]const u8 {
         const content_type = ex.header("content-type") orelse return "";
-        const body = ex.readAll(io, 4096) catch return "";
+        const body = ex.readAll(io, 4096) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => return "",
+        };
         if (std.ascii.startsWithIgnoreCase(content_type, "text/plain")) return a.dupe(u8, body.readForParse()) catch "";
         if (!isJsonType(content_type)) return "";
         const reason = parseJson(Reason, a, body, .http) catch return "";
@@ -2549,8 +2568,9 @@ pub fn parseRetryAfter(value: []const u8, now: ?Io.Timestamp) ?Io.Duration {
 /// A private directory for OpenSSH's control socket, as git-lfs makes one:
 /// in `XDG_RUNTIME_DIR`, else `/tmp` on macOS, whose own temporary
 /// directory makes a socket path too long, else `TMPDIR` or `/tmp`. `null`
-/// when none can be made, and ssh runs unshared.
-fn controlDir(arena: Allocator, io: Io, environ: *const std.process.Environ.Map) Allocator.Error!?[]const u8 {
+/// when none can be made, and ssh runs unshared. A cancel that lands in
+/// making it is returned.
+fn controlDir(arena: Allocator, io: Io, environ: *const std.process.Environ.Map) (Allocator.Error || Io.Cancelable)!?[]const u8 {
     const base = environ.get("XDG_RUNTIME_DIR") orelse if (builtin.target.os.tag == .macos)
         "/tmp"
     else
@@ -2559,7 +2579,10 @@ fn controlDir(arena: Allocator, io: Io, environ: *const std.process.Environ.Map)
     const name = fs.tempName(io, &name_buf, "sock-");
     const dir = try arena.print("{s}/{s}", .{ std.mem.trimEnd(u8, base, "/"), name });
     const private: Io.File.Permissions = if (builtin.target.os.tag == .windows) .default_dir else .fromMode(0o700);
-    Io.Dir.cwd().createDir(io, dir, private) catch return null;
+    Io.Dir.cwd().createDir(io, dir, private) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return null,
+    };
     return dir;
 }
 

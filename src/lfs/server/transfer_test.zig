@@ -192,3 +192,74 @@ test "a cancel that stops a read of an object coming up is its reader's to say, 
     const up: Up = .{ .dir = tmp.dir, .root = root, .store = directory.store() };
     try testing_io.eachCallCanceled(gpa, io, &up, .file_read_streaming);
 }
+
+test "a cancel that stops a write of an object going down is its writer's to say, not the store's failure" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "repo.git");
+    var repo_dir = try tmp.dir.openDir(io, "repo.git", .{});
+    var made = try repo_mod.Repository.create(gpa, io, repo_dir, .{ .default_branch = "main", .bare = true });
+    made.deinit(io);
+    repo_dir.close(io);
+    try tmp.dir.createDirPath(io, "objects");
+    var objects = try tmp.dir.openDir(io, "objects", .{});
+    defer objects.close(io);
+    var directory: server.Directory = .{ .dir = objects };
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+
+    // An object of several packets in the store, so its data takes writes
+    // of its own on the way down.
+    const content = try gpa.alloc(u8, 3 * pkt_line.max_data);
+    defer gpa.free(content);
+    @memset(content, 'd');
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(content, &digest, .{});
+    var oid: [64]u8 = undefined;
+    _ = std.mem.print(&oid, "{x}", .{&digest}) catch unreachable;
+    const store = directory.store();
+    var source: Io.Reader = .fixed(content);
+    try store.vtable.write.?(store.context, io, "repo.git", &.{ .oid = oid, .size = content.len }, &source);
+
+    var asked: Io.Writer.Allocating = .init(gpa);
+    defer asked.deinit();
+    const w = &asked.writer;
+    try pkt_line.write(w, "version 1\n");
+    try pkt_line.flush(w);
+    try pkt_line.print(w, "get-object {s}\n", .{&oid});
+    try pkt_line.flush(w);
+    try pkt_line.write(w, "quit\n");
+    try pkt_line.flush(w);
+
+    const Down = struct {
+        dir: Io.Dir,
+        root: []const u8,
+        store: server.Store,
+        asked: []const u8,
+        fn authorize(_: *Caller, _: []const u8, _: server.Access) Verdict {
+            return .{ .allow = "ada" };
+        }
+        fn now(_: *Caller) i64 {
+            return 1790244000;
+        }
+        // The caller owns the writer, and says why it failed.
+        pub fn run(d: *const @This(), run_io: Io) !void {
+            var in: Io.Reader = .fixed(d.asked);
+            var in_buffer: [pkt_line.max_line]u8 = undefined;
+            var limited = in.limited(.unlimited, &in_buffer);
+            const file = try d.dir.createFile(run_io, "answered", .{});
+            defer file.close(run_io);
+            var out_buffer: [4096]u8 = undefined;
+            var out = file.writerStreaming(run_io, &out_buffer);
+            var caller: Caller = .{ .vtable = &.{ .authorize = authorize, .now = now } };
+            _ = serve(gpa, run_io, .{ .root = d.root, .path = "/repo.git", .operation = .download, .in = &limited.interface, .out = &out.interface }, .{
+                .store = d.store,
+                .caller = &caller,
+            }) catch |err| return if (err == error.WriteFailed) out.err.? else err;
+        }
+    };
+    const down: Down = .{ .dir = tmp.dir, .root = root, .store = store, .asked = asked.written() };
+    try testing_io.eachCallCanceled(gpa, io, &down, .file_write_streaming);
+}

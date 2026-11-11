@@ -155,13 +155,15 @@ pub fn beforePush(
     const a = report.arena.allocator();
 
     const pointers = try pointersIn(a, io, repo.objectDatabase(), pushed);
-    if (options.mode == .auto and pointers.len == 0 and !usesLfs(io, repo)) return;
+    if (options.mode == .auto and pointers.len == 0 and !try usesLfs(io, repo)) return;
     report.ran = true;
 
     const server = try lfsapi.Server.open(gpa, io, repo, remote, .{ .programs = reach.programs, .prompt = reach.prompt, .auth_failure = reach.auth_failure, .now = options.now });
     defer server.deinit(io);
-    // glint-ignore: Z026 -- remembering the endpoint's access is git-lfs's best-effort config write and never fails a push
-    defer if (options.remember) server.client.remember(io, repo) catch {};
+    // Remembering the endpoint's access is git-lfs's best-effort config
+    // write and never fails a push; a cancel stays for the caller's next
+    // cancelation point.
+    defer if (options.remember) server.client.remember(io, repo) catch |err| if (err == error.Canceled) io.recancel();
 
     // Other people's locks first: a push refused for one uploads nothing.
     const endpoint = try server.client.endpoint(io, .upload);
@@ -248,12 +250,15 @@ fn pointersIn(a: Allocator, io: Io, db: *odb_mod.Odb, pushed: []const odb_mod.Pa
 }
 
 /// Whether the repository has anything to do with LFS: a `filter.lfs`
-/// setting, or an LFS directory.
-fn usesLfs(io: Io, repo: *Repository) bool {
+/// setting, or an LFS directory. A cancel that lands in looking is returned.
+fn usesLfs(io: Io, repo: *Repository) Io.Cancelable!bool {
     for (repo.configuration().entries.items) |entry| {
         if (std.ascii.eqlIgnoreCase(entry.section, "filter") and std.mem.eql(u8, entry.subsection, "lfs")) return true;
     }
-    repo.commonDirectory().access(io, "lfs", .{}) catch return false;
+    repo.commonDirectory().access(io, "lfs", .{}) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return false,
+    };
     return true;
 }
 
