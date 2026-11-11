@@ -500,3 +500,32 @@ test "LFS HTTP pagination ends or fails without publishing partial caches" {
         }
     }
 }
+
+test "a cancel that lands in a native hook's work is put back, not taken for the hook's answer" {
+    const shakedown = @import("shakedown");
+    const testing_io = @import("../testing/io.zig");
+    const lfshooks = @import("hooks.zig");
+    const gpa = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var repo = try repo_mod.Repository.create(gpa, testing.io, tmp.dir, .{ .default_branch = "main" });
+    defer repo.deinit(testing.io);
+    var environ: std.process.Environ.Map = .init(gpa);
+    defer environ.deinit();
+    const Merge = struct {
+        native: lfshooks.Native,
+        environ: *const std.process.Environ.Map,
+        pub fn setUp(_: *@This(), _: *shakedown.FaultIo) !void {}
+        // The hook answers with a bool: a cancel is the task's next
+        // cancelation point's to say.
+        pub fn run(m: *@This(), io: Io) !void {
+            _ = m.native.lfsHooks().run(io, "post-merge", .{ .args = &.{}, .input = "", .environ = m.environ });
+        }
+        pub fn check(_: *@This(), io: Io, result: anyerror!void, injected: ?shakedown.Injected) !void {
+            try testing_io.cancelKept(io, result, injected);
+        }
+        pub fn tearDown(_: *@This()) void {}
+    };
+    var merge: Merge = .{ .native = .{ .gpa = gpa, .repo = &repo }, .environ = &environ };
+    try testing_io.everyCancel(gpa, testing.io, &merge);
+}
