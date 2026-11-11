@@ -269,7 +269,12 @@ pub const File = struct {
         f.file = .init(try dir.openFile(io, path, .{}));
         errdefer f.file.deinit(io);
         f.reader = f.file.borrow().*.reader(io, &f.buffer);
-        f.header = try Header.read(gpa, &f.reader.interface);
+        f.header = Header.read(gpa, &f.reader.interface) catch |err| {
+            // A read that failed keeps its cause in the file's reader: a
+            // cancel is returned as itself.
+            if (err == error.ReadFailed) if (f.reader.err) |cause| if (cause == error.Canceled) return error.Canceled;
+            return err;
+        };
         return f;
     }
 
@@ -287,8 +292,13 @@ pub const File = struct {
 };
 
 /// `is_bundle`: whether `path` is a file whose header reads as a bundle's.
+/// A cancel that lands in reading it is put back for the caller's next
+/// cancelation point.
 pub fn isBundle(gpa: Allocator, io: Io, dir: Io.Dir, path: []const u8) bool {
-    const f = File.open(gpa, io, dir, path) catch return false;
+    const f = File.open(gpa, io, dir, path) catch |err| {
+        if (err == error.Canceled) io.recancel();
+        return false;
+    };
     f.deinit(io);
     return true;
 }
@@ -690,7 +700,11 @@ fn topoOrder(a: Allocator, io: Io, repo: *Repository, list: []const Oid) CreateE
 fn dwimRef(a: Allocator, io: Io, repo: *Repository, name: []const u8) CreateError!?[]const u8 {
     const found = (try rev_parse.dwimRef(a, io, repo.revisionSource(), name)) orelse return null;
     if (found.count != 1) return null;
-    if (repo.refStore().read(a, io, name) catch null) |direct| switch (direct) {
+    const direct_or_symbolic = repo.refStore().read(a, io, name) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => null,
+    };
+    if (direct_or_symbolic) |direct| switch (direct) {
         .symbolic => return name,
         .direct => {},
     };
@@ -753,4 +767,28 @@ test "a cancel that lands in peeling a bundle's revision to its commit is return
     };
     var peel: Peel = .{ .git = &git, .tag = try Oid.parse(.sha1, text) };
     try testing_io.everyCancel(gpa, io, &peel);
+}
+
+test "a cancel that lands in reading whether a file is a bundle is put back, not taken for no bundle" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    try git.exec(io, &.{ "commit", "-q", "--allow-empty", "-m", "one" });
+    try git.exec(io, &.{ "bundle", "create", "-q", "one.bundle", "HEAD" });
+    const Look = struct {
+        git: *testgit.Repo,
+        pub fn setUp(_: *@This(), _: *shakedown.FaultIo) !void {}
+        pub fn run(l: *@This(), task_io: Io) !void {
+            const is = isBundle(std.testing.allocator, task_io, l.git.dir, "one.bundle");
+            try task_io.checkCancel();
+            if (!is) return error.NotABundle;
+        }
+        pub fn check(_: *@This(), task_io: Io, result: anyerror!void, injected: ?shakedown.Injected) !void {
+            try testing_io.cancelKept(task_io, result, injected);
+        }
+        pub fn tearDown(_: *@This()) void {}
+    };
+    var look: Look = .{ .git = &git };
+    try testing_io.everyCancel(gpa, io, &look);
 }

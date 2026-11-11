@@ -1526,7 +1526,10 @@ pub const Server = struct {
         var opened: ?repo_mod.Repository = null;
         defer if (opened) |*r| r.deinit(s.io);
         const repo: *repo_mod.Repository = if (wt.linked) blk: {
-            var dir = Io.Dir.cwd().openDir(s.io, wt.path, .{}) catch return "Up-to-date check failed";
+            var dir = Io.Dir.cwd().openDir(s.io, wt.path, .{}) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => return "Up-to-date check failed",
+            };
             defer dir.close(s.io);
             opened = repo_mod.Repository.open(s.gpa, s.io, dir, .{}) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
@@ -1863,7 +1866,10 @@ fn shallowRoots(arena: Allocator, io: Io, index: *const pack.Index, repo: *repo_
             continue;
         }
         if ((index.find(oid) catch null) == null) continue;
-        const found = repo.objectDatabase().read(io, oid) catch continue;
+        const found = repo.objectDatabase().read(io, oid) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => continue,
+        };
         defer repo.objectDatabase().allocator().free(found.bytes);
         if (found.type != .commit) continue;
         var commit = object.Commit.parse(arena, repo.objectFormat(), found.bytes) catch continue;
@@ -2053,7 +2059,10 @@ pub fn checkHooks(io: Io, repo: *repo_mod.Repository) local.Error!void {
     var dir = (if (hooks_path) |path|
         Io.Dir.cwd().openDir(io, path, .{})
     else
-        repo.commonDirectory().openDir(io, "hooks", .{})) catch return;
+        repo.commonDirectory().openDir(io, "hooks", .{})) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return,
+    };
     defer dir.close(io);
     for ([_][]const u8{
         "pre-receive",  "update",           "post-receive",          "post-update",
@@ -2070,7 +2079,10 @@ pub fn checkHooks(io: Io, repo: *repo_mod.Repository) local.Error!void {
         var name_buf: [64]u8 = undefined;
         // unreachable: the longest hook name above, reference-transaction, is 21 bytes, 25 with .exe
         const executable = std.mem.print(&name_buf, "{s}.exe", .{name}) catch unreachable;
-        const stat = dir.statFile(io, executable, .{}) catch continue;
+        const stat = dir.statFile(io, executable, .{}) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => continue,
+        };
         if (stat.kind != .file) continue;
         return error.RemoteHooksNotRun;
     }
@@ -2228,4 +2240,32 @@ fn fuzzServe(remote: *local.Remote, case: *shakedown.Case) anyerror!void {
     defer out.deinit();
     // glint-ignore: Z026 -- refusing a malformed request is the expected outcome; only a crash or a leak fails the fuzzer
     server.serveRequest(&out.writer, &limited.interface) catch {};
+}
+
+const testgit = @import("../testing/git.zig");
+const testing_io = @import("../testing/io.zig");
+
+test "a cancel that lands in looking for a remote's hooks is returned, not taken for no hooks" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    const Look = struct {
+        git: *testgit.Repo,
+        repo: repo_mod.Repository = undefined,
+        pub fn setUp(l: *@This(), _: *shakedown.FaultIo) !void {
+            l.repo = try .open(std.testing.allocator, std.testing.io, l.git.dir, .{});
+        }
+        pub fn run(l: *@This(), task_io: Io) !void {
+            try checkHooks(task_io, &l.repo);
+        }
+        pub fn check(_: *@This(), task_io: Io, result: anyerror!void, injected: ?shakedown.Injected) !void {
+            try testing_io.cancelKept(task_io, result, injected);
+        }
+        pub fn tearDown(l: *@This()) void {
+            l.repo.deinit(std.testing.io);
+        }
+    };
+    var look: Look = .{ .git = &git };
+    try testing_io.everyCancel(gpa, io, &look);
 }

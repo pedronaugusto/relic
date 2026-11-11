@@ -431,9 +431,10 @@ const Run = struct {
             transport.download(run.gpa, run.io, &w.interface, uri, run.options.transport) catch |err| switch (err) {
                 error.Canceled => return error.Canceled,
                 error.OutOfMemory => return error.OutOfMemory,
-                else => return false,
+                // A write that failed keeps its cause in the file's writer.
+                else => return writeFailed(&w),
             };
-            w.interface.flush() catch return false;
+            w.interface.flush() catch return writeFailed(&w);
             return true;
         }
         const path = if (std.mem.startsWith(u8, uri, "file://")) uri["file://".len..] else uri;
@@ -442,6 +443,13 @@ const Run = struct {
             else => return false,
         };
         return true;
+    }
+
+    /// A download whose file write failed: not fetched, unless the write
+    /// was canceled.
+    fn writeFailed(w: *const Io.File.Writer) Error!bool {
+        if (w.err) |err| if (err == error.Canceled) return error.Canceled;
+        return false;
     }
 
     /// `unbundle_from_file`: the bundle's objects, and its refs under

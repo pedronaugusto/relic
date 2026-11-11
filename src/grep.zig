@@ -1174,16 +1174,24 @@ const Work = struct {
     /// How many items the workers have claimed: each takes the next by
     /// its index until none is left.
     next: Claimed = Claimed.init(Claims.fromRaw(0)),
+    /// Whether a worker met a cancelation. `Group.async` drops what its
+    /// task returns, and a worker the Io ran inline on the calling task
+    /// may have met the caller's, so the meeting is kept here.
+    canceled: aegis.Atomic(Cancel) = aegis.Atomic(Cancel).init(.running),
 
     const Claims = aegis.units.Count(Item, usize);
     const Claimed = aegis.Atomic(Claims);
+    const Cancel = enum(u8) { running, canceled };
 };
 
 /// Search files until none is left; a step is one file, held in memory
 /// already, so the check is explicit.
 fn runWorker(work: *Work, io: Io, worker: usize) Io.Cancelable!void {
     while (true) {
-        try io.checkCancel();
+        io.checkCancel() catch |err| {
+            work.canceled.store(.canceled, .monotonic);
+            return err;
+        };
         const i = work.next.fetchAddWrapping(Work.Claims.fromRaw(1), .monotonic).raw();
         if (i >= work.items.len) return;
         const content = work.contents[i] orelse continue;
@@ -1211,6 +1219,7 @@ fn searchAll(work: *Work, io: Io, tasks: usize) Io.Cancelable!void {
         return err;
     };
     try group.await(io);
+    if (work.canceled.load(.monotonic) == .canceled) return error.Canceled;
 }
 
 fn taskCount(threads: u16) usize {
@@ -1434,4 +1443,42 @@ test "the leftmost match decides a word match as git's retry does" {
     var icol: ?usize = null;
     try std.testing.expect(try evalExpr(&s, &sc, s.expr, "foobar foo", &col, &icol));
     try std.testing.expect(!try evalExpr(&s, &sc, s.expr, "foobar xfoo", &col, &icol));
+}
+
+const shakedown = @import("shakedown");
+
+/// An `Io` that runs a group's task at once on the calling task, as an Io
+/// with no thread to spare does, and whose first cancelation point meets
+/// a cancel: the caller's, met by whichever task runs first.
+const Eager = shakedown.Layer(struct { met: bool = false }, .{
+    .groupAsync = struct {
+        fn groupAsync(_: ?*anyopaque, _: *Io.Group, context: []const u8, _: std.mem.Alignment, start: *const fn (*const anyopaque) void) void {
+            start(context.ptr);
+        }
+    }.groupAsync,
+    .checkCancel = struct {
+        fn checkCancel(userdata: ?*anyopaque) Io.Cancelable!void {
+            const l = Eager.of(userdata);
+            if (l.state.met) return l.base.checkCancel();
+            l.state.met = true;
+            return error.Canceled;
+        }
+    }.checkCancel,
+});
+
+test "a cancel a search worker run inline meets is returned, though its group drops what the task returns" {
+    var eager: Eager = .init(std.testing.io, .{});
+    var work: Work = .{
+        .searcher = undefined,
+        .fmt = undefined,
+        .items = &.{},
+        .contents = &.{},
+        .binaries = &.{},
+        .outputs = &.{},
+        .hits = &.{},
+        .buffers = &.{},
+        .used = &.{},
+        .scratch = &.{},
+    };
+    try std.testing.expectError(error.Canceled, searchAll(&work, eager.io(), 2));
 }

@@ -1119,9 +1119,10 @@ fn followTags(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, sessi
 }
 
 /// Write the commit-graph `fetch.writeCommitGraph` asks for. A failure is
-/// a warning, as git's is: the fetch itself is done.
+/// a warning, as git's is: the fetch itself is done. A cancel is returned.
 fn writeCommitGraph(gpa: Allocator, io: Io, repo: *Repository, warnings: ?*warning.Warnings) Error!void {
     _ = accelerators.writeConfiguredCommitGraph(gpa, io, repo, .fetch) catch |err| {
+        if (err == error.Canceled) return error.Canceled;
         try warning.note(warnings, .{ .commit_graph_write_failed = @errorName(err) });
     };
 }
@@ -1516,7 +1517,7 @@ fn knownCommon(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, from
     defer complete.deinit(gpa);
     var order: u64 = 0;
     for (from) |tip| {
-        const oid = commitOf(io, repo, tip) orelse continue;
+        const oid = (try commitOf(io, repo, tip)) orelse continue;
         if (complete.contains(oid)) continue;
         const c = try readCommit(arena, gpa, io, db, oid);
         try complete.put(gpa, oid, c.parents);
@@ -1537,7 +1538,7 @@ fn knownCommon(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, from
     };
     var common: std.ArrayList(Oid) = .empty;
     for (remote_refs) |ref| {
-        const oid = commitOf(io, repo, ref.oid) orelse continue;
+        const oid = (try commitOf(io, repo, ref.oid)) orelse continue;
         if (complete.contains(oid)) try common.append(arena, oid);
     }
     return common.items;
@@ -2003,7 +2004,10 @@ fn rootsReached(arena: Allocator, io: Io, repo: *Repository, tip: Oid, roots: *c
     const index = fresh orelse return out.items;
     var seen: Oid.Set = .empty;
     var stack: std.ArrayList(Oid) = .empty;
-    const start = repo.peel(io, tip) catch return out.items;
+    const start = repo.peel(io, tip) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return out.items,
+    };
     try stack.append(arena, start);
     while (stack.pop()) |oid| {
         if ((try seen.getOrPut(arena, oid)).found_existing) continue;
@@ -2012,7 +2016,10 @@ fn rootsReached(arena: Allocator, io: Io, repo: *Repository, tip: Oid, roots: *c
             continue;
         }
         if (boundary.contains(oid) or (try index.find(oid)) == null) continue;
-        const found = repo.objectDatabase().read(io, oid) catch continue;
+        const found = repo.objectDatabase().read(io, oid) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => continue,
+        };
         defer repo.objectDatabase().allocator().free(found.bytes);
         if (found.type != .commit) continue;
         var commit = try object.Commit.parse(arena, repo.objectFormat(), found.bytes);
@@ -2107,7 +2114,10 @@ fn checkedOutBranches(arena: Allocator, gpa: Allocator, io: Io, repo: *Repositor
 
 fn isCommitish(io: Io, repo: *Repository, oid: Oid) Error!bool {
     if (!try repo.objectDatabase().exists(io, oid)) return false;
-    const peeled = repo.peel(io, oid) catch return false;
+    const peeled = repo.peel(io, oid) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return false,
+    };
     const header = try repo.objectDatabase().readHeader(io, peeled);
     return header.type == .commit;
 }
@@ -2153,8 +2163,8 @@ fn decide(
         if (force or entry.force) return .{ .old = old, .result = .tag_updated, .message = "updating tag" };
         return .{ .old = old, .result = .rejected_would_clobber_tag, .message = null };
     }
-    const old_commit = commitOf(io, repo, current);
-    const new_commit = commitOf(io, repo, entry.oid);
+    const old_commit = try commitOf(io, repo, current);
+    const new_commit = try commitOf(io, repo, entry.oid);
     if (old_commit == null or new_commit == null) {
         const message = if (std.mem.startsWith(u8, entry.name, "refs/tags/"))
             "storing tag"
@@ -2171,9 +2181,16 @@ fn decide(
     return .{ .old = old, .result = .rejected_non_fast_forward, .message = null };
 }
 
-fn commitOf(io: Io, repo: *Repository, oid: Oid) ?Oid {
-    const peeled = repo.peel(io, oid) catch return null;
-    const header = repo.objectDatabase().readHeader(io, peeled) catch return null;
+/// The commit `oid` is or peels to, or `null`; a cancel is returned.
+fn commitOf(io: Io, repo: *Repository, oid: Oid) Io.Cancelable!?Oid {
+    const peeled = repo.peel(io, oid) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return null,
+    };
+    const header = repo.objectDatabase().readHeader(io, peeled) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return null,
+    };
     return if (header.type == .commit) peeled else null;
 }
 

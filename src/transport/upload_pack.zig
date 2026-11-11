@@ -1432,7 +1432,7 @@ const Negotiation = struct {
                 for (n.edges.items) |oid| w.interface.print("{f}\n", .{oid}) catch |e| break :write e;
                 w.interface.writeAll("\n") catch |e| break :write e;
                 w.interface.flush() catch |e| break :write e;
-            }) catch return paced.died();
+            }) catch return paced.failed(w.err);
             running.child.closeStdin(s.io);
         }
         // Its progress beside the pack, where a second task runs; else the
