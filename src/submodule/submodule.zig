@@ -548,7 +548,10 @@ fn validateGitDir(arena: Allocator, io: Io, git_dir: Io.Dir, name: []const u8, d
     for (name, 0..) |c, i| {
         if (c != '/' and c != '\\') continue;
         const prefix = try arena.print("modules/{s}", .{name[0..i]});
-        var dir = git_dir.openDir(io, prefix, .{}) catch continue;
+        var dir = git_dir.openDir(io, prefix, .{}) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => continue,
+        };
         defer dir.close(io);
         if (try discover.directory.isGitDirectory(io, dir)) return refuse(refusal, display, prefix, error.GitDirInsideGitDir);
     }
@@ -1161,7 +1164,10 @@ pub fn deinit(gpa: Allocator, io: Io, repo: *Repository, options: DeinitOptions)
             try wt.deleteTree(io, entry.path);
             outcome.cleared += 1;
             const where = try moduleDir(arena, io, repo, module.name, entry.path, options.refusal);
-            var module_dir = where.base.openDir(io, where.path, .{}) catch null;
+            var module_dir = where.base.openDir(io, where.path, .{}) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => null,
+            };
             if (module_dir) |*dir| {
                 defer dir.close(io);
                 if (try discover.directory.isGitDirectory(io, dir.*)) try setCoreWorktree(io, repo, dir.*, null);
@@ -1193,14 +1199,17 @@ pub fn migrateGitDirConfigs(gpa: Allocator, io: Io, repo: *Repository) Self.Erro
         defer modules.close(io);
         var it = modules.iterate();
         while (try it.next(io)) |entry| {
-            var dir = modules.openDir(io, entry.name, .{}) catch continue;
+            var dir = modules.openDir(io, entry.name, .{}) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => continue,
+            };
             defer dir.close(io);
             if (!try discover.directory.isGitDirectory(io, dir)) continue;
             if (repo.configuration().get(try configKey(arena, entry.name, "gitdir")) != null) continue;
             try setDefaultGitDir(arena, io, repo, try arena.dupe(u8, entry.name), &edits);
             migrated += 1;
         }
-    } else |_| {}
+    } else |err| if (err == error.Canceled) return error.Canceled;
     const version = try repo.configuration().getInt(c_int, "core.repositoryformatversion", 0);
     if (version == 0) try edits.set("core.repositoryformatversion", "1");
     try edits.set("extensions.submodulePathConfig", "true");
@@ -1252,7 +1261,10 @@ fn encodedGitDirOk(arena: Allocator, io: Io, repo: *Repository, dir: ModuleDir, 
         var d = d_const;
         defer d.close(io);
         break :blk try discover.directory.isGitDirectory(io, d);
-    } else |_| false;
+    } else |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => false,
+    };
     if (is_git_dir) {
         // `submodule_conflicts_with_existing`.
         const mine = try dir.absolute(arena, io);
@@ -1267,7 +1279,10 @@ fn encodedGitDirOk(arena: Allocator, io: Io, repo: *Repository, dir: ModuleDir, 
     if (repo.settings().ignore_case) {
         // `check_casefolding_conflict`.
         const parent = std.Io.Dir.path.dirnamePosix(dir.path) orelse return true;
-        var modules = dir.base.openDir(io, parent, .{ .iterate = true }) catch return true;
+        var modules = dir.base.openDir(io, parent, .{ .iterate = true }) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => return true,
+        };
         defer modules.close(io);
         const suffixes_match = std.mem.eql(u8, last, name);
         var it = modules.iterate();
@@ -1452,7 +1467,10 @@ fn absorbIn(
             // with the submodule this one lives in.
             const module = entry.module orelse return refuse(options.refusal, display, "", error.NoSubmoduleMapping);
             const where = try moduleDir(arena, io, repo, module.name, display, options.refusal);
-            var module_dir = where.base.openDir(io, where.path, .{}) catch continue;
+            var module_dir = where.base.openDir(io, where.path, .{}) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => continue,
+            };
             defer module_dir.close(io);
             if (!try discover.directory.isGitDirectory(io, module_dir)) continue;
             var work = try wt.openDir(io, entry.path, .{});
@@ -1485,7 +1503,7 @@ fn relocate(
         defer dir.close(io);
         var it = dir.iterate();
         if (try it.next(io) != null) return refuse(refusal, display, "", error.SubmoduleHasWorktrees);
-    } else |_| {}
+    } else |err| if (err == error.Canceled) return error.Canceled;
     const where = try moduleDir(arena, io, repo, module.name, display, refusal);
     const target = where.path;
     if (try fs.statAt(io, where.base, target) != null) return refuse(refusal, display, target, error.GitDirExists);
@@ -1588,7 +1606,10 @@ fn connectAt(gpa: Allocator, io: Io, repo: *Repository, wt: Io.Dir, path: []cons
 
     // `connect_wt_gitdir_in_nested`: a working tree no repository opens at
     // has nothing nested to connect.
-    var sub = openSubmodule(gpa, io, repo, path, .{}) catch return;
+    var sub = openSubmodule(gpa, io, repo, path, .{}) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return,
+    };
     defer sub.deinit(io);
     const sub_wt = sub.workDirectory() orelse return;
     var index = try sub.openIndex(io);
@@ -2083,7 +2104,12 @@ fn populateRound(gpa: Allocator, io: Io, repo: *Repository, items: []const *Pend
         defer group.cancel(io);
         var started: usize = 0;
         for (items) |item| {
-            group.concurrent(io, populateBeside, .{ gpa, io, repo, item, options }) catch populateBeside(gpa, io, repo, item, options);
+            group.concurrent(io, populateBeside, .{ gpa, io, repo, item, options }) catch {
+                // Run here, on the caller's task: a cancel it met is the
+                // caller's, and stops the round.
+                populateBeside(gpa, io, repo, item, options);
+                try stopped(item);
+            };
             started += 1;
             if (started == count) {
                 try group.await(io);
@@ -2093,7 +2119,16 @@ fn populateRound(gpa: Allocator, io: Io, repo: *Repository, items: []const *Pend
         try group.await(io);
         return;
     }
-    for (items) |item| populateKept(gpa, io, repo, item, options, false);
+    for (items) |item| {
+        populateKept(gpa, io, repo, item, options, false);
+        try stopped(item);
+    }
+}
+
+/// A cancel `item` met on the caller's task, returned: the items after it
+/// are not populated. Any other failure stays the item's.
+fn stopped(item: *const Pending) Io.Cancelable!void {
+    if (item.beside.failed) |err| if (err == error.Canceled) return error.Canceled;
 }
 
 fn tally(outcome: *UpdateOutcome, populated: Populated) void {

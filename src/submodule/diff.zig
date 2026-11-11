@@ -70,7 +70,7 @@ pub const DiffWriter = struct {
     }
 
     fn write(d: *DiffWriter, a: Allocator, io: Io, w: *Io.Writer, change: diff.SubmoduleChange) diff.SubmoduleWriter.Error!void {
-        var opened = open(d.gpa, io, d.repo, change.path);
+        var opened = try open(d.gpa, io, d.repo, change.path);
         defer if (opened) |*r| r.deinit(io);
         const sub: ?*Repository = if (opened) |*r| r else null;
         const sides = (try header(a, io, d.repo, sub, w, change)) orelse return;
@@ -81,7 +81,7 @@ pub const DiffWriter = struct {
                 const left = sides.left orelse return;
                 const right = sides.right orelse return;
                 summary(a, io, repo, w, .{ .left = left, .right = right, .bases = sides.bases }, change.options, d.log_encoding) catch |err| switch (err) {
-                    error.WriteFailed, error.OutOfMemory => |e| return e,
+                    error.WriteFailed, error.OutOfMemory, error.Canceled => |e| return e,
                     else => try w.writeAll("(revision walker failed)\n"),
                 };
             },
@@ -90,7 +90,7 @@ pub const DiffWriter = struct {
                 if (sides.right == null and change.new != null) return;
                 var out: Io.Writer.Allocating = .init(a);
                 const failed = if (d.inlineDiff(a, io, repo, &out.writer, sides, change)) false else |err| switch (err) {
-                    error.WriteFailed, error.OutOfMemory => |e| return e,
+                    error.WriteFailed, error.OutOfMemory, error.Canceled => |e| return e,
                     else => true,
                 };
                 try w.writeAll(out.written());
@@ -143,18 +143,25 @@ pub const DiffWriter = struct {
 
 /// The repository of the submodule at `path`, as git's `open_submodule`
 /// finds it: its working tree's `.git`, else the one `.gitmodules` names
-/// it by in `modules`; `null` when there is none, or it does not open.
-fn open(gpa: Allocator, io: Io, repo: *Repository, path: []const u8) ?Repository {
+/// it by in `modules`; `null` when there is none, or it does not open. A
+/// cancel is returned, not taken for a submodule that is not there.
+fn open(gpa: Allocator, io: Io, repo: *Repository, path: []const u8) Io.Cancelable!?Repository {
     const wt = repo.workDirectory() orelse return null;
-    if (gitlink.isRepository(gpa, io, wt, path) catch false) {
-        return submodule.openRepository(gpa, io, repo, .{ .path = path, .name = path }, .{}) catch null;
+    if (gitlink.isRepository(gpa, io, wt, path) catch |err| return orNull(Repository, err)) {
+        return submodule.openRepository(gpa, io, repo, .{ .path = path, .name = path }, .{}) catch |err| orNull(Repository, err);
     }
-    var index = repo.openIndex(io) catch return null;
+    var index = repo.openIndex(io) catch |err| return orNull(Repository, err);
     defer index.deinit();
-    var modules = submodule.loadGitmodules(gpa, io, repo, &index) catch return null;
+    var modules = submodule.loadGitmodules(gpa, io, repo, &index) catch |err| return orNull(Repository, err);
     defer modules.deinit();
     const module = modules.byPath(path) orelse return null;
-    return submodule.openRepository(gpa, io, repo, .{ .path = path, .name = module.name }, .{}) catch null;
+    return submodule.openRepository(gpa, io, repo, .{ .path = path, .name = module.name }, .{}) catch |err| orNull(Repository, err);
+}
+
+/// `null` for a failure that means no submodule or no commit to show, as
+/// git's lookups read it; a cancel as itself.
+fn orNull(comptime T: type, err: anyerror) Io.Cancelable!?T {
+    return if (err == error.Canceled) error.Canceled else null;
 }
 
 /// The two commits as the submodule has them, and their merge bases.
@@ -177,12 +184,12 @@ fn header(a: Allocator, io: Io, repo: *Repository, sub: ?*Repository, w: *Io.Wri
     var fast_forward = false;
     var fast_backward = false;
     if (sub) |s| found: {
-        sides.left = if (change.old) |o| commitOf(io, s, o) else null;
-        sides.right = if (change.new) |n| commitOf(io, s, n) else null;
+        sides.left = if (change.old) |o| try commitOf(io, s, o) else null;
+        sides.right = if (change.new) |n| try commitOf(io, s, n) else null;
         if ((change.old != null and sides.left == null) or (change.new != null and sides.right == null)) note = "(commits not present)";
         if (sides.left != null and sides.right != null) {
             sides.bases = walk_mod.mergeBases(a, io, s.objectDatabase(), .{ .a = sides.left.?, .b = sides.right.? }, .{}) catch |err| switch (err) {
-                error.OutOfMemory => |e| return e,
+                error.OutOfMemory, error.Canceled => |e| return e,
                 else => {
                     note = "(corrupt repository)";
                     break :found;
@@ -198,8 +205,14 @@ fn header(a: Allocator, io: Io, repo: *Repository, sub: ?*Repository, w: *Io.Wri
     const len = abbrev.defaultLength(repo.configuration(), db);
     var one_buf: [hash.max_hex_len]u8 = undefined;
     var two_buf: [hash.max_hex_len]u8 = undefined;
-    const one_hex = abbrev.unique(io, db, one, len, &one_buf) catch one.abbrev(&one_buf, len);
-    const two_hex = abbrev.unique(io, db, two, len, &two_buf) catch two.abbrev(&two_buf, len);
+    const one_hex = abbrev.unique(io, db, one, len, &one_buf) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => one.abbrev(&one_buf, len),
+    };
+    const two_hex = abbrev.unique(io, db, two, len, &two_buf) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => two.abbrev(&two_buf, len),
+    };
     try w.print("Submodule {s} {s}{s}{s}", .{ change.path, one_hex, if (fast_forward or fast_backward) ".." else "...", two_hex });
     if (note) |n| try w.print(" {s}\n", .{n}) else try w.print("{s}:\n", .{if (fast_backward) " (rewind)" else ""});
     return sides;
@@ -207,9 +220,9 @@ fn header(a: Allocator, io: Io, repo: *Repository, sub: ?*Repository, w: *Io.Wri
 
 /// git's `lookup_commit_reference`: `oid`, a tag peeled, as a commit the
 /// submodule holds; `null` where it holds none.
-fn commitOf(io: Io, sub: *Repository, oid: Oid) ?Oid {
-    const peeled = sub.peel(io, oid) catch return null;
-    const found = sub.objectDatabase().readHeader(io, peeled) catch return null;
+fn commitOf(io: Io, sub: *Repository, oid: Oid) Io.Cancelable!?Oid {
+    const peeled = sub.peel(io, oid) catch |err| return orNull(Oid, err);
+    const found = sub.objectDatabase().readHeader(io, peeled) catch |err| return orNull(Oid, err);
     return if (found.type == .commit) peeled else null;
 }
 

@@ -1503,3 +1503,39 @@ test "extensions.submodulePathConfig: init writes git's gitdir settings, absorb 
         };
     }
 }
+
+test "a cancel that one submodule's clone meets is returned, and the next submodule is not cloned" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var f = try Fixture.init(gpa, io);
+    defer f.deinit();
+    // A second submodule beside `vendor/lib`, so that two need a clone.
+    const inner_url = try gpa.print("../{s}", .{dirName(&f.inner)});
+    defer gpa.free(inner_url);
+    try f.super.exec(io, &.{ "submodule", "add", "-q", inner_url, "vendor/other" });
+    try f.super.exec(io, &.{ "commit", "-q", "-m", "add other" });
+    var c = try Clone.init(gpa, io, &f.super, false);
+    defer c.deinit(io);
+    var repo = try c.open(gpa, io);
+    defer repo.deinit(io);
+
+    // Each clone is stopped as a cancel stops it, on the caller's task:
+    // `submodule.fetchjobs` is one, so the clones run one after another.
+    const Canceling = struct {
+        clones: u32 = 0,
+        interface: submodule.Transport = .{ .vtable = &.{ .clone = clone, .fetch = fetch } },
+
+        fn clone(seam: *submodule.Transport, _: Allocator, _: Io, _: submodule.CloneRequest) submodule.TransportError!void {
+            const t: *@This() = @fieldParentPtr("interface", seam);
+            t.clones += 1;
+            return error.Canceled;
+        }
+
+        fn fetch(_: *submodule.Transport, _: Allocator, _: Io, _: submodule.FetchRequest) submodule.TransportError!void {
+            return error.TransportFailed;
+        }
+    };
+    var t: Canceling = .{};
+    try testing.expectError(error.Canceled, submodule.update(gpa, io, &repo, .{ .init = true, .transport = &t.interface }));
+    try testing.expectEqual(@as(u32, 1), t.clones);
+}

@@ -1295,7 +1295,7 @@ pub const SubmoduleChange = struct {
 /// `submodule.DiffWriter` writes it as git does. A node its owner embeds,
 /// found again from the node by `@fieldParentPtr`.
 pub const SubmoduleWriter = struct {
-    pub const Error = Io.Writer.Error || Allocator.Error;
+    pub const Error = Io.Writer.Error || Allocator.Error || Io.Cancelable;
 
     vtable: *const VTable,
 

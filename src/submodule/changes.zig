@@ -377,14 +377,20 @@ fn hasRepository(gpa: Allocator, io: Io, repo: *Repository, path: []const u8, na
 
 /// git's `repo_has_absorbed_submodules`: `modules/` holds something.
 fn hasAbsorbed(io: Io, repo: *Repository) Self.Error!bool {
-    var dir = repo.gitDirectory().openDir(io, "modules", .{ .iterate = true }) catch return false;
+    var dir = repo.gitDirectory().openDir(io, "modules", .{ .iterate = true }) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return false,
+    };
     defer dir.close(io);
     var it = dir.iterate();
     return try it.next(io) != null;
 }
 
 fn isEmptyDir(io: Io, wt: Io.Dir, path: []const u8) Self.Error!bool {
-    var dir = wt.openDir(io, path, .{ .iterate = true }) catch return true;
+    var dir = wt.openDir(io, path, .{ .iterate = true }) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return true,
+    };
     defer dir.close(io);
     var it = dir.iterate();
     return try it.next(io) == null;

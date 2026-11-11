@@ -105,3 +105,42 @@ test "a submodule's log or diff with no writer is refused by name" {
     defer ours.deinit();
     try std.testing.expectError(error.NoSubmoduleWriter, diff.unified(gpa, io, &ours.writer, .{ .db = repo.objectDatabase(), .changes = changes.items }, .{ .submodule = .log }));
 }
+
+test "a cancel that lands in writing a submodule's log is returned, not written as a submodule that is not there" {
+    const shakedown = @import("shakedown");
+    const testing_io = @import("../testing/io.zig");
+    var git = try move_test.fixture(true);
+    defer git.deinit();
+    var repo = try repo_mod.Repository.open(gpa, io, git.dir, .{});
+    defer repo.deinit(io);
+    var changes = try diff.tree(gpa, io, repo.objectDatabase(), .{ .old = try treeOf(&repo, &git, "one"), .new = try treeOf(&repo, &git, "two") }, .{});
+    defer changes.deinit();
+
+    const Write = struct {
+        repo: *repo_mod.Repository,
+        root: Io.Dir,
+        changes: []const diff.Change,
+        pub fn setUp(_: *@This(), _: *shakedown.FaultIo) !void {}
+        pub fn run(w: *@This(), run_io: Io) !void {
+            var writer = try submodule_diff.DiffWriter.init(gpa, w.repo, null);
+            var out: Io.Writer.Allocating = .init(gpa);
+            defer out.deinit();
+            try diff.unified(gpa, run_io, &out.writer, .{ .db = w.repo.objectDatabase(), .changes = w.changes, .submodules = writer.writer() }, .{ .submodule = .log });
+        }
+        pub fn check(_: *@This(), check_io: Io, result: anyerror!void, injected: ?shakedown.Injected) !void {
+            try testing_io.cancelKept(check_io, result, injected);
+        }
+        // A cancel in the removal of the submodule's timestamp probe file
+        // leaves it, as a leftover is left; the next run starts without it.
+        pub fn tearDown(w: *@This()) void {
+            var objects = w.root.openDir(io, ".git/modules/sub/objects", .{ .iterate = true }) catch return;
+            defer objects.close(io);
+            var it = objects.iterate();
+            while (it.next(io) catch return) |entry| {
+                if (std.mem.startsWith(u8, entry.name, "relic_tres_")) objects.deleteFile(io, entry.name) catch return;
+            }
+        }
+    };
+    var w: Write = .{ .repo = &repo, .root = git.dir, .changes = changes.items };
+    try testing_io.everyCancel(gpa, io, &w);
+}
