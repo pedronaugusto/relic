@@ -301,6 +301,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- parallax at main f473e77, on the aegis line relic is on, where its pin 055179d asked for aegis 0.1.12 and bay refused the graph in CI's setup ("parallax asks for aegis 0.1.12, but aegis 0.2.4 is selected").
 - parallax at main 055179d (from 0.3.0), for a caller's rules as a context whose methods it calls: the function lines, the painters and the word diff reach its unified writer that way.
 - aegis 0.1.19: its owners' Debug witness binds once by compare-and-swap, where every lend stored it, a data race when the object database lends one source directory to several reading tasks (306 reports in the nightly ThreadSanitizer shards); the whole graph selects it.
 - A ref's name reaches a file — a loose ref read or removed, a lock, an emptied directory, another worktree's administrative directory or stack, a root ref — only as a `names.ref.Checked`, parsed where the name enters the store, where it was a byte slice checked by a boolean.
