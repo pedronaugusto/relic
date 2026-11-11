@@ -284,7 +284,7 @@ pub fn start(gpa: Allocator, io: Io, programs: Programs, invocation: Invocation)
     // on `PATH` by its base name, as that interpreter's first argument.
     if (builtin.target.os.tag == .windows) {
         var head: [100]u8 = undefined;
-        if (interpreterOf(io, line.argv[0], &head)) |name| {
+        if (try interpreterOf(io, line.argv[0], &head)) |name| {
             const found = try lookupOnPath(gpa, io, pathOf(&environ), name) orelse return error.FileNotFound;
             try line.runThrough(gpa, found);
         }
@@ -372,11 +372,17 @@ const CommandLine = struct {
 /// the file at `path` names, by its base name and without its options, read
 /// from its first bytes into `head`; `null` for a `.exe`, a file that cannot
 /// be read, or anything else.
-fn interpreterOf(io: Io, path: []const u8, head: *[100]u8) ?[]const u8 {
+fn interpreterOf(io: Io, path: []const u8, head: *[100]u8) Io.Cancelable!?[]const u8 {
     if (std.ascii.endsWithIgnoreCase(path, ".exe")) return null;
-    const file = Io.Dir.cwd().openFile(io, path, .{}) catch return null;
+    const file = Io.Dir.cwd().openFile(io, path, .{}) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return null,
+    };
     defer file.close(io);
-    const n = file.readPositionalAll(io, head[0 .. head.len - 1], 0) catch return null;
+    const n = file.readPositionalAll(io, head[0 .. head.len - 1], 0) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return null,
+    };
     return parseInterpreter(head[0..n]);
 }
 
@@ -411,7 +417,7 @@ fn pathOf(environ: *const Environ.Map) ?[]const u8 {
 /// Windows `name.exe`, then `name` -- and nowhere else: not the current
 /// directory, which is often a working tree someone else wrote. An empty
 /// entry is skipped. The result is `gpa`'s; `null` when no entry has it.
-pub fn lookupOnPath(gpa: Allocator, io: Io, path: ?[]const u8, name: []const u8) Allocator.Error!?[]u8 {
+pub fn lookupOnPath(gpa: Allocator, io: Io, path: ?[]const u8, name: []const u8) (Allocator.Error || Io.Cancelable)!?[]u8 {
     const list = path orelse return null;
     const windows = builtin.target.os.tag == .windows;
     const has_exe = name.len >= 4 and std.ascii.eqlIgnoreCase(name[name.len - 4 ..], ".exe");
@@ -422,7 +428,13 @@ pub fn lookupOnPath(gpa: Allocator, io: Io, path: ?[]const u8, name: []const u8)
         for ([_]bool{ true, false }) |with_exe| {
             if (with_exe and (!windows or has_exe)) continue;
             const candidate = try gpa.print("{s}{c}{s}{s}", .{ dir, std.Io.Dir.path.sep, name, if (with_exe) ".exe" else "" });
-            const stat = Io.Dir.cwd().statFile(io, candidate, .{}) catch null;
+            const stat = Io.Dir.cwd().statFile(io, candidate, .{}) catch |err| switch (err) {
+                error.Canceled => {
+                    gpa.free(candidate);
+                    return error.Canceled;
+                },
+                else => null,
+            };
             if (stat) |found| if (found.kind != .directory) return candidate;
             gpa.free(candidate);
         }

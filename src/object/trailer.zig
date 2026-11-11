@@ -694,7 +694,7 @@ fn applyCommand(arena: Allocator, io: Io, commands: ?Commands, rule: Rule, arg: 
         .unset = &program.repository_variables,
         .stderr = .inherit,
     }, .{}) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
+        error.OutOfMemory, error.Canceled => |e| return e,
         else => return "",
     };
     if (!outcome.succeeded()) return "";

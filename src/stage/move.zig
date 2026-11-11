@@ -246,8 +246,8 @@ const Mover = struct {
             try m.items.append(arena, .{ .source = try pathspec_mod.normalize(arena, t.*), .destination = "" });
         }
         m.trimmed = trimmed;
-        const one_dir = m.options.sources.len == 1 and isDirectory(m.io, m.wt, m.items.items[0].source) and
-            !isDirectory(m.io, m.wt, try pathspec_mod.normalize(arena, m.options.destination));
+        const one_dir = m.options.sources.len == 1 and try isDirectory(m.io, m.wt, m.items.items[0].source) and
+            !try isDirectory(m.io, m.wt, try pathspec_mod.normalize(arena, m.options.destination));
         const destination = try pathspec_mod.normalize(arena, if (one_dir) std.mem.trimEnd(u8, m.options.destination, "/") else m.options.destination);
         const dst_w_slash = try addSlash(arena, destination);
 
@@ -421,7 +421,7 @@ const Mover = struct {
                     return error.DirectoryIntoItself;
                 }
                 fs.rename(io, wt, item.source, item.destination) catch |err| {
-                    if (m.options.skip_errors) continue;
+                    if (m.options.skip_errors and err != error.Canceled) continue;
                     return err;
                 };
             }
@@ -442,7 +442,10 @@ const Mover = struct {
         // whatever is left in it.
         for (m.moved_dirs.items) |dir| {
             if (underDirectory(m.index, try addSlash(m.arena, dir)).len != 0) continue;
-            wt.deleteTree(io, dir) catch |err| std.log.warn("unable to remove '{s}': {t}", .{ dir, err });
+            wt.deleteTree(io, dir) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => std.log.warn("unable to remove '{s}': {t}", .{ dir, err }),
+            };
         }
         // `stage_updated_gitmodules`.
         if (gitmodules_modified) _ = try checkout.addAll(m.gpa, io, wt, .{ .index = m.index, .db = m.repo.objectDatabase() }, .{ .rules = rules, .prefix = ".gitmodules", .stage_deletions = false });
@@ -480,7 +483,10 @@ const Mover = struct {
             // one moves and stays.
             if (!sparse_and_dirty) {
                 (index.find(dst) orelse unreachable).skip_worktree = true;
-                fs.deleteFile(io, wt, src) catch |err| std.log.warn("unable to unlink '{s}': {t}", .{ src, err });
+                fs.deleteFile(io, wt, src) catch |err| switch (err) {
+                    error.Canceled => return error.Canceled,
+                    else => std.log.warn("unable to unlink '{s}': {t}", .{ src, err }),
+                };
             } else {
                 try m.dirty.append(m.arena, dst);
                 m.outcome.dirty = try m.dirty.toOwnedSlice(m.arena);
@@ -531,9 +537,12 @@ fn addSlash(arena: Allocator, path: []const u8) Allocator.Error![]const u8 {
 }
 
 /// What `stat` says, following a symbolic link: git's `is_directory`.
-fn isDirectory(io: Io, wt: Io.Dir, path: []const u8) bool {
+fn isDirectory(io: Io, wt: Io.Dir, path: []const u8) Io.Cancelable!bool {
     if (path.len == 0) return true;
-    const stat = wt.statFile(io, path, .{}) catch return false;
+    const stat = wt.statFile(io, path, .{}) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return false,
+    };
     return stat.kind == .directory;
 }
 

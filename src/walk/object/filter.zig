@@ -222,7 +222,10 @@ const Traversal = struct {
                 .commit, .begin_tree => Verdict.shown,
                 .end_tree => Verdict.zero,
                 .blob => blk: {
-                    const header = t.db.readHeader(t.io, oid) catch break :blk Verdict.shown;
+                    const header = t.db.readHeader(t.io, oid) catch |err| switch (err) {
+                        error.Canceled => return error.Canceled,
+                        else => break :blk Verdict.shown,
+                    };
                     // Strictly smaller than the limit, as git keeps it.
                     break :blk if (aegis.units.Bytes(u64).fromRaw(header.size).compare(limit) == .lt) Verdict.shown else Verdict.hidden;
                 },

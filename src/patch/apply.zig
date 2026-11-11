@@ -1511,10 +1511,16 @@ fn tryThreeway(st: *State, img: *Image, entry: *Entry, found: ?fs.Entry, ce: ?in
         pre_oid = try writeBlob(st, "");
         try tmp.prepare(st.gpa, "", true);
     } else {
-        pre_oid = st.repo.objectDatabase().findPrefix(st.io, p.old_oid_prefix) catch return false;
+        pre_oid = st.repo.objectDatabase().findPrefix(st.io, p.old_oid_prefix) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => return false,
+        };
         var buf: std.ArrayList(u8) = .empty;
         defer buf.deinit(st.gpa);
-        readBlobFor(st, pre_oid, p.old_mode, &buf) catch return false;
+        readBlobFor(st, pre_oid, p.old_mode, &buf) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => return false,
+        };
         try tmp.prepare(st.gpa, buf.items, true);
     }
     // the postimage the patch was made to give

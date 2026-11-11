@@ -785,7 +785,8 @@ fn fallBackThreeway(s: *Session, patch: []const u8, apply_options: apply_mod.Opt
         if (patchparse.isGitlink(f.old_mode)) return .failed;
         if (db.findPrefix(io, f.old_oid_prefix)) |found| {
             oid = found;
-        } else |_| {
+        } else |err| {
+            if (err == error.Canceled) return error.Canceled;
             if (f.lines_added == 0 and f.lines_deleted == 0) {
                 const e = current.find(name) orelse return .failed;
                 oid = e.oid;
@@ -798,7 +799,10 @@ fn fallBackThreeway(s: *Session, patch: []const u8, apply_options: apply_mod.Opt
         };
         try fake.add(.{ .path = name, .oid = oid, .mode = mode });
     }
-    const base_tree = worktree.writeTree(gpa, io, &fake, db) catch return .failed;
+    const base_tree = worktree.writeTree(gpa, io, &fake, db) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return .failed,
+    };
     // the patch applied to it
     var cached = apply_options;
     cached.target = .cached;

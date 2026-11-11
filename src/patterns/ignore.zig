@@ -376,7 +376,7 @@ pub const Checker = struct {
                 try checker.read.ensureUnusedCapacity(gpa, 1);
                 const key = try checker.rules.arena.allocator().dupe(u8, dir);
                 checker.rules.addDirectory(io, checker.wt, key, depth) catch |err| switch (err) {
-                    error.OutOfMemory => return error.OutOfMemory,
+                    error.OutOfMemory, error.Canceled => |e| return e,
                     else => if (checker.unreadable == .fail) return err,
                 };
                 checker.read.putAssumeCapacity(key, {});

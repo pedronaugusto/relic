@@ -756,7 +756,10 @@ pub const Listing = struct {
             .direct => |direct| oid = direct,
             .symbolic => |to| {
                 // a symbolic ref that resolves nowhere is broken, and left out
-                const resolved = (store.resolve(gpa, io, name) catch return) orelse return;
+                const resolved = (store.resolve(gpa, io, name) catch |err| switch (err) {
+                    error.Canceled => return error.Canceled,
+                    else => return,
+                }) orelse return;
                 defer gpa.free(resolved.name);
                 oid = resolved.oid;
                 symref = try l.a().dupe(u8, to);
@@ -1058,7 +1061,10 @@ pub const Listing = struct {
             .@"ahead-behind", .@"is-base" => {
                 const text = arg orelse return error.BadFieldArgument;
                 atom.base_name = text;
-                const resolved = revparse_mod.resolve(l.gpa, l.io, l.repo.revisionSource(), text) catch return error.UnknownCommit;
+                const resolved = revparse_mod.resolve(l.gpa, l.io, l.repo.revisionSource(), text) catch |err| switch (err) {
+                    error.Canceled => return error.Canceled,
+                    else => return error.UnknownCommit,
+                };
                 atom.base = (try l.peelToCommit(resolved)) orelse return error.UnknownCommit;
             },
             else => {},
@@ -1302,7 +1308,10 @@ pub const Listing = struct {
 
     /// The commit `name` names, as git's `lookup_commit_reference_by_name`.
     fn commitByName(l: *Listing, name: []const u8) ErrorNamespace.Error!?Oid {
-        const resolved = revparse_mod.resolve(l.gpa, l.io, l.repo.revisionSource(), name) catch return null;
+        const resolved = revparse_mod.resolve(l.gpa, l.io, l.repo.revisionSource(), name) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => return null,
+        };
         return l.peelToCommit(resolved);
     }
 
@@ -1772,7 +1781,7 @@ pub const Listing = struct {
         }
         const describer = l.describers.items[index] orelse return .{};
         const text = describer.describe(l.io, oid) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
+            error.OutOfMemory, error.Canceled => |e| return e,
             else => return .{},
         };
         defer l.gpa.free(text);
@@ -1923,7 +1932,10 @@ pub const Listing = struct {
         var depth: u8 = 0;
         var symbolic = false;
         while (depth <= refs_mod.max_symbolic_depth) : (depth += 1) {
-            const value = store.read(l.a(), l.io, current) catch null;
+            const value = store.read(l.a(), l.io, current) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => null,
+            };
             switch (value orelse return if (symbolic) current else null) {
                 .direct => return if (symbolic) current else null,
                 .symbolic => |target| {
@@ -1936,7 +1948,10 @@ pub const Listing = struct {
     }
 
     fn mainWorktreePath(l: *Listing) ErrorNamespace.Error![]const u8 {
-        var path: []const u8 = fs.realPathAlloc(l.a(), l.io, l.repo.commonDirectory(), ".") catch return "";
+        var path: []const u8 = fs.realPathAlloc(l.a(), l.io, l.repo.commonDirectory(), ".") catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => return "",
+        };
         if (std.mem.endsWith(u8, path, "/.git")) path = path[0 .. path.len - "/.git".len];
         return path;
     }
@@ -2082,11 +2097,17 @@ pub const Listing = struct {
     /// when there is nothing to compare with.
     fn trackingCounts(l: *Listing, short: []const u8, for_push: bool) ErrorNamespace.Error!?[2]usize {
         const base = (if (for_push) try l.pushOf(short) else try l.upstreamOf(short)) orelse return null;
-        const theirs_ref = (l.repo.refStore().resolve(l.gpa, l.io, base) catch return null) orelse return null;
+        const theirs_ref = (l.repo.refStore().resolve(l.gpa, l.io, base) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => return null,
+        }) orelse return null;
         defer l.gpa.free(theirs_ref.name);
         const theirs = (try l.peelToCommit(theirs_ref.oid)) orelse return null;
         const full = try l.a().print("refs/heads/{s}", .{short});
-        const ours_ref = (l.repo.refStore().resolve(l.gpa, l.io, full) catch return null) orelse return null;
+        const ours_ref = (l.repo.refStore().resolve(l.gpa, l.io, full) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => return null,
+        }) orelse return null;
         defer l.gpa.free(ours_ref.name);
         const ours = (try l.peelToCommit(ours_ref.oid)) orelse return null;
         if (ours.eql(theirs)) return .{ 0, 0 };
@@ -2105,12 +2126,12 @@ pub const Listing = struct {
         var text: []const u8 = "(no branch)";
         var rebasing = false;
         var branch: ?[]const u8 = null;
-        if (isDir(io, dir, "rebase-apply")) {
-            if (!exists(io, dir, "rebase-apply/applying")) {
+        if (try isDir(io, dir, "rebase-apply")) {
+            if (!try exists(io, dir, "rebase-apply/applying")) {
                 rebasing = true;
                 branch = try l.stateBranch("rebase-apply/head-name");
             }
-        } else if (isDir(io, dir, "rebase-merge")) {
+        } else if (try isDir(io, dir, "rebase-merge")) {
             rebasing = true;
             branch = try l.stateBranch("rebase-merge/head-name");
         }
@@ -2121,7 +2142,7 @@ pub const Listing = struct {
             } else {
                 text = try ar.print("(no branch, rebasing detached HEAD {s})", .{if (detached) |d| d.from else "(null)"});
             }
-        } else if (exists(io, dir, "BISECT_LOG")) {
+        } else if (try exists(io, dir, "BISECT_LOG")) {
             const from = try l.stateBranch("BISECT_START");
             text = try ar.print("(no branch, bisect started on {s})", .{from orelse "(null)"});
         } else if (detached) |d| {
@@ -2133,7 +2154,10 @@ pub const Listing = struct {
 
     /// git's `get_branch` for a state file.
     fn stateBranch(l: *Listing, path: []const u8) ErrorNamespace.Error!?[]const u8 {
-        const bytes = aegis.own.readFile(l.io, l.repo.gitDirectory(), path, l.a(), aegis.units.Bytes(u64).fromRaw(1 << 20)) catch return null;
+        const bytes = aegis.own.readFile(l.io, l.repo.gitDirectory(), path, l.a(), aegis.units.Bytes(u64).fromRaw(1 << 20)) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => return null,
+        };
         const trimmed = std.mem.trimEnd(u8, bytes, "\n");
         if (trimmed.len == 0) return null;
         if (std.mem.startsWith(u8, trimmed, "refs/heads/")) return trimmed["refs/heads/".len..];
@@ -2150,7 +2174,10 @@ pub const Listing = struct {
     /// git's `wt_status_get_detached_from`: where the last checkout that
     /// detached `HEAD` came from, and whether `HEAD` is still there.
     fn detachedFrom(l: *Listing) ErrorNamespace.Error!?struct { from: []const u8, at: bool } {
-        var log = l.repo.readLog(l.io, "HEAD") catch return null;
+        var log = l.repo.readLog(l.io, "HEAD") catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => return null,
+        };
         defer log.deinit();
         var i = log.entries.len;
         while (i > 0) {
@@ -2277,13 +2304,19 @@ fn cString(v: Value) []const u8 {
     return if (std.mem.findScalar(u8, v.s, 0)) |z| v.s[0..z] else v.s;
 }
 
-fn isDir(io: Io, dir: Io.Dir, path: []const u8) bool {
-    const stat = dir.statFile(io, path, .{}) catch return false;
+fn isDir(io: Io, dir: Io.Dir, path: []const u8) Io.Cancelable!bool {
+    const stat = dir.statFile(io, path, .{}) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return false,
+    };
     return stat.kind == .directory;
 }
 
-fn exists(io: Io, dir: Io.Dir, path: []const u8) bool {
-    _ = dir.statFile(io, path, .{}) catch return false;
+fn exists(io: Io, dir: Io.Dir, path: []const u8) Io.Cancelable!bool {
+    _ = dir.statFile(io, path, .{}) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return false,
+    };
     return true;
 }
 

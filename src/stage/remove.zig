@@ -195,9 +195,15 @@ fn absorbIfNeeded(gpa: Allocator, io: Io, repo: *Repository, work: Io.Dir, picke
     defer paths.deinit(gpa);
     for (picked) |p| {
         if (!p.gitlink) continue;
-        var dir = work.openDir(io, p.path, .{}) catch continue;
+        var dir = work.openDir(io, p.path, .{}) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => continue,
+        };
         defer dir.close(io);
-        const stat = dir.statFile(io, ".git", .{}) catch continue;
+        const stat = dir.statFile(io, ".git", .{}) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => continue,
+        };
         if (stat.kind == .directory) try paths.append(gpa, p.path);
     }
     if (paths.items.len == 0) return;
