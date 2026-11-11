@@ -1985,33 +1985,85 @@ test "a cancel that lands in waiting for the write tasks is returned, though eve
     try h.repo.exec(io, &.{ "commit", "-q", "-m", "one" });
     const tree_text = try h.repo.line(io, &.{ "rev-parse", "HEAD^{tree}" });
     defer gpa.free(tree_text);
+    try h.repo.exec(io, &.{ "reset", "-q", "--hard", "HEAD~1" });
+    try h.reload(gpa, io);
     const Write = struct {
-        h: *Harness,
-        tree: Oid,
-        pub fn run(w: *@This(), run_io: Io) !void {
-            const real = std.testing.io;
-            try w.h.repo.exec(real, &.{ "reset", "-q", "--hard", "HEAD~1" });
-            try w.h.reload(std.testing.allocator, real);
-            _ = try worktree.checkout(std.testing.allocator, run_io, w.h.repo.dir, .{ .index = &w.h.index, .db = &w.h.db, .tree = w.tree }, .{ .rules = w.h.worktreeRules(), .workers = 2 });
+        fn run(harness: *Harness, tree: Oid, run_io: Io) !void {
+            _ = try worktree.checkout(std.testing.allocator, run_io, harness.repo.dir, .{ .index = &harness.index, .db = &harness.db, .tree = tree }, .{ .rules = harness.worktreeRules(), .workers = 2 });
         }
     };
-    var write: Write = .{ .h = &h, .tree = try Oid.parse(.sha1, tree_text) };
-    var finish_first: FinishFirst = .init(io, .{});
-    try testing_io.eachCallCanceled(gpa, finish_first.io(), &write, .groupAwait);
+    var held: HeldTasks = .init(io, .{});
+    var task = try io.concurrent(Write.run, .{ &h, try Oid.parse(.sha1, tree_text), held.io() });
+    // The cancel lands while the checkout waits for a write task still
+    // writing, which then finishes untouched by it.
+    held.state.awaiting.waitUncancelable(io);
+    try std.testing.expectError(error.Canceled, task.cancel(io));
 }
 
-/// An Io whose `Group.cancel` lets the group's tasks finish uncanceled: the
-/// moment a cancel lands in the wait after every task has written, which
-/// timing alone rarely shows.
-const FinishFirst = shakedown.Layer(struct { unused: u8 = 0 }, .{ .groupCancel = finishFirst });
+/// An Io whose group tasks run with their cancel protection blocked and
+/// are slowed at each file they make, and which says when its caller waits
+/// for such a task still running: the moment a cancel lands in the wait for
+/// tasks past every cancelation point they will meet, which timing alone
+/// rarely shows.
+const HeldTasks = shakedown.Layer(struct {
+    running: std.atomic.Value(u32) = .init(0),
+    awaiting: Io.Event = .unset,
+}, .{ .groupConcurrent = heldConcurrent, .groupAwait = heldAwait, .dirCreateFile = heldCreateFile });
 
-fn finishFirst(userdata: ?*anyopaque, group: *Io.Group, token: *anyopaque) void {
-    const l = FinishFirst.of(userdata);
-    const protection = l.base.vtable.swapCancelProtection(l.base.userdata, .blocked);
-    defer _ = l.base.vtable.swapCancelProtection(l.base.userdata, protection);
-    l.base.vtable.groupAwait(l.base.userdata, group, token) catch |err| switch (err) {
-        error.Canceled => unreachable, // the protection is blocked
+threadlocal var in_held_task = false;
+
+const Held = struct {
+    layer: *HeldTasks,
+    start: *const fn (*const anyopaque) void,
+    context: []u8,
+    alignment: std.mem.Alignment,
+
+    const gpa = std.heap.smp_allocator;
+
+    fn run(context: *const anyopaque) void {
+        const b: *const *Held = @ptrCast(@alignCast(context));
+        const self = b.*;
+        const base = self.layer.base;
+        const was = base.vtable.swapCancelProtection(base.userdata, .blocked);
+        in_held_task = true;
+        self.start(self.context.ptr);
+        in_held_task = false;
+        _ = base.vtable.swapCancelProtection(base.userdata, was);
+        _ = self.layer.state.running.fetchSub(1, .release);
+        gpa.rawFree(self.context, self.alignment, @returnAddress());
+        gpa.destroy(self);
+    }
+};
+
+fn heldConcurrent(userdata: ?*anyopaque, group: *Io.Group, context: []const u8, alignment: std.mem.Alignment, start: *const fn (*const anyopaque) void) Io.ConcurrentError!void {
+    const l = HeldTasks.of(userdata);
+    const len = @max(context.len, 1);
+    const copy = (Held.gpa.rawAlloc(len, alignment, @returnAddress()) orelse return error.ConcurrencyUnavailable)[0..len];
+    @memcpy(copy[0..context.len], context);
+    const b = Held.gpa.create(Held) catch {
+        Held.gpa.rawFree(copy, alignment, @returnAddress());
+        return error.ConcurrencyUnavailable;
     };
+    b.* = .{ .layer = l, .start = start, .context = copy, .alignment = alignment };
+    _ = l.state.running.fetchAdd(1, .acquire);
+    l.base.vtable.groupConcurrent(l.base.userdata, group, std.mem.asBytes(&b), .of(*Held), Held.run) catch |err| {
+        _ = l.state.running.fetchSub(1, .release);
+        Held.gpa.rawFree(copy, alignment, @returnAddress());
+        Held.gpa.destroy(b);
+        return err;
+    };
+}
+
+fn heldAwait(userdata: ?*anyopaque, group: *Io.Group, token: *anyopaque) Io.Cancelable!void {
+    const l = HeldTasks.of(userdata);
+    if (l.state.running.load(.acquire) != 0) l.state.awaiting.set(l.base);
+    return l.base.vtable.groupAwait(l.base.userdata, group, token);
+}
+
+fn heldCreateFile(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, options: Io.Dir.CreateFileOptions) Io.File.OpenError!Io.File {
+    const l = HeldTasks.of(userdata);
+    if (in_held_task) try l.base.sleep(.fromMilliseconds(100), .awake);
+    return l.base.vtable.dirCreateFile(l.base.userdata, dir, sub_path, options);
 }
 
 const testing_io = @import("../testing/io.zig");
