@@ -160,7 +160,10 @@ const Run = struct {
         slot.key_ptr.* = try r.arena.dupe(u8, hex);
         slot.value_ptr.* = .empty;
         const sub = try r.arena.print("rr-cache/{s}", .{hex});
-        var dir = r.repo.commonDirectory().openDir(r.io, sub, .{ .iterate = true }) catch return slot.value_ptr;
+        var dir = r.repo.commonDirectory().openDir(r.io, sub, .{ .iterate = true }) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => return slot.value_ptr,
+        };
         defer dir.close(r.io);
         var it = dir.iterate();
         while (try it.next(r.io)) |entry| {
@@ -175,8 +178,13 @@ const Run = struct {
         return slot.value_ptr;
     }
 
-    fn readFile(r: *Run, sub: []const u8) ?[]u8 {
-        return state_file.read(r.arena, r.io, r.repo.commonDirectory(), sub) catch null;
+    /// `sub` of the rr-cache, or null where it cannot be read; a cancel is
+    /// returned.
+    fn readFile(r: *Run, sub: []const u8) Io.Cancelable!?[]u8 {
+        return state_file.read(r.arena, r.io, r.repo.commonDirectory(), sub) catch |err| switch (err) {
+            error.Canceled => error.Canceled,
+            else => null,
+        };
     }
 
     fn writeFile(r: *Run, sub: []const u8, bytes: []const u8) Error!void {
@@ -385,7 +393,7 @@ pub fn run(gpa: Allocator, io: Io, repo: *Repository, index: *Index, options: Op
 
     // `do_plain_rerere`.
     for (conflicts.items) |path| {
-        const bytes = readWorktree(&r, path) orelse continue;
+        const bytes = (try readWorktree(&r, path)) orelse continue;
         const n = try normalize(arena, bytes, try r.markerSize(path), repo.objectFormat());
         if (n.conflicts != 0) {
             if (rr.get(path)) |existing| {
@@ -508,8 +516,13 @@ fn isReg(mode: object.Mode) bool {
     return mode == .file or mode == .exec;
 }
 
-fn readWorktree(r: *Run, path: []const u8) ?[]u8 {
-    return aegis.own.readFile(r.io, r.wt, path, r.arena, aegis.units.Bytes(u64).fromRaw(1 << 30)) catch null;
+/// `path` in the working tree, or null where it cannot be read; a cancel
+/// is returned.
+fn readWorktree(r: *Run, path: []const u8) Io.Cancelable!?[]u8 {
+    return aegis.own.readFile(r.io, r.wt, path, r.arena, aegis.units.Bytes(u64).fromRaw(1 << 30)) catch |err| switch (err) {
+        error.Canceled => error.Canceled,
+        else => null,
+    };
 }
 
 fn removeVariant(r: *Run, id: Id) Error!void {
@@ -529,7 +542,7 @@ fn oneAtPath(r: *Run, path: []const u8, id_in: Id, autoupdate: bool) Error!struc
 
     // Resolved by hand already?
     if (id.variant >= 0) {
-        if (readWorktree(r, path)) |bytes| {
+        if (try readWorktree(r, path)) |bytes| {
             const n = try normalize(r.arena, bytes, size, r.repo.objectFormat());
             if (n.conflicts == 0) {
                 try r.writeFile(try r.pathOf(id, "postimage"), bytes);
@@ -557,7 +570,7 @@ fn oneAtPath(r: *Run, path: []const u8, id_in: Id, autoupdate: bool) Error!struc
         id.variant = v;
     }
     try fit(r.arena, st, id.variant);
-    if (readWorktree(r, path)) |bytes| {
+    if (try readWorktree(r, path)) |bytes| {
         const n = try normalize(r.arena, bytes, size, r.repo.objectFormat());
         try r.writeFile(try r.pathOf(id, "preimage"), n.text);
     }
@@ -572,7 +585,7 @@ fn oneAtPath(r: *Run, path: []const u8, id_in: Id, autoupdate: bool) Error!struc
 /// `merge`: the change from `vid`'s preimage to its postimage, merged into
 /// the conflict at `path`; the file is rewritten when that is clean.
 fn replay(r: *Run, vid: Id, path: []const u8, size: u32) Error!bool {
-    const bytes = readWorktree(r, path) orelse return false;
+    const bytes = (try readWorktree(r, path)) orelse return false;
     const n = try normalize(r.arena, bytes, size, r.repo.objectFormat());
     if (n.conflicts < 0) return false;
     try r.writeFile(try r.pathOf(vid, "thisimage"), n.text);
@@ -590,8 +603,8 @@ fn replay(r: *Run, vid: Id, path: []const u8, size: u32) Error!bool {
 /// `try_merge`: `vid`'s preimage to postimage change merged into `cur`, or
 /// `null` when that conflicts or a record is missing.
 fn tryMerge(r: *Run, vid: Id, path: []const u8, cur: []const u8, size: u32) Error!?[]const u8 {
-    const base = r.readFile(try r.pathOf(vid, "preimage")) orelse return null;
-    const other = r.readFile(try r.pathOf(vid, "postimage")) orelse return null;
+    const base = (try r.readFile(try r.pathOf(vid, "preimage"))) orelse return null;
+    const other = (try r.readFile(try r.pathOf(vid, "postimage"))) orelse return null;
     const merged = try llMerge(r, path, base, cur, other, size, .{ .ours = "", .base = "", .theirs = "" });
     return if (merged.clean) merged.bytes else null;
 }
@@ -636,7 +649,7 @@ fn llMerge(r: *Run, path: []const u8, base: []const u8, ours: []const u8, theirs
 
 /// `add_file_to_index`: the file as it is now, at stage 0.
 fn stagePath(r: *Run, index: *Index, path: []const u8) Error!void {
-    const bytes = readWorktree(r, path) orelse return;
+    const bytes = (try readWorktree(r, path)) orelse return;
     var mode: object.Mode = .file;
     if (index.findStage(path, 2)) |ours| mode = ours.mode;
     var content: []const u8 = bytes;
@@ -825,8 +838,8 @@ pub fn diff(gpa: Allocator, io: Io, repo: *Repository) Self.Error![]u8 {
     const rr = try readMergeRr(&r);
     for (rr.keys(), rr.values()) |path, slot| {
         const id = slot orelse continue;
-        const minus = r.readFile(try r.pathOf(id, "preimage")) orelse return error.UnreadableForDiff;
-        const plus = readWorktree(&r, path) orelse return error.UnreadableForDiff;
+        const minus = (try r.readFile(try r.pathOf(id, "preimage"))) orelse return error.UnreadableForDiff;
+        const plus = (try readWorktree(&r, path)) orelse return error.UnreadableForDiff;
         out.writer.print("--- a/{s}\n+++ b/{s}\n", .{ path, path }) catch return error.OutOfMemory;
         // `xdi_diff` with no flags: Myers, no indentation heuristic, no
         // function names, three lines of context.

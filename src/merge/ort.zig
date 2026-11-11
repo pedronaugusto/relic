@@ -108,12 +108,13 @@ pub const Submodules = struct {
     vtable: *const VTable,
 
     pub const VTable = struct {
-        open: *const fn (submodules: *Submodules, path: []const u8) ?SubmoduleHistory,
+        open: *const fn (submodules: *Submodules, path: []const u8) Io.Cancelable!?SubmoduleHistory,
     };
 
     /// The submodule at `path`, or `null` when it is not checked out,
-    /// which git reports as a conflict of its own.
-    pub fn open(submodules: *Submodules, path: []const u8) ?SubmoduleHistory {
+    /// which git reports as a conflict of its own. A cancel that lands in
+    /// looking is returned.
+    pub fn open(submodules: *Submodules, path: []const u8) Io.Cancelable!?SubmoduleHistory {
         return submodules.vtable.open(submodules, path);
     }
 };
@@ -1170,7 +1171,7 @@ const Merge = struct {
     fn mergeSubmodule(m: *Merge, path: []const u8, o: Oid, a: Oid, b: Oid, result: *Oid) Error!bool {
         result.* = if (m.call_depth > 0) o else a;
         const search = m.call_depth == 0;
-        const sub = if (m.options.submodules) |s| s.open(path) else null;
+        const sub = if (m.options.submodules) |s| try s.open(path) else null;
         const history = sub orelse {
             try m.pathMsg("Failed to merge submodule {s} (not checked out)", .submodule_not_initialized, path, null, null, &.{}, .{path});
             return false;

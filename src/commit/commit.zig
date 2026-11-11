@@ -311,7 +311,10 @@ fn prepareMessage(arena: Allocator, io: Io, repo: *Repository, input: []const u8
 pub fn template(gpa: Allocator, io: Io, repo: *Repository) config_mod.PathSettingError!?[]u8 {
     const path = (try repo.configuration().getPath(gpa, io, repo.topDirectory(), "commit.template")) orelse return null;
     defer gpa.free(path);
-    const text = aegis.own.readFile(io, repo.topDirectory(), path, gpa, aegis.units.Bytes(u64).fromRaw(1 << 30)) catch return null;
+    const text = aegis.own.readFile(io, repo.topDirectory(), path, gpa, aegis.units.Bytes(u64).fromRaw(1 << 30)) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return null,
+    };
     if (text.len == 0) {
         gpa.free(text);
         return null;

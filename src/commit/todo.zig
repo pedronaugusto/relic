@@ -135,7 +135,7 @@ pub const ParseError = error{
     InvalidTodoLine,
     /// A `fixup` or `squash` with nothing before it to fold into.
     FixupWithoutCommit,
-} || Allocator.Error;
+} || Allocator.Error || std.Io.Cancelable;
 
 /// What was wrong, when parsing failed.
 pub const Diagnostic = struct {
@@ -157,8 +157,9 @@ pub const Diagnostic = struct {
 
 /// A commit a sheet names, and how many parents it has: what `parse`'s
 /// resolver gives for whatever names a commit -- a full or abbreviated
-/// object name, a ref. Its `resolve(text) ?Resolved` is `null` when the
-/// name names no commit.
+/// object name, a ref. Its `resolve(text) std.Io.Cancelable!?Resolved` is
+/// `null` when the name names no commit, and returns a cancel that lands
+/// in looking.
 pub const Resolved = struct { oid: Oid, parents: usize };
 
 /// How a sheet is read.
@@ -280,7 +281,7 @@ fn parseLine(line_in: []const u8, number: usize, resolver: anytype, options: Par
     const end = std.mem.findAny(u8, rest, " \t\n") orelse rest.len;
     const named = rest[0..end];
     item.arg = skipBlanks(rest[end..]);
-    const resolved = resolver.resolve(named) orelse return fail(options, number, .unknown_commit);
+    const resolved = (try resolver.resolve(named)) orelse return fail(options, number, .unknown_commit);
     item.commit = resolved.oid;
     if (options.rebase and resolved.parents > 1 and cmd != .merge and cmd != .drop) {
         return fail(options, number, .merge_commit);
@@ -441,7 +442,7 @@ pub const Sheet = struct {
 //=========================================================================
 
 const TestResolver = struct {
-    fn resolve(_: TestResolver, text: []const u8) ?Resolved {
+    fn resolve(_: TestResolver, text: []const u8) std.Io.Cancelable!?Resolved {
         if (text.len < 4 or text.len > 40) return null;
         for (text) |c| if (!std.ascii.isHex(c)) return null;
         var full: [40]u8 = @splat('0');
@@ -549,7 +550,7 @@ fn fuzzTodo(_: void, case: *shakedown.Case) anyerror!void {
     case.source.bytes(text);
     var list = parse(gpa, text, TestResolver{}, .{ .fixup_first_ok = true }) catch |err| switch (err) {
         error.InvalidTodoLine, error.FixupWithoutCommit => return,
-        error.OutOfMemory => return err,
+        error.OutOfMemory, error.Canceled => return err,
     };
     defer list.deinit();
     const written = try toBytes(gpa, list.items.items, .{}, full_names);

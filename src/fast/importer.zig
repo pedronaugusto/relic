@@ -994,6 +994,7 @@ const Importer = struct {
         }
         return rev_parse.resolve(imp.gpa, imp.io, imp.repo.revisionSource(), text) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
+            error.Canceled => return error.Canceled,
             else => return error.BadRevision,
         };
     }
@@ -1634,6 +1635,15 @@ const Importer = struct {
         return Oid.parse(imp.kind, found.bytes[5..][0..hex_len]) catch error.WrongObjectType;
     }
 
+    /// The commit `peeled` reached, or null where it reached none, as a
+    /// ref update's check takes it; a cancel is returned.
+    fn commitOrNull(peeled: Error!Oid) Io.Cancelable!?Oid {
+        return peeled catch |err| switch (err) {
+            error.Canceled => error.Canceled,
+            else => null,
+        };
+    }
+
     fn peelToCommit(imp: *Importer, start: Oid) Error!Oid {
         var oid = start;
         var depth: usize = 0;
@@ -1697,8 +1707,8 @@ const Importer = struct {
                 break :blk r.oid;
             } else null;
             if (!imp.force) if (old) |o| {
-                const old_commit = imp.peelToCommit(o) catch null;
-                const new_commit = imp.peelToCommit(new) catch null;
+                const old_commit = try commitOrNull(imp.peelToCommit(o));
+                const new_commit = try commitOrNull(imp.peelToCommit(new));
                 if (old_commit == null or new_commit == null) {
                     try imp.rejected.append(imp.gpa, .{ .name = b.name, .new = new, .old = o, .reason = .missing_commits });
                     continue;

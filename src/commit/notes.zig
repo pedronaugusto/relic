@@ -1269,7 +1269,12 @@ pub const FormatOptions = struct { raw: bool = false };
 pub fn formatNote(io: Io, w: *Io.Writer, t: *Notes, obj: Oid, options: FormatOptions) FormatNoteError!void {
     const raw = options.raw;
     const note = (try t.get(io, obj)) orelse return;
-    const found = t.repo.objectDatabase().read(io, note) catch return;
+    // A note that cannot be read shows nothing, as git's `format_note`;
+    // a cancel is returned.
+    const found = t.repo.objectDatabase().read(io, note) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return,
+    };
     defer t.repo.objectDatabase().allocator().free(found.bytes);
     if (found.type != .blob) return;
     var msg = found.bytes;
@@ -1476,6 +1481,7 @@ pub fn merge(gpa: Allocator, io: Io, repo: *Repository, remote_in: []const u8, o
     // `expand_loose_notes_ref`: a name that resolves stays as it is.
     const remote_ref = if (rev_parse.resolve(gpa, io, repo.revisionSource(), remote_in)) |_| try gpa.dupe(u8, remote_in) else |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
+        error.Canceled => return error.Canceled,
         else => try expandRef(gpa, remote_in),
     };
     defer gpa.free(remote_ref);
@@ -1501,6 +1507,7 @@ pub fn merge(gpa: Allocator, io: Io, repo: *Repository, remote_in: []const u8, o
     const local = try repo.refStore().readOid(gpa, io, local_ref);
     const remote: ?Oid = rev_parse.resolve(gpa, io, repo.revisionSource(), remote_ref) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
+        error.Canceled => return error.Canceled,
         else => blk: {
             if (!ref_names.checkFormat(remote_ref, .{})) return error.BadRemoteRef;
             break :blk null;

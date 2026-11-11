@@ -833,7 +833,12 @@ fn saveTodo(r: *Replay, items: []const todo.Item) Error!void {
         replay: *Replay,
 
         pub fn shorten(s: @This(), oid: Oid, buf: *[hash.max_hex_len]u8) []const u8 {
-            return abbrev.unique(s.replay.io, s.replay.repo.objectDatabase(), oid, s.replay.abbrev_len, buf) catch oid.hex(buf);
+            // The full name where no short one is found, which reads back
+            // as well; a cancel is put back for the write that follows.
+            return abbrev.unique(s.replay.io, s.replay.repo.objectDatabase(), oid, s.replay.abbrev_len, buf) catch |err| {
+                if (err == error.Canceled) s.replay.io.recancel();
+                return oid.hex(buf);
+            };
         }
     };
     const bytes = try todo.toBytes(r.arena, items, .{}, Short{ .replay = r });
@@ -851,19 +856,35 @@ pub const ResolverContext = struct {
     repo: *Repository,
     io: Io,
 
-    /// The commit `text` names, and how many parents it has.
-    pub fn resolve(c: *ResolverContext, text: []const u8) ?todo.Resolved {
+    /// The commit `text` names, and how many parents it has; `null` where
+    /// it names none. A cancel is returned, never taken for no commit.
+    pub fn resolve(c: *ResolverContext, text: []const u8) Io.Cancelable!?todo.Resolved {
         const gpa = c.repo.allocator();
         var oid: ?Oid = null;
         if (text.len == c.repo.objectFormat().hexLen()) oid = Oid.parse(c.repo.objectFormat(), text) catch null;
-        if (oid == null) if (c.repo.refStore().resolveShort(gpa, c.io, text) catch null) |resolved| {
-            gpa.free(resolved.name);
-            oid = resolved.oid;
+        if (oid == null) {
+            const short = c.repo.refStore().resolveShort(gpa, c.io, text) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => null,
+            };
+            if (short) |resolved| {
+                gpa.free(resolved.name);
+                oid = resolved.oid;
+            }
+        }
+        if (oid == null) oid = c.repo.objectDatabase().findPrefix(c.io, text) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => null,
         };
-        if (oid == null) oid = c.repo.objectDatabase().findPrefix(c.io, text) catch null;
         const found = oid orelse return null;
-        const peeled = c.repo.peel(c.io, found) catch return null;
-        const read = c.repo.objectDatabase().read(c.io, peeled) catch return null;
+        const peeled = c.repo.peel(c.io, found) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => return null,
+        };
+        const read = c.repo.objectDatabase().read(c.io, peeled) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => return null,
+        };
         defer c.repo.objectDatabase().allocator().free(read.bytes);
         if (read.type != .commit) return null;
         var commit = object.Commit.parse(gpa, c.repo.objectFormat(), read.bytes) catch return null;

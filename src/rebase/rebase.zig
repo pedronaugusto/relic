@@ -1101,7 +1101,7 @@ fn rearrangeSquash(r: *Run, items: []todo.Item) Error![]todo.Item {
                 target = at;
             } else if (std.mem.findScalar(u8, p, ' ') == null) found_name: {
                 var context: sequencer.ResolverContext = .{ .repo = r.repo, .io = r.io };
-                const resolved = context.resolve(p) orelse break :found_name;
+                const resolved = (try context.resolve(p)) orelse break :found_name;
                 if (by_commit.get(resolved.oid.bytes)) |at| target = at;
             }
             if (target == null) {
@@ -1195,7 +1195,7 @@ fn resolveTip(r: *Run) Error!Tip {
             return .{ .head_name = full, .orig_head = resolved.oid };
         }
         var context: sequencer.ResolverContext = .{ .repo = r.repo, .io = r.io };
-        const found = context.resolve(name) orelse return error.NotACommit;
+        const found = (try context.resolve(name)) orelse return error.NotACommit;
         return .{ .head_name = null, .orig_head = found.oid };
     }
     var h = try r.head();
@@ -2509,7 +2509,7 @@ fn lookupLabel(r: *Run, name: []const u8) Error!Oid {
         return resolved.oid;
     }
     var context: sequencer.ResolverContext = .{ .repo = r.repo, .io = r.io };
-    const found = context.resolve(name) orelse return error.UnknownLabel;
+    const found = (try context.resolve(name)) orelse return error.UnknownLabel;
     return found.oid;
 }
 
@@ -3153,6 +3153,7 @@ fn loadRun(gpa: Allocator, io: Io, repo: *Repository, options: Options) Error!Ru
             r.done_nr = countCommands(parsed.items.items);
         } else |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
+            error.Canceled => return error.Canceled,
             error.InvalidTodoLine, error.FixupWithoutCommit => r.done_nr = 0,
         }
     }

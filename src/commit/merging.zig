@@ -224,7 +224,11 @@ pub fn resolve(gpa: Allocator, io: Io, repo: *Repository, name: []const u8) Self
         const full = try gpa.print(rule, .{name});
         defer gpa.free(full);
         if (std.mem.startsWith(u8, full, "refs/") or std.mem.eql(u8, rule, "{s}")) {
-            if (repo.refStore().resolve(gpa, io, full) catch null) |resolved| {
+            const found = repo.refStore().resolve(gpa, io, full) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => null,
+            };
+            if (found) |resolved| {
                 defer gpa.free(resolved.name);
                 const kind: Kind = if (std.mem.startsWith(u8, resolved.name, "refs/heads/"))
                     .branch
@@ -238,7 +242,10 @@ pub fn resolve(gpa: Allocator, io: Io, repo: *Repository, name: []const u8) Self
             }
         }
     }
-    const oid = repo.objectDatabase().findPrefix(io, name) catch return error.NotACommit;
+    const oid = repo.objectDatabase().findPrefix(io, name) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return error.NotACommit,
+    };
     return targetOf(io, repo, oid, .{ .oid = undefined, .name = name, .kind = .commit });
 }
 

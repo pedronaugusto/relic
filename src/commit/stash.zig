@@ -1115,7 +1115,10 @@ fn checkWritable(ctx: *Ctx, path: []const u8, refusal: ?*Refusal) Error!void {
     }
     const f = found orelse return;
     if (f.kind == .directory) {
-        var dir = ctx.wt.openDir(ctx.io, path, .{ .iterate = true }) catch return;
+        var dir = ctx.wt.openDir(ctx.io, path, .{ .iterate = true }) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => return,
+        };
         defer dir.close(ctx.io);
         var it = dir.iterate();
         if ((try it.next(ctx.io)) == null) return;

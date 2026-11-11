@@ -733,16 +733,27 @@ const SubmoduleOpener = struct {
         s.* = undefined;
     }
 
-    fn open(interface: *ort.Submodules, path: []const u8) ?ort.SubmoduleHistory {
+    /// A submodule that cannot be opened is one not checked out, as git's
+    /// `repo_submodule_init` failing says; a cancel is returned.
+    fn open(interface: *ort.Submodules, path: []const u8) Io.Cancelable!?ort.SubmoduleHistory {
         const s: *SubmoduleOpener = @fieldParentPtr("interface", interface);
-        return s.openInner(path) catch null;
+        return s.openInner(path) catch |err| switch (err) {
+            error.Canceled => error.Canceled,
+            else => null,
+        };
     }
 
     fn openInner(s: *SubmoduleOpener, path: []const u8) !?ort.SubmoduleHistory {
-        var dir = s.wt.openDir(s.io, path, .{}) catch return null;
+        var dir = s.wt.openDir(s.io, path, .{}) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => return null,
+        };
         defer dir.close(s.io);
         // Only a checkout of its own: a directory with a `.git` in it.
-        dir.access(s.io, ".git", .{}) catch return null;
+        dir.access(s.io, ".git", .{}) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => return null,
+        };
         const opened = try s.gpa.create(Opened);
         errdefer s.gpa.destroy(opened);
         opened.repo = try Repository.open(s.gpa, s.io, dir, .{});
@@ -758,7 +769,10 @@ const SubmoduleOpener = struct {
         for (listing.entries) |entry| {
             const resolved = (try opened.repo.refStore().resolve(s.gpa, s.io, entry.name)) orelse continue;
             s.gpa.free(resolved.name);
-            const peeled = opened.repo.peel(s.io, resolved.oid) catch continue;
+            const peeled = opened.repo.peel(s.io, resolved.oid) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => continue,
+            };
             try tips.append(s.gpa, peeled);
         }
         opened.tips = try tips.toOwnedSlice(s.gpa);
@@ -881,7 +895,15 @@ const Machinery = struct {
             .abbrev_len = abbrev.defaultLength(repo.configuration(), db),
             .blocked = options.blocked,
             .renormalize = if (settings.renormalize) &m.normalizer else null,
-            .attributes_from_merge = if (setup.wt) |wt| (if (wt.access(io, ".gitattributes", .{})) |_| false else |_| true) else true,
+            // A cancel in looking for the working tree's attributes is
+            // returned, not taken for none there.
+            .attributes_from_merge = if (setup.wt) |wt| from_merge: {
+                wt.access(io, ".gitattributes", .{}) catch |err| switch (err) {
+                    error.Canceled => return error.Canceled,
+                    else => break :from_merge true,
+                };
+                break :from_merge false;
+            } else true,
             .inner_messages = options.inner_messages or (repo.configuration().getInt(c_int, "merge.verbosity", 2) catch 2) >= 5,
         };
     }

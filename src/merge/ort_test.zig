@@ -69,7 +69,7 @@ const SubOpener = struct {
         o.* = undefined;
     }
 
-    fn open(interface: *ort.Submodules, path: []const u8) ?ort.SubmoduleHistory {
+    fn open(interface: *ort.Submodules, path: []const u8) Io.Cancelable!?ort.SubmoduleHistory {
         const o: *SubOpener = @fieldParentPtr("interface", interface);
         if (!std.mem.eql(u8, path, "sub")) return null;
         if (o.db) |*db| return .{ .db = db, .tips = o.tips.items };
