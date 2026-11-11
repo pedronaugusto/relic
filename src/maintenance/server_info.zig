@@ -103,7 +103,10 @@ fn infoPacks(arena: Allocator, io: Io, db: *odb_mod.Odb, out: *Io.Writer) Self.E
         // named: `maintenance`'s loose-objects task writes `loose-<name>`.
         if (!std.mem.endsWith(u8, entry.name, ".idx")) continue;
         const pack_name = try arena.print("{s}.pack", .{entry.name[0 .. entry.name.len - 4]});
-        pack_dir.access(io, pack_name, .{}) catch continue;
+        pack_dir.access(io, pack_name, .{}) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => continue,
+        };
         try present.append(arena, pack_name);
     }
     std.mem.sort([]const u8, present.items, {}, lessString);
@@ -184,4 +187,27 @@ fn update(arena: Allocator, io: Io, dir: Io.Dir, sub_dir: []const u8, name: []co
         fs.removeLeftover(io, dir, temp);
         return err;
     };
+}
+
+test "a cancel that lands in asking whether a pack is there is returned, not taken for a pack left out of info/packs" {
+    const testgit = @import("../testing/git.zig");
+    const testing_io = @import("../testing/io.zig");
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var git = try testgit.Repo.init(gpa, io, &.{});
+    defer git.deinit();
+    for ([_][]const u8{ "one", "two" }) |message| {
+        try git.exec(io, &.{ "commit", "-q", "--allow-empty", "-m", message });
+        try git.exec(io, &.{ "repack", "-q" });
+    }
+    var repo = try Repository.open(gpa, io, git.dir, .{});
+    defer repo.deinit(io);
+    const Update = struct {
+        repo: *Repository,
+        pub fn run(u: *@This(), fio: Io) !void {
+            try updateServerInfo(gpa, fio, u.repo);
+        }
+    };
+    var info: Update = .{ .repo = &repo };
+    try testing_io.eachCallCanceled(gpa, io, &info, .dirAccess);
 }

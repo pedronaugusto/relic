@@ -242,7 +242,9 @@ pub fn collect(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self
     var report: Report = .{ .outcome = .ran };
     if (!options.skip_foreground_tasks) try foreground(gpa, io, repo, options.clock, options.auto);
     background(gpa, io, repo, options, &s, plan, &report) catch |err| {
-        if (detach) try writeLog(gpa, io, repo, "error: gc failed: {s}\n", .{@errorName(err)});
+        // A canceled gc did not fail: no `gc.log`, which would hold the
+        // next `gc --auto` back as a failure.
+        if (detach and err != error.Canceled) try writeLog(gpa, io, repo, "error: gc failed: {s}\n", .{@errorName(err)});
         return err;
     };
     if (detach and report.too_many_loose) {

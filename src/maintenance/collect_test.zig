@@ -432,3 +432,41 @@ test "gc.repackFilter filters the repack of every pack, as git's gc does" {
         .{ .args = &.{}, .options = .{ .clock = clock().clock }, .config = &.{.{ "gc.repackFilter", "blob:none" }} },
     }, null);
 }
+
+test "a detached gc a cancel stops returns it and writes no gc.log, which would hold the next gc --auto back" {
+    const shakedown = @import("shakedown");
+    const testing_io = @import("../testing/io.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var made = try repo_mod.Repository.create(gpa, io, tmp.dir, .{ .default_branch = "main" });
+    made.deinit(io);
+    // No repack, so each run takes the same steps as the first.
+    var config = try tmp.dir.openFile(io, ".git/config", .{ .mode = .read_write });
+    try config.writePositionalAll(io, "[extensions]\n\tpreciousObjects = true\n", try config.length(io));
+    config.close(io);
+    const Gc = struct {
+        dir: Io.Dir,
+        options: collect.Options,
+        repo: repo_mod.Repository = undefined,
+        pub fn setUp(g: *@This(), _: *shakedown.FaultIo) !void {
+            g.repo = try repo_mod.Repository.open(gpa, io, g.dir, .{});
+        }
+        pub fn run(g: *@This(), fio: Io) !void {
+            _ = try collect.collect(gpa, fio, &g.repo, g.options);
+        }
+        pub fn check(g: *@This(), fio: Io, result: anyerror!void, injected: ?shakedown.Injected) !void {
+            try testing_io.cancelKept(fio, result, injected);
+            if (result) |_| {} else |err| if (err == error.Canceled) try std.testing.expectError(error.FileNotFound, g.dir.access(io, ".git/gc.log", .{}));
+        }
+        pub fn tearDown(g: *@This()) void {
+            // A log only the old code wrote, which the next run would stop at.
+            g.dir.deleteFile(io, ".git/gc.log") catch |err| std.debug.assert(err == error.FileNotFound);
+            g.repo.deinit(io);
+        }
+    };
+    var options = clock();
+    options.detach = true;
+    options.skip_foreground_tasks = true;
+    var gc: Gc = .{ .dir = tmp.dir, .options = options };
+    try testing_io.everyCancel(gpa, io, &gc);
+}

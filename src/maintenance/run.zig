@@ -206,11 +206,15 @@ pub fn selectTasks(repo: *Repository, given: []const Task, schedule: ?Schedule) 
 pub const Prefetch = struct {
     vtable: *const VTable,
 
+    /// `PrefetchFailed` for a fetch that failed, which the run records
+    /// as the task's failure; a cancel stops the run.
+    pub const Error = error{PrefetchFailed} || Io.Cancelable;
+
     pub const VTable = struct {
-        fetch: *const fn (prefetch: *Prefetch, io: Io, repo: *Repository) error{PrefetchFailed}!void,
+        fetch: *const fn (prefetch: *Prefetch, io: Io, repo: *Repository) Prefetch.Error!void,
     };
 
-    pub fn fetch(p: *Prefetch, io: Io, repo: *Repository) error{PrefetchFailed}!void {
+    pub fn fetch(p: *Prefetch, io: Io, repo: *Repository) Prefetch.Error!void {
         return p.vtable.fetch(p, io, repo);
     }
 };
@@ -242,7 +246,8 @@ pub const Outcome = union(enum) {
     /// `--auto`, and its condition said no.
     skipped,
     ran,
-    /// git's "task '<name>' failed": the others still run.
+    /// git's "task '<name>' failed": the others still run. A canceled
+    /// task is not one: `run` returns `error.Canceled`.
     failed: Self.Error,
 };
 
@@ -271,7 +276,8 @@ pub const Error = SelectError || collect.Error || ops.MidxError || error{
 /// git's `maintenance run`: the selected tasks under
 /// `objects/maintenance.lock`, the foreground ones (gc's `pack-refs` and
 /// `reflog expire`, the pack-refs and reflog-expire tasks) first, then the
-/// rest; a task that fails leaves the others to run.
+/// rest; a task that fails leaves the others to run. A cancel stops the
+/// run at the task it lands in and is returned.
 pub fn run(gpa: Allocator, io: Io, repo: *Repository, options: RunOptions) Self.Error!RunReport {
     if (options.auto and options.schedule != null) return error.IncompatibleOptions;
     var report: RunReport = .{ .selection = try selectTasks(repo, options.tasks, options.schedule) };
@@ -287,6 +293,7 @@ pub fn run(gpa: Allocator, io: Io, repo: *Repository, options: RunOptions) Self.
             if (!hasPhase(task, phase) or report.outcomes.get(task) == .failed) continue;
             if (options.auto) {
                 const wanted = condition(gpa, io, repo, task, options) catch |err| {
+                    if (err == error.Canceled) return error.Canceled;
                     report.outcomes.set(task, .{ .failed = err });
                     continue;
                 };
@@ -296,6 +303,7 @@ pub fn run(gpa: Allocator, io: Io, repo: *Repository, options: RunOptions) Self.
                 }
             }
             runTask(gpa, io, repo, task, phase, options) catch |err| {
+                if (err == error.Canceled) return error.Canceled;
                 report.outcomes.set(task, .{ .failed = err });
                 continue;
             };

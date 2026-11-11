@@ -501,7 +501,7 @@ test "LFS HTTP pagination ends or fails without publishing partial caches" {
     }
 }
 
-test "a cancel that lands in a native hook's work is put back, not taken for the hook's answer" {
+test "a cancel that lands in a native hook's work is returned, not taken for the hook's answer" {
     const shakedown = @import("shakedown");
     const testing_io = @import("../testing/io.zig");
     const lfshooks = @import("hooks.zig");
@@ -521,14 +521,15 @@ test "a cancel that lands in a native hook's work is put back, not taken for the
         pub fn setUp(m: *@This(), _: *shakedown.FaultIo) !void {
             m.repo = try repo_mod.Repository.open(testing.allocator, testing.io, m.dir, .{});
         }
-        // The hook answers with a bool: a cancel is the task's next
-        // cancelation point's to say.
         pub fn run(m: *@This(), io: Io) !void {
             var native: lfshooks.Native = .{ .gpa = testing.allocator, .repo = &m.repo };
-            _ = native.lfsHooks().run(io, "post-merge", .{ .args = &.{}, .input = "", .environ = m.environ });
+            _ = try native.lfsHooks().run(io, "post-merge", .{ .args = &.{}, .input = "", .environ = m.environ });
         }
-        pub fn check(_: *@This(), io: Io, result: anyerror!void, injected: ?shakedown.Injected) !void {
-            try testing_io.cancelKept(io, result, injected);
+        // Returned, never only put back: the hook's caller has an error
+        // to return it with.
+        pub fn check(_: *@This(), _: Io, result: anyerror!void, injected: ?shakedown.Injected) !void {
+            const at = injected orelse return result;
+            if (at.fault == .cancel) try testing.expectError(error.Canceled, result);
         }
         pub fn tearDown(m: *@This()) void {
             m.repo.deinit(testing.io);

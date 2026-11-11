@@ -51,14 +51,13 @@ pub const Native = struct {
         return &n.interface;
     }
 
-    fn run(lfs: *hooks.LfsHooks, io: Io, event: []const u8, handed: hooks.LfsHooks.Handed) bool {
+    fn run(lfs: *hooks.LfsHooks, io: Io, event: []const u8, handed: hooks.LfsHooks.Handed) Io.Cancelable!bool {
         const n: *Native = @fieldParentPtr("interface", lfs);
         n.fixed = null;
         n.failure = null;
         n.handle(io, event, handed.args, handed.environ) catch |err| {
-            // The hook's answer is a bool: a cancel stays for the caller's
-            // next cancelation point.
-            if (err == error.Canceled) io.recancel();
+            // A cancel is no answer of the hook's.
+            if (err == error.Canceled) return error.Canceled;
             n.failure = @errorName(err);
             // git-lfs's post-checkout and post-merge warn and go on; its
             // post-commit fails.

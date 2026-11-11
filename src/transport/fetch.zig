@@ -2816,7 +2816,8 @@ pub fn prefetchAll(gpa: Allocator, io: Io, repo: *Repository, template: Options)
 }
 
 /// `prefetchAll` as `maintenance.run` asks for it: `maintenance()` is the
-/// `maintenance.Prefetch` to hand it; a failure is kept in `failure`.
+/// `maintenance.Prefetch` to hand it; a failure is kept in `failure`, a
+/// cancel returned.
 pub const Prefetcher = struct {
     gpa: Allocator,
     options: Options,
@@ -2827,9 +2828,10 @@ pub const Prefetcher = struct {
         return &p.interface;
     }
 
-    fn run(prefetch: *maintenance_mod.Prefetch, io: Io, repo: *Repository) error{PrefetchFailed}!void {
+    fn run(prefetch: *maintenance_mod.Prefetch, io: Io, repo: *Repository) maintenance_mod.Prefetch.Error!void {
         const p: *Prefetcher = @alignCast(@fieldParentPtr("interface", prefetch)); // this function is installed only on a Prefetcher's interface
         prefetchAll(p.gpa, io, repo, p.options) catch |err| {
+            if (err == error.Canceled) return error.Canceled;
             p.failure = err;
             return error.PrefetchFailed;
         };

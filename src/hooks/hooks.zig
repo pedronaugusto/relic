@@ -100,8 +100,9 @@ pub const LfsHooks = struct {
 
     pub const VTable = struct {
         /// Do what `git lfs <event>` would do with what the hook is handed.
-        /// Returning false fails the hook, as the hook's own exit would.
-        run: *const fn (lfs: *LfsHooks, io: Io, event: []const u8, handed: Handed) bool,
+        /// Returning false fails the hook, as the hook's own exit would; a
+        /// cancel is returned.
+        run: *const fn (lfs: *LfsHooks, io: Io, event: []const u8, handed: Handed) Io.Cancelable!bool,
     };
 
     /// What the hook would be handed.
@@ -112,7 +113,7 @@ pub const LfsHooks = struct {
         environ: *const std.process.Environ.Map,
     };
 
-    pub fn run(lfs: *LfsHooks, io: Io, event: []const u8, handed: Handed) bool {
+    pub fn run(lfs: *LfsHooks, io: Io, event: []const u8, handed: Handed) Io.Cancelable!bool {
         return lfs.vtable.run(lfs, io, event, handed);
     }
 };
@@ -437,7 +438,7 @@ pub const Runner = struct {
             .missing => {},
             .not_executable => ran.passed_over = true,
             .found => |path| {
-                if (runner.options.lfs != null and gitLfsHookFile(io, event, path)) {
+                if (runner.options.lfs != null and try gitLfsHookFile(io, event, path)) {
                     lfs_native = true;
                 } else try planned.append(runner.gpa, .{ .command = path, .shell = false });
             },
@@ -451,7 +452,7 @@ pub const Runner = struct {
             const lfs_hooks = runner.options.lfs.?;
             ran.count += 1;
             ran.lfs_native = true;
-            if (!lfs_hooks.run(io, event, .{ .args = request.args, .input = request.input, .environ = runner.programs.environ }) and ran.failure == null) {
+            if (!try lfs_hooks.run(io, event, .{ .args = request.args, .input = request.input, .environ = runner.programs.environ }) and ran.failure == null) {
                 ran.failure = .init(event, .{ .exited = 1 });
             }
         }
@@ -491,6 +492,12 @@ pub const Runner = struct {
             };
         }
         work.run();
+        // A hook this task ran met a cancel: the others are canceled too,
+        // and none is started after it.
+        if (work.canceled.load(.monotonic) == .canceled) {
+            group.cancel(io);
+            return error.Canceled;
+        }
         group.await(io) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
         };
@@ -508,14 +515,20 @@ pub const Runner = struct {
             ran.count += 1;
             switch (runner.options.output) {
                 .capture => try runner.captured.appendSlice(gpa, outcome.stdout),
-                // glint-ignore: Z026 -- a hook's output that cannot reach this process's standard error is lost, as git's is
-                .inherit => stderr.interface.writeAll(outcome.stdout) catch {},
+                // glint-ignore: Z026 -- a hook's output that cannot reach this process's standard error is lost, as git's is; a cancel is returned
+                .inherit => stderr.interface.writeAll(outcome.stdout) catch try canceledOr(&stderr),
                 .ignore => {},
             }
             if (!outcome.succeeded() and ran.failure == null) ran.failure = .init(event, outcome.term);
         }
         // glint-ignore: Z026 -- as above: standard error that cannot be written to loses the output, not the hooks' result
-        stderr.interface.flush() catch {};
+        stderr.interface.flush() catch try canceledOr(&stderr);
+    }
+
+    /// A write to this process's standard error that failed: a cancel that
+    /// stopped it is returned; any other failure only loses the output.
+    fn canceledOr(stderr: *const Io.File.Writer) Io.Cancelable!void {
+        if (stderr.err) |err| if (err == error.Canceled) return error.Canceled;
     }
 
     const AtOnce = struct { outcome: ?program.Outcome = null, err: ?program.Error = null };
@@ -530,15 +543,19 @@ pub const Runner = struct {
         /// How many hooks the tasks have claimed: each takes the next by
         /// its index until none is left.
         next: Claimed = Claimed.init(Claims.fromRaw(0)),
+        /// Whether a hook met a cancel: no task claims another after it.
+        canceled: aegis.Atomic(Cancel) = aegis.Atomic(Cancel).init(.running),
 
         const Claims = aegis.units.Count(Planned, usize);
         const Claimed = aegis.Atomic(Claims);
+        const Cancel = enum(u8) { running, canceled };
 
         fn run(w: *AtOnceWork) void {
-            while (true) {
+            while (w.canceled.load(.monotonic) == .running) {
                 const at = w.next.fetchAddWrapping(Claims.fromRaw(1), .monotonic).raw();
                 if (at >= w.planned.len) return;
                 w.results[at] = w.runCaptured(w.planned[at]) catch |err| .{ .err = err };
+                if (w.results[at].err) |err| if (err == error.Canceled) w.canceled.store(.canceled, .monotonic);
             }
         }
 
@@ -962,12 +979,13 @@ pub const Runner = struct {
     }
 };
 
-/// Whether the file at `path` is git-lfs's own hook for `event`.
-fn gitLfsHookFile(io: Io, event: []const u8, path: []const u8) bool {
+/// Whether the file at `path` is git-lfs's own hook for `event`; one that
+/// cannot be read is not.
+fn gitLfsHookFile(io: Io, event: []const u8, path: []const u8) Io.Cancelable!bool {
     var buf: [1025]u8 = undefined;
-    const file = Io.Dir.openFileAbsolute(io, path, .{}) catch return false;
+    const file = Io.Dir.openFileAbsolute(io, path, .{}) catch |err| return if (err == error.Canceled) error.Canceled else false;
     defer file.close(io);
-    const n = file.readPositionalAll(io, &buf, 0) catch return false;
+    const n = file.readPositionalAll(io, &buf, 0) catch |err| return if (err == error.Canceled) error.Canceled else false;
     if (n > 1024) return false;
     return isGitLfsHook(event, buf[0..n]);
 }
@@ -1475,4 +1493,91 @@ test "an event's hooks run hook.jobs at once when each may, their output whole i
             return err;
         };
     }
+}
+
+/// What stands in for git-lfs's hooks in the tests: it says yes.
+const AgreeingLfs = struct {
+    interface: LfsHooks = .{ .vtable = &.{ .run = run } },
+
+    fn run(_: *LfsHooks, _: Io, _: []const u8, _: LfsHooks.Handed) Io.Cancelable!bool {
+        return true;
+    }
+};
+
+test "a cancel that lands in reading whether a hook is git-lfs's is returned, not taken for a hook to start" {
+    // Windows has no executable bit; the hook would be found another way.
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
+    const shakedown = @import("shakedown");
+    const testing_io = @import("../testing/io.zig");
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+    var environ = try testEnviron(gpa);
+    defer environ.deinit();
+    try repo.writeFile(io, ".git/hooks/post-merge", "#!/bin/sh\ncommand -v git-lfs >/dev/null 2>&1 || { printf >&2 \"\\n%s\\n\\n\" \"This repository is configured for Git LFS but 'git-lfs' was not found on your path. If you no longer wish to use Git LFS, remove this hook by deleting the 'post-merge' file in the hooks directory (set by 'core.hookspath'; usually '.git/hooks').\"; exit 2; }\ngit lfs post-merge \"$@\"\n");
+    {
+        const file = try repo.dir.openFile(io, ".git/hooks/post-merge", .{});
+        defer file.close(io);
+        try file.setPermissions(io, .fromMode(0o755));
+    }
+    var opened = try openRunner(gpa, io, &repo, &environ, "");
+    defer opened.git_dir.deinit(io);
+    defer opened.config.deinit();
+    defer opened.runner.deinit();
+    var lfs: AgreeingLfs = .{};
+    opened.runner.options.lfs = &lfs.interface;
+    const Merge = struct {
+        runner: *Runner,
+        pub fn setUp(_: *@This(), _: *shakedown.FaultIo) !void {}
+        pub fn run(m: *@This(), fio: Io) !void {
+            const ran = try m.runner.postMerge(fio, .{});
+            try testing.expect(ran.lfs_native);
+        }
+        // Returned: the runner has an error to return it with.
+        pub fn check(_: *@This(), _: Io, result: anyerror!void, injected: ?shakedown.Injected) !void {
+            const at = injected orelse return result;
+            if (at.fault == .cancel) try testing.expectError(error.Canceled, result);
+        }
+        pub fn tearDown(_: *@This()) void {}
+    };
+    var merge: Merge = .{ .runner = &opened.runner };
+    try testing_io.everyCancel(gpa, io, &merge);
+}
+
+test "a cancel that lands in one of an event's hooks run at once starts none of the others" {
+    const shakedown = @import("shakedown");
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var repo = try testgit.Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+    var environ = try testEnviron(gpa);
+    defer environ.deinit();
+    var opened = try openRunner(gpa, io, &repo, &environ, "[hook]\n\tjobs = 2\n" ++
+        "[hook \"one\"]\n\tevent = pre-commit\n\tcommand = echo > ran-one\n\tparallel = true\n" ++
+        "[hook \"two\"]\n\tevent = pre-commit\n\tcommand = echo > ran-two\n\tparallel = true\n" ++
+        "[hook \"three\"]\n\tevent = pre-commit\n\tcommand = echo > ran-three\n\tparallel = true\n");
+    defer opened.git_dir.deinit(io);
+    defer opened.config.deinit();
+    defer opened.runner.deinit();
+    // No second task, so this one runs the hooks one after another. The
+    // first cancelation point after that refusal is in the first hook's
+    // run: the nth call after it is canceled, n counting up past the calls
+    // a cancel cannot land in, until one lands.
+    var n: u32 = 1;
+    while (n <= 64) : (n += 1) {
+        const plan = [_]shakedown.IoPlan.Entry{
+            .{ .at = .{ .nth = .{ .call = .groupConcurrent, .n = 1 } }, .fault = .{ .fail = error.ConcurrencyUnavailable } },
+            .{ .at = .{ .nth = .{ .n = n, .after = 0 } }, .fault = .cancel },
+        };
+        const faults = try shakedown.FaultIo.init(gpa, io, .{ .plan = &plan });
+        defer faults.deinit();
+        if (opened.runner.run(faults.io(), "pre-commit", .{})) |_| {
+            for ([_][]const u8{ "ran-one", "ran-two", "ran-three" }) |name| try repo.dir.deleteFile(io, name);
+            continue;
+        } else |err| try testing.expectEqual(error.Canceled, err);
+        for ([_][]const u8{ "ran-two", "ran-three" }) |name| try testing.expectError(error.FileNotFound, repo.dir.access(io, name, .{}));
+        return;
+    }
+    return error.TestUnexpectedResult;
 }

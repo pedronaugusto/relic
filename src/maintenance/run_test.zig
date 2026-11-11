@@ -520,3 +520,64 @@ test "the commit-graph task writes the changed-path filters git's does: changedP
         };
     }
 }
+
+test "a cancel that lands in a task, or in asking whether it is needed, stops the run and is returned, not recorded as the task failing" {
+    const shakedown = @import("shakedown");
+    const testing_io = @import("../testing/io.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var made = try repo_mod.Repository.create(gpa, io, tmp.dir, .{ .default_branch = "main" });
+    made.deinit(io);
+    const Maintain = struct {
+        dir: Io.Dir,
+        now: Io.Timestamp,
+        repo: repo_mod.Repository = undefined,
+        pub fn setUp(m: *@This(), _: *shakedown.FaultIo) !void {
+            m.repo = try repo_mod.Repository.open(gpa, io, m.dir, .{});
+        }
+        // Two tasks, each first asked whether it is needed, then run: a
+        // cancel in either is the run's, and the next task does not run.
+        pub fn run(m: *@This(), fio: Io) !void {
+            for ([_]bool{ true, false }) |auto| {
+                _ = try run_mod.run(gpa, fio, &m.repo, .{ .clock = .{ .now = m.now }, .auto = auto, .tasks = &.{ .worktree_prune, .rerere_gc } });
+            }
+        }
+        pub fn check(_: *@This(), fio: Io, result: anyerror!void, injected: ?shakedown.Injected) !void {
+            try testing_io.cancelKept(fio, result, injected);
+        }
+        pub fn tearDown(m: *@This()) void {
+            m.repo.deinit(io);
+        }
+    };
+    var maintain: Maintain = .{ .dir = tmp.dir, .now = Io.Clock.real.now(io) };
+    try testing_io.everyCancel(gpa, io, &maintain);
+}
+
+test "a cancel that lands in the prefetch comes back through maintenance.Prefetch, not as a fetch that failed" {
+    const fetch = @import("../transport/fetch.zig");
+    const testing_io = @import("../testing/io.zig");
+    var source = try testgit.Repo.init(gpa, io, &.{});
+    defer source.deinit();
+    try shared.commitAt(&source, testgit.fixture_date, "one");
+    var source_buf: [Io.Dir.max_path_bytes]u8 = undefined;
+    const source_path = source_buf[0..try source.dir.realPath(io, &source_buf)];
+    var ours = try testgit.Repo.init(gpa, io, &.{});
+    defer ours.deinit();
+    try ours.exec(io, &.{ "remote", "add", "origin", source_path });
+    var native = try repo_mod.Repository.open(gpa, io, ours.dir, .{});
+    defer native.deinit(io);
+    const Prefetch = struct {
+        repo: *repo_mod.Repository,
+        prefetcher: fetch.Prefetcher,
+        now: Io.Timestamp,
+        pub fn run(p: *@This(), fio: Io) !void {
+            _ = try run_mod.run(gpa, fio, p.repo, .{ .clock = .{ .now = p.now }, .tasks = &.{.prefetch}, .prefetch = p.prefetcher.maintenance() });
+        }
+    };
+    var prefetch: Prefetch = .{
+        .repo = &native,
+        .prefetcher = .{ .gpa = gpa, .options = .{ .who = .{ .name = "Fixture", .email = "fixture@example.com", .when_secs = testgit.fixture_date, .offset_minutes = 0 }, .programs = .{ .environ = &ours.isolated.? } } },
+        .now = Io.Clock.real.now(io),
+    };
+    try testing_io.eachCallCanceled(gpa, io, &prefetch, .dirOpenFile);
+}
