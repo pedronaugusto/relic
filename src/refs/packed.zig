@@ -162,8 +162,12 @@ fn readSeen(gpa: Allocator, io: Io, dir: Io.Dir, kind: Kind, seen: *Validity) Re
         else => |e| return e,
     };
     defer file.close(io);
-    seen.* = Validity.from(file.stat(io) catch |err| return statError(err));
+    const st = file.stat(io) catch |err| return statError(err);
+    seen.* = Validity.from(st);
     var reader = file.reader(io, &.{});
+    // The length is the stat's: std's reader would stat the file again for
+    // it and keep a cancel that lands there in its `size_err`, unread.
+    reader.size = st.size;
     const bytes = reader.interface.allocRemaining(gpa, .limited(max_bytes)) catch |err| switch (err) {
         error.ReadFailed => return reader.err.?,
         error.OutOfMemory, error.StreamTooLong => |e| return e,
