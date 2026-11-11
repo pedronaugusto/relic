@@ -492,8 +492,13 @@ const Run = struct {
 
     /// `oid`'s short name in `buf`, its full one where none can be found:
     /// the names a sheet is written with (`todo.format`).
+    /// A cancel is put back for the task's next cancelation point:
+    /// `todo.format` takes no error from here.
     pub fn shorten(r: *Run, oid: Oid, buf: *[hash.max_hex_len]u8) []const u8 {
-        return abbrev.unique(r.io, r.repo.objectDatabase(), oid, r.abbrev_len, buf) catch oid.hex(buf);
+        return abbrev.unique(r.io, r.repo.objectDatabase(), oid, r.abbrev_len, buf) catch |err| {
+            if (err == error.Canceled) r.io.recancel();
+            return oid.hex(buf);
+        };
     }
 
     fn head(r: *Run) Error!head_mod.Head {
@@ -2755,7 +2760,7 @@ fn doMerge(r: *Run, item: todo.Item) Error!?Outcome {
     var outcome = try three_way.applyCommits(gpa, io, repo, .{ .index = index, .ours = head_oid, .theirs = merge_head, .bases = reversed }, .{
         .blob = .{
             .conflict_style = style,
-            .labels = .{ .ours = "HEAD", .theirs = if (lookupRewritten(r, name)) ref_name else name },
+            .labels = .{ .ours = "HEAD", .theirs = if (try lookupRewritten(r, name)) ref_name else name },
             .algorithm = .histogram,
         },
         .strategy_options = r.options.strategy_options,
@@ -2872,9 +2877,15 @@ fn sameOids(a: []const Oid, b: []const Oid) bool {
     return true;
 }
 
-fn lookupRewritten(r: *Run, name: []const u8) bool {
-    const ref = r.arena.print("refs/rewritten/{s}", .{name}) catch return false;
-    const found = r.repo.refStore().read(r.gpa, r.io, ref) catch return false;
+/// Whether `refs/rewritten/<name>` is there. A ref that does not read is
+/// not; a cancel is returned.
+fn lookupRewritten(r: *Run, name: []const u8) (Allocator.Error || Io.Cancelable)!bool {
+    const ref = try r.arena.print("refs/rewritten/{s}", .{name});
+    const found = r.repo.refStore().read(r.gpa, r.io, ref) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.Canceled => return error.Canceled,
+        else => return false,
+    };
     if (found) |f| switch (f) {
         .symbolic => |t| r.gpa.free(t),
         .direct => {},

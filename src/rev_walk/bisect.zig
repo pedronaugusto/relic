@@ -201,8 +201,11 @@ const Ctx = struct {
         return text.len == 0;
     }
 
-    fn exists(c: *Ctx, name: []const u8) bool {
-        _ = c.dir().statFile(c.io, name, .{}) catch return false;
+    fn exists(c: *Ctx, name: []const u8) Io.Cancelable!bool {
+        _ = c.dir().statFile(c.io, name, .{}) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => return false,
+        };
         return true;
     }
 
@@ -240,10 +243,11 @@ const Ctx = struct {
     fn commitOf(c: *Ctx, rev: []const u8) Error!Oid {
         const oid = rev_parse.resolve(c.gpa, c.io, c.repo.revisionSource(), rev) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
+            error.Canceled => return error.Canceled,
             else => return error.BadRevision,
         };
-        const peeled = c.repo.peel(c.io, oid) catch return error.BadRevision;
-        const header = c.repo.objectDatabase().readHeader(c.io, peeled) catch return error.BadRevision;
+        const peeled = c.repo.peel(c.io, oid) catch |err| return badRevision(err);
+        const header = c.repo.objectDatabase().readHeader(c.io, peeled) catch |err| return badRevision(err);
         if (header.type != .commit) return error.BadRevision;
         return peeled;
     }
@@ -408,10 +412,11 @@ fn bisectWrite(c: *Ctx, state: []const u8, rev: []const u8, t: Terms, nolog: boo
         return error.InvalidCommand;
     const oid = rev_parse.resolve(c.gpa, c.io, c.repo.revisionSource(), rev) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
+        error.Canceled => return error.Canceled,
         else => return error.BadRevision,
     };
     try c.updateRef(tag, oid);
-    const commit = c.repo.peel(c.io, oid) catch return error.BadRevision;
+    const commit = c.repo.peel(c.io, oid) catch |err| return badRevision(err);
     var line: std.ArrayList(u8) = .empty;
     try line.print(c.a, "# {s}: [{s}] {s}\n", .{ state, try c.hex(commit), try c.subject(commit) });
     if (!nolog) try line.print(c.a, "git bisect {s} {s}\n", .{ state, rev });
@@ -836,11 +841,17 @@ fn estimateSteps(all: i64) i64 {
     return if (e < 3 * x) n else @as(i64, n) - 1;
 }
 
+/// A revision that does not read as a commit is a bad one; a cancel is
+/// returned as itself.
+fn badRevision(err: anyerror) Error {
+    return if (err == error.Canceled) error.Canceled else error.BadRevision;
+}
+
 /// `bisect_next_all`.
 fn nextAll(c: *Ctx, t: Terms) Error!Step {
     const no_checkout = try c.roots().read(c.a, c.io, .bisect_head) != null;
     var revs = try readRefs(c, t);
-    const first_parent = c.exists("BISECT_FIRST_PARENT");
+    const first_parent = try c.exists("BISECT_FIRST_PARENT");
     const find_all = revs.skipped.items.len != 0;
 
     if (try checkGoodAncestors(c, t, &revs, no_checkout)) |step| return step;
@@ -892,7 +903,7 @@ fn onlySkipped(c: *Ctx, t: Terms, tried: []const Oid, bad: ?Oid) Error!Step {
 /// when a merge base was checked out to be tested.
 fn checkGoodAncestors(c: *Ctx, t: Terms, revs: *const Revs, no_checkout: bool) Error!?Step {
     const bad = revs.bad orelse return error.BadRevisionNeeded;
-    if (c.exists("BISECT_ANCESTORS_OK")) return null;
+    if (try c.exists("BISECT_ANCESTORS_OK")) return null;
     if (revs.good.items.len == 0) return null;
 
     // `check_ancestors`: is any good commit not reached from the bad one?
@@ -1081,7 +1092,10 @@ fn startWith(c: *Ctx, t: *Terms, args: []const []const u8) Error!Step {
     if (first_parent) try c.writeState("BISECT_FIRST_PARENT", "\n");
     if (reset_when_found) |mode| try c.writeState("BISECT_RESET_WHEN_FOUND", try std.mem.concat(c.a, u8, &.{ @tagName(mode), "\n" }));
     if (no_checkout) {
-        const oid = rev_parse.resolve(c.gpa, c.io, c.repo.revisionSource(), start_head) catch return error.BadHead;
+        const oid = rev_parse.resolve(c.gpa, c.io, c.repo.revisionSource(), start_head) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => return error.BadHead,
+        };
         try c.roots().write(c.gpa, c.io, .bisect_head, oid);
     }
     names.writer.writeByte('\n') catch return error.OutOfMemory;
@@ -1096,8 +1110,8 @@ fn startWith(c: *Ctx, t: *Terms, args: []const []const u8) Error!Step {
     try c.appendState("BISECT_LOG", log_line.written());
     // A bisection that cannot go on is not left half started.
     return autoNext(c, t.*) catch |err| {
-        // glint-ignore: Z026 -- the step's error is the one to report; a state left behind is what `git bisect reset` removes
-        cleanState(c) catch {};
+        // glint-ignore: Z026 -- the step's error is the one to report; a state left behind is what `git bisect reset` removes, and a cancel in its removal is put back
+        cleanState(c) catch |clean_err| if (clean_err == error.Canceled) c.io.recancel();
         return err;
     };
 }
@@ -1372,7 +1386,10 @@ fn verifyGood(c: *Ctx, t: Terms, line: []const u8, run_options: RunOptions) Erro
         if (good == null and e.target == .direct) good = e.target.direct;
     };
     const at = if (no_checkout) try c.roots().read(c.a, c.io, .bisect_head) else try c.readRef("HEAD");
-    const current = at orelse (c.commitOf("HEAD") catch return -1);
+    const current = at orelse (c.commitOf("HEAD") catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return -1,
+    });
     try checkout(c, good orelse return -1, no_checkout);
     const code = try runCommand(c, line, run_options);
     try checkout(c, current, no_checkout);

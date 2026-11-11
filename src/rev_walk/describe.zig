@@ -527,7 +527,7 @@ pub fn head(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Er
     if (options.broken) |broken| {
         const dirty_mark = options.dirty orelse "-dirty";
         suffix = if (isDirty(gpa, io, repo, resolved.oid)) |dirty| (if (dirty) dirty_mark else null) else |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
+            error.OutOfMemory, error.Canceled => |e| return e,
             else => broken,
         };
     } else if (options.dirty) |dirty_mark| {
@@ -1011,7 +1011,11 @@ fn shortenUnambiguous(a: Allocator, io: Io, store: *refs_mod.Store, refname: []c
         var ambiguous = false;
         for (rules[0..i]) |other| {
             const candidate = try std.mem.concat(a, u8, &.{ other[0], short, other[1] });
-            if (store.read(a, io, candidate) catch null) |_| {
+            const found = store.read(a, io, candidate) catch |err| switch (err) {
+                error.OutOfMemory, error.Canceled => |e| return e,
+                else => null,
+            };
+            if (found) |_| {
                 ambiguous = true;
                 break;
             }

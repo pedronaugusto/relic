@@ -228,11 +228,11 @@ pub const Mailmap = struct {
         }
         if (blob_name) |name| blob: {
             const oid = rev_parse.resolve(gpa, io, repo.revisionSource(), name) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
+                error.OutOfMemory, error.Canceled => |e| return e,
                 else => break :blob,
             };
             const found = repo.objectDatabase().read(io, oid) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
+                error.OutOfMemory, error.Canceled => |e| return e,
                 else => break :blob,
             };
             defer repo.objectDatabase().allocator().free(found.bytes);
@@ -264,11 +264,14 @@ pub const Mailmap = struct {
 
     pub fn addFileAt(m: *Mailmap, io: Io, dir: Io.Dir, path: []const u8, options: AddFileAtOptions) AddFileAtError!void {
         if (!options.follow_symlinks and builtin.target.os.tag != .windows) {
-            const st = dir.statFile(io, path, .{ .follow_symlinks = false }) catch return;
+            const st = dir.statFile(io, path, .{ .follow_symlinks = false }) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => return,
+            };
             if (st.kind == .sym_link) return;
         }
         const bytes = aegis.own.readFile(io, dir, path, m.gpa, aegis.units.Bytes(u64).fromRaw(std.math.maxInt(u64))) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
+            error.OutOfMemory, error.Canceled => |e| return e,
             else => return,
         };
         defer m.gpa.free(bytes);

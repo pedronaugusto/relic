@@ -59,7 +59,10 @@ fn addCommit(gpa: Allocator, io: Io, repo: *Repository, seen: *std.ArrayList(Oid
     for (seen.items) |known| {
         if (known.eql(oid)) return;
     }
-    const header = repo.objectDatabase().readHeader(io, oid) catch return;
+    const header = repo.objectDatabase().readHeader(io, oid) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return,
+    };
     if (header.type != .commit) return;
     try seen.append(gpa, oid);
 }
