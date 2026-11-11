@@ -155,10 +155,16 @@ fn converse(gpa: Allocator, io: Io, repo: *repo_mod.Repository, in: *Io.Reader, 
     };
     if (!allow_unreachable) {
         const name = treeish[0 .. std.mem.findScalar(u8, treeish, ':') orelse treeish.len];
-        const found = rev_parse.dwimRef(arena, io, repo.revisionSource(), name) catch null;
+        const found = rev_parse.dwimRef(arena, io, repo.revisionSource(), name) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => null,
+        };
         if (found == null) return refuse(out, "no such ref: {s}", .{name});
     }
-    const oid = rev_parse.resolve(gpa, io, repo.revisionSource(), treeish) catch return refuse(out, "not a valid object name: {s}", .{treeish});
+    const oid = rev_parse.resolve(gpa, io, repo.revisionSource(), treeish) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return refuse(out, "not a valid object name: {s}", .{treeish}),
+    };
     if (parsed.mtime) |text| {
         const secs = date.approximate(text, .{ .now = options.now }) orelse return refuse(out, "invalid date format: {s}", .{text});
         parsed.options.mtime = date.timestamp(secs);

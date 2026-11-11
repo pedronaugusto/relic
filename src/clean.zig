@@ -192,7 +192,7 @@ pub fn clean(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.E
         .precompose = precompose,
         .out = options.out,
         .quote_fully = quote_fully,
-        .cwd = cwdUnder(a, io, wt),
+        .cwd = try cwdUnder(a, io, wt),
     };
     for (walk.entries.items) |name| {
         if (!walk.isOther(name)) continue;
@@ -262,7 +262,10 @@ const Walk = struct {
 
     fn readDirectory(w: *Walk, base: []const u8, depth: u32, excluded: bool) Error!State {
         if (depth > 256) return error.TreeTooDeep;
-        var dir = if (base.len == 0) w.wt else w.wt.openDir(w.io, base, .{ .iterate = true }) catch return .none;
+        var dir = if (base.len == 0) w.wt else w.wt.openDir(w.io, base, .{ .iterate = true }) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => return .none,
+        };
         defer if (base.len != 0) dir.close(w.io);
         // Inside an excluded directory everything is excluded, and its own
         // ignore file is not read: git's `prep_exclude`.
@@ -461,9 +464,15 @@ const Walk = struct {
 
 /// The process's current directory when it lies in the working tree, as a
 /// path below it; git will not remove it.
-fn cwdUnder(a: Allocator, io: Io, wt: Io.Dir) ?[]const u8 {
-    const cwd = std.process.currentPathAlloc(io, a) catch return null;
-    const top = wt.realPathFileAlloc(io, ".", a) catch return null;
+fn cwdUnder(a: Allocator, io: Io, wt: Io.Dir) Io.Cancelable!?[]const u8 {
+    const cwd = std.process.currentPathAlloc(io, a) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return null,
+    };
+    const top = wt.realPathFileAlloc(io, ".", a) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return null,
+    };
     if (std.mem.eql(u8, cwd, top)) return "";
     if (cwd.len > top.len and std.mem.startsWith(u8, cwd, top) and std.Io.Dir.path.isSep(cwd[top.len])) {
         const rest = a.dupe(u8, cwd[top.len + 1 ..]) catch return null;

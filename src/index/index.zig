@@ -1687,6 +1687,7 @@ pub const Index = struct {
         index.split = .{ .base = checksum, .shared = shared };
         const stat = git_dir.statFile(io, name, .{}) catch |err| return switch (err) {
             error.FileNotFound => error.FileNotFound,
+            error.Canceled => error.Canceled,
             else => error.FileSystem,
         };
         return stat.mtime;
@@ -1694,24 +1695,37 @@ pub const Index = struct {
 
     /// git's `clean_shared_index_files`: every other `sharedindex.*` in
     /// `git_dir` whose modification time is not after `expire`, in
-    /// seconds, goes. An expiry of 0 is never.
-    pub fn removeSharedBefore(index: *const Index, io: Io, git_dir: Io.Dir, expire: date.Expiry) void {
+    /// seconds, goes. An expiry of 0 is never. A file that will not go is
+    /// said and left; a cancel is returned.
+    pub fn removeSharedBefore(index: *const Index, io: Io, git_dir: Io.Dir, expire: date.Expiry) Io.Cancelable!void {
         if (expire.eql(.fromRaw(0))) return;
         const base = (index.split orelse return).base orelse return;
         var hex: [hash.max_hex_len]u8 = undefined;
         const current = base.hex(&hex);
-        var dir = git_dir.openDir(io, ".", .{ .iterate = true }) catch |err| return std.log.warn("unable to open git dir: {t}", .{err});
+        var dir = git_dir.openDir(io, ".", .{ .iterate = true }) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => return std.log.warn("unable to open git dir: {t}", .{err}),
+        };
         defer dir.close(io);
         var it = dir.iterate();
-        while (it.next(io) catch |err| return std.log.warn("unable to read git dir: {t}", .{err})) |entry| {
+        while (it.next(io) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => return std.log.warn("unable to read git dir: {t}", .{err}),
+        }) |entry| {
             const rest = if (std.mem.startsWith(u8, entry.name, "sharedindex.")) entry.name["sharedindex.".len..] else continue;
             if (std.mem.eql(u8, rest, current)) continue;
-            const stat = dir.statFile(io, entry.name, .{}) catch |err| {
-                std.log.warn("could not stat '{s}': {t}", .{ entry.name, err });
-                continue;
+            const stat = dir.statFile(io, entry.name, .{}) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => {
+                    std.log.warn("could not stat '{s}': {t}", .{ entry.name, err });
+                    continue;
+                },
             };
             if (date.instant(stat.mtime).compare(expire) == .gt) continue;
-            dir.deleteFile(io, entry.name) catch |err| std.log.warn("unable to unlink: {s}: {t}", .{ entry.name, err });
+            dir.deleteFile(io, entry.name) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => std.log.warn("unable to unlink: {s}: {t}", .{ entry.name, err }),
+            };
         }
     }
 

@@ -280,6 +280,7 @@ pub const Order = struct {
         const path = (try config.getPath(arena, io, base, "diff.orderfile")) orelse return .{};
         const text = aegis.own.readFile(io, base, path, arena, aegis.units.Bytes(u64).fromRaw(std.math.maxInt(u64))) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
+            error.Canceled => return error.Canceled,
             else => return error.OrderFileUnreadable,
         };
         return parse(arena, text);

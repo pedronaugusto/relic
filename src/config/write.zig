@@ -77,8 +77,9 @@ pub const Pending = struct {
     pub fn commit(p: *Pending, io: Io) CommitError!void {
         if (std.Io.File.Permissions.has_executable_bit) {
             if (p.dir.statFile(io, p.sub_path, .{})) |st| {
-                p.dir.setFilePermissions(io, p.lock.lock_name, st.permissions, .{}) catch |err| {
-                    std.log.warn("cannot preserve configuration permissions: {s}", .{@errorName(err)});
+                p.dir.setFilePermissions(io, p.lock.lock_name, st.permissions, .{}) catch |err| switch (err) {
+                    error.Canceled => return error.Canceled,
+                    else => std.log.warn("cannot preserve configuration permissions: {s}", .{@errorName(err)}),
                 };
             } else |err| switch (err) {
                 // A file not there yet has no mode to carry over: the lock keeps its own.

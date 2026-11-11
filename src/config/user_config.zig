@@ -126,13 +126,13 @@ pub fn locate(gpa: Allocator, io: Io, environ: *const Environ.Map, programs: ?pr
         }
     }
     if (l.system) |path| {
-        if (!exists(io, path)) l.system = null;
+        if (!try exists(io, path)) l.system = null;
     }
 
     // The global files.
     var global: std.ArrayList([]const u8) = .empty;
     if (environ.get("GIT_CONFIG_GLOBAL")) |path| {
-        if (path.len != 0 and exists(io, path)) try global.append(arena, try arena.dupe(u8, path));
+        if (path.len != 0 and try exists(io, path)) try global.append(arena, try arena.dupe(u8, path));
     } else {
         const xdg: ?[]const u8 = if (environ.get("XDG_CONFIG_HOME")) |base|
             if (base.len != 0) try std.Io.Dir.path.join(arena, &.{ base, "git", "config" }) else null
@@ -140,13 +140,13 @@ pub fn locate(gpa: Allocator, io: Io, environ: *const Environ.Map, programs: ?pr
             try std.Io.Dir.path.join(arena, &.{ home, ".config", "git", "config" })
         else
             null;
-        if (xdg) |path| if (exists(io, path)) {
+        if (xdg) |path| if (try exists(io, path)) {
             try global.append(arena, path);
             l.xdg = path;
         };
         if (l.home) |home| {
             const path = try std.Io.Dir.path.join(arena, &.{ home, ".gitconfig" });
-            if (exists(io, path)) try global.append(arena, path);
+            if (try exists(io, path)) try global.append(arena, path);
         }
     }
     l.global = try global.toOwnedSlice(arena);
@@ -220,8 +220,13 @@ pub fn parseParameters(arena: Allocator, text: []const u8) Self.Error![]const co
     return out.items;
 }
 
-fn exists(io: Io, path: []const u8) bool {
-    Io.Dir.cwd().access(io, path, .{}) catch return false;
+/// Whether a configuration file is at `path`; a cancel is returned, never
+/// taken for no file.
+fn exists(io: Io, path: []const u8) Io.Cancelable!bool {
+    Io.Dir.cwd().access(io, path, .{}) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return false,
+    };
     return true;
 }
 
@@ -543,3 +548,35 @@ test "GIT_CONFIG_PARAMETERS in both forms, a bare name and a quoted quote read a
         }
     }
 }
+
+test "a cancel that lands in asking whether a configuration file is there is returned, not taken for no file" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var home = testing.tmpDir(.{ .iterate = true });
+    defer home.cleanup();
+    const home_path = try home.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(home_path);
+    try home.dir.createDirPath(io, ".config/git");
+    try home.dir.writeFile(io, .{ .sub_path = ".config/git/config", .data = "[x]\n\ta = xdg\n" });
+    try home.dir.writeFile(io, .{ .sub_path = ".gitconfig", .data = "[x]\n\ta = home\n" });
+    var env: Environ.Map = .init(gpa);
+    defer env.deinit();
+    try env.put("HOME", home_path);
+    try env.put("GIT_CONFIG_NOSYSTEM", "1");
+    const Locate = struct {
+        env: *const Environ.Map,
+        pub fn setUp(_: *@This(), _: *shakedown.FaultIo) !void {}
+        pub fn run(c: *@This(), run_io: Io) !void {
+            var l = try locate(testing.allocator, run_io, c.env, null);
+            l.deinit();
+        }
+        pub fn check(_: *@This(), check_io: Io, result: anyerror!void, injected: ?shakedown.Injected) !void {
+            try testing_io.cancelKept(check_io, result, injected);
+        }
+        pub fn tearDown(_: *@This()) void {}
+    };
+    var c: Locate = .{ .env = &env };
+    try testing_io.everyCancel(gpa, io, &c);
+}
+
+const testing_io = @import("../testing/io.zig");

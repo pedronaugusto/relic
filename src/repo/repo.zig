@@ -1252,7 +1252,7 @@ pub const Repository = struct {
         const written_at = try index.writeShared(io, repo.gitDirectory(), options);
         const text = config.get("splitindex.sharedindexexpire") orelse "2.weeks.ago";
         const expire = date_mod.parseExpiry(text, .{ .now = written_at }) orelse return error.MalformedValue;
-        index.removeSharedBefore(io, repo.gitDirectory(), expire);
+        try index.removeSharedBefore(io, repo.gitDirectory(), expire);
         return null;
     }
 
