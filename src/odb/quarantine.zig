@@ -71,7 +71,10 @@ pub const Quarantine = struct {
         const dir_name = fs.tempName(io, &q.name_buf, purpose.prefix());
         q.name_len = dir_name.len;
         try objects.createDir(io, dir_name, .default_dir);
-        errdefer objects.deleteTree(io, dir_name) catch {}; // glint-ignore: Z026 -- a quarantine never opened is removed on a best-effort basis; nothing in it was accepted
+        // A quarantine never opened is removed on a best-effort basis:
+        // nothing in it was accepted. A cancel that lands in the removal is
+        // put back for the caller's next cancelation point.
+        errdefer objects.deleteTree(io, dir_name) catch |err| if (err == error.Canceled) io.recancel();
         var dir = try objects.openDir(io, dir_name, .{ .iterate = true });
         defer dir.close(io);
         q.db = try Odb.openAt(gpa, io, dir, main.objectFormat(), main.settings());
@@ -181,8 +184,10 @@ pub const Quarantine = struct {
         if (!q.open) return;
         q.open = false;
         q.db.deinit(io);
-        // glint-ignore: Z026 -- what is left of a refused push is removed on a best-effort basis, as git's tmp_objdir_destroy removes it
-        q.objects.deleteTree(io, q.name()) catch {};
+        // What is left of a refused push is removed on a best-effort basis,
+        // as git's tmp_objdir_destroy removes it; a cancel that lands in it
+        // is put back for the caller's next cancelation point.
+        q.objects.deleteTree(io, q.name()) catch |err| if (err == error.Canceled) io.recancel();
     }
 
     /// Release everything; a quarantine not migrated is discarded.
@@ -220,4 +225,47 @@ fn moveFile(io: Io, from: Io.Dir, from_name: []const u8, to: Io.Dir, to_name: []
         else => |other| return other,
     }
     try Io.Dir.rename(from, from_name, to, to_name, io);
+}
+
+const shakedown = @import("shakedown");
+const testing_io = @import("../testing/io.zig");
+
+test "a cancel that lands in removing a discarded quarantine is put back, not dropped" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "objects/pack");
+    const objects = try tmp.dir.openDir(io, "objects", .{ .iterate = true });
+    defer objects.close(io);
+    const Hold = struct {
+        objects: Io.Dir,
+        pub fn setUp(_: *@This(), _: *shakedown.FaultIo) !void {}
+        pub fn run(h: *@This(), task_io: Io) !void {
+            var main = try Odb.openAt(std.testing.allocator, std.testing.io, h.objects, .sha1, .{});
+            defer main.deinit(std.testing.io);
+            var q = try Quarantine.begin(std.testing.allocator, task_io, &main, .incoming);
+            defer q.deinit(task_io);
+            _ = try q.db.write(task_io, .blob, "held\n");
+        }
+        pub fn check(_: *@This(), task_io: Io, result: anyerror!void, injected: ?shakedown.Injected) !void {
+            try testing_io.cancelKept(task_io, result, injected);
+        }
+        /// What a canceled removal left goes, so each run begins alike.
+        pub fn tearDown(h: *@This()) void {
+            var names: [8][64]u8 = undefined;
+            var lens: [8]usize = undefined;
+            var n: usize = 0;
+            var it = h.objects.iterate();
+            while (it.next(std.testing.io) catch null) |entry| {
+                if (std.mem.eql(u8, entry.name, "pack") or n == names.len) continue;
+                @memcpy(names[n][0..entry.name.len], entry.name);
+                lens[n] = entry.name.len;
+                n += 1;
+            }
+            for (names[0..n], lens[0..n]) |*name, len| h.objects.deleteTree(std.testing.io, name[0..len]) catch {};
+        }
+    };
+    var hold: Hold = .{ .objects = objects };
+    try testing_io.everyCancel(gpa, io, &hold);
 }
