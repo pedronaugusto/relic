@@ -508,24 +508,32 @@ test "a cancel that lands in a native hook's work is put back, not taken for the
     const gpa = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    var repo = try repo_mod.Repository.create(gpa, testing.io, tmp.dir, .{ .default_branch = "main" });
-    defer repo.deinit(testing.io);
+    var made = try repo_mod.Repository.create(gpa, testing.io, tmp.dir, .{ .default_branch = "main" });
+    made.deinit(testing.io);
     var environ: std.process.Environ.Map = .init(gpa);
     defer environ.deinit();
     const Merge = struct {
-        native: lfshooks.Native,
+        dir: Io.Dir,
+        repo: repo_mod.Repository = undefined,
         environ: *const std.process.Environ.Map,
-        pub fn setUp(_: *@This(), _: *shakedown.FaultIo) !void {}
+        // A repository opened afresh for each run, so each run asks
+        // what the first did.
+        pub fn setUp(m: *@This(), _: *shakedown.FaultIo) !void {
+            m.repo = try repo_mod.Repository.open(testing.allocator, testing.io, m.dir, .{});
+        }
         // The hook answers with a bool: a cancel is the task's next
         // cancelation point's to say.
         pub fn run(m: *@This(), io: Io) !void {
-            _ = m.native.lfsHooks().run(io, "post-merge", .{ .args = &.{}, .input = "", .environ = m.environ });
+            var native: lfshooks.Native = .{ .gpa = testing.allocator, .repo = &m.repo };
+            _ = native.lfsHooks().run(io, "post-merge", .{ .args = &.{}, .input = "", .environ = m.environ });
         }
         pub fn check(_: *@This(), io: Io, result: anyerror!void, injected: ?shakedown.Injected) !void {
             try testing_io.cancelKept(io, result, injected);
         }
-        pub fn tearDown(_: *@This()) void {}
+        pub fn tearDown(m: *@This()) void {
+            m.repo.deinit(testing.io);
+        }
     };
-    var merge: Merge = .{ .native = .{ .gpa = gpa, .repo = &repo }, .environ = &environ };
+    var merge: Merge = .{ .dir = tmp.dir, .environ = &environ };
     try testing_io.everyCancel(gpa, testing.io, &merge);
 }
