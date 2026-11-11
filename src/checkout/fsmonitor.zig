@@ -308,7 +308,7 @@ fn askHook(arena: Allocator, io: Io, wt: Io.Dir, hook: Hook, since: []const u8, 
     return .{ .token = now, .paths = try splitPaths(arena, out) };
 }
 
-fn runHook(arena: Allocator, io: Io, wt: Io.Dir, hook: Hook, version: []const u8, since: []const u8) Allocator.Error!?[]const u8 {
+fn runHook(arena: Allocator, io: Io, wt: Io.Dir, hook: Hook, version: []const u8, since: []const u8) (Allocator.Error || Io.Cancelable)!?[]const u8 {
     var outcome = program.run(arena, io, hook.programs, .{
         .argv = &.{ hook.command, version, since },
         .shell = true,
@@ -316,6 +316,7 @@ fn runHook(arena: Allocator, io: Io, wt: Io.Dir, hook: Hook, version: []const u8
         .stderr = .inherit,
     }, .{}) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
+        error.Canceled => return error.Canceled,
         // A hook that cannot be run is a hook that failed.
         else => return null,
     };
@@ -349,7 +350,9 @@ fn converseWithDaemon(arena: Allocator, io: Io, daemon: Daemon, since: []const u
         defer pipe.close(io);
         var writer = pipe.writerStreaming(io, &write_buffer);
         var reader = pipe.readerStreaming(io, read_buffer);
-        return exchange(arena, &writer.interface, &reader.interface, since);
+        const answer = try exchange(arena, &writer.interface, &reader.interface, since);
+        if (answer == null) try canceledIn(writer.err, reader.err);
+        return answer;
     }
     if (!Io.net.has_unix_sockets) return null;
     var owned = (try connectSocket(arena, io, daemon)) orelse return null;
@@ -357,7 +360,16 @@ fn converseWithDaemon(arena: Allocator, io: Io, daemon: Daemon, since: []const u
     const stream = owned.borrow().*;
     var writer = stream.writer(io, &write_buffer);
     var reader = stream.reader(io, read_buffer);
-    return exchange(arena, &writer.interface, &reader.interface, since);
+    const answer = try exchange(arena, &writer.interface, &reader.interface, since);
+    if (answer == null) try canceledIn(writer.err, reader.err);
+    return answer;
+}
+
+/// A conversation that failed is no answer, unless a cancel stopped it:
+/// the writer's or the reader's own error says which.
+fn canceledIn(write_err: anytype, read_err: anytype) Io.Cancelable!void {
+    if (write_err) |err| if (err == error.Canceled) return error.Canceled;
+    if (read_err) |err| if (err == error.Canceled) return error.Canceled;
 }
 
 /// git's `ipc_client_send_command_to_connection`: the message in lines of

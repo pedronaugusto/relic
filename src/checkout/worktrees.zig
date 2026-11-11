@@ -144,7 +144,10 @@ pub fn list(gpa: Allocator, io: Io, refs: *const refs_mod.Store) Self.Error!List
     var it: fs.Names = .init(worktrees_dir, refs.precomposeUnicode());
     while (try it.next(io)) |dir_entry| {
         if (dir_entry.kind != .directory) continue;
-        const admin = worktrees_dir.openDir(io, dir_entry.name, .{ .iterate = true }) catch continue;
+        const admin = worktrees_dir.openDir(io, dir_entry.name, .{ .iterate = true }) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => continue,
+        };
         defer admin.close(io);
 
         const named = try namedTree(arena, io, admin) orelse continue;
@@ -241,11 +244,15 @@ fn namedTree(arena: Allocator, io: Io, admin: Io.Dir) Self.Error!?Named {
 fn pointsBack(arena: Allocator, io: Io, admin: Io.Dir, named: Named) Self.Error!bool {
     var work = Io.Dir.openDirAbsolute(io, named.work, .{}) catch |err| switch (err) {
         error.FileNotFound => return true,
+        error.Canceled => return error.Canceled,
         else => return false,
     };
     defer work.close(io);
     const target = (try gitfile.read(arena, io, work, ".git")) orelse return false;
-    var target_dir = gitfile.open(io, work, target, .{}) catch return false;
+    var target_dir = gitfile.open(io, work, target, .{}) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return false,
+    };
     defer target_dir.deinit(io);
     var target_buf: [4096]u8 = undefined;
     var admin_buf: [4096]u8 = undefined;
@@ -413,12 +420,12 @@ pub fn remove(
     options: RemoveOptions,
 ) Self.Error!void {
     try checkId(name);
-    var worktrees_dir = common_dir.openDir(io, "worktrees", .{ .iterate = true }) catch
-        return error.WorktreeNotFound;
+    var worktrees_dir = common_dir.openDir(io, "worktrees", .{ .iterate = true }) catch |err|
+        return notFound(err);
     defer worktrees_dir.close(io);
 
-    var admin = worktrees_dir.openDir(io, name, .{ .iterate = true }) catch
-        return error.WorktreeNotFound;
+    var admin = worktrees_dir.openDir(io, name, .{ .iterate = true }) catch |err|
+        return notFound(err);
     var admin_open = true;
     defer if (admin_open) admin.close(io);
 
@@ -441,8 +448,11 @@ pub fn remove(
         if (try namedTree(arena, io, admin)) |named| {
             if (!try pointsBack(arena, io, admin, named)) return error.CorruptWorktree;
             const cwd: Io.Dir = .cwd();
-            cwd.deleteTree(io, named.work) catch |err| {
-                files_error = err;
+            cwd.deleteTree(io, named.work) catch |err| switch (err) {
+                // Stopped: the worktree stays registered, for a removal
+                // asked again to finish.
+                error.Canceled => return error.Canceled,
+                else => files_error = err,
             };
         }
     }
@@ -598,7 +608,7 @@ fn judge(arena: Allocator, io: Io, worktrees_dir: Io.Dir, name: []const u8, expi
     };
     if (locked) return .locked;
     const read = readGitdir(arena, io, admin, 1 << 20) catch |err| switch (err) {
-        error.OutOfMemory => |e| return e,
+        error.OutOfMemory, error.Canceled => |e| return e,
         else => return .{ .prune = .unreadable_gitdir },
     };
     const text = read orelse return .{ .prune = .no_gitdir };
@@ -608,8 +618,12 @@ fn judge(arena: Allocator, io: Io, worktrees_dir: Io.Dir, name: []const u8, expi
         var buf: [4096]u8 = undefined;
         break :blk try std.Io.Dir.path.resolveAllocPosix(arena, &.{ try fs.realPath(io, admin, &buf), written });
     };
-    if (std.Io.Dir.accessAbsolute(io, dot_git, .{})) |_| {} else |_| {
-        const stat = admin.statFile(io, "index", .{}) catch return .{ .prune = .gone };
+    if (std.Io.Dir.accessAbsolute(io, dot_git, .{})) |_| {} else |access_err| {
+        if (access_err == error.Canceled) return error.Canceled;
+        const stat = admin.statFile(io, "index", .{}) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => return .{ .prune = .gone },
+        };
         if (expire == null or date.instant(stat.mtime).compare(expire.?) != .gt) return .{ .prune = .gone };
     }
     return .{ .keep = dot_git };
@@ -623,13 +637,19 @@ fn checkId(name: []const u8) ErrorNamespace.Error!void {
     if (safe_path.checkComponent(name, .worktree, .{}) != null) return error.InvalidWorktreeName;
 }
 
+/// A worktree's directory that would not open: no such worktree, or a
+/// cancel, which is returned as itself.
+fn notFound(err: Io.Dir.OpenError) ErrorNamespace.Error {
+    return if (err == error.Canceled) error.Canceled else error.WorktreeNotFound;
+}
+
 /// Put a `locked` file beside a worktree, with an optional reason.
 pub fn lock(io: Io, common_dir: Io.Dir, name: []const u8, reason: []const u8) Self.Error!void {
     try checkId(name);
-    var worktrees_dir = common_dir.openDir(io, "worktrees", .{ .iterate = true }) catch
-        return error.WorktreeNotFound;
+    var worktrees_dir = common_dir.openDir(io, "worktrees", .{ .iterate = true }) catch |err|
+        return notFound(err);
     defer worktrees_dir.close(io);
-    var admin = worktrees_dir.openDir(io, name, .{}) catch return error.WorktreeNotFound;
+    var admin = worktrees_dir.openDir(io, name, .{}) catch |err| return notFound(err);
     defer admin.close(io);
     try admin.writeFile(io, .{ .sub_path = "locked", .data = reason });
 }
@@ -637,10 +657,10 @@ pub fn lock(io: Io, common_dir: Io.Dir, name: []const u8, reason: []const u8) Se
 /// Remove the `locked` file.
 pub fn unlock(io: Io, common_dir: Io.Dir, name: []const u8) Self.Error!void {
     try checkId(name);
-    var worktrees_dir = common_dir.openDir(io, "worktrees", .{ .iterate = true }) catch
-        return error.WorktreeNotFound;
+    var worktrees_dir = common_dir.openDir(io, "worktrees", .{ .iterate = true }) catch |err|
+        return notFound(err);
     defer worktrees_dir.close(io);
-    var admin = worktrees_dir.openDir(io, name, .{}) catch return error.WorktreeNotFound;
+    var admin = worktrees_dir.openDir(io, name, .{}) catch |err| return notFound(err);
     defer admin.close(io);
     admin.deleteFile(io, "locked") catch |err| switch (err) {
         error.FileNotFound => {},
@@ -661,10 +681,10 @@ pub fn repair(
     hide: fs.HideDotFiles,
 ) Self.Error!void {
     try checkId(name);
-    var worktrees_dir = common_dir.openDir(io, "worktrees", .{ .iterate = true }) catch
-        return error.WorktreeNotFound;
+    var worktrees_dir = common_dir.openDir(io, "worktrees", .{ .iterate = true }) catch |err|
+        return notFound(err);
     defer worktrees_dir.close(io);
-    var admin = worktrees_dir.openDir(io, name, .{}) catch return error.WorktreeNotFound;
+    var admin = worktrees_dir.openDir(io, name, .{}) catch |err| return notFound(err);
     defer admin.close(io);
 
     var abs_buf: [4096]u8 = undefined;
@@ -703,9 +723,9 @@ pub fn move(
     const new_name = inputs.new_name;
     try checkId(name);
     try checkId(new_name);
-    var worktrees_dir = common_dir.openDir(io, "worktrees", .{}) catch return error.WorktreeNotFound;
+    var worktrees_dir = common_dir.openDir(io, "worktrees", .{}) catch |err| return notFound(err);
     defer worktrees_dir.close(io);
-    var admin = worktrees_dir.openDir(io, name, .{}) catch return error.WorktreeNotFound;
+    var admin = worktrees_dir.openDir(io, name, .{}) catch |err| return notFound(err);
     defer admin.close(io);
     if (admin.access(io, "locked", .{})) |_| return error.WorktreeLocked else |err| switch (err) {
         error.FileNotFound => {},
@@ -734,3 +754,44 @@ test "every entry point refuses a worktree id that is not one name under worktre
         try std.testing.expectError(error.InvalidWorktreeName, unlock(io, tmp.dir, id));
     }
 }
+
+test "a cancel that lands in judging a worktree to prune is returned, not taken for one to prune" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "main");
+    var main_dir = try tmp.dir.openDir(io, "main", .{ .iterate = true });
+    defer main_dir.close(io);
+    var repo = try repo_mod.Repository.create(gpa, io, main_dir, .{ .default_branch = "main" });
+    defer repo.deinit(io);
+    const base = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(base);
+    // A worktree whose working tree is gone: one prune takes away.
+    const gitdir_text = try std.mem.concat(gpa, u8, &.{ base, "/gone/.git\n" });
+    defer gpa.free(gitdir_text);
+    const Prune = struct {
+        repo: *repo_mod.Repository,
+        gitdir_text: []const u8,
+        pub fn setUp(p: *@This(), _: *shakedown.FaultIo) !void {
+            const real = std.testing.io;
+            const common = p.repo.refStore().commonDir();
+            try common.createDirPath(real, "worktrees/x");
+            try common.writeFile(real, .{ .sub_path = "worktrees/x/gitdir", .data = p.gitdir_text });
+        }
+        pub fn run(p: *@This(), run_io: Io) !void {
+            var outcome = try prune(std.testing.allocator, run_io, p.repo.refStore(), .{});
+            outcome.deinit();
+        }
+        pub fn check(_: *@This(), check_io: Io, result: anyerror!void, injected: ?shakedown.Injected) !void {
+            try testing_io.cancelKept(check_io, result, injected);
+        }
+        pub fn tearDown(_: *@This()) void {}
+    };
+    var p: Prune = .{ .repo = &repo, .gitdir_text = gitdir_text };
+    try testing_io.everyCancel(gpa, io, &p);
+}
+
+const shakedown = @import("shakedown");
+const testing_io = @import("../testing/io.zig");
+const repo_mod = @import("../repo/repo.zig");

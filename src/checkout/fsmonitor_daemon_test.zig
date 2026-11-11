@@ -579,3 +579,26 @@ test "git's own daemon, where git has one, answers this package as it answers gi
     defer gpa.free(git_report);
     try std.testing.expectEqualStrings(report, git_report);
 }
+
+test "a cancel that lands in the conversation with the daemon is returned, not taken for no answer" {
+    // Windows talks to its daemon through a named pipe's file reads and writes.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var pair: Pair = undefined;
+    try Pair.init(gpa, io, &pair, "true");
+    defer pair.deinit();
+    pair.answer(line("t1\x00"));
+    const Ask = struct {
+        pair: *Pair,
+        pub fn run(a: *@This(), run_io: Io) !void {
+            const report = try ourStatus(std.testing.allocator, run_io, &a.pair.ours);
+            std.testing.allocator.free(report);
+        }
+    };
+    var ask: Ask = .{ .pair = &pair };
+    try testing_io.eachCallCanceled(gpa, io, &ask, .net_write);
+    try testing_io.eachCallCanceled(gpa, io, &ask, .net_read);
+}
+
+const testing_io = @import("../testing/io.zig");

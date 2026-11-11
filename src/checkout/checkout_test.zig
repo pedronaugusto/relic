@@ -1969,3 +1969,49 @@ test "add --resolved stages the resolved conflicts and nothing else, and refuses
         };
     }
 }
+
+test "a cancel that lands in waiting for the write tasks is returned, though every file was written" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var h = try Harness.init(gpa, io, &.{});
+    defer h.deinit(io);
+    try h.repo.writeFile(io, "seed", "seed\n");
+    try h.repo.exec(io, &.{ "add", "-A" });
+    try h.repo.exec(io, &.{ "commit", "-q", "-m", "zero" });
+    // More files than are written on the calling task alone.
+    var name: [32]u8 = undefined;
+    for (0..120) |i| try h.repo.writeFile(io, try std.mem.print(&name, "f/{d}", .{i}), "x\n");
+    try h.repo.exec(io, &.{ "add", "-A" });
+    try h.repo.exec(io, &.{ "commit", "-q", "-m", "one" });
+    const tree_text = try h.repo.line(io, &.{ "rev-parse", "HEAD^{tree}" });
+    defer gpa.free(tree_text);
+    const Write = struct {
+        h: *Harness,
+        tree: Oid,
+        pub fn run(w: *@This(), run_io: Io) !void {
+            const real = std.testing.io;
+            try w.h.repo.exec(real, &.{ "reset", "-q", "--hard", "HEAD~1" });
+            try w.h.reload(std.testing.allocator, real);
+            _ = try worktree.checkout(std.testing.allocator, run_io, w.h.repo.dir, .{ .index = &w.h.index, .db = &w.h.db, .tree = w.tree }, .{ .rules = w.h.worktreeRules(), .workers = 2 });
+        }
+    };
+    var write: Write = .{ .h = &h, .tree = try Oid.parse(.sha1, tree_text) };
+    var finish_first: FinishFirst = .init(io, .{});
+    try testing_io.eachCallCanceled(gpa, finish_first.io(), &write, .groupAwait);
+}
+
+/// An Io whose `Group.cancel` lets the group's tasks finish uncanceled: the
+/// moment a cancel lands in the wait after every task has written, which
+/// timing alone rarely shows.
+const FinishFirst = shakedown.Layer(struct { unused: u8 = 0 }, .{ .groupCancel = finishFirst });
+
+fn finishFirst(userdata: ?*anyopaque, group: *Io.Group, token: *anyopaque) void {
+    const l = FinishFirst.of(userdata);
+    const protection = l.base.vtable.swapCancelProtection(l.base.userdata, .blocked);
+    defer _ = l.base.vtable.swapCancelProtection(l.base.userdata, protection);
+    l.base.vtable.groupAwait(l.base.userdata, group, token) catch |err| switch (err) {
+        error.Canceled => unreachable, // the protection is blocked
+    };
+}
+
+const testing_io = @import("../testing/io.zig");

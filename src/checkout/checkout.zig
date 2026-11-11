@@ -2653,6 +2653,12 @@ fn makeLeadingDirs(io: Io, wt: Io.Dir, path: safe_path.Checked, hide: fs.HideDot
     try leading.make(io, wt, parent, false, null);
 }
 
+/// A directory in the way of a write that would not go: one holding
+/// something is someone's work. A cancel is returned as itself.
+fn untrackedInTheWay(err: Io.Dir.DeleteDirError) Error {
+    return if (err == error.Canceled) error.Canceled else error.UntrackedWouldBeOverwritten;
+}
+
 /// Write a symlink to `target` at `path`, replacing whatever is there; or,
 /// where `symlinks` is off or the platform refuses one, an ordinary file
 /// holding the target. `true` when it was written as a file.
@@ -2666,8 +2672,9 @@ fn writeLink(io: Io, wt: Io.Dir, path: safe_path.Checked, target: []const u8, sy
     };
     if (symlinks) {
         // a link's target is what the link holds, written as git writes it: nothing is opened through it here
-        // glint-ignore: Z026 -- a filesystem that refuses the link gets a file holding the target below, as git writes one
-        if (wt.symLink(io, target, path.bytes, .{})) |_| return false else |_| {}
+        // A filesystem that refuses the link gets a file holding the target
+        // below, as git writes one; a cancel is this step's own.
+        if (wt.symLink(io, target, path.bytes, .{})) |_| return false else |err| if (err == error.Canceled) return error.Canceled;
     }
     try writeFile(io, wt, path, .{ .bytes = target }, false);
     return true;
@@ -2810,11 +2817,16 @@ const WriteBatch = struct {
         // It stops only once every job is claimed, so none is read below
         // with the result it started with.
         assert(next.load(.monotonic).compare(Claims.fromRaw(b.jobs.items.len)) != .lt);
-        group.await(io) catch group.cancel(io);
+        // A cancel that lands in the wait is returned once what was
+        // written is recorded, though every job may have finished first.
         var first: ?Error = null;
+        group.await(io) catch |err| {
+            group.cancel(io);
+            first = err;
+        };
         for (b.jobs.items) |*job| {
             const stat = job.result catch |err| {
-                if (first == null) first = err;
+                if (first == null or err == error.Canceled) first = err;
                 continue;
             };
             fs.hideIfAsked(io, wt, job.path.bytes, rules.hide_dot_files);
@@ -3081,7 +3093,7 @@ pub fn writePaths(
         if (try fs.statAt(io, wt, path.bytes)) |found| {
             // An empty directory gives way; one with anything in it is
             // someone's work, or a submodule's checkout.
-            if (found.kind == .directory and want.mode != .gitlink) wt.deleteDir(io, path.bytes) catch return error.UntrackedWouldBeOverwritten;
+            if (found.kind == .directory and want.mode != .gitlink) wt.deleteDir(io, path.bytes) catch |err| return untrackedInTheWay(err);
         }
         switch (want.mode) {
             .gitlink => {
@@ -3273,7 +3285,7 @@ pub fn writeBytes(gpa: Allocator, io: Io, wt: Io.Dir, options: WriteBytesOptions
     try makeLeadingDirs(io, wt, checked, rules.hide_dot_files);
     defer fs.hideIfAsked(io, wt, path, rules.hide_dot_files);
     if (try fs.statAt(io, wt, path)) |found| {
-        if (found.kind == .directory and mode != .gitlink) wt.deleteDir(io, path) catch return error.UntrackedWouldBeOverwritten;
+        if (found.kind == .directory and mode != .gitlink) wt.deleteDir(io, path) catch |err| return untrackedInTheWay(err);
     }
     var written: Written = .{ .stat = .none };
     switch (mode) {
