@@ -111,6 +111,7 @@ test {
         _ = @import("stage/move.zig");
         _ = @import("stage/move_test.zig");
         _ = @import("checkout/checkout_test.zig");
+        _ = @import("checkout/worktrees_test.zig");
         _ = @import("repo/repo_test.zig");
         _ = @import("testing/concurrency.zig");
         _ = @import("testing/cancel.zig");

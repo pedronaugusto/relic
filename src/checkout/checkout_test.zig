@@ -2065,5 +2065,3 @@ fn heldCreateFile(userdata: ?*anyopaque, dir: Io.Dir, sub_path: []const u8, opti
     if (in_held_task) try l.base.sleep(.fromMilliseconds(100), .awake);
     return l.base.vtable.dirCreateFile(l.base.userdata, dir, sub_path, options);
 }
-
-const testing_io = @import("../testing/io.zig");
