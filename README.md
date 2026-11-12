@@ -56,6 +56,12 @@ newest git, 2.55 and git's main branch. The floor job only proves interop:
 repositories relic writes open in git 2.39, and its credential helpers, remote
 helpers and LFS filters work with relic.
 
+## Stability
+
+relic is 0.x and tracks Zig 0.17.x. A breaking change comes only in a minor release
+(0.29 to 0.30), with a CHANGELOG entry saying what changed and what to write instead; a
+patch release never breaks.
+
 ## Usage
 
 The block below is a region of [`examples/usage.zig`](examples/usage.zig),
@@ -612,7 +618,7 @@ A commit outside the selected bitmap entries, a filter or a shallow boundary
 uses the ordinary walk. Pack bitmap writing requires a closed DAG and refuses
 `BitmapNotClosed`; commit-graph writing refuses shallow input and cycles.
 
-## The API
+## API
 
 The root is one module per concern, and each of those holds the modules
 that belong to it: `relic.refs` is refs, their transactions and the log git
@@ -637,19 +643,19 @@ writes beside them, and `relic.refs.reftable.table` is the table format.
 | `object.fsck` | What git's `fsck` finds wrong with an object's bytes, every message id at git's level: `Rules` from `fsck.*`, `fetch.fsck.*` and `receive.fsck.*` with skip lists, `forTransfer` for `transfer.fsckObjects` and `fetch.fsckObjects`, and the `.gitmodules` and `.gitattributes` a tree names (`checkBlob`). |
 | `odb` | `Odb.open`, `read`, `readInto`, `readHeader`, `exists`, `existsOwn`, `own`, `findPrefix`, `write`, `writeStream`, `listObjects`, `listAlternates`, `addAlternate`, `removeAlternate`, `verify`, `refresh`, `syncBatch`, `placement`, and the `stats` counters. Loose objects, the packs, `objects/info/alternates` and the multi-pack index. Writing packs: `collectReachable`, `collectLoose`, `collectAll`, `writePack`, `packLoose`, `repack`, and `beginPack` / `writeInto` / `finishPack` for a caller filling one as it goes. |
 | `odb.abbrev` | Short object names as git prints them. |
-| `odb.bitmap` | Module within `odb`. |
-| `odb.commit_graph` | Module within `odb`. |
-| `odb.commit_graph.bloom` | Module within `odb.commit_graph`. |
-| `odb.rev_index` | Module within `odb`. |
-| `odb.mtimes` | Module within `odb`. |
+| `odb.bitmap` | Pack and multi-pack reachability bitmap files, and git's EWAH/XOR encoding. |
+| `odb.commit_graph` | The commit-graph, read and encoded as an accelerator. |
+| `odb.commit_graph.bloom` | Git's changed-path Bloom hashes. |
+| `odb.rev_index` | A pack's reverse index, `pack-<name>.rev`: its objects in the order they sit in the pack, each named by its position in the `.idx`. |
+| `odb.mtimes` | A cruft pack's object times, `pack-<name>.mtimes`: when each object it holds was last written or wanted, which `prune` and `repack --cruft` date that object by instead of by the pack's own time. |
 | `odb.islands` | Delta islands, the pack writer's side: which islands each object is in, and whether one may be a delta of another. |
-| `odb.index_pack` | Module within `odb`. |
-| `odb.pack` | Module within `odb`. |
-| `odb.delta` | Module within `odb`. |
-| `odb.midx` | Module within `odb`. |
+| `odb.index_pack` | Receiving a pack: what `git index-pack --stdin --fix-thin` does. |
+| `odb.pack` | Packfiles, and the `.idx` beside them. |
+| `odb.delta` | The delta encoding a packfile uses. |
+| `odb.midx` | The multi-pack index, read and encoded as an accelerator. |
 | `odb.quarantine` | `Quarantine` — objects held apart until accepted, git's `tmp_objdir`: begun, read through, migrated or discarded. |
 | `refs` | `Store`, `Ref`, `Resolved`, `Transaction`, `Expected`, `packed-refs` read and write. `Store.root` and `Store.special` own the root refs (`ORIG_HEAD`, `CHERRY_PICK_HEAD`, ...) and the special refs (`FETCH_HEAD`, `MERGE_HEAD`) in either ref format; `deleteRefs` removes refs by any safe name; `writeInitial` writes a new repository's first refs; `list` keeps what is no ref apart in `broken`; `main-worktree/` and `worktrees/<id>/` read another worktree's refs; `create` lays down a new ref store. Logs in either format through the store: `readLog` (`Log.at` for `HEAD@{n}`), `logExists`, `appendLog` under a `LogPolicy` (`core.logAllRefUpdates`), `createLog`, `expireLog` (git's `reflog expire` and `reflog delete`, `--rewrite` and `--updateref`), `deleteLog`. |
-| `refs.reftable` | Module within `refs`. |
+| `refs.reftable` | Reftable: the table format, and the stack of tables `tables.list` names, which is the ref store. |
 | `refs.reftable.table` | The reftable format: one table read and written. |
 | `refs.reftable.stack` | The stack of tables `tables.list` names: the ref store. |
 | `refs.verify` | git's `refs verify`: what is wrong with the refs themselves, by `fsck.<msg-id>`. |
@@ -661,19 +667,19 @@ writes beside them, and `relic.refs.reftable.table` is the table format.
 | `index.sparse` | The sparse index. |
 | `index.untracked` | The untracked cache, git's `UNTR`: read, kept true as entries come and go, and written. |
 | `worktree` | `addAll`, `writeTree`, `checkout`, `resetIndex`, `status`, `list`, `applySparse`. |
-| `worktree.sparse_checkout` | Module within `worktree`. |
+| `worktree.sparse_checkout` | `git sparse-checkout` as an operation: `set`, `add`, `reapply`, `disable`, `init` and `list`. |
 | `worktree.linked` | `list`, `add`, `remove`, `prune`, `lock`, `unlock`, `move`, `repair`, each worktree's refs in the repository's ref format. |
 | `worktree.snapshot` | `Store`, `capture`, `adoptTree`, `restore`, `diff`: working trees whose complete Git object closure belongs to a private store. |
 | `worktree.renames` | `find`, `configured`: the renames `git status` finds among the staged changes, through diff's rename detection, and what `status.renames` asks for. |
 | `worktree.remove` | `git rm`: the index entries a pathspec names removed, and their files and submodules, after git's check for what the removal would lose. |
 | `worktree.move` | `git mv`: files, directories and submodules renamed in the working tree and the index together, after git's checks of every source. |
-| `worktree.sparse` | Module within `worktree`. |
+| `worktree.sparse` | Sparse checkout: which tracked paths belong in the working tree. |
 | `worktree.ignore` | `Rules.init` / `loadGlobal` / `addDirectory` / `addText` / `popTo` / `match` / `matchPath`, with the pattern that decided. |
 | `worktree.attributes` | `Attrs`, `Attributes`, `unsupported`, `toGit`, `toWorktree`, `isBinaryForDiff`, `isBinaryForCheckIn`. |
-| `worktree.convert` | Module within `worktree`. |
-| `worktree.encoding` | Module within `worktree`. |
+| `worktree.convert` | What happens to a file's bytes between the working tree and the object database, in git's order. |
+| `worktree.encoding` | Character sets, converted as git converts them through iconv: one place for both of git's jobs. |
 | `worktree.fsmonitor` | `refresh`, `configured`, `ChangeSource`: the file monitor git asks through `core.fsmonitor` (its hook, protocol 1 and 2, or its own daemon, `true`, over the daemon's socket or pipe), or a program's own, deciding which files `status` looks at; `FSMN` read and written. |
-| `worktree.filter` | Module within `worktree`. |
+| `worktree.filter` | Clean and smudge filters: the programs a `filter` attribute names. |
 | `worktree.filter.native` | Native content-filter protocol. |
 | `worktree.dir_scan` | `Scan` — a directory's entries with their stats, from `getattrlistbulk(2)` where the volume has it and a read and a stat per name where it does not. |
 | `worktree.safe_path` | What a path from a tree is allowed to be. |
@@ -683,8 +689,8 @@ writes beside them, and `relic.refs.reftable.table` is the table format.
 | `diff.driver` | `Drivers` — the diff driver each side of a diff takes by its `diff` attribute and mode, and what the driver says: binary or not, its `textconv`, the lines that start its functions. |
 | `diff.external` | `External` — an external diff program (`diff.external`, a driver's `command`) run for a file pair in place of its patch, as `git diff` runs it. |
 | `diff.patch_id` | Patch ids: a name for what a commit changes. |
-| `diff.rename` | Module within `diff`. |
-| `diff.similarity` | Module within `diff`. |
+| `diff.rename` | Pairing deleted paths with added ones: git's `diffcore-rename`, for `git diff -M` and `-C` and for the merge. |
+| `diff.similarity` | How much of one blob another is made of, scored exactly as git's rename detection scores it. |
 | `diff.stat` | `files`, `write`, `writeSummary`, `Widths.configured` — `--stat` and `--summary` as git writes them, the widths from `diff.statNameWidth` and `diff.statGraphWidth`. |
 | `diff.textconv` | `Textconv` — a file's text as its diff driver's `textconv` program writes it, for diff, blame, grep and range-diff; a cache for `cachetextconv`. |
 | `rev_walk` | `Walk` and `Walk.count`, `mergeBase`, `mergeBases`, `mergeBasesMany`, `isAncestor`, `parentsOf` — git's date queue and topological order, commit-graph generation numbers, the shallow boundary, and history simplified by paths (`Walk.paths`) as git simplifies it by default. |
@@ -696,71 +702,71 @@ writes beside them, and `relic.refs.reftable.table` is the table format.
 | `rev_walk.path_walk` | `PathWalk` — git's path-walk: the objects a history reaches, in batches by the path that reaches them. |
 | `rev_walk.mailmap` | `Mailmap.load`, `lookup`, `map`: `.mailmap`, `mailmap.blob` and `mailmap.file` read and matched as git reads and matches them. |
 | `rev_walk.shallow` | A shallow repository's boundary: `.git/shallow`. |
-| `rev_walk.object` | Module within `rev_walk`. |
-| `rev_walk.object.walk` | Module within `rev_walk.object`. |
-| `rev_walk.object.filter` | Module within `rev_walk.object`. |
+| `rev_walk.object` | The object walk: every object a set of tips reaches past what is excluded, and the filters a partial clone asks it to apply. |
+| `rev_walk.object.walk` | Which objects one side has that the other lacks, and whether a set of tips is whole. |
+| `rev_walk.object.filter` | The objects a filtered pack holds, chosen as git's `list-objects` walk and its filters (`list-objects-filter.c`) choose them, so that a server sends what git's sends, object for object. |
 | `merge` | `blobs`, git's `ll_merge` on parallax's three-way merge, and the stage-only tree merge. |
 | `merge.rerere` | Recorded resolutions in git's `rr-cache`: `run`, `status`, `remaining`, `diff`, `forget`, `gc`. |
 | `merge.three_way` | A merge of three trees carried into the index and the working tree. |
-| `merge.subtree_shift` | Module within `merge`. |
-| `merge.strategy` | Module within `merge`. |
+| `merge.subtree_shift` | Lining one tree up with another that holds it one or more directories down, or that it holds: git's match-trees, which the merge strategy options `subtree` and `subtree=<path>` run before a merge. |
+| `merge.strategy` | Git's merge strategy options: the words `-X` hands the ort strategy, as `merge`, `cherry-pick`, `revert` and `rebase` take them and as they are kept between the steps of a sequence. |
 | `merge.ort` | `mergeTrees`, `mergeCommits` — git's merge-ort: renames, directory renames, directory/file and type conflicts, submodules, virtual merge bases, git's messages. |
 | `merge.octopus` | `mergeCommits` — git's octopus: several heads merged one after another, `read-tree --aggressive` then `merge-one-file`. |
 | `commit` | Making a commit the way `git commit` does, its hooks in git's order. |
 | `commit.notes` | `Notes`, `add`, `append`, `copy`, `remove`, `prune`, `show`, `merge`, `mergeCommit`, `mergeAbort`, `formatNote`: `refs/notes/*` read and written as `git notes` does, git's fanout and every merge strategy included. |
-| `commit.todo` | Module within `commit`. |
+| `commit.todo` | The instruction sheet a cherry-pick sequence and a rebase work through: `.git/sequencer/todo` and `.git/rebase-merge/git-rebase-todo`. |
 | `commit.branch` | `create`, `setUpstream`, `deleteMerged` — `git branch <name> <start>`, `--set-upstream-to` and `--delete-merged`: a branch made at a revision, tracking what `branch.autoSetupMerge` and `branch.autoSetupRebase` say; the branches whose work their upstream holds, deleted as git 2.56 deletes them. |
-| `commit.rebase` | Module within `commit`. |
+| `commit.rebase` | Rebasing: replaying a branch's own commits on top of another commit, `git rebase` with the merge backend, non-interactive or driven by an instruction sheet the caller supplies. |
 | `commit.history` | `fixup`, `reword`, `split` — `git history`: one commit rewritten where it stands, its descendants replayed onto it and their branches moved. |
 | `commit.replay` | `replay` — `git replay`: commits made again in memory onto `--onto`, `--advance` or `--revert`, and the refs that pointed at them moved in one transaction. |
-| `commit.sequencer` | Module within `commit`. |
-| `commit.merging` | Module within `commit`. |
+| `commit.sequencer` | Replaying commits: `git cherry-pick` and `git revert`, one commit or a sequence of them. |
+| `commit.merging` | Merging commits into the current branch: `git merge`. |
 | `commit.stash` | `push`, `create`, `store`, `apply`, `pop`, `list`, `show`, `drop`, `clear`; the autostash a merge or a rebase makes and brings back. |
 | `commit.in_progress` | `read`: which operations a worktree is in the middle of, as `git status` says. |
-| `commit.message` | Module within `commit`. |
+| `commit.message` | Commit messages as git's commands shape them. |
 | `commit.trailer` | `process`, `processFile`, `format`, `iterate`, `amend`, `Settings.load` — `git interpret-trailers` byte for byte: the trailer block found as git finds it, `--trailer` added by `--where`, `--if-exists` and `--if-missing`, `--trim-empty`, `--only-trailers`, `--only-input`, `--unfold`, `--parse`, `--no-divider`, `--in-place`; `trailer.separators`, `.where`, `.ifExists`, `.ifMissing` and every `trailer.<name>.key`, `.command` and `.cmd`. `%(trailers)` and `git commit --trailer` go through it. |
-| `commit.head` | Module within `commit`. |
-| `commit.reset` | Module within `commit`. |
+| `commit.head` | HEAD as git's commands move it, and the files a command in progress leaves beside it. |
+| `commit.reset` | Putting the index and the working tree back to a commit's tree: `git reset --merge` and `git reset --hard`, which is how every history-editing command is aborted. |
 | `commit.signing` | Sign and verify commits and tags: OpenPGP, SSH, X.509. |
-| `commit.hooks` | Module within `commit`. |
+| `commit.hooks` | The hooks git's history commands run around the commits they make: `git merge`, `git cherry-pick`, `git revert` and `git rebase`, and the `git commit` each of them hands a resolved stop to. |
 | `transport` | `Session`: a remote, open — the one thing a fetch, a clone or a push talks to. |
-| `transport.filter_spec` | Module within `transport`. |
-| `transport.partial` | Module within `transport`. |
-| `transport.side_band` | Module within `transport`. |
-| `transport.http_settings` | Module within `transport`. |
+| `transport.filter_spec` | A partial clone's filter, read as git reads `--filter=<spec>` and the `filter` line a server is sent: `blob:none`, `blob:limit=<size>`, `tree:<depth>`, `object:type=<type>`, `sparse:oid=<blob>`, and `combine:<spec>+<spec>…`, each part percent-encoded where it holds a character git reserves. |
+| `transport.partial` | Partial clone: a repository that holds some of its objects and is promised the rest. |
+| `transport.side_band` | The side-band: several streams over one, a pkt-line at a time. |
+| `transport.http_settings` | The `http.*` settings for one URL, read the way git reads them. |
 | `transport.hidden` | `Refs` — `transfer.hideRefs`, `uploadpack.hideRefs` and `receive.hideRefs` as git's `ref_is_hidden` reads them: what a served repository does not advertise, what a want may name, what a push may not touch. |
 | `transport.promisors` | `advertisement`, `reply`, `autoFilter` — the protocol v2 `promisor-remote` capability: `promisor.advertise` and `sendFields` on a server, `promisor.acceptFromServer`, `checkFields` and `storeFields` on a client, and the filter `auto`. |
-| `transport.push` | Module within `transport`. |
-| `transport.clone` | Module within `transport`. |
-| `transport.fetch` | Module within `transport`. |
+| `transport.push` | `git push`: update a remote's refs from this repository's, with the objects they need. |
+| `transport.clone` | `git clone`: a new repository with a remote, the remote's refs and objects, and its default branch checked out. |
+| `transport.fetch` | `git fetch`: bring a remote's refs and the objects under them, and keep them where the refspecs say. |
 | `transport.pull` | `pull` — `git pull`: the fetch, then a fast-forward, a merge of `FETCH_HEAD` or a rebase from the fork point, as `pull.ff`, `pull.rebase` and `branch.<name>.rebase` say. |
 | `transport.backfill` | `backfill` — `git backfill`: a partial clone's missing blobs fetched in batches by path, within a range, a pathspec or the sparse checkout. |
-| `transport.refspec` | Module within `transport`. |
-| `transport.remote` | Module within `transport`. |
-| `transport.url` | Module within `transport`. |
-| `transport.fetch_pack` | Module within `transport`. |
-| `transport.send_pack` | Module within `transport`. |
-| `transport.local` | Module within `transport`. |
-| `transport.ssh` | Module within `transport`. |
-| `transport.smart_http` | Module within `transport`. |
-| `transport.credential` | Module within `transport`. |
+| `transport.refspec` | Refspecs: the rule that says which refs a fetch takes and where it keeps them, and which refs a push sends and where they land. |
+| `transport.remote` | Remotes, as a repository's configuration describes them. |
+| `transport.url` | What a remote's URL names: which transport reaches it, and where. |
+| `transport.fetch_pack` | Asking a server for a pack: the `fetch` command of protocol v2, and the `want`/`have` exchange of v0 and v1 when that is all the server speaks. |
+| `transport.send_pack` | Sending to `git-receive-pack`: commands, a pack, and the report. |
+| `transport.local` | A remote on this machine: a path, or a `file://` URL. |
+| `transport.ssh` | Reaching a remote over ssh: the person's own `ssh`, started the way git starts it. |
+| `transport.smart_http` | git's smart HTTP protocol over uplink's client, and a dumb server's files: `Files` and `Early`, each body an `aegis.io.ReadEnd`. |
+| `transport.credential` | Credentials for an HTTP remote: git's credential helper protocol, and the prompt git falls back to, as git's `credential.c` has them. |
 | `transport.credential.cache` | git's `credential-cache` client. |
-| `transport.credential_cache_daemon` | Module within `transport`. |
-| `transport.auth` | Module within `transport`. |
-| `transport.protocol` | Module within `transport`. |
-| `transport.connection` | Module within `transport`. |
-| `transport.pkt_line` | Module within `transport`. |
+| `transport.credential_cache_daemon` | Git's `credential-cache--daemon`: credentials held in memory, on a unix socket of the daemon's own, for as long as each was stored for. |
+| `transport.auth` | Why a remote would not let this client in, in the terms a person needs to put it right. |
+| `transport.protocol` | What a git server says first, and how its refs are asked for. |
+| `transport.connection` | A conversation with a remote git service: `git-upload-pack` for a fetch, `git-receive-pack` for a push. |
+| `transport.pkt_line` | Pkt-line: the framing under git's wire protocol and its long-running filter processes. |
 | `transport.upload_pack` | `Server` — serving fetches, with shallow and every filter. |
 | `transport.receive_pack` | `Server`, `connect` — serving pushes as git's receive-pack: quarantine, connectivity and fsck, the receive hooks, `receive.*`, report-status v1 and v2. |
 | `transport.http_backend` | `Backend` — git's smart HTTP served on uplink's server: clone, fetch and push over `http://`. Only with `http`. |
 | `transport.bundle` | `create`, `write`, `File.open`, `Header.read`, `listHeads`, `writeSummary`, `verify`, `unbundle`, `isBundle`: `git bundle` v2 and v3, its header byte for byte, filtered by any filter git takes, `sparse:oid=` included; a path to a bundle is fetched and cloned from. |
 | `transport.bundle_uri` | `fetch`, `fetchList`, `List`: bundle URIs as git's `bundle-uri.c` takes them, a bundle or a bundle list (`mode`, the `creationToken` heuristic) unbundled before a clone or a fetch asks the server, its refs under `refs/bundles/`. |
-| `transport.progress` | Module within `transport`. |
+| `transport.progress` | What a long operation says while it runs. |
 | `transport.remote_helper` | `Helper`, `Spec`, `allowed` — `git-remote-<name>` run as git runs it: capabilities, options, `list`, `connect`, `fetch`, `import` (through `fast.importer`, `bidi-import` answered), `push`, `export` (through `fast.exporter`, with the helper's marks), private refs by its `refspec`. |
-| `transport.policy` | Module within `transport`. |
-| `submodule` | Public concern. |
-| `submodule.gitmodules` | Module within `submodule`. |
-| `submodule.gitlink` | Module within `submodule`. |
+| `transport.policy` | Which transports a remote may be reached through, as git's `is_transport_allowed` decides it. |
+| `submodule` | Submodules: repositories a superproject records by commit, at a path, with `.gitmodules` saying what each is called and where it comes from. |
+| `submodule.gitmodules` | `.gitmodules`: which submodule lives at which path, and where its repository comes from. |
+| `submodule.gitlink` | A gitlink's directory in the working tree: whether a repository is there, and which commit it has checked out. |
 | `patch` | `parse`, `Patch`, `FilePatch`, `Fragment`: git patches and plain unified diffs read as `git apply` reads them, from whatever surrounds them. |
 | `patch.am` | `start`, `proceed`, `skip`, `abort`, `quit` — `git am` with `--3way`, its state in `rebase-apply` as git keeps it. |
 | `patch.commit_diff` | `parts`, `write`, `configured` — a commit's diff as `git log -p` and `git show` write it: a merge's by `--diff-merges` and `log.diffMerges`, first parent, each parent, combined, dense or the remerge diff. |
@@ -792,14 +798,14 @@ are relic's types, a `relic.repo.Repository` among them. Its namespaces:
 |---|---|
 | `filter` | Native LFS filters selected by an operation owner. |
 | `clone` | Clone with native LFS checkout and downloads. |
-| `netrc` | What the LFS client reads beside: `~/.netrc`. |
-| `ssh` | Module within `relic_lfs`. |
-| `hooks` | Module within `relic_lfs`. |
-| `push` | Module within `relic_lfs`. |
-| `locks` | Module within `relic_lfs`. |
-| `transfer` | Module within `relic_lfs`. |
-| `custom` | Module within `relic_lfs`. |
-| `api` | Module within `relic_lfs`. |
+| `netrc` | `~/.netrc`: a login and password per host, which git-lfs reads before it asks any credential helper, read as git-lfs reads it. |
+| `ssh` | Git-lfs's pure-ssh protocol: `ssh <host> git-lfs-transfer <path> <operation>`, and the objects and locks it moves without HTTP. |
+| `hooks` | The work of the hooks `git lfs install` writes, done in process, so a repository set up by git-lfs works on a machine that has no git-lfs. |
+| `push` | What git-lfs's pre-push hook does, done in process by a push: other people's locks checked, and the LFS objects the pushed commits point at uploaded, before any ref is sent. |
+| `locks` | Locks on paths, held on a remote's LFS server: git-lfs's locking API, the read-only working files it keeps for paths marked `lockable`, and the check a push makes against other people's locks. |
+| `transfer` | Moving LFS objects between this repository's store and a remote's, as git-lfs moves them: the batch API and the basic transfer adapter. |
+| `custom` | Custom transfer adapters: `lfs.customtransfer.<name>`, the programs git-lfs hands its transfers to, one line of JSON each way. |
+| `api` | The Git LFS server a remote has, and how it is reached: where its API is, who the person is to it, and the HTTP requests that carry both. |
 | `settings` | git-lfs's configuration and `.lfsconfig`, read as git-lfs reads them. |
 | `server` | `Backend`, `Store`, `Directory`, `S3` — a Git LFS server as a handler for uplink's server: the batch API, basic transfers into the caller's store (a directory, or S3-compatible storage through signed URLs), the locking API, authorization by the caller's hook. Only with `http`. |
 <!-- END LFS MODULES -->

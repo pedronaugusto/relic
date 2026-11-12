@@ -16,16 +16,16 @@
 //! |---|---|
 //! | `filter` | Native LFS filters selected by an operation owner. |
 //! | `clone` | Clone with native LFS checkout and downloads. |
-//! | `netrc` | Module within `relic_lfs`. |
-//! | `ssh` | Module within `relic_lfs`. |
-//! | `hooks` | Module within `relic_lfs`. |
-//! | `push` | Module within `relic_lfs`. |
-//! | `locks` | Module within `relic_lfs`. |
-//! | `transfer` | Module within `relic_lfs`. |
-//! | `custom` | Module within `relic_lfs`. |
-//! | `api` | Module within `relic_lfs`. |
+//! | `netrc` | `~/.netrc`: a login and password per host, which git-lfs reads before it asks any credential helper, read as git-lfs reads it. |
+//! | `ssh` | Git-lfs's pure-ssh protocol: `ssh <host> git-lfs-transfer <path> <operation>`, and the objects and locks it moves without HTTP. |
+//! | `hooks` | The work of the hooks `git lfs install` writes, done in process, so a repository set up by git-lfs works on a machine that has no git-lfs. |
+//! | `push` | What git-lfs's pre-push hook does, done in process by a push: other people's locks checked, and the LFS objects the pushed commits point at uploaded, before any ref is sent. |
+//! | `locks` | Locks on paths, held on a remote's LFS server: git-lfs's locking API, the read-only working files it keeps for paths marked `lockable`, and the check a push makes against other people's locks. |
+//! | `transfer` | Moving LFS objects between this repository's store and a remote's, as git-lfs moves them: the batch API and the basic transfer adapter. |
+//! | `custom` | Custom transfer adapters: `lfs.customtransfer.<name>`, the programs git-lfs hands its transfers to, one line of JSON each way. |
+//! | `api` | The Git LFS server a remote has, and how it is reached: where its API is, who the person is to it, and the HTTP requests that carry both. |
 //! | `settings` | git-lfs's configuration and `.lfsconfig`, read as git-lfs reads them. |
-//! | `server` | Module within `relic_lfs`. Only with `http`. |
+//! | `server` | `Backend`, `Store`, `Directory`, `S3` — a Git LFS server as a handler for uplink's server: the batch API, basic transfers into the caller's store (a directory, or S3-compatible storage through signed URLs), the locking API, authorization by the caller's hook. Only with `http`. |
 
 pub const filter = @import("lfs/filter.zig");
 pub const clone = @import("lfs/clone.zig");
