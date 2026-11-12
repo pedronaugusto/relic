@@ -3,8 +3,8 @@
     .version = "0.29.2",
     .dependencies = .{
         .aegis = .{
-            .url = "git+https://github.com/pedronaugusto/aegis#3c0b13e5fc25797b5fbcc25fec48b0a8411cc668",
-            .hash = "aegis-0.2.4-rsxoug3uCwBiVYRBbQolOSbqdOEzmmUeaj19tWOo2rmc",
+            .url = "git+https://github.com/pedronaugusto/aegis#c43e90db7fa8721b5f492da3350a388372f78e82",
+            .hash = "aegis-0.2.4-rsxouh_ZDADwsssgFEu1g7mmKRVplCNL8uzsdpwiHC7V",
         },
 
         .conduit = .{
