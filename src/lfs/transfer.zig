@@ -1481,7 +1481,7 @@ const Partial = struct {
             error.LfsZstdWindowTooLarge => return .{ .fail = "the server's zstd frame asks for a window wider than 512 MiB" },
             else => |e| return e,
         };
-        var counting: Counting = .init(body, state);
+        var counting: Counting = .init(body.reader(), state);
         var buf: [64 * 1024]u8 = undefined;
         var at = p.from;
         while (true) {
@@ -1507,8 +1507,10 @@ const Partial = struct {
             if (broken) {
                 // Broken off: what came is kept for the next attempt.
                 p.keep = at > 0;
-                if (ex.canceled()) return error.Canceled;
-                return .{ .retry = .{ .message = try state.dupe(ex.bodyError()) } };
+                return switch (body.settle(error.ReadFailed)) {
+                    error.Canceled => error.Canceled,
+                    error.ReadFailed => .{ .retry = .{ .message = try state.dupe(ex.bodyError()) } },
+                };
             }
             if (n < buf.len) break;
         }
@@ -1970,12 +1972,13 @@ fn attemptUploadSsh(state: *Run, t: *lfsssh.Transfer, worker: usize, r: *Result,
         conn.beginData(io, put, args) catch |err| return sshRetry(state, err);
         var chunk: [32 * 1024]u8 = undefined;
         var fr = file.reader(io, &.{});
+        const object_end: aegis.io.ReadEnd = .fromFile(&fr);
         var left = r.size;
         while (left > 0) {
             const want: usize = @intCast(@min(left, chunk.len));
-            const n = fr.interface.readSliceShort(chunk[0..want]) catch {
-                if (fr.err) |cause| if (cause == error.Canceled) return error.Canceled;
-                return .{ .fail = "upload: reading the object" };
+            const n = object_end.reader().readSliceShort(chunk[0..want]) catch |err| return switch (object_end.settle(err)) {
+                error.Canceled => error.Canceled,
+                error.ReadFailed => .{ .fail = "upload: reading the object" },
             };
             if (n == 0) return .{ .fail = "upload: the object is shorter than its pointer" };
             conn.writeData(io, chunk[0..n]) catch |err| {

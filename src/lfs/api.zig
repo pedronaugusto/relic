@@ -1759,12 +1759,13 @@ pub const Client = struct {
                 defer outgoing.deinit(io);
                 var chunk: [64 * 1024]u8 = undefined;
                 var fr = file.reader(io, &.{});
+                const object_end: aegis.io.ReadEnd = .fromFile(&fr);
                 var left = o.pointer.size;
                 while (left > 0) {
                     const want: usize = @intCast(@min(left, chunk.len));
-                    const n = fr.interface.readSliceShort(chunk[0..want]) catch {
-                        if (fr.err) |cause| if (cause == error.Canceled) return error.Canceled;
-                        return c.fail("upload: reading the object", io, .{}, error.ConnectionFailed);
+                    const n = object_end.reader().readSliceShort(chunk[0..want]) catch |err| switch (object_end.settle(err)) {
+                        error.Canceled => return error.Canceled,
+                        error.ReadFailed => return c.fail("upload: reading the object", io, .{}, error.ConnectionFailed),
                     };
                     if (n == 0) return c.fail("upload: the object is shorter than its pointer", io, .{}, error.ConnectionFailed);
                     outgoing.writer().writeAll(chunk[0..n]) catch return c.uploadBroke(io, ex, &outgoing, request_url);
@@ -2310,7 +2311,18 @@ pub const Exchange = struct {
     /// for git-lfs; one whose coding is zstd is decoded with the window
     /// its first frame's header asks for, as git-lfs's decoder gives it,
     /// up to the same limit. Any other coding is handed over as it came.
-    pub fn reader(ex: *Exchange, io: Io) Self.Error!*Io.Reader {
+    /// The end settles a failed read through the response's own failure,
+    /// a cancel as `Canceled`.
+    pub fn reader(ex: *Exchange, io: Io) Self.Error!aegis.io.ReadEnd {
+        return .init(try ex.decoded(io), ex, causeOf);
+    }
+
+    fn causeOf(context: *const anyopaque) ?anyerror {
+        const ex: *const Exchange = @ptrCast(@alignCast(context)); // safe: reader passes an Exchange
+        return ex.held().response.failure();
+    }
+
+    fn decoded(ex: *Exchange, io: Io) Self.Error!*Io.Reader {
         const raw = ex.state().response.reader(io);
         if (ex.body) |r| return r;
         const codings = uplink.wire.coding.Codings.of(&ex.state().response.headers) catch uplink.wire.coding.Codings{};
@@ -2364,20 +2376,15 @@ pub const Exchange = struct {
     }
 
     pub fn readAll(ex: *Exchange, io: Io, limit: usize) Self.Error!Unparsed {
-        const r = try ex.reader(io);
-        return .init(r.allocRemaining(ex.arena.allocator(), .limited(limit)) catch |err| switch (err) {
+        const body = try ex.reader(io);
+        return .init(body.reader().allocRemaining(ex.arena.allocator(), .limited(limit)) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.StreamTooLong => return error.StreamTooLong,
-            error.ReadFailed => {
-                if (ex.canceled()) return error.Canceled;
-                return ex.client.fail("reading the answer: {s}", io, .{ex.bodyError()}, error.ConnectionFailed);
+            error.ReadFailed => switch (body.settle(error.ReadFailed)) {
+                error.Canceled => return error.Canceled,
+                error.ReadFailed => return ex.client.fail("reading the answer: {s}", io, .{ex.bodyError()}, error.ConnectionFailed),
             },
         });
-    }
-
-    /// Whether the last read of the body failed for a cancel.
-    pub fn canceled(ex: *const Exchange) bool {
-        return ex.held().response.failure() == error.Canceled;
     }
 
     /// The reason a read of the body failed.

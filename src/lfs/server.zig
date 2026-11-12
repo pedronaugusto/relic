@@ -378,11 +378,11 @@ const Call = struct {
         c.response.status = .ok;
         try c.response.header("Content-Type", "application/octet-stream");
         try c.response.setLength(size);
-        const w = try c.response.writer(c.io);
-        const held = read(s.context, c.io, c.repository, &pointer, w) catch |err| {
+        const sent = responseEnd(try c.response.writer(c.io), c.response);
+        const held = read(s.context, c.io, c.repository, &pointer, sent.writer()) catch |err| {
             // A write to the client that failed is the store's failure to
             // it: a cancel is the response's to say.
-            if (c.response.failure() == error.Canceled) return error.Canceled;
+            if (sent.settle(error.WriteFailed) == error.Canceled) return error.Canceled;
             return err;
         };
         if (!held) {
@@ -400,11 +400,12 @@ const Call = struct {
         const length = c.request.headers.get("content-length") orelse return message(c.io, c.response, .length_required, "Length Required");
         const size = decimal.digits(u64, length) orelse return message(c.io, c.response, .bad_request, "Bad Request");
         const pointer: lfs.Pointer = .{ .oid = oid.*, .size = size };
-        write(s.context, c.io, c.repository, &pointer, c.request.reader(c.io)) catch |err| switch (err) {
+        const uploaded = requestEnd(c.request.reader(c.io), c.request);
+        write(s.context, c.io, c.repository, &pointer, uploaded.reader()) catch |err| switch (err) {
             error.LfsObjectMismatch => return message(c.io, c.response, .unprocessable_entity, "The upload is not the object it names"),
             // A read of the body that failed is the store's failure to
             // read it: a cancel is the request's to say.
-            else => |e| return if (c.request.failure() == error.Canceled) error.Canceled else e,
+            else => |e| return if (uploaded.settle(error.ReadFailed) == error.Canceled) error.Canceled else e,
         };
         return json(c.io, c.response, .ok, "");
     }
@@ -551,6 +552,28 @@ fn isOid(text: []const u8) bool {
         else => return false,
     };
     return true;
+}
+
+/// The response body's writer as an end, the response's own failure its
+/// cause.
+fn responseEnd(w: *Io.Writer, response: *const Response) aegis.io.WriteEnd {
+    return .init(w, response, responseCause);
+}
+
+fn responseCause(context: *const anyopaque) ?anyerror {
+    const response: *const Response = @ptrCast(@alignCast(context)); // safe: responseEnd passes a Response
+    return response.failure();
+}
+
+/// The request body's reader as an end, the request's own failure its
+/// cause.
+fn requestEnd(r: *Io.Reader, request: *const Request) aegis.io.ReadEnd {
+    return .init(r, request, requestCause);
+}
+
+fn requestCause(context: *const anyopaque) ?anyerror {
+    const request: *const Request = @ptrCast(@alignCast(context)); // safe: requestEnd passes a Request
+    return request.failure();
 }
 
 fn json(io: Io, response: *Response, status: std.http.Status, bytes: []const u8) Response.Error!void {

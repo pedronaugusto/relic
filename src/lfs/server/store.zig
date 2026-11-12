@@ -99,11 +99,13 @@ pub const Directory = struct {
         const file = owned.borrow().*;
         var buf: [64 * 1024]u8 = undefined;
         var r = file.reader(io, &buf);
-        _ = r.interface.streamRemaining(w) catch |err| switch (err) {
-            error.ReadFailed => return if (r.err) |e| switch (e) {
+        const object_end: aegis.io.ReadEnd = .fromFile(&r);
+        _ = object_end.reader().streamRemaining(w) catch |err| switch (err) {
+            error.ReadFailed => return switch (object_end.settle(error.ReadFailed)) {
                 error.Canceled => error.Canceled,
-                else => error.LfsStoreFailed,
-            } else error.LfsStoreFailed,
+                error.ReadFailed => error.LfsStoreFailed,
+            },
+            // The caller's writer: its end says whether a cancel stopped it.
             error.WriteFailed => return error.LfsStoreFailed,
         };
         return true;
