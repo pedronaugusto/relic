@@ -352,18 +352,12 @@ pub const Session = struct {
                 if (try (try s.nativeOf()).canonical(a, out)) |canonical_bytes| return canonical_bytes;
             },
             .program => |driver| {
-                var smudged = try s.smudge(a, path, driver, out, .{});
-                switch (smudged) {
+                switch (try s.smudge(a, path, driver, out, .{})) {
                     .bytes => |text| out = text,
-                    .file => |*file| {
-                        defer file.deinit(s.io);
-                        var buf: [4096]u8 = undefined;
-                        var reader = file.borrow().*.reader(s.io, &buf);
-                        var all: std.ArrayList(u8) = .empty;
-                        try reader.interface.appendRemainingUnlimited(a, &all);
-                        out = all.items;
-                    },
-                    .delayed => unreachable,
+                    // A program's smudge answers in bytes (a native
+                    // provider's alone hands over a file), and no delay
+                    // is offered here.
+                    .file, .delayed => unreachable,
                 }
             },
         }
