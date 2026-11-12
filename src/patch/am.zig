@@ -211,7 +211,7 @@ pub const Outcome = struct {
 /// Whether an `am` session is in progress: `rebase-apply` with `next` and
 /// `last` in it.
 pub fn inProgress(io: Io, repo: *Repository) Io.Cancelable!bool {
-    return state_file.exists(io, repo.gitDirectory(), state_dir ++ "/next") and state_file.exists(io, repo.gitDirectory(), state_dir ++ "/last");
+    return try state_file.exists(io, repo.gitDirectory(), state_dir ++ "/next") and try state_file.exists(io, repo.gitDirectory(), state_dir ++ "/last");
 }
 
 const Session = struct {
@@ -277,7 +277,7 @@ const Session = struct {
     }
 
     fn exists(s: *Session, name: []const u8) Error!bool {
-        return state_file.exists(s.io, s.repo.gitDirectory(), try s.path(name));
+        return try state_file.exists(s.io, s.repo.gitDirectory(), try s.path(name));
     }
 
     fn msgnum(s: *Session) Allocator.Error![]const u8 {
@@ -399,7 +399,7 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, mailboxes: []const []con
     if (repo.workDirectory() == null) return error.BareRepository;
     if ((try inProgress(io, repo))) return error.AmInProgress;
     // A rebase made the directory for its autostash.
-    if (!options.rebasing and state_file.exists(io, repo.gitDirectory(), state_dir)) return error.RebaseInProgress;
+    if (!options.rebasing and try state_file.exists(io, repo.gitDirectory(), state_dir)) return error.RebaseInProgress;
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     errdefer arena_instance.deinit();
     const a = arena_instance.allocator();
@@ -1119,6 +1119,6 @@ pub fn quit(io: Io, repo: *Repository) Self.Error!void {
 /// and `--quit` remove a stray one; with none there either, there is
 /// nothing to end.
 fn destroyStray(io: Io, repo: *Repository) Self.Error!void {
-    if (!state_file.exists(io, repo.gitDirectory(), state_dir)) return error.NoAmInProgress;
+    if (!try state_file.exists(io, repo.gitDirectory(), state_dir)) return error.NoAmInProgress;
     try destroy(io, repo);
 }

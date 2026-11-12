@@ -403,8 +403,8 @@ pub fn inProgress(io: Io, repo: *Repository) Io.Cancelable!bool {
 /// The backend of the rebase that is waiting.
 fn backendInProgress(io: Io, repo: *Repository) Io.Cancelable!?Backend {
     const dir = repo.gitDirectory();
-    if (state_file.exists(io, dir, Backend.merge.dir())) return .merge;
-    if (state_file.exists(io, dir, Backend.apply.dir()) and !state_file.exists(io, dir, "rebase-apply/applying")) return .apply;
+    if (try state_file.exists(io, dir, Backend.merge.dir())) return .merge;
+    if (try state_file.exists(io, dir, Backend.apply.dir()) and !try state_file.exists(io, dir, "rebase-apply/applying")) return .apply;
     return null;
 }
 
@@ -471,7 +471,7 @@ const Run = struct {
     }
 
     fn hasState(r: *Run, comptime name: []const u8) Io.Cancelable!bool {
-        return state_file.exists(r.io, r.repo.gitDirectory(), r.statePath(name));
+        return try state_file.exists(r.io, r.repo.gitDirectory(), r.statePath(name));
     }
 
     fn appendState(r: *Run, comptime name: []const u8, bytes: []const u8) Error!void {
@@ -1304,7 +1304,7 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, upstream: Oid, options: 
     // which dies on a value that is no boolean, asked for or not.
     const configured_autostash = try repo.configuration().getBool("rebase.autostash", false);
 
-    if ((try inProgress(io, repo)) or state_file.exists(io, repo.gitDirectory(), Backend.apply.dir())) return error.RebaseInProgress;
+    if ((try inProgress(io, repo)) or try state_file.exists(io, repo.gitDirectory(), Backend.apply.dir())) return error.RebaseInProgress;
     r.backend = try backendOf(&r);
     if ((try merging.inProgress(io, repo)) or (try sequencer.inProgress(io, repo)) != null) return error.OperationInProgress;
     if (options.exec.len != 0 and options.programs == null) return error.ExecNotPermitted;

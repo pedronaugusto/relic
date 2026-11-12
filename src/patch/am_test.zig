@@ -530,3 +530,32 @@ test "mails in quoted-printable, base64, Latin-1, flowed and multipart text, wit
         }
     }.inFormat);
 }
+
+const shakedown = @import("shakedown");
+const testing_io = @import("../testing/io.zig");
+
+test "a cancel that lands in looking for a stray am directory is returned, not taken for no am" {
+    const gpa = std.testing.allocator;
+    var git = try testgit.Repo.init(gpa, std.testing.io, &.{});
+    defer git.deinit();
+    try git.exec(std.testing.io, &.{ "commit", "-q", "--allow-empty", "-m", "one" });
+    const Quit = struct {
+        git: *testgit.Repo,
+        pub fn setUp(q: *@This(), _: *shakedown.FaultIo) !void {
+            // A `rebase-apply` with no session in it, which `--quit` removes.
+            try q.git.writeFile(std.testing.io, ".git/rebase-apply/patch", "stray\n");
+        }
+        pub fn run(q: *@This(), io: Io) !void {
+            // The probe measures the real disk's clock, which no two runs share.
+            var repo = try repo_mod.Repository.open(std.testing.allocator, io, q.git.dir, .{ .odb = .{ .probe_timestamp_resolution = false } });
+            defer repo.deinit(io);
+            try am.quit(io, &repo);
+        }
+        pub fn check(_: *@This(), io: Io, result: anyerror!void, injected: ?shakedown.Injected) !void {
+            try testing_io.cancelKept(io, result, injected);
+        }
+        pub fn tearDown(_: *@This()) void {}
+    };
+    var q: Quit = .{ .git = &git };
+    try testing_io.everyCancel(gpa, std.testing.io, &q);
+}

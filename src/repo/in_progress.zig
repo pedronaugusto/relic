@@ -48,17 +48,17 @@ pub fn read(io: Io, repo: *Repository) Io.Cancelable!InProgress {
     var p: InProgress = .{};
     if ((try repo.refStore().special().exists(io, .merge_head))) {
         p.merge = true;
-    } else if (state.exists(io, dir, "rebase-apply")) {
-        if (state.exists(io, dir, "rebase-apply/applying")) p.am = true else p.rebase = true;
-    } else if (state.exists(io, dir, "rebase-merge")) {
+    } else if (try state.exists(io, dir, "rebase-apply")) {
+        if (try state.exists(io, dir, "rebase-apply/applying")) p.am = true else p.rebase = true;
+    } else if (try state.exists(io, dir, "rebase-merge")) {
         p.rebase_merge = true;
-        p.interactive = state.exists(io, dir, "rebase-merge/interactive");
+        p.interactive = try state.exists(io, dir, "rebase-merge/interactive");
     }
     const root = repo.refStore().root();
     if ((try root.exists(repo.allocator(), io, .cherry_pick_head))) p.cherry_pick = true;
-    if (state.exists(io, dir, "BISECT_START")) p.bisect = true;
+    if (try state.exists(io, dir, "BISECT_START")) p.bisect = true;
     if ((try root.exists(repo.allocator(), io, .revert_head))) p.revert = true;
-    if (lastSequenced(repo.allocator(), io, repo)) |last| switch (last) {
+    if (try lastSequenced(repo.allocator(), io, repo)) |last| switch (last) {
         .pick => p.cherry_pick = true,
         .revert => p.revert = true,
     };
@@ -71,12 +71,12 @@ pub const Sequenced = enum { pick, revert };
 /// The command the first line of `.git/sequencer/todo` names, `pick` (or
 /// `p`) or `revert`, then a space or tab: what a stopped sequence last
 /// ran, as git's `sequencer_get_last_command` reads it. `null` with no
-/// such line.
-pub fn lastSequenced(gpa: Allocator, io: Io, repo: *Repository) ?Sequenced {
-    const text = (state.read(gpa, io, repo.gitDirectory(), "sequencer/todo") catch |err| {
-        // A cancel is put back for the task's next cancelation point.
-        if (err == error.Canceled) io.recancel();
-        return null;
+/// such line. A cancel that lands in the read is returned; any other
+/// failure to read the file is `null`, as git reads it.
+pub fn lastSequenced(gpa: Allocator, io: Io, repo: *Repository) Io.Cancelable!?Sequenced {
+    const text = (state.read(gpa, io, repo.gitDirectory(), "sequencer/todo") catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return null,
     }) orelse return null;
     defer gpa.free(text);
     const rest = std.mem.trimStart(u8, text, " \t\r\n");

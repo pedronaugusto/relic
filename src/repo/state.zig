@@ -45,12 +45,13 @@ pub fn remove(io: Io, dir: Io.Dir, sub_path: []const u8) Self.Error!void {
 }
 
 /// Whether the state file or directory `sub_path` under `dir` is there. A
-/// cancel that lands here is put back for the task's next cancelation
-/// point rather than lost.
-pub fn exists(io: Io, dir: Io.Dir, sub_path: []const u8) bool {
-    dir.access(io, sub_path, .{}) catch |err| {
-        if (err == error.Canceled) io.recancel();
-        return false;
+/// cancel that lands here is returned, before the caller decides on the
+/// answer; any other failure to look reads as not there, as git's
+/// `file_exists` reads it.
+pub fn exists(io: Io, dir: Io.Dir, sub_path: []const u8) Io.Cancelable!bool {
+    dir.access(io, sub_path, .{}) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return false,
     };
     return true;
 }

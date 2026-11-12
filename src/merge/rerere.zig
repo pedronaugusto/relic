@@ -108,8 +108,9 @@ pub const Outcome = struct {
 };
 
 /// Whether rerere runs here: `rerere.enabled`, or, unset, whether
-/// `.git/rr-cache` is there.
-pub fn enabled(io: Io, repo: *Repository) config_mod.ValueError!bool {
+/// `.git/rr-cache` is there. A cancel that lands in looking for it is
+/// returned; any other failure to look reads as not there, as git reads it.
+pub fn enabled(io: Io, repo: *Repository) (config_mod.ValueError || Io.Cancelable)!bool {
     if (repo.configuration().get("rerere.enabled") == null) return state_file.exists(io, repo.commonDirectory(), "rr-cache");
     return repo.configuration().getBool("rerere.enabled", false);
 }
