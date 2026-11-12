@@ -27,6 +27,7 @@
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const decimal = @import("../text.zig").decimal;
 const shakedown = @import("shakedown");
 const assert = std.debug.assert;
@@ -402,14 +403,12 @@ pub const ProtocolError = error{
 /// bytes.
 pub const Protocol = struct {
     pub const Error = Self.ProtocolError;
-    /// What the filter writes.
-    in: *Io.Reader,
-    /// What the filter reads.
-    out: *Io.Writer,
-    /// The pipes `in` and `out` are made over, when they are a program's:
-    /// a read or write either fails on is the program gone, unless the
-    /// failure was a cancel.
-    pipes: ?Pipes = null,
+    /// What the filter writes. A read that fails is the filter gone,
+    /// unless the end settles it as a cancel.
+    in: aegis.io.ReadEnd,
+    /// What the filter reads. A write that fails is the filter gone,
+    /// unless the end settles it as a cancel.
+    out: aegis.io.WriteEnd,
     /// What the handshake settled on.
     capabilities: Capabilities = .{},
 
@@ -450,7 +449,7 @@ pub const Protocol = struct {
     /// `clean`, `smudge` and `delay` all offered.
     pub fn handshake(p: *Protocol) Self.ProtocolError!void {
         // `pktline.read` hands back a packet out of the reader's buffer.
-        assert(p.in.buffer.len >= pkt_line.max_line);
+        assert(p.in.reader().buffer.len >= pkt_line.max_line);
         try p.line("git-filter-client\n");
         try p.line("version=2\n");
         try p.end();
@@ -495,7 +494,7 @@ pub const Protocol = struct {
         var rest = req.content;
         while (rest.len > 0) {
             const n = @min(rest.len, pkt_line.max_data);
-            pkt_line.write(p.out, rest[0..n]) catch return p.writeGone();
+            pkt_line.write(p.out.writer(), rest[0..n]) catch return p.writeGone();
             rest = rest[n..];
         }
         try p.end();
@@ -578,7 +577,7 @@ pub const Protocol = struct {
     /// a flush, a delimiter, a response end, and a packet with no data, and
     /// so does this.
     fn readPacket(p: *Protocol) ProtocolError!?[]const u8 {
-        const packet = pkt_line.read(p.in) catch |err| switch (err) {
+        const packet = pkt_line.read(p.in.reader()) catch |err| switch (err) {
             error.BadPacket => return error.FilterReply,
             error.EndOfStream => return error.FilterGone,
             error.ReadFailed => return p.readGone(),
@@ -604,41 +603,37 @@ pub const Protocol = struct {
     }
 
     fn line(p: *Protocol, text: []const u8) ProtocolError!void {
-        pkt_line.write(p.out, text) catch return p.writeGone();
+        pkt_line.write(p.out.writer(), text) catch return p.writeGone();
     }
 
     fn print(p: *Protocol, comptime fmt: []const u8, args: anytype) ProtocolError!void {
-        pkt_line.print(p.out, fmt, args) catch return p.writeGone();
+        pkt_line.print(p.out.writer(), fmt, args) catch return p.writeGone();
     }
 
     fn flushOnly(p: *Protocol) ProtocolError!void {
-        pkt_line.flush(p.out) catch return p.writeGone();
+        pkt_line.flush(p.out.writer()) catch return p.writeGone();
     }
 
     /// A flush packet, and everything written so far sent.
     fn end(p: *Protocol) ProtocolError!void {
         try p.flushOnly();
-        p.out.flush() catch return p.writeGone();
+        p.out.writer().flush() catch return p.writeGone();
     }
-
-    /// A program's two pipes, as `Process` reads and writes them.
-    pub const Pipes = struct {
-        reader: *const Io.File.Reader,
-        writer: *const Io.File.Writer,
-    };
 
     /// What a failed read of `in` was.
     fn readGone(p: *const Protocol) error{ FilterGone, Canceled } {
-        const pipes = p.pipes orelse return error.FilterGone;
-        const cause = pipes.reader.err orelse return error.FilterGone;
-        return if (cause == error.Canceled) error.Canceled else error.FilterGone;
+        return switch (p.in.settle(error.ReadFailed)) {
+            error.Canceled => error.Canceled,
+            error.ReadFailed => error.FilterGone,
+        };
     }
 
     /// What a failed write to `out` was.
     fn writeGone(p: *const Protocol) error{ FilterGone, Canceled } {
-        const pipes = p.pipes orelse return error.FilterGone;
-        const cause = pipes.writer.err orelse return error.FilterGone;
-        return if (cause == error.Canceled) error.Canceled else error.FilterGone;
+        return switch (p.out.settle(error.WriteFailed)) {
+            error.Canceled => error.Canceled,
+            error.WriteFailed => error.FilterGone,
+        };
     }
 };
 
@@ -694,9 +689,8 @@ pub const Process = struct {
         p.reader = p.running.child.stdoutFile().?.readerStreaming(io, p.in_buffer);
         p.writer = p.running.child.stdinFile().?.writerStreaming(io, p.out_buffer);
         p.protocol = .{
-            .in = &p.reader.interface,
-            .out = &p.writer.interface,
-            .pipes = .{ .reader = &p.reader, .writer = &p.writer },
+            .in = .fromFile(&p.reader),
+            .out = .fromFile(&p.writer),
         };
         p.protocol.handshake() catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
@@ -793,7 +787,7 @@ const Scripted = struct {
         s.fixed = .fixed(replies);
         s.limited = s.fixed.limited(.unlimited, &s.buffer);
         s.sent = .init(testing.allocator);
-        s.protocol = .{ .in = &s.limited.interface, .out = &s.sent.writer };
+        s.protocol = .{ .in = .causeless(&s.limited.interface), .out = .causeless(&s.sent.writer) };
     }
 
     fn deinit(s: *Scripted) void {
