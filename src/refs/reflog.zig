@@ -267,6 +267,8 @@ pub const ExpireError = errors: {
 /// as a chain, and `keeper` is asked about each entry with that old value.
 /// A line that is not an entry goes, as git's rewrite drops it,
 /// and a log every entry of which goes is left empty, as git leaves it.
+/// `keep` returns `Io.Cancelable!bool`: a cancel it meets stops the expiry
+/// with the log as it was, the lock let go unwritten.
 ///
 /// Returns the newest kept entry's new value, or `null` when none was kept
 /// or there is no log, which is left as it is. The caller holds the ref's
@@ -314,7 +316,7 @@ pub fn expire(
         // git's `expire_reflog_ent` asks about a rewritten entry with the
         // old value it will have: the last kept one's new value.
         if (rewrite) entry.old = last_kept orelse Oid.zero(kind);
-        if (!keeper.keep(entry, count - seen)) continue;
+        if (!try keeper.keep(entry, count - seen)) continue;
         const w = &lock;
         if (rewrite) {
             const old = last_kept orelse Oid.zero(kind);

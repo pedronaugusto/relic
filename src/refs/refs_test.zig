@@ -271,7 +271,7 @@ test "another worktree's HEAD and logs are read as git reads them, and a transac
 
 /// Keeps every entry of a log `expireLog` walks.
 pub const KeepAll = struct {
-    pub fn keep(_: *const KeepAll, _: refs.LogEntry, _: usize) bool {
+    pub fn keep(_: *const KeepAll, _: refs.LogEntry, _: usize) Io.Cancelable!bool {
         return true;
     }
 };

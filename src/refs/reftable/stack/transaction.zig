@@ -650,7 +650,8 @@ pub fn copyRef(gpa: Allocator, io: Io, store: anytype, inputs: CopyInputs, log: 
 /// under the stack's lock, one table that tombstones each entry `keeper`
 /// lets go and writes each kept one again, its old value rewritten when
 /// asked; a log left with no entry keeps the marker that says it exists,
-/// and the ref moves to the newest kept entry when asked.
+/// and the ref moves to the newest kept entry when asked. A cancel `keeper`
+/// meets stops it before the table is written.
 pub fn expireLog(
     gpa: Allocator,
     io: Io,
@@ -692,7 +693,7 @@ pub fn expireLog(
         if (options.rewrite) if (last_kept) |at| {
             dest.value.update.old = rewritten[at].value.update.new;
         };
-        if (keeper.keep(entry, newer)) last_kept = i else dest.value = .deletion;
+        if (try keeper.keep(entry, newer)) last_kept = i else dest.value = .deletion;
     }
 
     const update_index = try stack.nextUpdateIndex();

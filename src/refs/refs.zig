@@ -1065,7 +1065,9 @@ pub const Store = struct {
     /// says to, as git's `refs_reflog_expire` does for `git reflog expire`
     /// and `git reflog delete`; `nth` is how far back the entry is, `0` the
     /// newest, which is what `<ref>@{n}` counts. `keeper` is a pointer to
-    /// anything with that method, which may keep what it learns. A ref
+    /// anything with that method, which may keep what it learns, and
+    /// `keep` returns `Io.Cancelable!bool`: a cancel it meets is returned
+    /// before anything is written, the log and the ref as they were. A ref
     /// without a log is left alone.
     ///
     /// The log and the ref move together: under the ref's lock in the files

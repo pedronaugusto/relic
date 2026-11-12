@@ -1175,7 +1175,7 @@ pub const Dropping = struct {
     dropped: ?Oid = null,
     remaining: usize = 0,
 
-    pub fn keep(d: *Dropping, entry: refs_mod.LogEntry, nth: usize) bool {
+    pub fn keep(d: *Dropping, entry: refs_mod.LogEntry, nth: usize) Io.Cancelable!bool {
         if (nth != d.n) {
             d.remaining += 1;
             return true;

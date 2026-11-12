@@ -360,3 +360,77 @@ fn worktreeLogsInFormat(format: testgit.RefFormat) !void {
 test "reflog expire --all reaches every worktree's own logs, in both ref formats" {
     try testgit.eachRefFormat(worktreeLogsInFormat);
 }
+
+const shakedown = @import("shakedown");
+const testing_io = @import("../testing/io.zig");
+
+/// `main`'s log with an entry gone by age, entries whose commits `main`
+/// reaches, and two of a commit a reset left behind: an expiry that judges
+/// reachability reads objects in the keeper, under the lock.
+fn expireCanceledInFormat(format: testgit.RefFormat) !void {
+    const base: i64 = 1_700_000_000;
+    var git = try testgit.Repo.init(gpa, io, format.initArgs());
+    defer git.deinit();
+    try commitAt(&git, base, "one");
+    try commitAt(&git, base + 10, "two");
+    try commitAt(&git, base + 20, "three");
+    try at(&git, base + 30);
+    try git.exec(io, &.{ "reset", "-q", "--hard", "HEAD~1" });
+    const options: gc.ReflogExpireOptions = .{
+        .clock = .{ .now = .fromNanoseconds(@as(i96, base + 100) * std.time.ns_per_s) },
+        .refs = &.{"refs/heads/main"},
+        .expire = .fromRaw(base + 5),
+        .expire_unreachable = .fromRaw(base + 1000),
+    };
+    const before = try logsState(&git, format);
+    defer gpa.free(before);
+    const after = after: {
+        var copy = try testgit.Repo.copyOf(gpa, io, &git);
+        defer copy.deinit();
+        var native = try repo_mod.Repository.open(gpa, io, copy.dir, .{});
+        defer native.deinit(io);
+        try gc.expireReflogs(gpa, io, &native, options);
+        break :after try logsState(&copy, format);
+    };
+    defer gpa.free(after);
+    // The expiry the sweep cancels takes more than the entry gone by age.
+    try std.testing.expect(!std.mem.eql(u8, before, after));
+    const Expire = struct {
+        source: *testgit.Repo,
+        format: testgit.RefFormat,
+        options: gc.ReflogExpireOptions,
+        before: []const u8,
+        after: []const u8,
+        copy: ?testgit.Repo = null,
+        pub fn setUp(e: *@This(), _: *shakedown.FaultIo) !void {
+            e.copy = try testgit.Repo.copyOf(gpa, io, e.source);
+        }
+        pub fn tearDown(e: *@This()) void {
+            if (e.copy) |*c| c.deinit();
+            e.copy = null;
+        }
+        pub fn run(e: *@This(), run_io: std.Io) !void {
+            var native = try repo_mod.Repository.open(gpa, run_io, e.copy.?.dir, .{ .odb = .{ .probe_timestamp_resolution = false } });
+            defer native.deinit(run_io);
+            try gc.expireReflogs(gpa, run_io, &native, e.options);
+        }
+        pub fn check(e: *@This(), check_io: std.Io, result: anyerror!void, injected: ?shakedown.Injected) !void {
+            try testing_io.cancelKept(check_io, result, injected);
+            const fault = injected orelse return;
+            if (fault.fault != .cancel) return;
+            // Canceled, the log and the ref are as they were or wholly
+            // expired, never kept from the canceled entry on.
+            const now = try logsState(&e.copy.?, e.format);
+            defer gpa.free(now);
+            if (std.mem.eql(u8, now, e.before) or std.mem.eql(u8, now, e.after)) return;
+            std.debug.print("a cancel at step {d} ({t}) left the log half expired:\n{s}\n", .{ fault.step, fault.call, now });
+            return error.HalfExpired;
+        }
+    };
+    var e: Expire = .{ .source = &git, .format = format, .options = options, .before = before, .after = after };
+    try testing_io.everyCancel(gpa, io, &e);
+}
+
+test "a cancel that lands in judging a log entry stops reflog expire before the log or the ref is written, in both ref formats" {
+    try testgit.eachRefFormat(expireCanceledInFormat);
+}

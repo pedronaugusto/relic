@@ -121,7 +121,7 @@ test "HEAD's log gains a detach where it exists already and core.logAllRefUpdate
 pub const DropOne = struct {
     nth: usize,
 
-    pub fn keep(d: *const DropOne, entry: refs_mod.LogEntry, nth: usize) bool {
+    pub fn keep(d: *const DropOne, entry: refs_mod.LogEntry, nth: usize) Io.Cancelable!bool {
         _ = entry;
         return nth != d.nth;
     }

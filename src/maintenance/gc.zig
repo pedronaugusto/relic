@@ -140,7 +140,8 @@ const Settings = struct {
 /// commit its ref does not reach -- `HEAD`'s by any ref, and with the
 /// unreachable expiry `never` any ref's -- or when it is past the
 /// unreachable expiry of a ref that names no commit. A value that is not
-/// a commit, or that cannot be read, keeps its entry.
+/// a commit, or that cannot be read, keeps its entry. A cancel that lands
+/// in judging an entry is returned with that log and its ref unwritten.
 pub fn expireReflogs(gpa: Allocator, io: Io, repo: *Repository, options: ReflogExpireOptions) Self.Error!void {
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
@@ -191,7 +192,7 @@ pub fn countExpiring(gpa: Allocator, io: Io, repo: *Repository, inputs: CountInp
     var count: usize = 0;
     for (log.entries) |entry| {
         if (count >= limit) break;
-        if (!keeper.judge(entry)) count += 1;
+        if (!try keeper.judge(entry)) count += 1;
     }
     if (keeper.failure) |err| return err;
     return count;
@@ -230,12 +231,14 @@ const Keeper = struct {
     }
 
     // The ref store calls `keep` on the keeper it is handed (`expireLog`'s `anytype`), which is this file's own and never leaves it
-    pub fn keep(k: *Keeper, entry: refs_mod.LogEntry, nth: usize) bool {
+    pub fn keep(k: *Keeper, entry: refs_mod.LogEntry, nth: usize) Io.Cancelable!bool {
         _ = nth;
         return k.judge(entry);
     }
 
-    fn judge(k: *Keeper, entry: refs_mod.LogEntry) bool {
+    /// A cancel is returned, so the store writes nothing; any other
+    /// failure keeps this entry and every later one, and is reported.
+    fn judge(k: *Keeper, entry: refs_mod.LogEntry) Io.Cancelable!bool {
         if (k.failure != null) return true;
         const when: date.Expiry = .fromRaw(entry.who.when_secs);
         if (when.compare(k.policy.total) == .lt) return false;
@@ -248,7 +251,8 @@ const Keeper = struct {
         return !(old_gone or new_gone);
     }
 
-    fn fail(k: *Keeper, err: Self.Error) bool {
+    fn fail(k: *Keeper, err: Self.Error) Io.Cancelable!bool {
+        if (err == error.Canceled) return error.Canceled;
         k.failure = err;
         return true;
     }
