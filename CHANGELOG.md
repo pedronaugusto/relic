@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.29.3] - 2026-11-12
+
 ### Security
 
 - uplink 0.8.6 -> 0.8.8, which refuses a tab in a URL where it reached the HTTP request line (uplink's GHSA-mccp-phmw-4w5f). relic hands uplink URLs it did not write: the `href` of each action an LFS server's batch answer returns, and a remote's URL and `lfs.url` from the repository's configuration, which a cloned repository's own `.lfsconfig` can set. A tab in one of them could add to the request line uplink wrote, in every relic release since 0.4.0. Nothing else changes.
@@ -1521,7 +1523,8 @@ Decisions worth knowing before reading the source:
 - **`working-tree-encoding` and a required filter are refusals, with the
   value.** Passing the bytes through would write a blob git would not write.
 
-[Unreleased]: https://github.com/pedronaugusto/relic/compare/v0.29.2...HEAD
+[Unreleased]: https://github.com/pedronaugusto/relic/compare/v0.29.3...HEAD
+[0.29.3]: https://github.com/pedronaugusto/relic/compare/v0.29.2...v0.29.3
 [0.29.2]: https://github.com/pedronaugusto/relic/compare/v0.7.0...v0.29.2
 [0.7.0]: https://github.com/pedronaugusto/relic/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/pedronaugusto/relic/compare/v0.5.0...v0.6.0
