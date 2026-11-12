@@ -503,6 +503,7 @@ pub const Runner = struct {
         };
         var stderr_buf: [4096]u8 = undefined;
         var stderr = Io.File.stderr().writer(io, &stderr_buf);
+        const said: aegis.io.WriteEnd = .fromFile(&stderr);
         for (results) |*r| {
             if (r.err) |err| {
                 if (err == error.OutOfMemory) return error.OutOfMemory;
@@ -516,19 +517,19 @@ pub const Runner = struct {
             switch (runner.options.output) {
                 .capture => try runner.captured.appendSlice(gpa, outcome.stdout),
                 // glint-ignore: Z026 -- a hook's output that cannot reach this process's standard error is lost, as git's is; a cancel is returned
-                .inherit => stderr.interface.writeAll(outcome.stdout) catch try canceledOr(&stderr),
+                .inherit => said.writer().writeAll(outcome.stdout) catch |err| try canceledOr(said, err),
                 .ignore => {},
             }
             if (!outcome.succeeded() and ran.failure == null) ran.failure = .init(event, outcome.term);
         }
         // glint-ignore: Z026 -- as above: standard error that cannot be written to loses the output, not the hooks' result
-        stderr.interface.flush() catch try canceledOr(&stderr);
+        said.writer().flush() catch |err| try canceledOr(said, err);
     }
 
     /// A write to this process's standard error that failed: a cancel that
     /// stopped it is returned; any other failure only loses the output.
-    fn canceledOr(stderr: *const Io.File.Writer) Io.Cancelable!void {
-        if (stderr.err) |err| if (err == error.Canceled) return error.Canceled;
+    fn canceledOr(said: aegis.io.WriteEnd, failed: error{WriteFailed}) Io.Cancelable!void {
+        if (said.settle(failed) == error.Canceled) return error.Canceled;
     }
 
     const AtOnce = struct { outcome: ?program.Outcome = null, err: ?program.Error = null };
