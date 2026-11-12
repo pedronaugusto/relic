@@ -308,7 +308,10 @@ pub const Session = struct {
         switch (resolved) {
             .none => return .{ .bytes = bytes },
             .native => return (try s.nativeOf()).smudge(a, s.io, .{ .path = path, .bytes = bytes, .can_delay = meta.can_delay }),
-            .program => |driver| return s.smudge(a, path, driver, bytes, meta),
+            .program => |driver| return switch (try s.smudge(a, path, driver, bytes, meta)) {
+                .bytes => |text| .{ .bytes = text },
+                .delayed => .delayed,
+            },
         }
     }
 
@@ -354,10 +357,10 @@ pub const Session = struct {
             .program => |driver| {
                 switch (try s.smudge(a, path, driver, out, .{})) {
                     .bytes => |text| out = text,
-                    // A program's smudge answers in bytes (a native
-                    // provider's alone hands over a file), and no delay
-                    // is offered here.
-                    .file, .delayed => unreachable,
+                    // unreachable: no delay is offered here (`.{}` has
+                    // `can_delay` false), and a filter's "delayed" is
+                    // taken only when one was (filter.zig `request`).
+                    .delayed => unreachable,
                 }
             },
         }
@@ -450,6 +453,10 @@ pub const Session = struct {
         return s.runLine(a, programs, path, driver, line, bytes);
     }
 
+    /// What a program's smudge gives: its bytes, or a delay. Unlike a
+    /// native provider's `native.Content` it never hands over a file.
+    const Smudged = union(enum) { bytes: []const u8, delayed };
+
     fn smudge(
         s: *Session,
         a: Allocator,
@@ -457,7 +464,7 @@ pub const Session = struct {
         driver: *const filter.Driver,
         bytes: []const u8,
         meta: Meta,
-    ) ErrorNamespace.Error!native.Content {
+    ) ErrorNamespace.Error!Smudged {
         const programs = s.options.programs orelse
             return .{ .bytes = (try s.passOver(path, driver, .needs_program, "")) orelse bytes };
         if (driver.process) |command| {
