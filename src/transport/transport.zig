@@ -583,7 +583,7 @@ pub const Session = struct {
                     // way, and a server that has gone cannot read it. A
                     // cancel is put back for the caller.
                     sayGoodbye(smart.conn) catch |err| switch (err) {
-                        error.WriteFailed => if (smart.conn.failure() == error.Canceled) io.recancel(),
+                        error.Canceled => io.recancel(),
                         else => {},
                     };
                 }
@@ -595,10 +595,13 @@ pub const Session = struct {
         s.* = undefined;
     }
 
+    /// The farewell flush; a failed write is settled through the request's
+    /// end, so a cancel comes back as `Canceled`.
     fn sayGoodbye(conn: *Connection) !void {
-        const w = try conn.request();
-        try pkt_line.flush(w);
-        try w.flush();
+        const end = try conn.requestEnd();
+        const w = end.writer();
+        pkt_line.flush(w) catch |err| return end.settle(err);
+        w.flush() catch |err| return end.settle(err);
     }
 
     /// The hash the remote's object names are written with.

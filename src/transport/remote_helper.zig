@@ -258,10 +258,13 @@ pub const Helper = struct {
         return h;
     }
 
+    /// The farewell line; a failed write is settled through the request's
+    /// end, so a cancel comes back as `Canceled`.
     fn sayGoodbye(conn: *connection.Connection) !void {
-        const w = try conn.request();
-        try w.writeByte('\n');
-        try w.flush();
+        const end = try conn.requestEnd();
+        const w = end.writer();
+        w.writeByte('\n') catch |err| return end.settle(err);
+        w.flush() catch |err| return end.settle(err);
     }
 
     /// End the conversation: a blank line, as git's disconnect writes it,
@@ -271,7 +274,7 @@ pub const Helper = struct {
             // The blank line is a courtesy; the helper is waited for whether
             // or not it heard it. A cancel is put back for the caller.
             sayGoodbye(conn) catch |err| switch (err) {
-                error.WriteFailed => if (conn.failure() == error.Canceled) io.recancel(),
+                error.Canceled => io.recancel(),
                 else => {},
             };
             conn.deinit(io);

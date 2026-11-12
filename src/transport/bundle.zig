@@ -23,6 +23,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const ctype = @import("../text.zig").ctype;
 const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
@@ -272,7 +273,7 @@ pub const File = struct {
         f.header = Header.read(gpa, &f.reader.interface) catch |err| {
             // A read that failed keeps its cause in the file's reader: a
             // cancel is returned as itself.
-            if (err == error.ReadFailed) if (f.reader.err) |cause| if (cause == error.Canceled) return error.Canceled;
+            if (err == error.ReadFailed and aegis.io.ReadEnd.fromFile(&f.reader).settle(error.ReadFailed) == error.Canceled) return error.Canceled;
             return err;
         };
         return f;

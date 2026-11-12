@@ -428,13 +428,14 @@ const Run = struct {
             defer out.close(run.io);
             var buf: [64 * 1024]u8 = undefined;
             var w = out.writer(run.io, &buf);
-            transport.download(run.gpa, run.io, &w.interface, uri, run.options.transport) catch |err| switch (err) {
+            const into: aegis.io.WriteEnd = .fromFile(&w);
+            transport.download(run.gpa, run.io, into.writer(), uri, run.options.transport) catch |err| switch (err) {
                 error.Canceled => return error.Canceled,
                 error.OutOfMemory => return error.OutOfMemory,
                 // A write that failed keeps its cause in the file's writer.
-                else => return writeFailed(&w),
+                else => return writeFailed(into),
             };
-            w.interface.flush() catch return writeFailed(&w);
+            into.writer().flush() catch return writeFailed(into);
             return true;
         }
         const path = if (std.mem.startsWith(u8, uri, "file://")) uri["file://".len..] else uri;
@@ -447,9 +448,11 @@ const Run = struct {
 
     /// A download whose file write failed: not fetched, unless the write
     /// was canceled.
-    fn writeFailed(w: *const Io.File.Writer) Error!bool {
-        if (w.err) |err| if (err == error.Canceled) return error.Canceled;
-        return false;
+    fn writeFailed(into: aegis.io.WriteEnd) Error!bool {
+        return switch (into.settle(error.WriteFailed)) {
+            error.Canceled => error.Canceled,
+            error.WriteFailed => false,
+        };
     }
 
     /// `unbundle_from_file`: the bundle's objects, and its refs under

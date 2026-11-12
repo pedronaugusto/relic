@@ -1138,9 +1138,11 @@ pub const Server = struct {
         var out_buffer: [4096]u8 = undefined;
         var reader = running.child.stdoutFile().?.readerStreaming(s.io, in_buffer);
         var writer = running.child.stdinFile().?.writerStreaming(s.io, &out_buffer);
-        var answered = try s.converse(arena, &reader.interface, &writer.interface, commands, push_options, &errmsg);
-        if (reader.err) |err| if (err == error.Canceled) return error.Canceled;
-        if (writer.err) |err| if (err == error.Canceled) return error.Canceled;
+        const heard: aegis.io.ReadEnd = .fromFile(&reader);
+        const told: aegis.io.WriteEnd = .fromFile(&writer);
+        var answered = try s.converse(arena, heard.reader(), told.writer(), commands, push_options, &errmsg);
+        if (heard.settle(error.ReadFailed) == error.Canceled) return error.Canceled;
+        if (told.settle(error.WriteFailed) == error.Canceled) return error.Canceled;
 
         // Its output is no longer heard, and its input ends.
         if (running.child.takeStdout()) |taken| {
@@ -1776,10 +1778,11 @@ pub const Server = struct {
         if (builtin.is_test) return;
         var buffer: [256]u8 = undefined;
         var stderr = Io.File.stderr().writerStreaming(s.io, &buffer);
+        const said: aegis.io.WriteEnd = .fromFile(&stderr);
         // A message to a closed standard error has nowhere else to go, as
         // git's has not; a cancel is returned.
-        stderr.interface.writeAll(text) catch return canceledOr(&stderr);
-        stderr.interface.flush() catch return canceledOr(&stderr);
+        said.writer().writeAll(text) catch |err| return canceledOr(said, err);
+        said.writer().flush() catch |err| return canceledOr(said, err);
     }
 
     /// What git writes on its own standard error rather than the side band:
@@ -1788,16 +1791,17 @@ pub const Server = struct {
         if (text.len == 0 or builtin.is_test) return;
         var buffer: [256]u8 = undefined;
         var stderr = Io.File.stderr().writerStreaming(s.io, &buffer);
+        const said: aegis.io.WriteEnd = .fromFile(&stderr);
         // A message to a closed standard error has nowhere else to go, as
         // git's has not; a cancel is returned.
-        stderr.interface.writeAll(text) catch return canceledOr(&stderr);
-        stderr.interface.flush() catch return canceledOr(&stderr);
+        said.writer().writeAll(text) catch |err| return canceledOr(said, err);
+        said.writer().flush() catch |err| return canceledOr(said, err);
     }
 
     /// `error.Canceled` where a write to standard error was canceled;
     /// nothing for any other failure.
-    fn canceledOr(stderr: *const Io.File.Writer) Io.Cancelable!void {
-        if (stderr.err) |err| if (err == error.Canceled) return error.Canceled;
+    fn canceledOr(said: aegis.io.WriteEnd, failed: error{WriteFailed}) Io.Cancelable!void {
+        if (said.settle(failed) == error.Canceled) return error.Canceled;
     }
 
     fn rpError(s: *Server, comptime fmt: []const u8, args: anytype) Self.Error!void {

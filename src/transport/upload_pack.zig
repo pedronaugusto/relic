@@ -1428,6 +1428,7 @@ const Negotiation = struct {
         {
             var buf: [4096]u8 = undefined;
             var w = running.child.stdinFile().?.writerStreaming(s.io, &buf);
+            const asked: aegis.io.WriteEnd = .fromFile(&w);
             (write: {
                 for (shallow.items) |oid| w.interface.print("--shallow {f}\n", .{oid}) catch |e| break :write e;
                 for (n.wants.items) |oid| w.interface.print("{f}\n", .{oid}) catch |e| break :write e;
@@ -1437,7 +1438,7 @@ const Negotiation = struct {
                 for (n.edges.items) |oid| w.interface.print("{f}\n", .{oid}) catch |e| break :write e;
                 w.interface.writeAll("\n") catch |e| break :write e;
                 w.interface.flush() catch |e| break :write e;
-            }) catch return paced.failed(w.err);
+            }) catch return paced.failed(asked.failure());
             running.child.closeStdin(s.io);
         }
         // Its progress beside the pack, where a second task runs; else the
@@ -1456,21 +1457,22 @@ const Negotiation = struct {
         }
         var read_buffer: [pkt_line.max_data]u8 = undefined;
         var pack = running.child.stdoutFile().?.readerStreaming(s.io, &read_buffer);
+        const packed_end: aegis.io.ReadEnd = .fromFile(&pack);
         if (n.uri_protocols.len != 0) {
             // What it prints before the pack names the packs it left out,
             // a line each, as git's `relay_pack_data` takes them.
             var named: std.ArrayList([]const u8) = .empty;
             while (true) {
-                const head = pack.interface.peek(4) catch return paced.failed(pack.err);
+                const head = pack.interface.peek(4) catch return paced.failed(packed_end.failure());
                 if (std.mem.eql(u8, head, "PACK")) break;
-                const line = pack.interface.takeDelimiterInclusive('\n') catch return paced.failed(pack.err);
+                const line = pack.interface.takeDelimiterInclusive('\n') catch return paced.failed(packed_end.failure());
                 try named.append(n.arena, try n.arena.dupe(u8, line));
             }
             try openPack(n.arena, paced, named.items);
         }
         _ = pack.interface.streamRemaining(packed_writer) catch |err| switch (err) {
             error.WriteFailed => return error.WriteFailed,
-            error.ReadFailed => return paced.failed(pack.err),
+            error.ReadFailed => return paced.failed(packed_end.failure()),
         };
         if (relay) |*task| {
             task.await(s.io);
