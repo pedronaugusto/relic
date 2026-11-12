@@ -15,6 +15,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
+const aegis = @import("aegis");
 const uplink = @import("uplink");
 const http_enabled = @import("relic_options").http;
 
@@ -216,8 +217,8 @@ const Socket = struct {
 
     fn failure(context: *anyopaque, c: *Connection) connection.Error {
         const s = of(context);
-        if (s.reader.err) |err| if (err == error.Canceled) return error.Canceled;
-        if (s.writer.err) |err| if (err == error.Canceled) return error.Canceled;
+        if (aegis.io.ReadEnd.fromStream(&s.reader).settle(error.ReadFailed) == error.Canceled) return error.Canceled;
+        if (aegis.io.WriteEnd.fromStream(&s.writer).settle(error.WriteFailed) == error.Canceled) return error.Canceled;
         c.message_len = 0;
         return error.ConnectionFailed;
     }
@@ -230,10 +231,8 @@ const Socket = struct {
         // is put back for the caller's next cancelation point once it has
         // closed, where closing, which returns nothing, would lose it.
         var put_back = false;
-        s.writer.interface.flush() catch {
-            if (s.writer.err) |err| if (err == error.Canceled) {
-                put_back = true;
-            };
+        s.writer.interface.flush() catch |err| {
+            if (aegis.io.WriteEnd.fromStream(&s.writer).settle(err) == error.Canceled) put_back = true;
         };
         s.stream.deinit(io);
         s.gpa.free(s.read_buffer);

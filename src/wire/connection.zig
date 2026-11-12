@@ -114,6 +114,18 @@ pub const Connection = struct {
         return c.vtable.request(c.context, c);
     }
 
+    /// The writer for the next request, with the connection's `failure`
+    /// as the cause of a failed write.
+    pub fn requestEnd(c: *Connection) Self.Error!aegis.io.WriteEnd {
+        return .init(try c.request(), c, causeOf);
+    }
+
+    fn causeOf(context: *const anyopaque) ?anyerror {
+        const held: *const Connection = @ptrCast(@alignCast(context)); // safe: requestEnd passes a Connection
+        // safe: requestEnd was handed the Connection mutable; `failure` may keep the far side's message in it
+        return @constCast(held).failure();
+    }
+
     /// Send the request and hand back the reader for its response.
     pub fn response(c: *Connection) Self.Error!*Io.Reader {
         return c.vtable.response(c.context, c);
@@ -352,23 +364,27 @@ pub const Process = struct {
 
     /// Whether the conversation was cancelled: a read, a write or a wait
     /// of it answered `Canceled`.
-    fn canceled(p: *const Process) bool {
+    fn canceled(p: *Process) bool {
         if (p.wait_canceled) return true;
-        if (p.reader.err) |err| if (err == error.Canceled) return true;
-        if (p.writer.err) |err| if (err == error.Canceled) return true;
+        if (p.readEnd().settle(error.ReadFailed) == error.Canceled) return true;
+        if (p.writeEnd().settle(error.WriteFailed) == error.Canceled) return true;
         return false;
+    }
+
+    /// The program's output, with its reader's own cause.
+    fn readEnd(p: *Process) aegis.io.ReadEnd {
+        return .fromFile(&p.reader);
+    }
+
+    /// The program's input, with its writer's own cause.
+    fn writeEnd(p: *Process) aegis.io.WriteEnd {
+        return .fromFile(&p.writer);
     }
 
     fn failure(context: *anyopaque, c: *Connection) Error {
         const p: *Process = @ptrCast(@alignCast(context)); // this vtable's context, a Process, from start
-        if (p.reader.err) |err| switch (err) {
-            error.Canceled => return error.Canceled,
-            else => {},
-        };
-        if (p.writer.err) |err| switch (err) {
-            error.Canceled => return error.Canceled,
-            else => {},
-        };
+        if (p.readEnd().settle(error.ReadFailed) == error.Canceled) return error.Canceled;
+        if (p.writeEnd().settle(error.WriteFailed) == error.Canceled) return error.Canceled;
         c.message_len = 0;
         return error.ConnectionFailed;
     }
@@ -386,10 +402,8 @@ pub const Process = struct {
             // writing — after a refusal half way through a pack — stops at
             // a closed pipe rather than waiting on one nobody reads. A
             // program that stopped reading has nothing more to hear.
-            p.writer.interface.flush() catch {
-                if (p.writer.err) |err| if (err == error.Canceled) {
-                    put_back = true;
-                };
+            p.writer.interface.flush() catch |err| {
+                if (p.writeEnd().settle(err) == error.Canceled) put_back = true;
             };
             if (p.running.child.takeStdout()) |stdout| {
                 var owned = stdout;
@@ -468,8 +482,8 @@ pub const Process = struct {
         // status, waited for next, is the answer. A cancel is returned,
         // and `deinit` stops the program, where the wait would hold the
         // caller until it ended.
-        p.writer.interface.flush() catch {
-            if (p.writer.err) |err| if (err == error.Canceled) return error.Canceled;
+        p.writer.interface.flush() catch |err| {
+            if (p.writeEnd().settle(err) == error.Canceled) return error.Canceled;
         };
         p.exited = true;
         const term = p.running.wait(io) catch |err| switch (err) {

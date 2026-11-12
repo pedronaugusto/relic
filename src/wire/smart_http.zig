@@ -263,14 +263,15 @@ pub const Files = struct {
     /// `GET` of `suffix` under the repository, which begins with `/`: its
     /// body, read until the next `get`, or `null` for a 404, git's
     /// missing target. Any other status is refused as the conversation
-    /// refuses it.
-    pub fn get(f: *Files, suffix: []const u8) Self.Error!?*Io.Reader {
+    /// refuses it. The body's end settles a failed read: a cancel as
+    /// `Canceled`.
+    pub fn get(f: *Files, suffix: []const u8) Self.Error!?aegis.io.ReadEnd {
         if (comptime !http_enabled) aegis.assert.never("a Files is made only with http");
         const h = f.h;
         const res = try h.get(suffix);
         if (res.status == .not_found) return null;
         try h.checkStatus(res);
-        return res.readerBuffered(h.io, h.body_buffer);
+        return responseEnd(res.readerBuffered(h.io, h.body_buffer), res);
     }
 
     /// How many requests `begin` keeps under way: `http.maxRequests`.
@@ -314,14 +315,6 @@ pub const Files = struct {
     pub fn message(f: *const Files) []const u8 {
         if (comptime !http_enabled) aegis.assert.never("a Files is made only with http");
         return f.h.connection.message();
-    }
-
-    /// Whether the last read of the body `get` handed out failed for a
-    /// cancel.
-    pub fn canceled(f: *const Files) bool {
-        if (comptime !http_enabled) aegis.assert.never("a Files is made only with http");
-        const res = &(f.h.in_flight orelse return false);
-        return res.failure() == error.Canceled;
     }
 };
 
@@ -368,18 +361,12 @@ pub const Early = struct {
         return answer;
     }
 
-    /// An `ok` answer's body, read through `buffer`.
-    pub fn body(e: *Early, io: Io, buffer: []u8) ?*Io.Reader {
+    /// An `ok` answer's body, read through `buffer`; its end settles a
+    /// failed read, a cancel as `Canceled`.
+    pub fn body(e: *Early, io: Io, buffer: []u8) ?aegis.io.ReadEnd {
         if (comptime !http_enabled) return null;
         const res = &(e.response orelse return null);
-        return res.readerBuffered(io, buffer);
-    }
-
-    /// Whether the last read of `body` failed for a cancel.
-    pub fn canceled(e: *const Early) bool {
-        if (comptime !http_enabled) return false;
-        const res = &(e.response orelse return false);
-        return res.failure() == error.Canceled;
+        return responseEnd(res.readerBuffered(io, buffer), res);
     }
 
     /// The request ended, ready for the next.
@@ -420,11 +407,22 @@ pub fn download(gpa: Allocator, io: Io, w: *Io.Writer, url: url_mod.Url, options
     h.base_path = url.path;
     const res = try h.get("");
     if (res.status != .ok) return error.HttpStatus;
-    const body = res.reader(io);
-    _ = body.streamRemaining(w) catch |err| return switch (err) {
+    const body = responseEnd(res.reader(io), res);
+    _ = body.reader().streamRemaining(w) catch |err| return switch (err) {
         error.WriteFailed => error.WriteFailed,
-        error.ReadFailed => h.cutShort(res),
+        error.ReadFailed => h.cutShort(body),
     };
+}
+
+/// A response body's end: `reader`, read from `res`, with the response's
+/// own failure as the cause of a failed read.
+fn responseEnd(reader: *Io.Reader, res: *const uplink.Response) aegis.io.ReadEnd {
+    return .init(reader, res, responseFailure);
+}
+
+fn responseFailure(context: *const anyopaque) ?anyerror {
+    const res: *const uplink.Response = @ptrCast(@alignCast(context)); // safe: responseEnd passes a Response
+    return res.failure();
 }
 
 /// The conversation's state, its client configured, before any request.
@@ -755,11 +753,12 @@ const Http = struct {
         defer opened.close(h.io);
         var buffer: [8192]u8 = undefined;
         var reader = opened.reader(h.io, &buffer);
-        h.cookies.?.load(h.io, &reader.interface) catch |err| switch (err) {
+        const jar: aegis.io.ReadEnd = .fromFile(&reader);
+        h.cookies.?.load(h.io, jar.reader()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             // curl skips a line too long for its buffer, and stops at a
             // failed read with what it has; a cancel stops the read.
-            error.ReadFailed => if (reader.err) |cause| if (cause == error.Canceled) return error.Canceled,
+            error.ReadFailed => if (jar.settle(error.ReadFailed) == error.Canceled) return error.Canceled,
             error.StreamTooLong => {},
         };
     }
@@ -959,8 +958,9 @@ const Http = struct {
     /// caller's next cancelation point.
     fn endRequest(h: *Http) void {
         if (h.in_flight) |*res| {
-            _ = res.reader(h.io).discardRemaining() catch {
-                if (res.failure() == error.Canceled) h.io.recancel();
+            const rest = responseEnd(res.reader(h.io), res);
+            _ = rest.reader().discardRemaining() catch {
+                if (rest.settle(error.ReadFailed) == error.Canceled) h.io.recancel();
             };
             res.deinit(h.io);
             h.in_flight = null;
@@ -1013,17 +1013,22 @@ const Http = struct {
     }
 
     /// A body whose read failed: canceled, or cut short.
-    fn cutShort(h: *Http, res: *const uplink.Response) Error {
-        if (res.failure() == error.Canceled) return error.Canceled;
-        return h.fail(error.ConnectionFailed, "the body was cut short");
+    fn cutShort(h: *Http, body: aegis.io.ReadEnd) Error {
+        return switch (body.settle(error.ReadFailed)) {
+            error.Canceled => error.Canceled,
+            error.ReadFailed => h.fail(error.ConnectionFailed, "the body was cut short"),
+        };
     }
 
     /// A body that ended before the packets it must begin with: canceled,
     /// or the remote hung up.
-    fn hungUp(res: *const uplink.Response, err: Io.Reader.Error) Error {
+    fn hungUp(body: aegis.io.ReadEnd, err: Io.Reader.Error) Error {
         return switch (err) {
             error.EndOfStream => error.RemoteHungUp,
-            error.ReadFailed => if (res.failure() == error.Canceled) error.Canceled else error.RemoteHungUp,
+            error.ReadFailed => switch (body.settle(error.ReadFailed)) {
+                error.Canceled => error.Canceled,
+                error.ReadFailed => error.RemoteHungUp,
+            },
         };
     }
 
@@ -1252,17 +1257,21 @@ const Http = struct {
     fn serverText(h: *Http, res: *uplink.Response) Error![]const u8 {
         const content_type = res.headers.get("content-type") orelse return "";
         if (!std.ascii.startsWithIgnoreCase(content_type, "text/plain")) return "";
-        const reader = res.reader(h.io);
+        const body = responseEnd(res.reader(h.io), res);
+        const reader = body.reader();
         var out: Io.Writer.Allocating = .init(h.arena.allocator());
         _ = reader.stream(&out.writer, .limited(4096)) catch |err| switch (err) {
             error.EndOfStream => {},
-            error.ReadFailed => if (res.failure() == error.Canceled) return error.Canceled else return out.written(),
+            error.ReadFailed => switch (body.settle(error.ReadFailed)) {
+                error.Canceled => return error.Canceled,
+                error.ReadFailed => return out.written(),
+            },
             else => return out.written(),
         };
         // What was read is the text; the rest is read only so the
         // connection can carry the next request.
         _ = reader.streamRemaining(&out.writer) catch |err| switch (err) {
-            error.ReadFailed => if (res.failure() == error.Canceled) return error.Canceled,
+            error.ReadFailed => if (body.settle(error.ReadFailed) == error.Canceled) return error.Canceled,
             else => {},
         };
         const text = out.written();
@@ -1336,25 +1345,27 @@ const Http = struct {
             // read whole as git reads it, and every request after it is a
             // download.
             var listing: std.ArrayList(u8) = .empty;
-            res.reader(h.io).appendRemaining(h.arena.allocator(), &listing, .limited(max_dumb_file_bytes)) catch |err| return switch (err) {
+            const listed = responseEnd(res.reader(h.io), res);
+            listed.reader().appendRemaining(h.arena.allocator(), &listing, .limited(max_dumb_file_bytes)) catch |err| return switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
-                error.ReadFailed => h.cutShort(res),
+                error.ReadFailed => h.cutShort(listed),
                 error.StreamTooLong => h.fail(error.DumbHttpFileTooLarge, "the info/refs listing is larger than 1 GiB"),
             };
             h.downloading = true;
             return .{ .dumb = listing.items };
         }
 
-        const body = res.readerBuffered(h.io, h.body_buffer);
+        const end = responseEnd(res.readerBuffered(h.io, h.body_buffer), res);
+        const body = end.reader();
         // A v0 answer begins `# service=<name>` and a flush, which say what
         // the body is and nothing else.
-        const first = body.peekArray(4) catch |err| return hungUp(res, err);
+        const first = body.peekArray(4) catch |err| return hungUp(end, err);
         const len = pkt_line.parseLength(first) orelse return error.ProtocolError;
         if (len > 4) {
-            const whole = body.peek(len) catch |err| return hungUp(res, err);
+            const whole = body.peek(len) catch |err| return hungUp(end, err);
             if (std.mem.startsWith(u8, whole[4..], "# service=")) {
                 body.toss(len);
-                const flush = body.takeArray(4) catch |err| return hungUp(res, err);
+                const flush = body.takeArray(4) catch |err| return hungUp(end, err);
                 if (!std.mem.eql(u8, flush, "0000")) return error.ProtocolError;
             }
         }

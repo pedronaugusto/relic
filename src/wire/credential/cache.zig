@@ -112,11 +112,15 @@ pub fn request(gpa: Allocator, io: Io, socket: []const u8, req: Request) Self.Er
     // No buffer of the writer's, which would hold a copy of the input: the
     // input goes to the daemon from where it is.
     var w = stream.borrow().writer(io, &.{});
+    const sent: aegis.io.WriteEnd = .fromStream(&w);
     (write: {
-        w.interface.print("action={t}\ntimeout={d}\n", .{ req.action, req.timeout }) catch |e| break :write e;
-        w.interface.writeAll(req.input) catch |e| break :write e;
-        w.interface.flush() catch |e| break :write e;
-    }) catch return if (w.err) |e| (if (e == error.Canceled) error.Canceled else error.CacheConversationFailed) else error.CacheConversationFailed;
+        sent.writer().print("action={t}\ntimeout={d}\n", .{ req.action, req.timeout }) catch |e| break :write e;
+        sent.writer().writeAll(req.input) catch |e| break :write e;
+        sent.writer().flush() catch |e| break :write e;
+    }) catch |err| return switch (sent.settle(err)) {
+        error.Canceled => error.Canceled,
+        error.WriteFailed => error.CacheConversationFailed,
+    };
     // git's `send_request` lets the shutdown's result go: a daemon that has
     // read all it will and closed already leaves the socket unconnected,
     // and its answer, or none, is still there to read.
@@ -133,16 +137,19 @@ pub fn request(gpa: Allocator, io: Io, socket: []const u8, req: Request) Self.Er
         // No buffer of the reader's: each read lands in `answer`'s own
         // storage, wiped as it grows and when it is let go.
         var r = stream.borrow().reader(io, &.{});
+        const answered: aegis.io.ReadEnd = .fromStream(&r);
         // One byte past the most an answer may be says it is longer.
         while (into.interface.end <= max_request) {
-            _ = r.interface.stream(&into.interface, Io.Limit.limited(max_request + 1 - into.interface.end)) catch |err| switch (err) {
+            _ = answered.reader().stream(&into.interface, Io.Limit.limited(max_request + 1 - into.interface.end)) catch |err| switch (err) {
                 error.EndOfStream => break,
-                error.ReadFailed => switch (r.err.?) {
+                error.ReadFailed => switch (answered.settle(error.ReadFailed)) {
+                    error.Canceled => return error.Canceled,
                     // The daemon closing on its side ends the answer: git's
                     // `connection_closed`.
-                    error.ConnectionResetByPeer => break,
-                    error.Canceled => return error.Canceled,
-                    else => return error.CacheConversationFailed,
+                    error.ReadFailed => if (answered.failure()) |cause| {
+                        if (cause == error.ConnectionResetByPeer) break;
+                        return error.CacheConversationFailed;
+                    } else return error.CacheConversationFailed,
                 },
                 // The writer fails only for want of memory.
                 error.WriteFailed => return error.OutOfMemory,

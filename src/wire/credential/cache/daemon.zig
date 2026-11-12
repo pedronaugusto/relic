@@ -217,13 +217,14 @@ pub const Daemon = struct {
             // No buffer of the reader's: each read lands in `text`'s own
             // storage, wiped as it grows and when it is let go.
             var r = stream.reader(d.io, &.{});
+            const asked: aegis.io.ReadEnd = .fromStream(&r);
             // One byte past the most a request may be says it is longer.
             while (into.interface.end <= max_request) {
-                _ = r.interface.stream(&into.interface, Io.Limit.limited(max_request + 1 - into.interface.end)) catch |err| switch (err) {
+                _ = asked.reader().stream(&into.interface, Io.Limit.limited(max_request + 1 - into.interface.end)) catch |err| switch (err) {
                     error.EndOfStream => break,
-                    error.ReadFailed => {
-                        if (r.err) |cause| if (cause == error.Canceled) return error.Canceled;
-                        return .served;
+                    error.ReadFailed => switch (asked.settle(error.ReadFailed)) {
+                        error.Canceled => return error.Canceled,
+                        error.ReadFailed => return .served,
                     },
                     // The writer fails only for want of memory.
                     error.WriteFailed => return error.OutOfMemory,
@@ -336,9 +337,10 @@ fn sendAnswer(gpa: Allocator, io: Io, stream: Io.net.Stream, e: *const Session, 
         into.interface.flush() catch return error.OutOfMemory;
     }
     var w = stream.writer(io, &.{});
+    const told: aegis.io.WriteEnd = .fromStream(&w);
     // A client that left has nothing waiting for this answer.
-    w.interface.writeAll(text.expose()) catch {
-        if (w.err) |err| if (err == error.Canceled) return error.Canceled;
+    told.writer().writeAll(text.expose()) catch |err| {
+        if (told.settle(err) == error.Canceled) return error.Canceled;
     };
 }
 
