@@ -29,7 +29,7 @@ pub fn main() void {
 }
 
 /// relic_lfs's entry points, each of which compiles without uplink and
-/// cloak, and its server, which exists only with them.
+/// cloak, and its server, which compiles only with them.
 fn lfs(comptime relic_lfs: type) void {
     _ = &relic_lfs.clone.clone;
     _ = &relic_lfs.push.push;
@@ -56,7 +56,7 @@ fn lfs(comptime relic_lfs: type) void {
     // What relic_lfs takes is relic's own repository: one core beneath both.
     const takes = @typeInfo(@TypeOf(relic_lfs.filter.load)).@"fn".param_types[2].?;
     if (takes != *relic.repo.Repository) @compileError("relic_lfs takes a repository that is not relic's");
-    if (relic.built_with.http) {
-        _ = &relic_lfs.server.Backend;
-    } else if (@hasDecl(relic_lfs, "server")) @compileError("relic_lfs.server without http");
+    // Without `http`, naming `relic_lfs.server` stops the build, saying it
+    // needs `-Dhttp=true`, so it is named only with it.
+    if (relic.built_with.http) _ = &relic_lfs.server.Backend;
 }
