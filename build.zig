@@ -489,7 +489,7 @@ pub fn dev(b: *std.Build, tools: type) void {
         } } else .default,
         .bench = .{
             .programs = &.{ .{ .name = "relic-regressions", .source = "bench/regressions.zig" }, .{ .name = "relic-rows", .source = "bench/rows.zig" } },
-            .imports = benchImports,
+            .imports = preflight.Bench.importsFrom(benchImports),
             .target = target,
             .optimize = optimize,
         },
