@@ -90,7 +90,6 @@ fn credential(t: *const Tool, kind: []const u8, fields: *Fields) !void {
     }
     if (!std.mem.eql(u8, operation, "get")) return;
     if (removable) {
-        // glint-ignore: Z026 -- an object with no erased marker is served as it is
         if (Io.Dir.cwd().openFile(io, erased_path, .{})) |file| {
             file.close(io);
             return;

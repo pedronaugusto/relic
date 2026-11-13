@@ -516,13 +516,11 @@ pub const Runner = struct {
             ran.count += 1;
             switch (runner.options.output) {
                 .capture => try runner.captured.appendSlice(gpa, outcome.stdout),
-                // glint-ignore: Z026 -- a hook's output that cannot reach this process's standard error is lost, as git's is; a cancel is returned
                 .inherit => said.writer().writeAll(outcome.stdout) catch |err| try canceledOr(said, err),
                 .ignore => {},
             }
             if (!outcome.succeeded() and ran.failure == null) ran.failure = .init(event, outcome.term);
         }
-        // glint-ignore: Z026 -- as above: standard error that cannot be written to loses the output, not the hooks' result
         said.writer().flush() catch |err| try canceledOr(said, err);
     }
 

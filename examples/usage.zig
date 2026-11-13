@@ -192,10 +192,8 @@ test "overlapping usage examples own different scratch directories" {
     const control = &controlled.state;
     const guarded = controlled.io();
     var first = try io.concurrent(Controlled.example, .{ guarded, tmp.dir });
-    // glint-ignore: Z026 -- the task is canceled to stop it; how it ended is not this example's subject
     defer first.cancel(io) catch {};
     var second = try io.concurrent(Controlled.example, .{ guarded, tmp.dir });
-    // glint-ignore: Z026 -- the task is canceled to stop it; how it ended is not this example's subject
     defer second.cancel(io) catch {};
     defer control.proceed.set(io);
     const example_watchdog: Io.Duration = .fromSeconds(5);

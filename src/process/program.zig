@@ -673,7 +673,6 @@ test "timeout bounds a helper that closes its output and keeps running" {
                 .stderr = if (capture) .capture else .ignore,
                 .cwd = .{ .dir = tmp.dir },
             }, .{ .input = bytes, .timeout = .{ .duration = .{ .raw = .fromMilliseconds(20), .clock = .awake } } });
-            // glint-ignore: Z026 -- a run that timed out has nothing to free; the timeout is checked below
             defer if (result) |value| {
                 var outcome = value;
                 outcome.deinit(testing.allocator);
@@ -708,7 +707,6 @@ test "opposite full pipes refuse unavailable concurrency instead of deadlocking"
             run_with.input = input;
             break :blk run_with;
         });
-        // glint-ignore: Z026 -- a run that failed has nothing to free; its error is checked below
         defer if (result) |value| {
             var outcome = value;
             outcome.deinit(testing.allocator);

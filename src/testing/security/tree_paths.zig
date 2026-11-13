@@ -193,7 +193,6 @@ test "reset --hard deletes nothing through a symbolic link in the working tree" 
     const tree = try treeWith(gpa, io, &repo, "link/victim");
     var index = try repo.openIndex(io);
     defer index.deinit();
-    // glint-ignore: Z026 -- what is asserted is that nothing outside is deleted; which refusal the write through the link meets is the checkout's
     _ = reset.toTree(gpa, io, &repo, .{ .index = &index, .tree = tree, .mode = .hard }) catch {};
     try f.expectSentinels(gpa, io);
 }

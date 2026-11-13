@@ -2651,7 +2651,6 @@ test "a receive canceled while it resolves stops every resolving task, even one 
         if (s.caller_parked.load(.acquire) == .set) break;
         try io.sleep(.fromMilliseconds(1), .awake);
     } else {
-        // glint-ignore: Z026 -- the test fails next; a task that will not cancel is reported by the leak check
         _ = future.cancel(io) catch {};
         std.debug.print("the calling task did not park after another (beside: {}, caller read: {})\n", .{ s.beside.load(.acquire) == .set, s.on_caller.load(.acquire) == .set });
         return error.TestUnexpectedResult;

@@ -2196,7 +2196,7 @@ test "display notes are the trees git's load_display_notes shows, in its order" 
         while (i < case.config.len) : (i += 2) try git.exec(io, &.{ "config", case.config[i], case.config[i + 1] });
         defer {
             var j: usize = 0;
-            while (j < case.config.len) : (j += 2) git.exec(io, &.{ "config", "--unset", case.config[j] }) catch {}; // glint-ignore: Z026 -- the next case sets what it needs; a key that is gone is fine
+            while (j < case.config.len) : (j += 2) git.exec(io, &.{ "config", "--unset", case.config[j] }) catch {};
         }
         var repo = try Repository.open(gpa, io, git.dir, .{});
         defer repo.deinit(io);

@@ -176,7 +176,7 @@ test "a cover letter is written as git writes one, with its shortlog, its diffst
 /// added as `git config --add` adds it and taken out after.
 fn compareSet(gpa: Allocator, io: Io, git: *testgit.Repo, settings: []const [2][]const u8, args: []const []const u8, range_text: []const u8, range: formatpatch.Range, options: formatpatch.Options) !void {
     for (settings) |kv| try git.exec(io, &.{ "config", "--add", kv[0], kv[1] });
-    defer for (settings) |kv| git.exec(io, &.{ "config", "--unset-all", kv[0] }) catch {}; // glint-ignore: Z026 -- the next case sets what it needs; a key already gone is fine
+    defer for (settings) |kv| git.exec(io, &.{ "config", "--unset-all", kv[0] }) catch {};
     var repo = try Repository.open(gpa, io, git.dir, .{});
     defer repo.deinit(io);
     try compare(gpa, io, git, &repo, args, range_text, range, options);
@@ -251,7 +251,7 @@ test "format.signatureFile, format.useAutoBase and format.outputDirectory are re
     try compareSet(gpa, io, &git, &.{.{ "format.useAutoBase", "true" }}, &.{ "--no-signature", "--no-base" }, "base..HEAD", range, .{ .who = fixture, .signature = .off, .base = .off });
 
     try git.exec(io, &.{ "config", "format.outputDirectory", "patches" });
-    defer git.exec(io, &.{ "config", "--unset", "format.outputDirectory" }) catch {}; // glint-ignore: Z026 -- the next case sets what it needs; a key already gone is fine
+    defer git.exec(io, &.{ "config", "--unset", "format.outputDirectory" }) catch {};
     var repo = try Repository.open(gpa, io, git.dir, .{});
     defer repo.deinit(io);
     var series = try formatpatch.format(gpa, io, &repo, range, .{ .who = fixture });
@@ -280,7 +280,7 @@ test "a setting that needs the committer asks for one, and bad format.* values a
         .{ "format.signOff", "true" }, .{ "format.thread", "true" }, .{ "format.coverLetter", "true" }, .{ "format.from", "yes" },
     }) |kv| {
         try git.exec(io, &.{ "config", kv[0], kv[1] });
-        defer git.exec(io, &.{ "config", "--unset", kv[0] }) catch {}; // glint-ignore: Z026 -- the next case sets what it needs; a key already gone is fine
+        defer git.exec(io, &.{ "config", "--unset", kv[0] }) catch {};
         var repo = try Repository.open(gpa, io, git.dir, .{});
         defer repo.deinit(io);
         try std.testing.expectError(error.NoIdentity, formatpatch.format(gpa, io, &repo, range, .{}));
@@ -291,7 +291,7 @@ test "a setting that needs the committer asks for one, and bad format.* values a
         .{ "format.from", "Nobody" },            .{ "format.useAutoBase", "sometimes" },
     }) |kv| {
         try git.exec(io, &.{ "config", kv[0], kv[1] });
-        defer git.exec(io, &.{ "config", "--unset", kv[0] }) catch {}; // glint-ignore: Z026 -- the next case sets what it needs; a key already gone is fine
+        defer git.exec(io, &.{ "config", "--unset", kv[0] }) catch {};
         // git dies on each
         git.report_failures = false;
         try std.testing.expectError(error.GitFailed, git.exec(io, &.{ "format-patch", "--stdout", "base..HEAD" }));

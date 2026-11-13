@@ -131,7 +131,7 @@ const Run = struct {
         try cancel.expectCanceled(io, cases[4].at, 0, described, .{ r, "main", past_vs });
 
         try r.repo.exec(testing.io, &.{ "bisect", "start", "main", "v0" });
-        defer r.repo.exec(testing.io, &.{ "bisect", "reset" }) catch {}; // glint-ignore: Z026 -- the next backend starts its own; a reset that fails leaves a scratch repository's state
+        defer r.repo.exec(testing.io, &.{ "bisect", "reset" }) catch {};
         const bisect_points = try pointsOf(io, bisected, .{r});
         // The walk listing the candidates, a point for each commit popped
         // and each handed out; the merge's distance, one for each commit it

@@ -52,7 +52,7 @@ test "a submodule's change is git diff --submodule's: its log, or its own diff, 
     };
     for (modes) |mode| {
         if (mode.by_config) try git.exec(io, &.{ "config", "diff.submodule", @tagName(mode.format) });
-        defer if (mode.by_config) git.exec(io, &.{ "config", "--unset", "diff.submodule" }) catch {}; // glint-ignore: Z026 -- set just above
+        defer if (mode.by_config) git.exec(io, &.{ "config", "--unset", "diff.submodule" }) catch {};
         var repo = try repo_mod.Repository.open(gpa, io, git.dir, .{});
         defer repo.deinit(io);
         for (pairs) |pair| {

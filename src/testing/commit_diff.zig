@@ -227,7 +227,7 @@ test "-m shows what log.diffMerges names, as git log -m -p writes it" {
     const settings = [_][]const []const u8{ &.{}, &.{"first-parent"}, &.{"1"}, &.{"separate"}, &.{"c"}, &.{"dense-combined"}, &.{"r"}, &.{"none"}, &.{ "cc", "on" }, &.{ "remerge", "m", "combined" } };
     for (settings) |values| {
         git.report_failures = false;
-        _ = git.run(io, &.{ "config", "--unset-all", "log.diffMerges" }) catch {}; // glint-ignore: Z026 -- nothing to unset the first time round
+        _ = git.run(io, &.{ "config", "--unset-all", "log.diffMerges" }) catch {};
         git.report_failures = true;
         for (values) |v| try git.exec(io, &.{ "config", "--add", "log.diffMerges", v });
         const theirs = try git.run(io, &.{ "log", "-1", "-m", "-p", "--no-color", "--format=tformat:X", "merged" });

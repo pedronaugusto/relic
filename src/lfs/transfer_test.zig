@@ -641,7 +641,6 @@ test "a refused credential is erased, as git-lfs erases it, and the transfer say
     var theirs = try fx.cloneRepo("theirs", wrong_git);
     defer theirs.close(io);
     const out = testlfs.git(gpa, io, theirs, &fx.env, &.{ "lfs", "fetch" }, false);
-    // glint-ignore: Z026 -- git-lfs's fetch may fail here; the test checks the objects it left
     if (out) |o| {
         gpa.free(o);
         return error.TestUnexpectedResult;
@@ -1405,10 +1404,8 @@ test "an unreadable client certificate, unreadable authorities and an unsupporte
         .{ .config = .{ "http.proxy", "unsupported://127.0.0.1:9" }, .want = error.InvalidProxy },
     }) |case| {
         if (case.config) |kv| try fx.gitIn(d, &.{ "config", kv[0], kv[1] });
-        // glint-ignore: Z026 -- unsetting the case's setting is cleanup; the case's result is already checked
         defer if (case.config) |kv| fx.gitIn(d, &.{ "config", "--unset", kv[0] }) catch {};
         if (case.also) |kv| try fx.gitIn(d, &.{ "config", kv[0], kv[1] });
-        // glint-ignore: Z026 -- unsetting the case's setting is cleanup; the case's result is already checked
         defer if (case.also) |kv| fx.gitIn(d, &.{ "config", "--unset", kv[0] }) catch {};
         var env = try fx.env.clone(gpa);
         defer env.deinit();
@@ -2148,7 +2145,6 @@ test "a redirect to another host leaves the request's own Authorization behind, 
         const location = try to.url(gpa, route);
         defer gpa.free(location);
         try fx.server.fail(.{ .route = .download, .status = 307, .location = location });
-        // glint-ignore: Z026 -- the redirect may be refused; the test checks the request the server saw
         if (server.client.send(io, .{ .method = .GET, .url = from, .headers = headers, .authenticated = true })) |ex| {
             ex.deinit(io);
         } else |_| {}

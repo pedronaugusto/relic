@@ -51,7 +51,7 @@ const Served = struct {
 };
 
 fn runServer(server: *uplink.Server, io: Io, listener: *Io.net.Server) void {
-    server.serve(io, listener) catch {}; // glint-ignore: Z026 -- the server stops when the test shuts it down; how is not the test's question
+    server.serve(io, listener) catch {};
 }
 
 test "git clones, fetches and pushes over HTTP against relic's server, in v2 and v0" {

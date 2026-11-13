@@ -164,10 +164,8 @@ test "ignore-errors reports unreadable files, keeps their entries and stages the
         try h.repo.writeFile(io, "0-good", "before\n");
         try h.repo.writeFile(io, "z-good", "after\n");
         const first_error = (try makeUnreadable(io, h.repo.dir, "a-unreadable")).err;
-        // glint-ignore: Z026 -- restoring the mode only lets the temporary directory be removed; the test's result is already decided
         defer h.repo.dir.setFilePermissions(io, "a-unreadable", .default_file, .{}) catch {};
         const second_error = (try makeUnreadable(io, h.repo.dir, "b/new-unreadable")).err;
-        // glint-ignore: Z026 -- restoring the mode only lets the temporary directory be removed; the test's result is already decided
         defer h.repo.dir.setFilePermissions(io, "b/new-unreadable", .default_file, .{}) catch {};
 
         var report: worktree.AddErrorReport = .init(gpa);
@@ -218,7 +216,6 @@ test "without ignore-errors the first unreadable file stops add" {
     try h.repo.writeFile(io, "a-unreadable", "cannot read\n");
     try h.repo.writeFile(io, "z-good", "would have been staged\n");
     const read_error = (try makeUnreadable(io, h.repo.dir, "a-unreadable")).err;
-    // glint-ignore: Z026 -- restoring the mode only lets the temporary directory be removed; the test's result is already decided
     defer h.repo.dir.setFilePermissions(io, "a-unreadable", .default_file, .{}) catch {};
     var report: worktree.AddErrorReport = .init(gpa);
     defer report.deinit();
@@ -251,7 +248,6 @@ test "add.ignoreErrors and add.ignore-errors decide git add's default as git rea
         try repo.writeFile(io, "a-unreadable", "cannot read\n");
         try repo.writeFile(io, "z-good", "staged when errors are ignored\n");
         _ = try makeUnreadable(io, repo.dir, "a-unreadable");
-        // glint-ignore: Z026 -- restoring the mode only lets the temporary directory be removed; the test's result is already decided
         defer repo.dir.setFilePermissions(io, "a-unreadable", .default_file, .{}) catch {};
         repo.report_failures = false;
         var ran = try repo.capture(io, &.{ "add", "-A" });

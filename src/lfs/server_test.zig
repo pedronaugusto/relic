@@ -77,7 +77,7 @@ const Policy = struct {
 };
 
 fn runServer(s: *uplink.Server, io: Io, listener: *Io.net.Server) void {
-    s.serve(io, listener) catch {}; // glint-ignore: Z026 -- the server stops when the test shuts it down; how is not the test's question
+    s.serve(io, listener) catch {};
 }
 
 const Bench = struct {

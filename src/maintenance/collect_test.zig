@@ -82,7 +82,6 @@ pub fn housekeeping(repo: *testgit.Repo) ![]u8 {
         } else try out.print(gpa, "{s}:\n{s}", .{ path, bytes });
     }
     var tables: usize = 0;
-    // glint-ignore: Z026 -- a repository with no reftable directory has no tables, which the count reports
     if (repo.dir.openDir(io, ".git/reftable", .{ .iterate = true })) |dir_value| {
         var dir = dir_value;
         defer dir.close(io);

@@ -152,7 +152,6 @@ test "a push changing a file someone else has locked is refused or reported, as 
         try testing.expectEqualStrings("bob", report.locked_by_others[0].owner.?);
         try testing.expectEqual(@as(usize, 0), report.uploads.len);
     }
-    // glint-ignore: Z026 -- git's push may refuse; the test checks what relic sent, not git's answer
     if (testlfs.git(gpa, io, clones[1], &fx.env, &.{ "push", "-q", "origin", "main" }, false)) |out| {
         gpa.free(out);
         return error.TestUnexpectedResult;

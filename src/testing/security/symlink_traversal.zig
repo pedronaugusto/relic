@@ -194,7 +194,6 @@ test "CVE-2021-21300, t0021-conversion 'delayed checkout with case-collision don
             defer index.deinit();
             // Refused, or written with the delayed file kept inside: what
             // must never be is a file in `target-dir`.
-            // glint-ignore: Z026 -- refused, or written with the delayed file kept inside: the test checks target-dir, not the checkout's answer
             if (worktree.checkout(gpa, io, git.dir, .{ .index = &index, .db = repo.objectDatabase(), .tree = try hash.Oid.parse(.sha1, tree_text) }, .{
                 .rules = rules,
                 .programs = .{ .environ = &env },

@@ -637,7 +637,6 @@ test "credential-cache's daemon lets a credential go when its time is up, and en
     var daemon = try cache_daemon.Daemon.listen(gpa, clock_io, socket);
     defer daemon.deinit();
     var running = try clock_io.concurrent(cache_daemon.Daemon.run, .{&daemon});
-    // glint-ignore: Z026 -- the daemon has ended by then, or the test failed already
     defer running.cancel(clock_io) catch {};
 
     const ask = struct {

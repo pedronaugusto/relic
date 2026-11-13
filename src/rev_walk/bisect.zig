@@ -1110,7 +1110,6 @@ fn startWith(c: *Ctx, t: *Terms, args: []const []const u8) Error!Step {
     try c.appendState("BISECT_LOG", log_line.written());
     // A bisection that cannot go on is not left half started.
     return autoNext(c, t.*) catch |err| {
-        // glint-ignore: Z026 -- the step's error is the one to report; a state left behind is what `git bisect reset` removes, and a cancel in its removal is put back
         cleanState(c) catch |clean_err| if (clean_err == error.Canceled) c.io.recancel();
         return err;
     };

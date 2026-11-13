@@ -603,7 +603,6 @@ test "git submodule status and this agree in every state" {
     try c.git.exec(io, &.{ "add", "vendor/lib" });
     try c.git.exec(io, &.{ "commit", "-q", "-m", "other side" });
     c.git.report_failures = false;
-    // glint-ignore: Z026 -- the merge is meant to stop on the conflict; the unmerged entries below are what it must leave
     c.git.exec(io, &.{ "merge", "-q", "other" }) catch {};
     c.git.report_failures = true;
     const unmerged = try c.git.run(io, &.{ "ls-files", "-u" });
@@ -1432,7 +1431,6 @@ fn pathConfigState(gpa: Allocator, io: Io, repo: *testgit.Repo) ![]u8 {
         if (std.mem.endsWith(u8, std.mem.sliceTo(line, '='), ".gitdir") or std.mem.startsWith(u8, line, "extensions.") or
             std.mem.startsWith(u8, line, "core.repositoryformatversion")) try out.print(gpa, "{s}\n", .{line});
     }
-    // glint-ignore: Z026 -- a repository with no modules directory has none to print
     if (repo.dir.openDir(io, ".git/modules", .{ .iterate = true })) |modules_const| {
         var modules = modules_const;
         defer modules.close(io);

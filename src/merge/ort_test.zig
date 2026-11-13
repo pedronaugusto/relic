@@ -117,7 +117,6 @@ fn expectSameMerge(gpa: Allocator, io: Io, repo: *testgit.Repo, ours: []const u8
     if (expected.len == 0 and git.code > 1) {
         const known = gitAsserted(git.stderr, "handle_content_merge", "(S_IFMT & a->mode) == (S_IFMT & b->mode)") or
             gitAsserted(git.stderr, "process_entry", "ci->merged.is_null == (ci->filemask == ci->match_mask)");
-        // glint-ignore: Z026 -- relic's merge may fail where git's asserts; the check below reads git's
         if (merged) |r| {
             var result = r;
             result.deinit();

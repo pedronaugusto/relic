@@ -54,7 +54,6 @@ const Holder = struct {
             stdin.close(io);
             h.child.stdin = null;
         }
-        // glint-ignore: Z026 -- releasing cannot fail; a helper that will not be waited for has lost its lock with its stdin
         _ = h.child.wait(io) catch {};
     }
 };

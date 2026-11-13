@@ -2114,7 +2114,6 @@ test "init takes its branch, object format and ref format from the user's config
         for (case.overrides) |o| try args.appendSlice(gpa, &.{ "-c", o });
         try args.appendSlice(gpa, &.{ "init", "-q", "by-git" });
         const git_init = testremote.gitInputEnv(gpa, io, root.dir, &env, args.items, "", false);
-        // glint-ignore: Z026 -- git's own init may refuse here; the test compares what each left
         if (git_init) |out| gpa.free(out) else |_| {}
 
         try root.dir.createDirPath(io, "by-relic");

@@ -169,7 +169,6 @@ fn localCommand(arena: Allocator, io: Io, environ: *const std.process.Environ.Ma
     }
     if (std.mem.eql(u8, words[0], "git-lfs-transfer")) {
         const sibling = try std.Io.Dir.path.join(arena, &.{ std.Io.Dir.path.dirname(executable) orelse ".", if (builtin.target.os.tag == .windows) "git-lfs-transfer.exe" else "git-lfs-transfer" });
-        // glint-ignore: Z026 -- no sibling git-lfs-transfer: the one on the path runs instead
         if (Io.Dir.cwd().openFile(io, sibling, .{})) |file| {
             file.close(io);
             command.items[0] = sibling;
@@ -242,7 +241,6 @@ fn holdStderr(io: Io, release: []const u8) !void {
     try ready.interface.writeAll("ready\n");
     Io.File.stdout().close(io);
     _ = try server.accept(io);
-    // glint-ignore: Z026 -- a socket file already gone is the end sought
     Io.Dir.cwd().deleteFile(io, release) catch {};
     std.process.exit(0);
 }

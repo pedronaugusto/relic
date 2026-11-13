@@ -54,7 +54,6 @@ fn acks(gpa: std.mem.Allocator, io: Io, version: protocol.Version, repeat: usize
     var buffer: [pkt_line.max_line]u8 = undefined;
     var fixed: Io.Reader = .fixed(answer.written());
     var reader = fixed.limited(.unlimited, &buffer);
-    // glint-ignore: Z026 -- the answer ends in an error or its end; the count so far is what the test checks
     while (pkt_line.read(&reader.interface)) |packet| switch (packet) {
         .data => |unparsed| {
             const line = unparsed.readForParse();

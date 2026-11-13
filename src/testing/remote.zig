@@ -275,7 +275,6 @@ pub const HttpServer = struct {
         s.stopping.store(true, .release);
         // Wake the accept with a connection of its own.
         const address = Io.net.IpAddress.parse("127.0.0.1", s.port) catch unreachable;
-        // glint-ignore: Z026 -- a wake that cannot connect finds the server already gone, which is what the stop waits for
         if (address.connect(io, .{ .mode = .stream })) |stream| stream.close(io) else |_| {}
         s.task.await(io);
         s.listener.deinit(io);
@@ -343,7 +342,6 @@ pub const HttpServer = struct {
 
     fn serveConnection(s: *HttpServer, stream: Io.net.Stream) void {
         defer stream.close(s.io);
-        // glint-ignore: Z026 -- a connection that fails is its client's to report; the server goes on to the next
         s.handle(stream) catch {};
     }
 
@@ -656,7 +654,6 @@ pub const DaemonServer = struct {
         s.stopping.store(true, .release);
         // Wake the accept with a connection of its own.
         const address = Io.net.IpAddress.parse("127.0.0.1", s.port) catch unreachable;
-        // glint-ignore: Z026 -- a wake that cannot connect finds the server already gone, which is what the stop waits for
         if (address.connect(io, .{ .mode = .stream })) |stream| stream.close(io) else |_| {}
         s.task.await(io);
         s.listener.deinit(io);
@@ -710,7 +707,6 @@ pub const DaemonServer = struct {
     fn serveConnection(s: *DaemonServer, stream: Io.net.Stream) void {
         defer s.count(.one_fewer);
         defer stream.close(s.io);
-        // glint-ignore: Z026 -- a connection that fails is its client's to report; the server goes on to the next
         s.relay(stream) catch {};
     }
 
@@ -1123,7 +1119,6 @@ pub const Proxy = struct {
         const io = p.io;
         p.stopping.store(true, .release);
         const address = Io.net.IpAddress.parse("127.0.0.1", p.port) catch unreachable;
-        // glint-ignore: Z026 -- a wake that cannot connect finds the server already gone, which is what the stop waits for
         if (address.connect(io, .{ .mode = .stream })) |stream| stream.close(io) else |_| {}
         p.task.await(io);
         p.listener.deinit(io);
@@ -1266,7 +1261,6 @@ pub const Proxy = struct {
             const stream = p.listener.accept(p.io) catch return;
             defer stream.close(p.io);
             if (p.stopping.load(.acquire)) return;
-            // glint-ignore: Z026 -- a connection that fails is its client's to report; the server goes on to the next
             p.handle(stream) catch {};
         }
     }
@@ -1481,7 +1475,6 @@ pub const SocksProxy = struct {
         while (!p.stopping.load(.acquire)) {
             const stream = p.listener.accept(p.io) catch return;
             defer stream.close(p.io);
-            // glint-ignore: Z026 -- a connection that fails is its client's to report; the server goes on to the next
             p.handle(stream) catch {};
         }
     }

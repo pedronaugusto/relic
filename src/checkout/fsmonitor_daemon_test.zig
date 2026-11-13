@@ -88,11 +88,9 @@ const FakeDaemon = struct {
         d.stopping.store(true, .release);
         // A client of its own wakes the daemon from its wait.
         if (builtin.os.tag == .windows) {
-            // glint-ignore: Z026 -- a wake that cannot open the pipe finds the daemon already gone, which is what the stop waits for
             if (Io.Dir.openFileAbsolute(io, d.path, .{ .mode = .read_write })) |pipe| pipe.close(io) else |_| {}
         } else {
             const address: Io.net.UnixAddress = .{ .path = d.path };
-            // glint-ignore: Z026 -- a wake that cannot connect finds the daemon already gone, which is what the stop waits for
             if (address.connect(io)) |stream| stream.close(io) else |_| {}
         }
         d.task.await(io);
@@ -127,7 +125,6 @@ const FakeDaemon = struct {
                 if (d.stopping.load(.acquire)) return;
                 var reader = pipe.readerStreaming(io, read_buffer);
                 var writer = pipe.writerStreaming(io, &write_buffer);
-                // glint-ignore: Z026 -- a question that breaks off is its client's to report; the daemon takes the next
                 d.handle(&reader.interface, &writer.interface) catch {};
             } else {
                 const stream = d.listener.accept(io) catch return;
@@ -135,7 +132,6 @@ const FakeDaemon = struct {
                 if (d.stopping.load(.acquire)) return;
                 var reader = stream.reader(io, read_buffer);
                 var writer = stream.writer(io, &write_buffer);
-                // glint-ignore: Z026 -- a question that breaks off is its client's to report; the daemon takes the next
                 d.handle(&reader.interface, &writer.interface) catch {};
             }
         }
@@ -547,13 +543,11 @@ test "git's own daemon, where git has one, answers this package as it answers gi
     const running = started.code == 0;
     started.deinit(gpa);
     if (!running) return error.SkipZigTest;
-    // glint-ignore: Z026 -- a stop that fails leaves nothing to free; the daemon's own end is checked elsewhere
     defer if (r.capture(io, &.{ "fsmonitor--daemon", "stop" })) |stopped| {
         var s = stopped;
         s.deinit(gpa);
     } else |_| {};
     r.report_failures = true;
-    // glint-ignore: Z026 -- a trace that cannot be read is not printed; the failure being reported is the test's own
     errdefer if (r.dir.readFileAlloc(io, ".git/fsmonitor-trace", gpa, .limited(1 << 20))) |text| {
         defer gpa.free(text);
         std.debug.print("git's daemon traced:\n{s}\n", .{text});

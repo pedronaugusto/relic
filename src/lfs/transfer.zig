@@ -659,7 +659,6 @@ fn fromReference(io: Io, store: *const lfs.Store, references: []const []const u8
         };
         if (stat.kind != .file or stat.size != pointer.size) continue;
         try store.base.createDirPath(io, std.Io.Dir.path.dirnamePosix(object_path).?);
-        // glint-ignore: Z026 -- a store that cannot take a hard link gets a copy below
         if (fs.hardLink(io, store.base, ref_path, object_path)) {
             return true;
         } else |err| if (err == error.Canceled) return error.Canceled;
@@ -722,7 +721,6 @@ pub fn sweepTmp(gpa: Allocator, io: Io, store: *const lfs.Store, now_at: Io.Time
             var object_buf: [lfs.Store.max_path]u8 = undefined;
             // glint-ignore: Z026 -- a name that is no object's leaves the entry to the steps below
             if (store.objectPath(&object_buf, name[0..64])) |object_path| {
-                // glint-ignore: Z026 -- an object the store does not have leaves the entry to the steps below
                 if (store.base.statFile(io, object_path, .{})) |st| {
                     if (st.kind != .directory) {
                         try tmp.deleteFile(io, entry.path);
