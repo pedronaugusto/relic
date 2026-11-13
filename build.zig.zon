@@ -3,8 +3,8 @@
     .version = "0.29.2",
     .dependencies = .{
         .aegis = .{
-            .url = "git+https://github.com/pedronaugusto/aegis#c43e90db7fa8721b5f492da3350a388372f78e82",
-            .hash = "aegis-0.2.4-rsxouh_ZDADwsssgFEu1g7mmKRVplCNL8uzsdpwiHC7V",
+            .url = "git+https://github.com/pedronaugusto/aegis#1243edb4e8f9f77b8dd9e311c54c60f68ed969b6",
+            .hash = "aegis-0.2.4-rsxoumU2DQBP43gnbSG8y_GZfIVV7Hww_cftccwgZWpi",
         },
 
         .conduit = .{
@@ -29,8 +29,8 @@
         },
 
         .airlock = .{
-            .url = "git+https://github.com/pedronaugusto/airlock#f0b59c41348ad772c984753ea819f9345a37130d",
-            .hash = "airlock-0.6.0-rfvu6PdDCAChN1RPjYEz_v65zNQ-wOiR6ANrRrxzIWLH",
+            .url = "git+https://github.com/pedronaugusto/airlock#55f0265ad74ceff3ea14a1fca316f82aa3f45ae8",
+            .hash = "airlock-0.6.0-rfvu6DdECADPsZW3JjI6jPRt-hpplrgrRaA4M4Ey7e8W",
         },
 
         .warp = .{
