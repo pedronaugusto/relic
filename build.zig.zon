@@ -71,8 +71,8 @@
     },
     .dev_dependencies = .{
         .preflight = .{
-            .url = "git+https://github.com/pedronaugusto/preflight#be554fbee3f2e0be306a06bec287e32b02df9120",
-            .hash = "preflight-0.18.6-LX1ZwkRUFABxCNOEWkU0oo8KRj5teFGNd6VOtH1m-_fB",
+            .url = "git+https://github.com/pedronaugusto/preflight?ref=ci-standard#48ccb44d8447ce32225d1d269359be34448af926",
+            .hash = "preflight-0.18.6-LX1Zwg3NGADdODO5qqL7c_IR6XmVJKTzPFb2mTzlFOHw",
         },
 
         .shakedown = .{
