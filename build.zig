@@ -36,8 +36,20 @@ pub fn build(b: *std.Build) void {
     const on: Features = .{ .http = http, .lfs = lfs };
     // One core under both: what `relic_lfs` hands out is `relic`'s own type.
     const core = coreModule(b, target, optimize, on);
-    _ = b.addModule("relic", relicModule(b, target, optimize, core, on));
-    if (lfs) _ = b.addModule("relic_lfs", lfsModule(b, target, optimize, core, on));
+    // Each module said in the literal form, its root a path, so what the
+    // package exports is read from this text (preflight's changelog check).
+    _ = b.addModule("relic", .{
+        .root_source_file = b.path("src/relic.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = rootImports(b, target, optimize, core, on, &.{}),
+    });
+    if (lfs) _ = b.addModule("relic_lfs", .{
+        .root_source_file = b.path("src/lfs.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = rootImports(b, target, optimize, core, on, &lfs_packages),
+    });
 }
 
 const http_description = "Fetch and push over HTTP(S), with uplink and cloak (default on)";
@@ -85,9 +97,9 @@ fn featureOptions(p: *std.Build, on: Features) *std.Build.Module {
     return features.createModule();
 }
 
-/// The `relic` module over `core`: `src/relic.zig`, which reaches every
-/// namespace through the core and checks the README's module table against
-/// the API as it compiles.
+/// The `relic` module over `core`, as `build` adds it, for the benchmarks:
+/// `src/relic.zig`, which reaches every namespace through the core and
+/// checks the README's module table against the API as it compiles.
 fn relicModule(p: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, core: Core, on: Features) std.Build.Module.CreateOptions {
     return .{
         .root_source_file = p.path("src/relic.zig"),
@@ -98,16 +110,13 @@ fn relicModule(p: *std.Build, target: std.Build.ResolvedTarget, optimize: std.la
 }
 
 /// The `relic_lfs` module over `core` and strand, which exists only with
-/// `lfs`: rooted at `src/lfs.zig`, and with `http` at `src/lfs_with_http.zig`,
-/// whose `server` is on uplink's server. Two roots on purpose: a file's
-/// declarations cannot be made absent one by one in Zig, and `server` must
-/// be absent without `http` (a declaration exists exactly when its types
-/// do), so the build chooses the root whole, as `src/relic.zig` chooses
-/// `transport`. `lfs_with_http.zig` re-exports every name of `lfs.zig` and
-/// adds `server`; `sameNamesBut` holds the two lists equal.
+/// `lfs`, as `build` adds it, for the benchmarks: rooted at `src/lfs.zig`,
+/// whose `server`, on uplink's server, is there only with `http`. Without
+/// it `server` is a branch never taken, whose file is never compiled, so
+/// uplink is neither imported nor fetched.
 fn lfsModule(p: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, core: Core, on: Features) std.Build.Module.CreateOptions {
     return .{
-        .root_source_file = p.path(if (on.http) "src/lfs_with_http.zig" else "src/lfs.zig"),
+        .root_source_file = p.path("src/lfs.zig"),
         .target = target,
         .optimize = optimize,
         .imports = rootImports(p, target, optimize, core, on, &lfs_packages),

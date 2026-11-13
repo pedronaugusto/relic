@@ -6,8 +6,9 @@
 //! strand. It exists only while relic's `lfs` option is on (the default), and
 //! what it hands out are relic's own types: a `relic.repo.Repository` is
 //! what its operations take. Over ssh and custom agents it needs `lfs` alone;
-//! over HTTP(S), `http` too. The build roots it here without `http`, and at
-//! `lfs_with_http.zig`, every name of this file and `server`, with it.
+//! over HTTP(S), `http` too. `server` is uplink's, so it is here only with
+//! `http`: a build without it that names `server` stops, saying so, and
+//! fetches nothing of uplink's.
 //!
 //! The table below describes its namespaces; it is checked against the API,
 //! and the README's against both, wherever relic_lfs compiles.
@@ -55,18 +56,19 @@ pub const FetchError = implementation.FetchError;
 pub const Fetcher = implementation.Fetcher;
 pub const Lfs = implementation.Lfs;
 pub const Error = implementation.Error;
+/// Only with `http`: the untaken branch's file is never compiled, so a
+/// build without it neither needs nor fetches uplink.
+pub const server = if (options.http) @import("lfs/server.zig") else @compileError("relic_lfs.server needs relic built with -Dhttp=true");
 
 const implementation = @import("lfs/lfs.zig");
 const core = @import("relic_core");
+const options = @import("relic_options");
 
 // relic_lfs's public surface keeps relic's contract (`core.contract`), and
-// publishes every declaration of its implementation. With `http` the root
-// is `lfs_with_http.zig`, which checks itself.
+// publishes every declaration of its implementation.
 comptime {
-    if (!@import("relic_options").http) {
-        core.contract.check(@This(), surface);
-        core.contract.covers(@This(), "relic_lfs", implementation);
-    }
+    core.contract.check(@This(), surface);
+    core.contract.covers(@This(), "relic_lfs", implementation);
 }
 
 /// relic_lfs's module tables, this file's and the README's.
@@ -77,4 +79,5 @@ const surface: core.contract.Surface = .{
     .begin = "<!-- BEGIN LFS MODULES -->",
     .end = "<!-- END LFS MODULES -->",
     .depth = 2,
+    .http_only = &.{"server"},
 };

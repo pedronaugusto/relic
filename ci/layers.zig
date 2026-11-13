@@ -43,11 +43,11 @@ pub const layers: []const gantry.rules.Layer = &.{
     // core is everything up to here, and imports nothing above.
     .{ .name = "core", .patterns = &.{ "src/core.zig", "src/contract.zig" } },
     // relic_lfs, over the core.
-    .{ .name = "lfs", .patterns = &.{ "src/lfs/**", "src/lfs.zig", "src/lfs_with_http.zig" } },
+    .{ .name = "lfs", .patterns = &.{ "src/lfs/**", "src/lfs.zig" } },
     .{ .name = "public", .patterns = &.{"src/relic.zig"} },
 };
 
-pub const required = [_][]const u8{ "src/relic.zig", "src/core.zig", "src/contract.zig", "src/lfs_with_http.zig", "src/lfs_tests.zig", "src/tests.zig", "src/clean_test.zig", "src/commit.zig", "src/config.zig", "src/diff.zig", "src/grep_test.zig", "src/hash.zig", "src/index.zig", "src/lfs.zig", "src/merge.zig", "src/maintenance.zig", "src/object.zig", "src/odb.zig", "src/patch.zig", "src/pretty.zig", "src/refs.zig", "src/repo.zig", "src/rev_walk.zig", "src/submodule.zig", "src/transport.zig", "src/worktree.zig" };
+pub const required = [_][]const u8{ "src/relic.zig", "src/core.zig", "src/contract.zig", "src/lfs_tests.zig", "src/tests.zig", "src/clean_test.zig", "src/commit.zig", "src/config.zig", "src/diff.zig", "src/grep_test.zig", "src/hash.zig", "src/index.zig", "src/lfs.zig", "src/merge.zig", "src/maintenance.zig", "src/object.zig", "src/odb.zig", "src/patch.zig", "src/pretty.zig", "src/refs.zig", "src/repo.zig", "src/rev_walk.zig", "src/submodule.zig", "src/transport.zig", "src/worktree.zig" };
 pub const entries: []const []const u8 = &.{};
 pub const modules: []const gantry.NamedModule = &.{
     .{ .name = "root", .path = "src/tests.zig", .from = "src/testing/concurrency.zig" },
@@ -86,17 +86,15 @@ pub const references: []const gantry.rules.ReferenceRule = &.{
     .{ .name = "the core imports no public root", .target = "src/relic.zig", .except_from = &(test_files ++ .{"src/relic.zig"}) },
     .{ .name = "the core imports no LFS", .target = "src/lfs/**", .except_from = &(test_files ++ lfs_files) },
     .{ .name = "the core imports no LFS", .target = "src/lfs.zig", .except_from = &(test_files ++ lfs_files) },
-    .{ .name = "the core imports no LFS", .target = "src/lfs_with_http.zig", .except_from = &(test_files ++ lfs_files) },
     .{ .name = "LFS reaches the core by relic_core", .from = "src/lfs/**", .relative = true, .suffix = ".zig", .except_targets = &.{"src/lfs/**"}, .except_from = &.{"src/lfs/**/*_test.zig"} },
     .{ .name = "LFS reaches the core by relic_core", .from = "src/lfs.zig", .relative = true, .suffix = ".zig", .except_targets = &.{ "src/lfs/**", "src/lfs.zig" } },
-    .{ .name = "LFS reaches the core by relic_core", .from = "src/lfs_with_http.zig", .relative = true, .suffix = ".zig", .except_targets = &.{ "src/lfs/**", "src/lfs.zig" } },
     .{ .name = "the public root reaches the core by relic_core", .from = "src/relic.zig", .relative = true, .suffix = ".zig", .except_targets = &.{"src/relic.zig"} },
 };
 
 /// Files of the one test module, which holds the core's files and LFS's.
 const test_files = .{ "src/testing/**", "src/tests.zig", "src/lfs_tests.zig", "src/**/*_test.zig", "src/benchmark.zig" };
 /// relic_lfs's own files.
-const lfs_files = .{ "src/lfs/**", "src/lfs.zig", "src/lfs_with_http.zig" };
+const lfs_files = .{ "src/lfs/**", "src/lfs.zig" };
 
 const tests = [_][]const u8{ "src/testing/**", "src/**/*_test.zig" };
 

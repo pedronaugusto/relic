@@ -10,7 +10,8 @@
 //! - no public function takes more than five positional inputs.
 //! A facade publishes every declaration of its implementation (`covers`),
 //! and a namespace chosen whole by a feature has every name of the one
-//! without it and the one it adds (`sameNamesBut`).
+//! without it and the one it adds (`sameNamesBut`). A declaration that is
+//! there only with `http` (`Surface.http_only`) is passed over without it.
 const std = @import("std");
 const conduit = @import("conduit");
 const fs = @import("fs/fs.zig");
@@ -30,6 +31,10 @@ pub const Surface = struct {
     end: []const u8,
     /// How many levels of namespaces the tables describe.
     depth: usize,
+    /// The root's declarations that exist only with `http`, each a
+    /// `@compileError` without it, so the checks pass over them there, as
+    /// the tables pass over a row that says "Only with `http`.".
+    http_only: []const []const u8 = &.{},
 };
 
 /// `root` holds to the contract over `surface`.
@@ -39,11 +44,12 @@ pub fn check(comptime root: type, comptime surface: Surface) void {
     const begin = std.mem.find(u8, surface.readme, surface.begin) orelse @compileError("README.md: no " ++ surface.begin ++ " marker");
     const end = std.mem.find(u8, surface.readme, surface.end) orelse @compileError("README.md: no " ++ surface.end ++ " marker");
     const documented = tableNames(surface.readme[begin..end], "| `");
-    const count = checkNamespaces(root, "", surface.depth, own, documented, surface);
+    const absent: []const []const u8 = if (features.http) &.{} else surface.http_only;
+    const count = checkNamespaces(root, "", surface.depth, own, documented, surface, absent);
     if (own.len != count) @compileError(std.fmt.comptimePrint("{s}'s module table has {d} rows for {d} namespaces", .{ surface.path, own.len, count }));
     if (documented.len != count) @compileError(std.fmt.comptimePrint("README.md's table between {s} and {s} has {d} rows for {d} namespaces", .{ surface.begin, surface.end, documented.len, count }));
-    checkErrors(root, "", surface.depth);
-    checkInputs(root, "", surface.depth + 4);
+    checkErrors(root, "", surface.depth, absent);
+    checkInputs(root, "", surface.depth + 4, absent);
 }
 
 /// `with` has every public name of `base`, and `extra`, and no other.
@@ -88,6 +94,12 @@ fn isNamespace(comptime ns: type, comptime name: []const u8) bool {
     };
 }
 
+/// Whether `name` is one of `absent`: a declaration this build does not have.
+fn isAbsent(comptime absent: []const []const u8, comptime name: []const u8) bool {
+    for (absent) |gone| if (std.mem.eql(u8, gone, name)) return true;
+    return false;
+}
+
 fn rowsOf(comptime names: []const []const u8, comptime path: []const u8) usize {
     var count: usize = 0;
     for (names) |name| {
@@ -99,20 +111,20 @@ fn rowsOf(comptime names: []const []const u8, comptime path: []const u8) usize {
 /// Each namespace under `ns` to `depth` levels, held to one row in each
 /// table, to being its own and to offering no test access; how many there
 /// are.
-fn checkNamespaces(comptime ns: type, comptime prefix: []const u8, comptime depth: usize, comptime own: []const []const u8, comptime documented: []const []const u8, comptime surface: Surface) usize {
+fn checkNamespaces(comptime ns: type, comptime prefix: []const u8, comptime depth: usize, comptime own: []const []const u8, comptime documented: []const []const u8, comptime surface: Surface, comptime absent: []const []const u8) usize {
     var count: usize = 0;
     for (@typeInfo(ns).@"struct".decl_names) |name| {
-        if (!isNamespace(ns, name)) continue;
+        if (isAbsent(absent, name) or !isNamespace(ns, name)) continue;
         const path = if (prefix.len == 0) name else prefix ++ "." ++ name;
         if (rowsOf(own, path) != 1) @compileError("`" ++ path ++ "` needs one row in " ++ surface.path ++ "'s module table: //! | `" ++ path ++ "` | <purpose> |");
         if (rowsOf(documented, path) != 1) @compileError("`" ++ path ++ "` needs one row in README.md's module table, between its " ++ surface.begin ++ " and " ++ surface.end ++ " markers");
         if (@hasDecl(@field(ns, name), "test_access")) @compileError("`" ++ path ++ "` offers test access");
         for (@typeInfo(ns).@"struct".decl_names) |other| {
-            if (!std.mem.eql(u8, name, other) and isNamespace(ns, other) and @field(ns, name) == @field(ns, other))
+            if (!std.mem.eql(u8, name, other) and !isAbsent(absent, other) and isNamespace(ns, other) and @field(ns, name) == @field(ns, other))
                 @compileError("`" ++ path ++ "` is the same namespace as `" ++ other ++ "`");
         }
         count += 1;
-        if (depth > 1) count += checkNamespaces(@field(ns, name), path, depth - 1, own, documented, surface);
+        if (depth > 1) count += checkNamespaces(@field(ns, name), path, depth - 1, own, documented, surface, &.{});
     }
     return count;
 }
@@ -129,8 +141,9 @@ fn isForeign(comptime T: type) bool {
 /// Each namespace under `ns` to `depth` levels, and each type of one that
 /// a caller releases with `deinit`, names its errors: `Error`, an error
 /// set with names.
-fn checkErrors(comptime ns: type, comptime prefix: []const u8, comptime depth: usize) void {
+fn checkErrors(comptime ns: type, comptime prefix: []const u8, comptime depth: usize, comptime absent: []const []const u8) void {
     for (@typeInfo(ns).@"struct".decl_names) |name| {
+        if (isAbsent(absent, name)) continue;
         const value = @field(ns, name);
         if (@TypeOf(value) != type or isForeign(value) or @typeInfo(value) != .@"struct") continue;
         const path = if (prefix.len == 0) name else prefix ++ "." ++ name;
@@ -139,14 +152,14 @@ fn checkErrors(comptime ns: type, comptime prefix: []const u8, comptime depth: u
             if (@typeInfo(value.Error) != .error_set or @typeInfo(value.Error).error_set.error_names == null)
                 @compileError("`" ++ path ++ ".Error` is not an error set with names");
         }
-        if (isNamespace(ns, name) and depth > 1) checkErrors(value, path, depth - 1);
+        if (isNamespace(ns, name) and depth > 1) checkErrors(value, path, depth - 1, &.{});
     }
 }
 
 /// No public function under `ns`, to `depth` levels of namespaces and
 /// types, takes more than five positional inputs; more go in an options
 /// or inputs struct.
-fn checkInputs(comptime ns: type, comptime prefix: []const u8, comptime depth: usize) void {
+fn checkInputs(comptime ns: type, comptime prefix: []const u8, comptime depth: usize, comptime absent: []const []const u8) void {
     if (depth == 0) return;
     const names = switch (@typeInfo(ns)) {
         .@"struct" => |s| s.decl_names,
@@ -155,10 +168,11 @@ fn checkInputs(comptime ns: type, comptime prefix: []const u8, comptime depth: u
         else => return,
     };
     for (names) |name| {
+        if (isAbsent(absent, name)) continue;
         const value = @field(ns, name);
         const path = if (prefix.len == 0) name else prefix ++ "." ++ name;
         if (@TypeOf(value) == type) {
-            checkInputs(value, path, depth - 1);
+            checkInputs(value, path, depth - 1, &.{});
         } else if (@typeInfo(@TypeOf(value)) == .@"fn") {
             const inputs = @typeInfo(@TypeOf(value)).@"fn".param_types.len;
             if (inputs > 5) @compileError(std.fmt.comptimePrint("`{s}` takes {d} positional inputs; at most five, the rest in an options or inputs struct", .{ path, inputs }));

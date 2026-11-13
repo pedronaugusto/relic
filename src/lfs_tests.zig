@@ -8,8 +8,8 @@ const builtin = @import("builtin");
 const features = @import("relic_options");
 const lfs = @import("lfs/lfs.zig");
 const api_mod = @import("lfs/api.zig");
-/// The module's root, with `server` where `http` is on.
-const root = if (features.http) @import("lfs_with_http.zig") else @import("lfs.zig");
+/// The module's root: `server` is in it only where `http` is on.
+const root = @import("lfs.zig");
 
 test "the plumbing is relic_lfs's own: no public name reaches it" {
     try std.testing.expect(!@hasDecl(lfs, "time_text"));
@@ -25,9 +25,11 @@ test "the plumbing is relic_lfs's own: no public name reaches it" {
 
 test {
     // Every module the API reaches, one level down as well as at the top,
-    // so that every file under the root is compiled and its tests run.
-    std.testing.refAllDecls(root);
+    // so that every file under the root is compiled and its tests run;
+    // `server` only where `http` is on, a compile error elsewhere.
     inline for (@typeInfo(root).@"struct".decl_names) |name| {
+        if (comptime !features.http and std.mem.eql(u8, name, "server")) continue;
+        _ = &@field(root, name);
         if (@TypeOf(@field(root, name)) == type and @typeInfo(@field(root, name)) == .@"struct") std.testing.refAllDecls(@field(root, name));
     }
     if (builtin.is_test) {
