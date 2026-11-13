@@ -118,6 +118,8 @@ test "a server's JSON is read as git-lfs reads it, within limits" {
 }
 
 test "LFS checks certificates with the request Io before dialing" {
+    // Only with `http`: the request is sent by uplink's client.
+    if (!@import("relic_options").http) return error.SkipZigTest;
     const gpa = testing.allocator;
     const faults = try shakedown.FaultIo.init(gpa, testing.io, .{});
     defer faults.deinit();
@@ -1439,6 +1441,7 @@ pub const Client = struct {
     /// redirects git-lfs follows. The answer is open for its body and is the
     /// caller's to `close`, whatever its status.
     pub fn send(c: *Client, io: Io, request: Request) Self.Error!*Exchange {
+        if (comptime !http_enabled) return error.HttpUnavailable;
         const operation: Operation = switch (request.method) {
             .POST, .PUT => .upload,
             else => .download,
@@ -2232,6 +2235,13 @@ pub const Exchange = struct {
     decompress: warp.zstd.Decompress.Reader = undefined,
     body: ?*Io.Reader = null,
 
+    /// Without `http` no exchange is made: `Client.send` and `Client.api`
+    /// return `error.HttpUnavailable` first, so what reads one's network
+    /// state, uplink's, is never reached, and is not compiled.
+    fn noExchange() noreturn {
+        @panic("relic_lfs: an Exchange without http, which Client.send and Client.api never make");
+    }
+
     fn state(ex: *Exchange) *ExchangeState {
         return @fieldParentPtr("exchange", ex);
     }
@@ -2242,15 +2252,18 @@ pub const Exchange = struct {
 
     /// The answer's status.
     pub fn status(ex: *const Exchange) http.Status {
+        if (comptime !http_enabled) noExchange();
         return ex.held().response.status;
     }
 
     /// A header of the answer, or `null`.
     pub fn header(ex: *const Exchange, name: []const u8) ?[]const u8 {
+        if (comptime !http_enabled) noExchange();
         return ex.held().response.headers.get(name);
     }
 
     fn location(ex: *const Exchange) ?[]const u8 {
+        if (comptime !http_enabled) noExchange();
         return ex.held().response.headers.get("location");
     }
 
@@ -2259,6 +2272,7 @@ pub const Exchange = struct {
     /// The server's `LFS-Authenticate` values, then its `WWW-Authenticate`
     /// ones, into `a`: what git-lfs hands the helpers as `wwwauth[]`.
     fn challenges(ex: *const Exchange, a: Allocator) Allocator.Error![]const []const u8 {
+        if (comptime !http_enabled) noExchange();
         var out: std.ArrayList([]const u8) = .empty;
         for ([_][]const u8{ "lfs-authenticate", "www-authenticate" }) |name| {
             var it = ex.held().response.headers.iterator();
@@ -2285,6 +2299,7 @@ pub const Exchange = struct {
     }
 
     fn authenticateOffers(ex: *const Exchange) Offers {
+        if (comptime !http_enabled) noExchange();
         var offers: Offers = .{};
         var it = ex.held().response.headers.iterator();
         while (it.next()) |h| {
@@ -2318,11 +2333,13 @@ pub const Exchange = struct {
     }
 
     fn causeOf(context: *const anyopaque) ?anyerror {
+        if (comptime !http_enabled) noExchange();
         const ex: *const Exchange = @ptrCast(@alignCast(context)); // safe: reader passes an Exchange
         return ex.held().response.failure();
     }
 
     fn decoded(ex: *Exchange, io: Io) Self.Error!*Io.Reader {
+        if (comptime !http_enabled) noExchange();
         const raw = ex.state().response.reader(io);
         if (ex.body) |r| return r;
         const codings = uplink.wire.coding.Codings.of(&ex.state().response.headers) catch uplink.wire.coding.Codings{};
@@ -2389,6 +2406,7 @@ pub const Exchange = struct {
 
     /// The reason a read of the body failed.
     pub fn bodyError(ex: *const Exchange) []const u8 {
+        if (comptime !http_enabled) noExchange();
         return switch (ex.held().response.failure()) {
             error.TimedOut => "timed out",
             else => |err| @errorName(err),
@@ -2397,6 +2415,7 @@ pub const Exchange = struct {
 
     /// Give the connection back and release everything.
     pub fn deinit(ex: *Exchange, io: Io) void {
+        if (comptime !http_enabled) noExchange();
         const c = ex.client;
         const owned = ex.state();
         // The allocation also contains ex, so free it after invalidation.
@@ -2890,6 +2909,8 @@ test "FETCH_HEAD's first line names the URL as git-lfs's pattern reads it" {
 }
 
 test "git-lfs's timeouts are read as git-lfs reads them: 30 seconds unless set, the activity one by host under https" {
+    // Only with `http`: its activity timeout is uplink's.
+    if (!@import("relic_options").http) return error.SkipZigTest;
     var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
@@ -2935,6 +2956,8 @@ test "Retry-After is a number of seconds, or a date counted from the time the ca
 }
 
 test "LFS proxy parsing preserves allocation resource failures" {
+    // Only with `http`: the client's transport is uplink's.
+    if (!@import("relic_options").http) return error.SkipZigTest;
     var client: Client = undefined;
     client.said = .init(.{});
     var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
@@ -2942,6 +2965,8 @@ test "LFS proxy parsing preserves allocation resource failures" {
 }
 
 test "LFS accepts each SOCKS proxy scheme and decodes its credentials" {
+    // Only with `http`: the client's transport is uplink's.
+    if (!@import("relic_options").http) return error.SkipZigTest;
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     var client: Client = undefined;

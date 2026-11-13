@@ -100,6 +100,8 @@ fn relicGet(gpa: Allocator, io: Io, pki: *Pki, port: u16, auth: ?cloak.ClientAut
 }
 
 test "the certificates relic reads answer OpenSSL's demand for one in TLS 1.3 and TLS 1.2, with RSA, ECDSA and Ed25519 keys, plain and encrypted" {
+    // Only with `http`: the certificate is cloak's and the fetch uplink's.
+    if (!@import("relic_options").http) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     const pki = try Pki.make(gpa, io);
@@ -197,6 +199,8 @@ const Case = struct {
 };
 
 test "git and relic fetch from a server that requires a certificate alike: key beside or with the certificate, a passphrase from the helper, and the refusals" {
+    // Only with `http`: the certificate is cloak's and the fetch uplink's.
+    if (!@import("relic_options").http) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     const pki = try Pki.make(gpa, io);

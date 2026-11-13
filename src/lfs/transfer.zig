@@ -1333,6 +1333,7 @@ fn accessUrl(href: []const u8, oid: []const u8) []const u8 {
 }
 
 fn attemptDownload(state: *Run, r: *Result, action: Action, authenticated: bool) Error!Attempt {
+    if (comptime !lfsapi.http_enabled) return error.HttpUnavailable;
     const server = state.server;
     const io = state.io();
     const store = server.store();
@@ -1603,6 +1604,7 @@ fn requestFrom(state: *Run, scratch: Allocator, partial: *Partial, req: Download
 }
 
 fn attemptUpload(state: *Run, r: *Result, action: Action, verify: ?Action, authenticated: bool) Error!Attempt {
+    if (comptime !lfsapi.http_enabled) return error.HttpUnavailable;
     const server = state.server;
     var scratch_state: std.heap.ArenaAllocator = .init(server.gpa);
     defer scratch_state.deinit();
@@ -1743,6 +1745,7 @@ fn batchRequest(
     limits: Limits,
     comptime_into: anytype,
 ) Error!if (@TypeOf(comptime_into) == @TypeOf(null)) Answered else BatchResponse {
+    if (comptime !lfsapi.http_enabled) return error.HttpUnavailable;
     const own = @TypeOf(comptime_into) == @TypeOf(null);
     var arena_state: std.heap.ArenaAllocator = .init(server.gpa);
     errdefer arena_state.deinit();

@@ -184,7 +184,8 @@ test {
         _ = @import("merge/ort_test.zig");
         _ = @import("transport/upload_pack_test.zig");
         _ = @import("transport/receive_pack_test.zig");
-        _ = @import("transport/http_backend_test.zig");
+        // relic's HTTP server, uplink's: there only with `http`.
+        if (features.http) _ = @import("transport/http_backend_test.zig");
         _ = @import("testing/clone_config.zig");
         _ = @import("wire/client_cert_test.zig");
         _ = @import("wire/pinned_key.zig");

@@ -1553,6 +1553,8 @@ const Http = struct {
 const testing = std.testing;
 
 test "an https proxy is checked against http.proxySSLCAInfo, or the system's, whatever http.sslVerify says, and answered with http.proxySSLCert" {
+    // Only with `http`: the proxy is uplink's.
+    if (!@import("relic_options").http) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var tmp = testing.tmpDir(.{});

@@ -135,6 +135,8 @@ fn readSecret(gpa: Allocator, io: Io, path: []const u8) !aegis.SecretBytes {
 }
 
 test "a certificate and key are read from one file or two, and each refusal has its name" {
+    // Only with `http`: the key is cloak's.
+    if (!@import("relic_options").http) return error.SkipZigTest;
     const testing = std.testing;
     const gpa = testing.allocator;
     const io = testing.io;

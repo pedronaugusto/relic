@@ -1024,8 +1024,10 @@ fn installTool(gpa: Allocator, io: Io, dir: Io.Dir, name: []const u8, kind: []co
 /// A stand-in `git-lfs-transfer` in `dir`: relic's own server for the
 /// pure-ssh protocol, keeping repositories under `root` and writing what
 /// each connection was asked into `log_dir`. `extra` goes to it as well:
-/// `--user=<name>`, `--no-version`.
+/// `--user=<name>`, `--no-version`. The server is relic_lfs's, there only
+/// with `http`: without it a test that needs one skips.
 pub fn transferScript(gpa: Allocator, io: Io, dir: Io.Dir, root: []const u8, log_dir: []const u8, extra: []const u8) ![]u8 {
+    if (!@import("relic_options").http) return error.SkipZigTest;
     return installTool(gpa, io, dir, "git-lfs-transfer", "transfer", &.{ suite.path(.lfs_transfer_helper), root, log_dir, extra });
 }
 

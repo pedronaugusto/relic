@@ -653,6 +653,8 @@ fn tlsFront(gpa: Allocator, io: Io, server: *testremote.HttpServer, options: tes
 }
 
 test "a server's own authority, in http.sslCAInfo or http.sslCAPath, is trusted as git trusts it, and nothing else is" {
+    // Only with `http`: the TLS server and its client are uplink's.
+    if (!@import("relic_options").http) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var root = testing.tmpDir(.{ .iterate = true });
@@ -724,6 +726,8 @@ fn firstLines(gpa: Allocator, log: []const u8) ![]u8 {
 }
 
 test "a proxy is gone through as git goes through it: the whole URL for http, CONNECT and TLS inside for https, not where no_proxy says" {
+    // Only with `http`: the TLS server and its client are uplink's.
+    if (!@import("relic_options").http) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var root = testing.tmpDir(.{ .iterate = true });
@@ -872,6 +876,8 @@ test "a proxy given to a fetch or a clone stands over the configuration's and no
 }
 
 test "a proxy that asks is answered as curl answers for git: nothing first with anyauth, then Basic or Digest, MD5 or SHA-256" {
+    // Only with `http`: the TLS server and its client are uplink's.
+    if (!@import("relic_options").http) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var root = testing.tmpDir(.{ .iterate = true });
@@ -960,6 +966,8 @@ test "a proxy that asks is answered as curl answers for git: nothing first with 
 }
 
 test "a proxy's credentials come from its URL, or its user's from the helpers, as git's do, and a refusal is named" {
+    // Only with `http`: the TLS server and its client are uplink's.
+    if (!@import("relic_options").http) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var root = testing.tmpDir(.{ .iterate = true });
@@ -1045,6 +1053,8 @@ test "a proxy's credentials come from its URL, or its user's from the helpers, a
 }
 
 test "an https server is fetched from unchecked when http.sslVerify says so, and the caller is told" {
+    // Only with `http`: the TLS server and its client are uplink's.
+    if (!@import("relic_options").http) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var root = testing.tmpDir(.{ .iterate = true });
@@ -1296,6 +1306,8 @@ test "http.version and http.sslVersion as git reads them: an unknown value warne
 }
 
 test "http.sslVersion=tlsv1.3 and http.pinnedPubkey hold the server as curl holds it for git: the lowest version spoken, the keys its certificate may hold" {
+    // Only with `http`: the TLS server and its client are uplink's.
+    if (!@import("relic_options").http) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var root = testing.tmpDir(.{ .iterate = true });
@@ -1385,6 +1397,8 @@ test "http.sslVersion=tlsv1.3 and http.pinnedPubkey hold the server as curl hold
 }
 
 test "an idle kept connection does not block another client" {
+    // Only with `http`: the kept connection is uplink's.
+    if (!@import("relic_options").http) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var root = testing.tmpDir(.{ .iterate = true });
@@ -1718,6 +1732,8 @@ fn socksHttpsFetch(gpa: Allocator, io: Io, root: *testing.TmpDir, proxy: *testre
 }
 
 test "clone fetch and push cross each SOCKS tunnel as git crosses it, and a fetch TLS to the origin inside it" {
+    // Only with `http`: the TLS server and its client are uplink's.
+    if (!@import("relic_options").http) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     try testgit.requireGitVersion(gpa, io, 2, 48);

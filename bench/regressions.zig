@@ -1001,9 +1001,10 @@ fn row9() !void {
         var opened = try relic.transport.smart_http.connect(gpa, io, url, .upload_pack, .{ .protocol_v2 = false });
         const conn = switch (opened) {
             .smart => |c| c,
-            // The canned server answers as a smart one.
+            // The canned server answers as a smart one. Without `http` the
+            // arm holds nothing, and there is nothing to release.
             .dumb => |*files| {
-                files.deinit(io);
+                if (@TypeOf(files.*) != void) files.deinit(io);
                 return error.UnexpectedDumbServer;
             },
         };

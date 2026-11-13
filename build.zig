@@ -205,15 +205,17 @@ pub fn dev(b: *std.Build, tools: type) void {
 
     // git-lfs does not ship a `git-lfs-transfer` server, so the suite
     // brings one: relic and git-lfs are each pointed at it over the same
-    // stand-in ssh and what it was asked is compared.
-    const lfs_transfer_helper = b.addExecutable(.{
+    // stand-in ssh and what it was asked is compared. It is relic_lfs's
+    // server, so it is built where that is: with `lfs` and `http`; the
+    // tests that run it skip elsewhere.
+    const lfs_transfer_helper: ?*std.Build.Step.Compile = if (features_option.lfs and features_option.http) b.addExecutable(.{
         .name = "relic-lfs-transfer-helper",
         .root_module = b.createModule(.{
             .root_source_file = p.path("src/testing/lfs/transfer.zig"),
             .target = target,
             .optimize = optimize,
         }),
-    });
+    }) else null;
 
     // relic's own upload-pack, as a program real git can be pointed at with
     // `--upload-pack`, so what git makes of relic's server is compared with
@@ -326,7 +328,7 @@ pub fn dev(b: *std.Build, tools: type) void {
         p.path(gnupg_fixture_root));
     build_options.addOptionPath("lock_helper_path", lock_helper.getEmittedBin());
     build_options.addOptionPath("filter_helper_path", filter_helper.getEmittedBin());
-    build_options.addOptionPath("lfs_transfer_helper_path", lfs_transfer_helper.getEmittedBin());
+    if (lfs_transfer_helper) |helper| build_options.addOptionPath("lfs_transfer_helper_path", helper.getEmittedBin()) else build_options.addOption([]const u8, "lfs_transfer_helper_path", "");
     // A real `git-lfs-transfer` server — Scutiger's is the one git-lfs's
     // own suite uses — for the tests that prove relic's client against one
     // rather than against the suite's own; they skip without it.
@@ -377,8 +379,10 @@ pub fn dev(b: *std.Build, tools: type) void {
     test_module.addImport("airlock.testing", airlock_build.testing(airlock_dependency, shakedown.module("shakedown")));
     test_module.addImport("shakedown", shakedown.module("shakedown"));
     filter_helper.root_module.addImport("relic", module);
-    lfs_transfer_helper.root_module.addImport("relic", module);
-    if (features_option.lfs) lfs_transfer_helper.root_module.addImport("relic_lfs", package.module("relic_lfs"));
+    if (lfs_transfer_helper) |helper| {
+        helper.root_module.addImport("relic", module);
+        helper.root_module.addImport("relic_lfs", package.module("relic_lfs"));
+    }
     hook_fixture.root_module.addImport("relic", module);
     upload_pack_helper.root_module.addImport("relic", module);
     receive_pack_helper.root_module.addImport("relic", module);
@@ -416,7 +420,7 @@ pub fn dev(b: *std.Build, tools: type) void {
     check_step.dependOn(&held_git.step);
     check_step.dependOn(&lock_helper.step);
     check_step.dependOn(&filter_helper.step);
-    check_step.dependOn(&lfs_transfer_helper.step);
+    if (lfs_transfer_helper) |helper| check_step.dependOn(&helper.step);
     check_step.dependOn(&upload_pack_helper.step);
     check_step.dependOn(&receive_pack_helper.step);
     check_step.dependOn(&upload_archive_helper.step);

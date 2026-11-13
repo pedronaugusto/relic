@@ -2118,6 +2118,8 @@ test "a custom adapter the batch answer names moves the objects, handed the acti
 }
 
 test "a redirect to another host leaves the request's own Authorization behind, as git-lfs's does, and one to the same host keeps it" {
+    // Only with `http`: the redirect is followed by uplink's client.
+    if (!@import("relic_options").http) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     const tokens: []const testlfs.Token = &.{.{ .token = "t0ken", .user = "ada" }};
