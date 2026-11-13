@@ -81,6 +81,10 @@ test {
         _ = @import("codec/varint.zig");
         _ = @import("codec/rows.zig");
         _ = @import("odb/keep.zig");
+        _ = @import("odb/quarantine.zig");
+        _ = @import("maintenance/server_info.zig");
+        _ = @import("walk/walk.zig");
+        _ = @import("wire/credential/store.zig");
         _ = @import("names/ref.zig");
         _ = @import("refs/refs_test.zig");
         _ = @import("refs/verify_test.zig");
