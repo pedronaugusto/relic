@@ -471,6 +471,16 @@ fn untrackedIdent(gpa: Allocator, io: Io, work: Io.Dir) (Allocator.Error || Io.D
     const real = try fs.realPathAlloc(gpa, io, work, ".");
     defer gpa.free(real);
     if (builtin.target.os.tag == .windows) return gpa.print("Location {s}, system Windows", .{real});
+    if (builtin.target.os.tag == .freebsd) {
+        // Zig's std has no utsname for FreeBSD; uname(3)'s sysname is the
+        // kern.ostype sysctl, read here into SYS_NMLN, the size uname gives it.
+        var name: [256]u8 = undefined;
+        var len: usize = name.len;
+        // kern.ostype is a string the kernel always has and is shorter than
+        // SYS_NMLN, so the read has no way to fail; git dies where uname does.
+        if (std.c.sysctlbyname("kern.ostype", &name, &len, null, 0) != 0) unreachable;
+        return gpa.print("Location {s}, system {s}", .{ real, std.mem.sliceTo(name[0..len], 0) });
+    }
     const uts = std.posix.uname();
     return gpa.print("Location {s}, system {s}", .{ real, std.mem.sliceTo(&uts.sysname, 0) });
 }
