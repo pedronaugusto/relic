@@ -295,7 +295,9 @@ pub const Index = struct {
             const end = index.fanout(@intCast(bucket));
             if (end > index.count) return error.CorruptIndexFanout;
             if (end > 0 and (try index.rawNameAt(end - 1))[0] > bucket) return error.CorruptIndexFanout;
-            if (end < index.count and (try index.rawNameAt(end))[0] < bucket) return error.CorruptIndexFanout;
+            // The bucket holds every name that begins with its byte or a
+            // lower one, so the next name begins with a higher one.
+            if (end < index.count and (try index.rawNameAt(end))[0] <= bucket) return error.CorruptIndexFanout;
         }
     }
 
