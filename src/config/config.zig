@@ -1824,11 +1824,16 @@ fn userHome(gpa: Allocator, user: []const u8) PathError![]u8 {
     return gpa.dupe(u8, std.mem.span(dir));
 }
 
-/// git's integer spellings, as its `git_parse_signed` reads them:
-/// `strtoimax` in base 0 -- leading blanks and a sign, `0x` for
-/// hexadecimal, a leading `0` for octal -- then a `k`, `m` or `g` size
-/// suffix, and nothing after.
-fn parseWide(raw: []const u8) Self.ValueError!i64 {
+/// A number as git spells one: its sign, its magnitude and its size
+/// suffix's factor.
+const Spelling = struct { negative: bool, magnitude: u64, factor: u64 };
+
+/// `strtoimax` (`signed`) or `strtoumax` in base 0 -- leading blanks and a
+/// sign, `0x` for hexadecimal, a leading `0` for octal -- then git's
+/// `get_unit_factor`: nothing, or exactly one `k`, `m` or `g` in either
+/// case. git looks at `errno` first, so a magnitude past what the call
+/// holds is `error.OutOfRange` whatever follows the digits.
+fn spelling(raw: []const u8, comptime signed: bool) Self.ValueError!Spelling {
     var i: usize = 0;
     while (i < raw.len and (raw[i] == ' ' or (raw[i] >= '\t' and raw[i] <= '\r'))) i += 1;
     var negative = false;
@@ -1844,25 +1849,35 @@ fn parseWide(raw: []const u8) Self.ValueError!i64 {
         i += 2;
     } else if (i < raw.len and raw[i] == '0') base = 8;
     const digits_start = i;
-    var value: i64 = 0;
+    var magnitude: u64 = 0;
+    var overflow = false;
+    // strto*max reads every digit, saturating, and says ERANGE after.
     while (i < raw.len) : (i += 1) {
         const digit = std.fmt.charToDigit(raw[i], base) catch break;
-        value = std.math.mul(i64, value, base) catch return error.OutOfRange;
-        value = (if (negative) std.math.sub(i64, value, digit) else std.math.add(i64, value, digit)) catch return error.OutOfRange;
-    }
-    if (i == digits_start) return error.NotAnInteger;
-    var multiplier: i64 = 1;
-    if (i < raw.len) {
-        multiplier = switch (raw[i]) {
-            'k', 'K' => 1024,
-            'm', 'M' => 1024 * 1024,
-            'g', 'G' => 1024 * 1024 * 1024,
-            else => return error.NotAnInteger,
+        const shifted = std.math.mul(u64, magnitude, base) catch {
+            overflow = true;
+            continue;
         };
-        i += 1;
+        magnitude = std.math.add(u64, shifted, digit) catch {
+            overflow = true;
+            continue;
+        };
     }
-    if (i != raw.len) return error.NotAnInteger;
-    return std.math.mul(i64, value, multiplier) catch error.OutOfRange;
+    if (signed and magnitude > @as(u64, if (negative) 1 << 63 else std.math.maxInt(i64))) overflow = true;
+    if (overflow) return error.OutOfRange;
+    if (i == digits_start) return error.NotAnInteger;
+    const rest = raw[i..];
+    const factor: u64 = if (rest.len == 0)
+        1
+    else if (std.ascii.eqlIgnoreCase(rest, "k"))
+        1024
+    else if (std.ascii.eqlIgnoreCase(rest, "m"))
+        1024 * 1024
+    else if (std.ascii.eqlIgnoreCase(rest, "g"))
+        1024 * 1024 * 1024
+    else
+        return error.NotAnInteger;
+    return .{ .negative = negative, .magnitude = magnitude, .factor = factor };
 }
 
 /// `raw` as a `T`: git's `git_parse_signed` for a signed `T` and
@@ -1871,20 +1886,28 @@ fn parseWide(raw: []const u8) Self.ValueError!i64 {
 /// multiplied, is `error.OutOfRange`; an unsigned `T` takes no `-`.
 pub fn parseInteger(comptime T: type, raw: []const u8) Self.ValueError!T {
     return switch (@typeInfo(T).int.signedness) {
-        .signed => aegis.int.narrow(T, try parseWide(raw)) orelse error.OutOfRange,
-        .unsigned => aegis.int.narrow(T, try parseUnsigned(raw, std.math.maxInt(T))) orelse error.OutOfRange,
+        .signed => @intCast(try parseSigned(raw, std.math.maxInt(T))),
+        .unsigned => @intCast(try parseUnsigned(raw, std.math.maxInt(T))),
     };
 }
 
+/// git's `git_parse_signed`: what `strtoimax` reads, times its factor,
+/// refused unless it lies within `-max - 1` and `max`.
+fn parseSigned(raw: []const u8, max: i64) Self.ValueError!i64 {
+    const s = try spelling(raw, true);
+    const value: i128 = if (s.negative) -@as(i128, s.magnitude) else s.magnitude;
+    const factor: i128 = s.factor;
+    if ((value < 0 and @divTrunc(-@as(i128, max) - 1, factor) > value) or (value > 0 and @divTrunc(max, factor) < value)) return error.OutOfRange;
+    return @intCast(value * factor);
+}
+
 /// git's `git_parse_unsigned`, what an `OPT_UNSIGNED` option and an
-/// unsigned setting are read with: `strtoumax` in base 0 -- leading blanks
-/// and a `+`, `0x` for hexadecimal, a leading `0` for octal -- then a `k`,
-/// `m` or `g` size suffix and nothing after, no `-` anywhere, and at most
-/// `max` once multiplied.
+/// unsigned setting are read with: no `-` anywhere, then what `strtoumax`
+/// reads, times its factor, at most `max`.
 fn parseUnsigned(raw: []const u8, max: u64) Self.ValueError!u64 {
     if (std.mem.findScalar(u8, raw, '-') != null) return error.NotAnInteger;
-    // Read as `i64`, which holds every `max` a caller passes.
-    const value = aegis.int.cast(u64, try parseWide(raw)) catch return error.OutOfRange;
+    const s = try spelling(raw, false);
+    const value = std.math.mul(u64, s.magnitude, s.factor) catch return error.OutOfRange;
     if (value > max) return error.OutOfRange;
     return value;
 }
@@ -2354,10 +2377,12 @@ pub fn unquote(gpa: Allocator, raw: []const u8) UnquoteError![]u8 {
                 '\\' => '\\',
                 '"' => '"',
                 '\n' => continue,
-                '\r' => {
-                    if (i + 1 < raw.len and raw[i + 1] == '\n') i += 1;
+                // git's get_next_char folds CR LF to LF, which joins the
+                // lines; a CR alone is an escape git refuses.
+                '\r' => if (i + 1 < raw.len and raw[i + 1] == '\n') {
+                    i += 1;
                     continue;
-                },
+                } else return error.MalformedValue,
                 else => return error.MalformedValue,
             };
             out.writer.writeByte(escaped) catch return error.OutOfMemory;
