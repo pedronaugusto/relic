@@ -1,5 +1,5 @@
-//! Writes `src/text/legacy/tables.zig`: each encoding name both iconvs git
-//! is built with take, and how their common meaning of it differs from the
+//! Writes `src/text/legacy/tables.zig`: each encoding name either iconv git
+//! is built with takes, and how relic's meaning of it differs from the
 //! WHATWG standard's (designs/relic.md §14).
 //!
 //! `encodings <glibc source> <output file>`, on macOS. Apple's libiconv,
@@ -14,11 +14,14 @@
 //! marks after it as they decode, from the tables in `iconvdata/cp1255.c`
 //! and `cp1258.c`.
 //!
-//! The common meaning of a sequence of bytes is what both iconvs read it
-//! as, and of a character what both write it as; anything else is refused.
-//! A delta holds the sequences and characters where relic's reading
-//! through the standard, `legacy.zig`, would differ from the common
-//! meaning. The generator checks the result over every sequence of up to
+//! relic's meaning (§14's rule): where git behaves the same on every
+//! platform, relic matches git; where the platforms' gits differ, the
+//! standard decides. So a sequence of bytes reads as both iconvs read it
+//! where they agree, refusing included, and as the standard reads it where
+//! they differ; a character likewise. An iconv that takes no such name
+//! refuses everything in it. A delta holds the sequences and characters
+//! where relic's reading through the standard, `legacy.zig`, would differ
+//! from that meaning. The generator checks the result over every sequence of up to
 //! two bytes (three for EUC-JP's JIS X 0212, four for GB18030's, and the
 //! letters with up to three marks of the composing encodings) and every
 //! character, and writes nothing if any differs.
@@ -38,8 +41,8 @@ pub fn main(init: std.process.Init) !void {
     const a = init.arena.allocator();
     const io = init.io;
     const args = try init.minimal.args.toSlice(a);
-    if (args.len != 3) {
-        std.debug.print("usage: encodings <glibc source> <output file>\n", .{});
+    if (args.len != 4) {
+        std.debug.print("usage: encodings <glibc source> <tables file> <disputes file>\n", .{});
         return error.Usage;
     }
     const root = try Io.Dir.cwd().openDir(io, args[1], .{});
@@ -57,20 +60,33 @@ pub fn main(init: std.process.Init) !void {
 
     var meanings: std.ArrayList(Meaning) = .empty;
     var names: std.ArrayList(Name) = .empty;
-    var it = glibc.names.iterator();
+    // Every name glibc knows and every label of the standard's: a name only
+    // one iconv takes is converted on one platform and kept on the other,
+    // so the standard decides it, which takes trying each label on Apple's.
+    var seen: std.StringHashMapUnmanaged(void) = .empty;
     var labels: std.ArrayList([]const u8) = .empty;
-    while (it.next()) |kv| try labels.append(a, kv.key_ptr.*);
+    var it = glibc.names.iterator();
+    while (it.next()) |kv| if (!(try seen.getOrPut(a, kv.key_ptr.*)).found_existing) try labels.append(a, kv.key_ptr.*);
+    for (xg.labels()) |l| if (!(try seen.getOrPut(a, l.label)).found_existing) try labels.append(a, l.label);
     std.mem.sortUnstable([]const u8, labels.items, {}, lessString);
+    // glibc's table for a name it does not take: it refuses every sequence
+    // and character, as its iconv_open refuses the name.
+    const no_map: Map = .{ .charmap = "no charmap" };
     for (labels.items) |label| {
-        const module = glibc.resolve(label) orelse continue;
-        // relic's own: UTF-8 and the UTFs, ASCII and ISO-8859-1.
-        if (own(module)) continue;
         const encoding = xg.forLabel(label) orelse continue;
         if (!tabled(encoding)) continue;
-        const map = (try glibc.module(a, io, root, module)) orelse continue;
-        const dec = appleOpen("UTF-8", label) orelse continue;
-        const enc = appleOpen(label, "UTF-8") orelse continue;
-        const apple: Apple = .{ .decoder = dec, .encoder = enc };
+        const resolved = glibc.resolve(label);
+        // A name Apple's iconv does not take: the Mac's git keeps every
+        // text in it, glibc's converts, so the standard decides.
+        const apple: ?Apple = if (appleOpen("UTF-8", label)) |dec| if (appleOpen(label, "UTF-8")) |enc| .{ .decoder = dec, .encoder = enc } else null else null;
+        // relic's own, UTF-8 and the UTFs, ASCII and ISO-8859-1, where both
+        // take the name; one only glibc takes is the standard's to decide.
+        if (resolved) |m| if (own(m) and apple != null) continue;
+        // A name glibc takes with no table its source states is not read.
+        const map: *const Map = if (resolved) |m| (try glibc.module(a, io, root, m)) orelse continue else &no_map;
+        // Neither takes it: git keeps every text in it on each platform.
+        if (resolved == null and apple == null) continue;
+        const module = resolved orelse try std.ascii.allocUpperString(a, xg.name(encoding));
         const meaning = try measure(a, encoding, map, apple, module);
         const index = for (meanings.items, 0..) |m, i| {
             if (std.mem.eql(u8, m.module, meaning.module) and std.mem.eql(u8, m.text, meaning.text)) break i;
@@ -98,7 +114,7 @@ pub fn main(init: std.process.Init) !void {
     }
     try w.writeAll(
         \\
-        \\/// The names both iconvs take, each as glibc lists it, lower-cased;
+        \\/// The names either iconv takes, each as glibc lists it, lower-cased;
         \\/// compared ignoring ASCII case.
         \\pub const names = [_]struct { []const u8, *const Legacy }{
         \\
@@ -106,6 +122,36 @@ pub fn main(init: std.process.Init) !void {
     for (names.items) |n| try w.print("    .{{ \"{s}\", &{s} }},\n", .{ n.label, meanings.items[n.meaning].ident });
     try w.writeAll("};\n");
     try Io.Dir.cwd().writeFile(io, .{ .sub_path = args[2], .data = out.written() });
+
+    // The tests' record of where the platforms' gits differ, so each host's
+    // git is compared with relic only where its iconv agrees with relic.
+    var disputes: Io.Writer.Allocating = .init(a);
+    const d = &disputes.writer;
+    try d.print(
+        \\//! Written by tools/encodings.zig from glibc {s}'s source and Apple's
+        \\//! libiconv on macOS {s} (designs/relic.md §14). Not to be edited.
+        \\
+    , .{ glibc.version, macos });
+    try d.writeAll(
+        \\//! Where the two iconvs differ, relic reads and writes as the standard
+        \\//! does: these are those sequences and characters, each range with which
+        \\//! iconv reads or writes it otherwise than relic. A test holds relic to
+        \\//! a host's git everywhere else, and to the standard here.
+        \\const tables = @import("../text/legacy/tables.zig");
+        \\const Legacy = @import("../text/legacy.zig").Legacy;
+        \\
+        \\/// Sequences of `len` bytes, `first` to `last` read as big-endian
+        \\/// numbers, or characters `first` to `last` (`len` 0).
+        \\pub const Range = struct { len: u8 = 0, first: u32, last: u32, apple: bool, glibc: bool };
+        \\
+        \\pub const Disputes = struct { reads: []const Range = &.{}, writes: []const Range = &.{} };
+        \\
+        \\pub const all = [_]struct { *const Legacy, Disputes }{
+        \\
+    );
+    for (meanings.items) |m| if (m.disputes.len > 0) try d.print("    .{{ &tables.{s}, .{{\n{s}    }} }},\n", .{ m.ident, m.disputes });
+    try d.writeAll("};\n");
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = args[3], .data = disputes.written() });
 }
 
 const Name = struct { label: []const u8, meaning: usize };
@@ -116,6 +162,8 @@ const Meaning = struct {
     text: []const u8,
     doc: []const u8,
     summary: []const u8,
+    /// The fields of its `Disputes` literal; empty where the iconvs agree.
+    disputes: []const u8,
     ident: []const u8 = "",
 };
 
@@ -305,6 +353,7 @@ const Glibc = struct {
         const m = try a.create(Map);
         m.* = .{ .charmap = charmap };
         try m.readCharmap(a, try readAll(a, io, root, charmap));
+        if (std.mem.eql(u8, name, "GB18030")) try m.gb18030Supplementary(a);
         if (readAll(a, io, root, try a.print("iconvdata/{s}.irreversible", .{name}))) |text| {
             try m.readIrreversible(a, text);
         } else |_| {}
@@ -358,6 +407,32 @@ const Map = struct {
             }
             const val = parseUnicode(a, u) catch continue;
             try m.both(a, try parseBytes(a, b), val);
+        }
+    }
+
+    /// GB18030 past the Basic Multilingual Plane, which glibc's module
+    /// computes and its charmap lists only in part: `iconvdata/gb18030.c`
+    /// reads a four-byte sequence of linear index 0x2E248 to 0x12E247 as
+    /// `idx - 0x1E248`, U+10000 to U+10FFFF, and writes those back so. The
+    /// charmap's own lines stand where it has them.
+    fn gb18030Supplementary(m: *Map, a: Allocator) !void {
+        var cp: u21 = 0x10000;
+        while (true) : (cp += 1) {
+            var idx: u32 = @as(u32, cp) + 0x1e248;
+            var bytes: [4]u8 = undefined;
+            bytes[3] = @intCast(0x30 + idx % 10);
+            idx /= 10;
+            bytes[2] = @intCast(0x81 + idx % 126);
+            idx /= 126;
+            bytes[1] = @intCast(0x30 + idx % 10);
+            idx /= 10;
+            bytes[0] = @intCast(0x81 + idx);
+            const chars = try utf8Of(a, &.{cp});
+            const key = try a.dupe(u8, &bytes);
+            _ = try m.decode.getOrPutValue(a, key, chars);
+            _ = try m.encode.getOrPutValue(a, chars, key);
+            m.longest = @max(m.longest, 4);
+            if (cp == 0x10ffff) break;
         }
     }
 
@@ -512,8 +587,8 @@ const Compose = struct {
 //=========================================================================
 
 /// The common meaning of one name, and its delta.
-fn measure(a: Allocator, encoding: xg.Encoding, map: *const Map, apple: Apple, module: []const u8) !Meaning {
-    var cx: Context = .{ .a = a, .map = map, .apple = apple, .l = .{ .encoding = encoding } };
+fn measure(a: Allocator, encoding: xg.Encoding, map: *const Map, apple: ?Apple, module: []const u8) !Meaning {
+    var cx: Context = .{ .a = a, .map = map, .apple = apple, .l = .{ .encoding = encoding }, .standard = .{ .encoding = encoding } };
     const keys = try cx.decodeKeys(encoding);
     try cx.buildDecode(keys);
     const chars = try cx.encodeKeys(encoding);
@@ -523,17 +598,25 @@ fn measure(a: Allocator, encoding: xg.Encoding, map: *const Map, apple: Apple, m
     try cx.verify(keys, chars, pairs);
     var text: Io.Writer.Allocating = .init(a);
     try cx.write(&text.writer);
+    var disputes: Io.Writer.Allocating = .init(a);
+    try writeRanges(&disputes.writer, "reads", try mergedRanges(a, cx.disputed_reads.items));
+    try writeRanges(&disputes.writer, "writes", try mergedRanges(a, cx.disputed_writes.items));
     return .{
+        .disputes = disputes.written(),
         .module = module,
         .text = text.written(),
-        .doc = try a.print("glibc's {s} ({s}) and Apple's, from the standard's {s}.", .{ module, map.charmap, xg.name(encoding) }),
+        .doc = try a.print("{s} and {s}, from the standard's {s}.", .{
+            if (map.decode.count() == 0) "No name of glibc's" else try a.print("glibc's {s} ({s})", .{ module, map.charmap }),
+            if (apple == null) "no name of Apple's" else "Apple's",
+            xg.name(encoding),
+        }),
         .summary = try a.print("{s}: {d} decode, {d} encode, {d} pairs", .{ xg.name(encoding), cx.decode.items.len, cx.encode.items.len, cx.pairs.items.len }),
     };
 }
 
 const Key = struct {
     bytes: []const u8,
-    /// What both iconvs read it as, in UTF-8; null where they do not agree.
+    /// What relic reads it as, in UTF-8 (`commonRead`); null for a refusal.
     common: ?[]const u8,
 };
 
@@ -545,8 +628,15 @@ const CharKey = struct {
 const Context = struct {
     a: Allocator,
     map: *const Map,
-    apple: Apple,
+    /// Null for a name Apple's iconv does not take.
+    apple: ?Apple,
     l: legacy.Legacy,
+    /// The standard's encoding with no delta.
+    standard: legacy.Legacy,
+    /// Every sequence and character measured, with whether each iconv
+    /// differs from relic there (neither, where they agree).
+    disputed_reads: std.ArrayList(Range) = .empty,
+    disputed_writes: std.ArrayList(Range) = .empty,
     decode: std.ArrayList(legacy.Decode) = .empty,
     encode: std.ArrayList(legacy.Encode) = .empty,
     pairs: std.ArrayList(legacy.Pair) = .empty,
@@ -558,47 +648,54 @@ const Context = struct {
         cx.l.pairs = cx.pairs.items;
     }
 
-    /// What both iconvs read `bytes` as.
+    /// What relic reads `bytes` as: what both iconvs read, where they
+    /// agree (both refusing included), and the standard's reading where
+    /// they differ.
     fn commonRead(cx: *Context, bytes: []const u8) !?[]const u8 {
         var buf: [64]u8 = undefined;
-        const theirs = appleRun(cx.apple.decoder, bytes, &buf) orelse return null;
-        if (!try cx.map.read(bytes, &cx.scratch, cx.a)) return null;
-        if (!std.mem.eql(u8, theirs, cx.scratch.items)) return null;
-        return try cx.a.dupe(u8, theirs);
+        const theirs: ?[]const u8 = if (cx.apple) |apple| appleRun(apple.decoder, bytes, &buf) else null;
+        const mine: ?[]const u8 = if (try cx.map.read(bytes, &cx.scratch, cx.a)) cx.scratch.items else null;
+        const key = keyValue(bytes);
+        if (same(theirs, mine)) {
+            try cx.disputed_reads.append(cx.a, .{ .len = @intCast(bytes.len), .first = key, .last = key, .apple = false, .glibc = false });
+            return if (theirs) |t| try cx.a.dupe(u8, t) else null;
+        }
+        var out: std.ArrayList(u8) = .empty;
+        const standard: ?[]const u8 = if (try readWith(cx.a, &cx.standard, bytes, &out)) out.items else null;
+        try cx.disputed_reads.append(cx.a, .{ .len = @intCast(bytes.len), .first = key, .last = key, .apple = !same(theirs, standard), .glibc = !same(mine, standard) });
+        return standard;
     }
 
-    /// What both iconvs write `cps` as.
+    /// What relic writes `cps` as: what both iconvs write, where they agree
+    /// (both refusing included), and the standard's bytes where they differ.
     fn commonWrite(cx: *Context, cps: []const u21) !?[]const u8 {
         var buf: [64]u8 = undefined;
         var in: [8]u8 = undefined;
-        const theirs = appleRun(cx.apple.encoder, utf8Into(&in, cps), &buf) orelse return null;
-        if (!try cx.map.write(cps, &cx.scratch, cx.a)) return null;
-        if (!std.mem.eql(u8, theirs, cx.scratch.items)) return null;
-        return try cx.a.dupe(u8, theirs);
+        const theirs: ?[]const u8 = if (cx.apple) |apple| appleRun(apple.encoder, utf8Into(&in, cps), &buf) else null;
+        const mine: ?[]const u8 = if (try cx.map.write(cps, &cx.scratch, cx.a)) cx.scratch.items else null;
+        if (same(theirs, mine)) {
+            // A character alone: the tests write characters one at a time.
+            if (cps.len == 1) try cx.disputed_writes.append(cx.a, .{ .first = cps[0], .last = cps[0], .apple = false, .glibc = false });
+            return if (theirs) |t| try cx.a.dupe(u8, t) else null;
+        }
+        var out: std.ArrayList(u8) = .empty;
+        const standard: ?[]const u8 = if (try writeWith(cx.a, &cx.standard, cps, &out)) out.items else null;
+        if (cps.len == 1) try cx.disputed_writes.append(cx.a, .{ .first = cps[0], .last = cps[0], .apple = !same(theirs, standard), .glibc = !same(mine, standard) });
+        return standard;
+    }
+
+    fn same(x: ?[]const u8, y: ?[]const u8) bool {
+        if (x == null or y == null) return x == null and y == null;
+        return std.mem.eql(u8, x.?, y.?);
     }
 
     /// relic's reading of `bytes`, in UTF-8, into `out`; false where it stops.
     fn relicRead(cx: *Context, bytes: []const u8, out: *std.ArrayList(u8)) !bool {
-        out.clearRetainingCapacity();
-        var i: usize = 0;
-        var cps: [2]u21 = undefined;
-        var buf: [4]u8 = undefined;
-        while (i < bytes.len) {
-            const n = legacy.decodeAt(&cx.l, bytes, &i, &cps) orelse return false;
-            for (cps[0..n]) |cp| try out.appendSlice(cx.a, buf[0..try std.unicode.utf8Encode(cp, &buf)]);
-        }
-        return true;
+        return readWith(cx.a, &cx.l, bytes, out);
     }
 
     fn relicWrite(cx: *Context, cps: []const u21, out: *std.ArrayList(u8)) !bool {
-        out.clearRetainingCapacity();
-        var i: usize = 0;
-        var bytes: [4]u8 = undefined;
-        while (i < cps.len) {
-            const n = legacy.encodeAt(&cx.l, cps, &i, &bytes) orelse return false;
-            try out.appendSlice(cx.a, bytes[0..n]);
-        }
-        return true;
+        return writeWith(cx.a, &cx.l, cps, out);
     }
 
     fn agrees(cx: *Context, got: bool, out: []const u8, want: ?[]const u8) bool {
@@ -840,7 +937,7 @@ const Context = struct {
     }
 
     /// Fails unless relic, with the delta as written, reads and writes every
-    /// key as both iconvs do.
+    /// key as its meaning says (`commonRead`, `commonWrite`).
     fn verify(cx: *Context, keys: []const Key, chars: []const CharKey, pairs: []const CharKey) !void {
         cx.sync();
         var out: std.ArrayList(u8) = .empty;
@@ -891,6 +988,71 @@ const Context = struct {
         try w.writeAll(" }");
     }
 };
+
+/// `bytes` read through `l`, in UTF-8, into `out`; false where it stops.
+fn readWith(a: Allocator, l: *const legacy.Legacy, bytes: []const u8, out: *std.ArrayList(u8)) !bool {
+    out.clearRetainingCapacity();
+    var i: usize = 0;
+    var cps: [2]u21 = undefined;
+    var buf: [4]u8 = undefined;
+    while (i < bytes.len) {
+        const n = legacy.decodeAt(l, bytes, &i, &cps) orelse return false;
+        for (cps[0..n]) |cp| try out.appendSlice(a, buf[0..try std.unicode.utf8Encode(cp, &buf)]);
+    }
+    return true;
+}
+
+/// `cps` written through `l` into `out`; false where it stops.
+fn writeWith(a: Allocator, l: *const legacy.Legacy, cps: []const u21, out: *std.ArrayList(u8)) !bool {
+    out.clearRetainingCapacity();
+    var i: usize = 0;
+    var bytes: [4]u8 = undefined;
+    while (i < cps.len) {
+        const n = legacy.encodeAt(l, cps, &i, &bytes) orelse return false;
+        try out.appendSlice(a, bytes[0..n]);
+    }
+    return true;
+}
+
+/// A disputed sequence or character range (`legacy_disputes.zig`'s).
+const Range = struct { len: u8 = 0, first: u32, last: u32, apple: bool, glibc: bool };
+
+/// The disputed among `ranges`, every key measured: sorted, and a run of
+/// keys of one length and one verdict as one range, whatever values lie
+/// between them that are no key (the tests look keys up alone).
+fn mergedRanges(a: Allocator, ranges: []Range) ![]const Range {
+    std.mem.sortUnstable(Range, ranges, {}, struct {
+        fn less(_: void, x: Range, y: Range) bool {
+            if (x.len != y.len) return x.len < y.len;
+            return x.first < y.first;
+        }
+    }.less);
+    var out: std.ArrayList(Range) = .empty;
+    for (ranges) |r| {
+        if (out.items.len > 0) {
+            const prev = &out.items[out.items.len - 1];
+            if (prev.len == r.len and prev.apple == r.apple and prev.glibc == r.glibc) {
+                prev.last = r.last;
+                continue;
+            }
+        }
+        try out.append(a, r);
+    }
+    var disputed: std.ArrayList(Range) = .empty;
+    for (out.items) |r| if (r.apple or r.glibc) try disputed.append(a, r);
+    return disputed.items;
+}
+
+fn writeRanges(w: *Io.Writer, field: []const u8, ranges: []const Range) !void {
+    if (ranges.len == 0) return;
+    try w.print("        .{s} = &.{{\n", .{field});
+    for (ranges) |r| {
+        try w.writeAll("            .{");
+        if (r.len > 0) try w.print(" .len = {d},", .{r.len});
+        try w.print(" .first = 0x{x}, .last = 0x{x}, .apple = {s}, .glibc = {s} }},\n", .{ r.first, r.last, if (r.apple) "true" else "false", if (r.glibc) "true" else "false" });
+    }
+    try w.writeAll("        },\n");
+}
 
 /// The first character of `chars`, UTF-8.
 fn firstOf(chars: []const u8) ?u21 {

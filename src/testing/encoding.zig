@@ -3,9 +3,11 @@
 //! the blobs and the files on the disk compared. Commits in Latin-1 and
 //! UTF-8: what `git log`, `git shortlog` and `git format-patch` write of
 //! them in each `i18n.logOutputEncoding`, and the commits a cherry-pick and
-//! `git commit-tree` make under `i18n.commitEncoding`. Each single-byte
-//! encoding of the standard's that relic converts, byte by byte and
-//! character by character, as `git log` converts it.
+//! `git commit-tree` make under `i18n.commitEncoding`. Each legacy
+//! encoding relic converts, byte by byte and character by character, as
+//! the host's `git log` converts it where the host's iconv agrees with
+//! relic, and as the standard does where the platforms' iconvs differ
+//! (`legacy_disputes.zig`, designs/relic.md §14).
 
 const std = @import("std");
 const Io = std.Io;
@@ -24,6 +26,8 @@ const ft = @import("filters.zig");
 const encoding = @import("../text.zig").encoding;
 const legacy = @import("../text/legacy.zig");
 const legacy_tables = @import("../text/legacy/tables.zig");
+const legacy_disputes = @import("legacy_disputes.zig");
+const builtin = @import("builtin");
 
 const testing = std.testing;
 
@@ -316,7 +320,7 @@ fn expectLoggedAlike(a: std.mem.Allocator, io: Io, r: *testgit.Repo, hex: []cons
     };
 }
 
-test "each encoding is converted as git log converts it: every sequence both iconvs read, every character both write, and a byte or character neither has kept as it was" {
+test "each encoding is converted as the host's git log converts it where its iconv agrees with relic, and as the standard where the platforms differ: every sequence relic reads, every character it writes, and a byte or character it has not kept as it was" {
     const gpa = testing.allocator;
     const io = testing.io;
     var r = try testgit.Repo.init(gpa, io, &.{});
@@ -369,7 +373,10 @@ test "each encoding is converted as git log converts it: every sequence both ico
             if (cp > 0xffff and cp % 31 != 0) continue;
             var i: usize = 0;
             var out: [4]u8 = undefined;
-            _ = legacy.encodeAt(l, &.{cp}, &i, &out) orelse continue;
+            const n = legacy.encodeAt(l, &.{cp}, &i, &out) orelse continue;
+            // Where the host's iconv writes it otherwise, relic writes the
+            // standard's bytes, and the host's git is not asked.
+            if (try heldToStandardWrite(l, cp, out[0..n])) continue;
             var utf8: [4]u8 = undefined;
             try written.add(a, utf8[0..try std.unicode.utf8Encode(cp, &utf8)]);
         }
@@ -386,14 +393,79 @@ test "each encoding is converted as git log converts it: every sequence both ico
             if (byte == 0xff and std.mem.eql(u8, name, "windows-874")) continue;
             var i: usize = 0;
             var cps: [2]u21 = undefined;
+            // A byte the host's iconv reads otherwise than relic: its git
+            // converts what relic keeps.
+            if (hostDisputes(disputesOf(l).reads, 1, byte)) continue;
             if (legacy.decodeAt(l, &.{ byte, 0x20 }, &i, &cps) == null) {
                 refused = byte;
                 break;
             }
         };
         if (refused) |byte| try expectLoggedAlike(a, io, &r, try commitOf(a, io, &r, name, try a.print("refused {x:0>2}: {c}\n", .{ byte, byte })), null, name);
+        // U+1F600, which only GB18030 has: where the host's iconv writes
+        // it otherwise (Apple's has no GB18030 past the Basic Multilingual
+        // Plane), relic writes the standard's bytes.
+        var at: usize = 0;
+        var emoji: [4]u8 = undefined;
+        const emoji_len = legacy.encodeAt(l, &.{0x1f600}, &at, &emoji);
+        if (emoji_len) |n| if (try heldToStandardWrite(l, 0x1f600, emoji[0..n])) continue;
         try expectLoggedAlike(a, io, &r, try commitOf(a, io, &r, null, "unmappable \xf0\x9f\x98\x80\n"), name, name);
     }
+}
+
+/// The iconv the host's git converts through: Apple's on macOS, glibc's on
+/// a GNU Linux. Elsewhere (Windows, musl, a BSD) it is neither relic's
+/// meaning was measured against, so every disputed sequence is the
+/// standard's alone.
+const host: enum { apple, glibc, other } = switch (builtin.os.tag) {
+    .macos => .apple,
+    .linux => if (builtin.abi.isGnu()) .glibc else .other,
+    else => .other,
+};
+
+fn disputesOf(l: *const legacy.Legacy) legacy_disputes.Disputes {
+    for (legacy_disputes.all) |entry| if (entry[0] == l) return entry[1];
+    return .{};
+}
+
+/// Whether the host's iconv reads or writes the key otherwise than relic.
+fn hostDisputes(ranges: []const legacy_disputes.Range, len: usize, key: u32) bool {
+    for (ranges) |r| if (r.len == len and key >= r.first and key <= r.last) return switch (host) {
+        .apple => r.apple,
+        .glibc => r.glibc,
+        .other => true,
+    };
+    return false;
+}
+
+/// For a sequence the host's iconv reads otherwise than relic: that relic
+/// reads it as the standard does, and true; false for any other.
+fn heldToStandardRead(l: *const legacy.Legacy, seq: []const u8, cps: []const u21) !bool {
+    if (!hostDisputes(disputesOf(l).reads, seq.len, std.mem.readVarInt(u32, seq, .big))) return false;
+    const standard: legacy.Legacy = .{ .encoding = l.encoding };
+    var i: usize = 0;
+    var want: [2]u21 = undefined;
+    const n = legacy.decodeAt(&standard, seq, &i, &want) orelse return error.TestUnexpectedResult;
+    testing.expectEqualSlices(u21, want[0..n], cps) catch |err| {
+        std.debug.print("{x} in {s}: relic reads it otherwise than the standard\n", .{ seq, @tagName(l.encoding) });
+        return err;
+    };
+    return true;
+}
+
+/// For a character the host's iconv writes otherwise than relic: that relic
+/// writes the standard's bytes, and true; false for any other.
+fn heldToStandardWrite(l: *const legacy.Legacy, cp: u21, bytes: []const u8) !bool {
+    if (!hostDisputes(disputesOf(l).writes, 0, cp)) return false;
+    const standard: legacy.Legacy = .{ .encoding = l.encoding };
+    var i: usize = 0;
+    var want: [4]u8 = undefined;
+    const n = legacy.encodeAt(&standard, &.{cp}, &i, &want) orelse return error.TestUnexpectedResult;
+    testing.expectEqualSlices(u8, want[0..n], bytes) catch |err| {
+        std.debug.print("U+{X:0>4} in {s}: relic writes it otherwise than the standard\n", .{ cp, @tagName(l.encoding) });
+        return err;
+    };
+    return true;
 }
 
 /// Text built a piece at a time, each after a space, sixteen to a line.
@@ -417,6 +489,9 @@ fn readOne(a: std.mem.Allocator, l: *const legacy.Legacy, seq: []const u8, bytes
     if (i != seq.len) return false;
     // ASCII read as itself is the commit's own text.
     if (seq.len == 1 and seq[0] < 0x80 and n == 1 and cps[0] == seq[0]) return true;
+    // Where the host's iconv reads it otherwise, relic reads it as the
+    // standard does, and the host's git is not asked.
+    if (try heldToStandardRead(l, seq, cps[0..n])) return true;
     var utf8: [8]u8 = undefined;
     var len: usize = 0;
     for (cps[0..n]) |cp| len += try std.unicode.utf8Encode(cp, utf8[len..]);

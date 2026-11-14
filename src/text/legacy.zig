@@ -1,13 +1,14 @@
 //! The encodings git converts through iconv past UTF-8, ASCII and
-//! ISO-8859-1, read as both the iconvs git is built with read them
-//! (designs/relic.md §14): an encoding of the WHATWG standard's
-//! (xenoglyph's), and where the iconvs' common meaning differs from it, a
-//! delta. `tools/encodings.zig` measures the delta and writes it into
+//! ISO-8859-1 (designs/relic.md §14): where git behaves the same on every
+//! platform, relic matches git; where the platforms' gits differ, the
+//! standard decides. Each is an encoding of the WHATWG standard's
+//! (xenoglyph's) and, where the iconvs agree on a meaning other than the
+//! standard's, a delta. `tools/encodings.zig` measures the delta and writes it into
 //! `legacy/tables.zig`.
 const std = @import("std");
 const xenoglyph = @import("xenoglyph");
 
-/// An encoding as both iconvs read it.
+/// An encoding as relic reads it: the standard's, and a delta.
 pub const Legacy = struct {
     /// The standard's encoding the meaning starts from.
     encoding: xenoglyph.encoding.Encoding,
@@ -86,8 +87,8 @@ pub fn encodeAt(l: *const Legacy, cps: []const u21, i: *usize, out: *[4]u8) ?u8 
         return e.len;
     }
     // The standard's bytes, where they read back as the character: a
-    // character the standard writes as bytes both iconvs read otherwise is
-    // one they do not write so.
+    // character the standard writes as bytes relic reads otherwise is one
+    // it does not write so.
     var utf8: [4]u8 = undefined;
     const n = std.unicode.utf8Encode(cp, &utf8) catch return null;
     var w: std.Io.Writer = .fixed(out);

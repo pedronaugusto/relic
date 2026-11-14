@@ -22,8 +22,9 @@
 //! `i18n.logOutputEncoding`, a mail in its `charset` (`reencode`, git's
 //! `reencode_string_len`, and `same`, its `same_encoding`), for the
 //! character sets `Charset` names: UTF-8, ASCII, Latin-1 and the WHATWG
-//! standard's encodings (xenoglyph's), each as both of git's iconvs read
-//! it, Apple's libiconv and glibc's (`legacy.zig`, designs/relic.md §14).
+//! standard's encodings (xenoglyph's), each as git's iconvs read it,
+//! Apple's libiconv and glibc's, where they agree, and as the standard
+//! reads it where they differ (`legacy.zig`, designs/relic.md §14).
 //!
 //! Names: on macOS, under `core.precomposeUnicode`, a name read from a
 //! directory in its decomposed spelling, composed as git's `readdir`
@@ -106,15 +107,16 @@ pub fn same(x: ?[]const u8, y: ?[]const u8) bool {
 
 /// The character sets commit messages, log output and mail are converted
 /// between, as git converts them with iconv (`reencode_string_len`). Each
-/// is what Apple's libiconv and glibc's both make of its name; a name
-/// either refuses is one this package does not convert, which `reencode`
+/// is what Apple's libiconv and glibc's make of its name where they agree,
+/// and the standard's where they differ; a name both refuse is one this
+/// package does not convert, which `reencode`
 /// refuses rather than leave the text unconverted where git would convert
 /// it.
 pub const Charset = union(enum) {
     utf8,
     ascii,
     latin1,
-    /// One of the standard's encodings, as both iconvs read it.
+    /// One of the standard's encodings, as relic reads it (`legacy.zig`).
     legacy: *const legacy.Legacy,
 
     /// The spellings both iconvs take for each, compared ignoring case; any
@@ -550,19 +552,22 @@ test "text is reencoded as iconv converts it, and stops where iconv stops" {
     try testing.expect(!same("latin1", "ISO-8859-1") and !same(null, "ISO-8859-1"));
 }
 
-test "a name both iconvs take is an encoding as both read it, and a name either refuses is none" {
+test "a name either iconv takes is an encoding, read as both read it where they agree and as the standard reads it where they differ, and a name neither takes is none" {
     for (legacy_tables.names) |entry| try testing.expect(Charset.fromName(entry[0]).? == .legacy);
     try testing.expect(Charset.fromName("LATIN2").? == .legacy);
     try testing.expect(Charset.fromName("Shift_JIS").?.legacy == &legacy_tables.sjis);
-    // Refused by one iconv or both: Apple's takes none of these.
-    for ([_][]const u8{ "LATIN-1", "x-cp1252", "iso88592", "l9", "csisolatin9", "x-sjis", "windows-949", "ks_c_5601-1987", "iso-2022-jp", " latin2" }) |n| {
+    // Taken by glibc's iconv and not Apple's: one platform's git converts,
+    // the other's keeps the text, so the standard decides.
+    for ([_][]const u8{ "iso88592", "l9", "ks_c_5601-1987", "korean", "csbig5" }) |n| try testing.expect(Charset.fromName(n).? == .legacy);
+    // Taken by neither, or not read sequence by sequence (ISO-2022-JP).
+    for ([_][]const u8{ "LATIN-1", "x-cp1252", "csisolatin9", "x-sjis", "windows-949", "iso-2022-jp", " latin2" }) |n| {
         try testing.expect(Charset.fromName(n) == null);
     }
 
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const Case = struct { name: []const u8, bytes: []const u8, text: ?[]const u8 };
+    const Case = struct { name: []const u8, bytes: []const u8, text: ?[]const u8, written: bool = true };
     for ([_]Case{
         .{ .name = "cp1252", .bytes = "\x80", .text = "\u{20ac}" },
         // a slot the code page leaves empty
@@ -571,26 +576,35 @@ test "a name both iconvs take is an encoding as both read it, and a name either 
         .{ .name = "latin5", .bytes = "\x80\xd0", .text = "\u{80}\u{11e}" },
         .{ .name = "iso-8859-11", .bytes = "\x85", .text = "\u{85}" },
         .{ .name = "iso-8859-11", .bytes = "\xdb", .text = null },
-        .{ .name = "tis-620", .bytes = "\xa0", .text = null },
+        // Apple's iconv reads it, glibc's refuses it: the standard's
+        // windows-874 decides
+        .{ .name = "tis-620", .bytes = "\xa0", .text = "\u{a0}" },
         .{ .name = "tis-620", .bytes = "\xa1", .text = "\u{e01}" },
-        .{ .name = "mac", .bytes = "\xf0", .text = null },
+        // Apple's logo: Apple's iconv reads it, glibc's refuses it, and the
+        // standard reads it as Apple's does
+        .{ .name = "mac", .bytes = "\xf0", .text = "\u{f8ff}" },
         .{ .name = "koi8-u", .bytes = "\xae\xbe", .text = "\u{255d}\u{256c}" },
         // Shift_JIS's yen and overline, where the standard reads ASCII
         .{ .name = "Shift_JIS", .bytes = "\x5c\x7e\x82\xa0", .text = "\u{a5}\u{203e}\u{3042}" },
         .{ .name = "EUC-JP", .bytes = "\xa4\xa2\x8f\xb0\xa1", .text = "\u{3042}\u{4e02}" },
         .{ .name = "EUC-KR", .bytes = "\xb0\xa1", .text = "\u{ac00}" },
-        // UHC's extension, which neither iconv reads as EUC-KR
-        .{ .name = "EUC-KR", .bytes = "\x81\x41", .text = null },
+        // UHC's extension: Apple's iconv refuses it, glibc's reads its 0x81
+        // as a C1 control, so the standard's EUC-KR, which is UHC, decides;
+        // both refuse to write the character, so relic does too
+        .{ .name = "EUC-KR", .bytes = "\x81\x41", .text = "\u{ac02}", .written = false },
         .{ .name = "GB2312", .bytes = "\xb0\xa1", .text = "\u{554a}" },
         // GBK's, which GB2312 does not have
         .{ .name = "GB2312", .bytes = "\x81\x40", .text = null },
         .{ .name = "GBK", .bytes = "\x81\x40", .text = "\u{4e02}" },
         .{ .name = "GB18030", .bytes = "\x81\x30\x81\x30", .text = "\u{80}" },
-        // past the Basic Multilingual Plane, which Apple's does not map
-        .{ .name = "GB18030", .bytes = "\x90\x30\x81\x30", .text = null },
+        // past the Basic Multilingual Plane, the standard's four bytes:
+        // glibc's iconv maps them, Apple's does not, so the standard decides
+        .{ .name = "GB18030", .bytes = "\x90\x30\x81\x30", .text = "\u{10000}" },
+        .{ .name = "GB18030", .bytes = "\x94\x39\xfc\x36", .text = "\u{1f600}" },
         .{ .name = "Big5", .bytes = "\xa4\x40", .text = "\u{4e00}" },
-        // glibc composes a letter and its point, Apple's iconv does not
-        .{ .name = "windows-1255", .bytes = "\xe9\xc4", .text = null },
+        // glibc composes a letter and its point, Apple's iconv does not, so
+        // the standard decides: the two as they are
+        .{ .name = "windows-1255", .bytes = "\xe9\xc4", .text = "\u{5d9}\u{5b4}" },
         .{ .name = "windows-1255", .bytes = "\xe9", .text = "\u{5d9}" },
     }) |case| {
         const got = try reencode(a, case.bytes, "UTF-8", case.name);
@@ -598,7 +612,10 @@ test "a name both iconvs take is an encoding as both read it, and a name either 
             std.debug.print("{s}: {x}\n", .{ case.name, case.bytes });
             return err;
         };
-        if (case.text) |text| try testing.expectEqualStrings(case.bytes, (try reencode(a, text, case.name, "UTF-8")).?);
+        if (case.text) |text| {
+            const back = try reencode(a, text, case.name, "UTF-8");
+            if (case.written) try testing.expectEqualStrings(case.bytes, back.?) else try testing.expect(back == null);
+        }
     }
     // written as both write it: a composite as its letter and point, and
     // nothing for a character neither has

@@ -573,8 +573,9 @@ pub fn dev(b: *std.Build, tools: type) void {
     measure.setCwd(p.path("."));
     if (b.option([]const u8, "glibc-source", "glibc's source, for the encodings step")) |source| measure.addArg(source);
     measure.addArg("src/text/legacy/tables.zig");
+    measure.addArg("src/testing/legacy_disputes.zig");
     measure.has_side_effects = true;
-    b.step("encodings", "Write src/text/legacy/tables.zig from Apple's libiconv and glibc's source (-Dglibc-source)").dependOn(&measure.step);
+    b.step("encodings", "Write src/text/legacy/tables.zig and the tests' src/testing/legacy_disputes.zig from Apple's libiconv and glibc's source (-Dglibc-source)").dependOn(&measure.step);
 }
 
 /// What fetching and pushing over HTTP need, fetched only while `http` is on.
