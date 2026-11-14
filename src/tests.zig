@@ -80,6 +80,7 @@ test {
         // so named here for its tests to run
         _ = @import("codec/varint.zig");
         _ = @import("codec/rows.zig");
+        _ = @import("object/crud.zig");
         _ = @import("odb/keep.zig");
         _ = @import("odb/quarantine.zig");
         _ = @import("maintenance/server_info.zig");

@@ -1262,7 +1262,9 @@ test "repository writes preserve signature and hash refusals" {
     defer repo.deinit(io);
     const tree = hash.Hasher.object(.sha1, "tree", "");
     var invalid = fixture_who;
-    invalid.name = "broken\nname";
+    // all crud: what git's strict ident refuses, where a newline inside a
+    // name it only leaves out
+    invalid.name = " ,;<\n> ";
     try std.testing.expectError(error.InvalidSignature, repo.writeCommit(io, .{
         .tree = tree,
         .author = invalid,
