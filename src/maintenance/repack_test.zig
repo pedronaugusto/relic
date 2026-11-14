@@ -1000,12 +1000,16 @@ test "repack --drop-filtered drops the promisor blobs git 2.56's does, and lists
     defer theirs.repo.deinit();
     var ours = try dropFixture(now);
     defer ours.repo.deinit();
-    // a blob made here, which no promisor remote has, is never one
+    // a blob made here, which no promisor remote has, is never one; it stays
+    // loose, so its time is pinned: the two repos' writes can fall in
+    // different seconds, and state() prints a loose object's time
     for ([_]*testgit.Repo{ &theirs.repo, &ours.repo }) |r| {
         const bytes = try gpa.alloc(u8, 4096);
         defer gpa.free(bytes);
         noise(bytes, 9);
-        gpa.free(try r.runInput(io, &.{ "hash-object", "-w", "--stdin" }, bytes));
+        const oid = try blob(r, bytes);
+        defer gpa.free(oid);
+        try touchObject(r, oid, now);
     }
     const listed = try theirs.repo.run(io, &.{ "-c", "repack.writeBitmaps=false", "repack", "--drop-filtered", "--filter=blob:limit=1k", "--dry-run", "-a" });
     defer gpa.free(listed);
