@@ -65,23 +65,22 @@ const Context = struct {
     }
 };
 
-const Git = enum { release, master, floor };
+/// The gits the compatibility jobs (.github/workflows/git.yml) build
+/// themselves; every other job runs preflight's held git.
+const Git = enum { master, floor };
 
 fn buildGit(c: Context, root: []const u8, kind: Git) !void {
     const master = kind == .master;
     const name = switch (kind) {
-        .release => "git",
         .master => "master",
         .floor => "old-git",
     };
     const prefix = try std.Io.Dir.path.join(c.a, &.{ root, name });
-    // A cached build is kept only while it is the release asked for: the
-    // tool cache's key does not follow `git_release.zig`.
+    // A cached build is kept only while it is the release asked for.
     const built = try std.Io.Dir.path.join(c.a, &.{ prefix, "bin", "git" });
     if (!master and c.exists(built)) {
         const version = try c.capture(&.{ built, "--version" });
-        const wanted = if (kind == .floor) std.mem.eql(u8, std.mem.trimEnd(u8, version, "\r\n"), "git version " ++ floor_version) else held(version);
-        if (wanted) return;
+        if (std.mem.eql(u8, std.mem.trimEnd(u8, version, "\r\n"), "git version " ++ floor_version)) return;
         try std.Io.Dir.cwd().deleteTree(c.io, prefix);
     }
     try c.command(&.{ "sudo", "apt-get", "update" });
@@ -94,9 +93,7 @@ fn buildGit(c: Context, root: []const u8, kind: Git) !void {
         } else try c.command(&.{ "git", "clone", "--depth", "1", "https://github.com/git/git.git", source });
     } else {
         const archive = try std.Io.Dir.path.join(c.a, &.{ root, try c.a.print("{s}.tar.xz", .{name}) });
-        const version = if (kind == .floor) floor_version else try c.a.print("{f}", .{git_release.held});
-        const digest = if (kind == .floor) floor_sha256 else git_release.sha256;
-        try c.fetch(try c.a.print("https://mirrors.edge.kernel.org/pub/software/scm/git/git-{s}.tar.xz", .{version}), archive, digest);
+        try c.fetch("https://mirrors.edge.kernel.org/pub/software/scm/git/git-" ++ floor_version ++ ".tar.xz", archive, floor_sha256);
         // A cached tree of another release must not underlie this one.
         try std.Io.Dir.cwd().deleteTree(c.io, source);
         try std.Io.Dir.cwd().createDirPath(c.io, source);
@@ -164,13 +161,27 @@ fn old(c: Context, root: []const u8) !void {
     try lfs(c, root);
     try selectLfs(c, root, git);
     // The next hosted step must choose this Git before the runner's own.
+    try addToPath(c, &.{ bin, try std.Io.Dir.path.join(c.a, &.{ root, "lfs", "bin" }) });
+    try report("{s}", c.io, .{version});
+}
+
+/// `dirs` on the path of the hosted steps after this one (`GITHUB_PATH`),
+/// the first first; ahead of the runner's own, behind nothing setup did
+/// not put there.
+fn addToPath(c: Context, dirs: []const []const u8) !void {
     const path_file = c.env.get("GITHUB_PATH") orelse return error.HostedSetupOnly;
     const file = try std.Io.Dir.cwd().openFile(c.io, path_file, .{ .mode = .write_only });
     defer file.close(c.io);
-    const at = (try file.stat(c.io)).size;
-    const lfs_bin = try std.Io.Dir.path.join(c.a, &.{ root, "lfs", "bin" });
-    try file.writePositionalAll(c.io, try c.a.print("{s}\n{s}\n", .{ bin, lfs_bin }), at);
-    try report("{s}", c.io, .{version});
+    var at = (try file.stat(c.io)).size;
+    // GitHub puts each line it reads ahead of the path so far, so the last
+    // line written is the first on the path.
+    var i = dirs.len;
+    while (i > 0) {
+        i -= 1;
+        const line = try c.a.print("{s}\n", .{dirs[i]});
+        try file.writePositionalAll(c.io, line, at);
+        at += line.len;
+    }
 }
 
 fn selectLfs(c: Context, root: []const u8, git: []const u8) !void {
@@ -214,27 +225,39 @@ pub fn main(init: std.process.Init) !void {
     const root = try std.Io.Dir.path.join(a, &.{ init.environ_map.get("RUNNER_TEMP") orelse return error.HostedSetupOnly, "preflight-tools" });
     try std.Io.Dir.cwd().createDirPath(c.io, root);
     if (args.len > 1 and std.mem.eql(u8, args[1], "old")) return old(c, root);
-    const master = args.len > 1 and std.mem.eql(u8, args[1], "master");
-    switch (builtin.target.os.tag) {
-        .linux => try buildGit(c, root, if (master) .master else .release),
-        .macos => {
-            if (!held(try c.capture(&.{ "git", "--version" }))) try c.command(&.{ "brew", "upgrade", "git" });
-        },
-        .windows => {
-            if (!held(try c.capture(&.{ "git", "--version" }))) try c.command(&.{ "choco", "upgrade", "git", "-y", "--no-progress" });
-        },
-        else => return error.UnsupportedHost,
+    if (args.len > 1 and std.mem.eql(u8, args[1], "master")) return gitMaster(c, root);
+    // Every other job runs preflight's held git, which a step before this
+    // one built or installed and put first on the path, its program in
+    // `PREFLIGHT_GIT`. What is left here is git-lfs, and on Linux the
+    // signers the signing tests need (`testing/git.zig`'s `signersRequired`).
+    if (builtin.target.os.tag == .linux) {
+        try c.command(&.{ "sudo", "apt-get", "update" });
+        try c.command(&.{ "sudo", "apt-get", "install", "-y", "--no-install-recommends", "gnupg", "openssh-client" });
     }
-    if (!master) try lfs(c, root);
-    const git = if (builtin.target.os.tag == .linux) try std.Io.Dir.path.join(a, &.{ root, if (master) "master" else "git", "bin", "git" }) else "git";
-    if (!master) try selectLfs(c, root, git);
-    const version = try c.capture(&.{ git, "--version" });
-    if (master) {
-        if (!recent(version)) return error.GitTooOld;
-    } else if (!held(version)) {
+    const git = init.environ_map.get("PREFLIGHT_GIT") orelse "git";
+    try lfs(c, root);
+    try selectLfs(c, root, git);
+    try addToPath(c, &.{try std.Io.Dir.path.join(a, &.{ root, "lfs", "bin" })});
+    const version = c.capture(&.{ git, "--version" }) catch |err| {
+        try report("relic's comparisons are held to git {f} (src/testing/git_release.zig), and this job has no git that runs ({s}): preflight's held git (ci/workflow.json `git`) puts it first on the path and in PREFLIGHT_GIT\n", c.io, .{ git_release.held, git });
+        return err;
+    };
+    if (!held(version)) {
         try report("relic's comparisons are held to git {f} (src/testing/git_release.zig); this runner has {s}", c.io, .{ git_release.held, version });
         return error.NotTheHeldGit;
     }
+    try report("{s}", c.io, .{version});
+}
+
+/// git's development branch, built for the compatibility job that runs it
+/// (`RELIC_GIT=master`), first on the path of the steps after this one.
+fn gitMaster(c: Context, root: []const u8) !void {
+    if (builtin.target.os.tag != .linux) return error.UnsupportedHost;
+    try buildGit(c, root, .master);
+    const bin = try std.Io.Dir.path.join(c.a, &.{ root, "master", "bin" });
+    const version = try c.capture(&.{ try std.Io.Dir.path.join(c.a, &.{ bin, "git" }), "--version" });
+    if (!recent(version)) return error.GitTooOld;
+    try addToPath(c, &.{bin});
     try report("{s}", c.io, .{version});
 }
 

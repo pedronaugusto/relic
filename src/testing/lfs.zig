@@ -57,19 +57,27 @@ pub fn environ(gpa: Allocator, home: []const u8) !Environ.Map {
 var lfs_checked = false;
 var lfs_present = false;
 
-/// `error.SkipZigTest` unless `git lfs` runs, with `env` and nothing else.
+/// `error.SkipZigTest` unless `git lfs` runs, with `env` and nothing else;
+/// on a hosted job that installs git-lfs (every one but the development
+/// branch's, `RELIC_GIT=master`), `error.NoGitLfsOnHostedJob`, so an LFS
+/// comparison cannot pass there by never running.
 pub fn requireGitLfs(gpa: Allocator, io: Io, env: *const Environ.Map) !void {
     try testgit.requireGit(gpa, io);
     if (!lfs_checked) {
         lfs_checked = true;
         var root_buf: [Io.Dir.max_path_bytes]u8 = undefined;
         const root = try testgit.testsRoot(&root_buf);
-        var outcome = program.run(gpa, io, .{ .environ = env }, .{ .argv = &.{ "git", "lfs", "version" }, .cwd = .{ .path = root } }, .{}) catch
-            return error.SkipZigTest;
-        defer outcome.deinit(gpa);
-        lfs_present = outcome.succeeded();
+        if (program.run(gpa, io, .{ .environ = env }, .{ .argv = &.{ "git", "lfs", "version" }, .cwd = .{ .path = root } }, .{})) |ran| {
+            var outcome = ran;
+            defer outcome.deinit(gpa);
+            lfs_present = outcome.succeeded();
+        } else |_| lfs_present = false;
     }
-    if (!lfs_present) return error.SkipZigTest;
+    if (lfs_present) return;
+    const required = if (testgit.hostedGit()) |which| which != .master else false;
+    if (!required) return error.SkipZigTest;
+    std.debug.print("`git lfs` does not run on this hosted job: relic's setup (`zig build ci-setup`) installs git-lfs and puts it on the path\n", .{});
+    return error.NoGitLfsOnHostedJob;
 }
 
 /// Run `git` with `env` and only `env`, in `dir`. The output is the
