@@ -11,11 +11,12 @@
   ],
   "compile_once": false,
   "setup_step": "ci-setup",
-  "test_job_timeout": 45,
+  "test_job_timeout": 60,
   "windows_job_timeout": 60,
   "source_job_timeout": 10,
   "fast_shards": 2,
   "shards": {
+    "linux": 2,
     "macos": 3,
     "windows": 6,
     "linux_arm": 2,
