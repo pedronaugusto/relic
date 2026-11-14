@@ -545,39 +545,25 @@ pub fn isolatedEnviron(gpa: Allocator, home: []const u8) !Environ.Map {
 // The tools on a hosted runner, as git_release.zig finds them.
 //=====================================================================
 
-const HostedGit = git_release.Hosted;
+pub const HostedGit = git_release.Hosted;
 
-/// `null` off a hosted runner.
-fn hostedGit() ?HostedGit {
+/// Which git this hosted job runs; `null` off a hosted runner.
+pub fn hostedGit() ?HostedGit {
     return git_release.hosted(std.testing.allocator, std.testing.environ);
 }
 
-fn hostedDirs(a: Allocator, git: ?HostedGit) ![]const []const u8 {
-    return git_release.hostedDirs(a, std.testing.environ, git);
+/// Whether the tests run in a hosted job, where a missing git or git-lfs
+/// fails by name rather than skipping.
+pub fn hostedJob() bool {
+    return git_release.hostedJob(std.testing.allocator, std.testing.environ);
 }
 
-/// The `PATH` every program the suite starts sees: the hosted tools'
-/// directories, then the test process's own `PATH` (the native floor job
-/// installs its Git there). The caller frees it.
+/// The `PATH` every program the suite starts sees: the test process's own,
+/// which on a hosted job holds preflight's held git first and relic's
+/// git-lfs (or a compatibility job's git). The caller frees it.
 /// `error.SkipZigTest` where there is no `PATH`.
 pub fn searchPath(gpa: Allocator) ![]u8 {
-    const path = std.testing.environ.getAlloc(gpa, "PATH") catch return error.SkipZigTest;
-    defer gpa.free(path);
-    var arena: std.heap.ArenaAllocator = .init(gpa);
-    defer arena.deinit();
-    const dirs = try hostedDirs(arena.allocator(), hostedGit());
-    return joinSearchPath(gpa, dirs, path);
-}
-
-fn joinSearchPath(gpa: Allocator, dirs: []const []const u8, rest: []const u8) ![]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(gpa);
-    for (dirs) |dir| {
-        try out.appendSlice(gpa, dir);
-        try out.append(gpa, std.Io.Dir.path.delimiter);
-    }
-    try out.appendSlice(gpa, rest);
-    return out.toOwnedSlice(gpa);
+    return std.testing.environ.getAlloc(gpa, "PATH") catch return error.SkipZigTest;
 }
 
 /// Whether a missing gpg, gpgconf or ssh-keygen fails the run rather than
@@ -593,15 +579,16 @@ pub fn signersRequired() bool {
 
 /// The git a test starts itself, with `std.process`: Zig looks a bare name
 /// up in this process's own `PATH`, never in the child's, so on a hosted
-/// runner the installed git is named by its path. Elsewhere it is `git`,
-/// found as `searchPath` would find it. Found once; the build has asked it
-/// for its release before the tests run (testing/held_git.zig).
+/// job preflight's held git is named by its path (`PREFLIGHT_GIT`).
+/// Elsewhere it is `git`, found as `searchPath` would find it. Found once;
+/// the build has asked it for its release before the tests run
+/// (testing/held_git.zig).
 pub fn program() []const u8 {
     if (program_state.load(.acquire) != 2) {
         if (program_state.cmpxchgStrong(0, 1, .acquire, .monotonic) == null) {
             var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
             defer arena.deinit();
-            const found = git_release.program(arena.allocator(), std.testing.io, std.testing.environ);
+            const found = git_release.program(arena.allocator(), std.testing.environ);
             if (found.len <= program_buffer.len) {
                 @memcpy(program_buffer[0..found.len], found);
                 program_name = program_buffer[0..found.len];
@@ -632,19 +619,6 @@ fn probeVersion(name: []const u8) ?git_release.Version {
         else => return null,
     }
     return git_release.parse(result.stdout) orelse .{ .major = 0, .minor = 0, .patch = 0 };
-}
-
-test "a hosted job's tools come before the machine's own, in order" {
-    const gpa = std.testing.allocator;
-    const sep = [1]u8{std.Io.Dir.path.delimiter};
-    const joined = try joinSearchPath(gpa, &.{ "tools/git/bin", "tools/lfs/bin" }, "rest");
-    defer gpa.free(joined);
-    try std.testing.expectEqualStrings("tools/git/bin" ++ sep ++ "tools/lfs/bin" ++ sep ++ "rest", joined);
-    const alone = try joinSearchPath(gpa, &.{}, "rest");
-    defer gpa.free(alone);
-    try std.testing.expectEqualStrings("rest", alone);
-    try std.testing.expectEqual(@as(usize, 0), (try hostedDirs(gpa, null)).len);
-    try std.testing.expectEqual(@as(usize, 0), (try hostedDirs(gpa, .old)).len);
 }
 
 /// The environment a program the library starts runs in during a test: the
@@ -757,12 +731,20 @@ pub fn copyTree(gpa: Allocator, io: Io, from: Io.Dir, to: Io.Dir) !void {
     };
 }
 
-/// `error.SkipZigTest` unless a usable `git` is on the path.
+/// `error.SkipZigTest` unless a usable `git` is on the path; on a hosted
+/// job, where preflight's held git is, `error.NoGitOnHostedJob`, so a
+/// comparison cannot pass there by never running.
 pub fn requireGit(gpa: Allocator, io: Io) !void {
     _ = gpa;
     _ = io;
     _ = program();
-    if (git_version == null) return error.SkipZigTest;
+    if (git_version == null) {
+        if (hostedJob()) {
+            std.debug.print("no git runs on this hosted job ({s}): preflight's held git puts it first on the path and in PREFLIGHT_GIT\n", .{program_name});
+            return error.NoGitOnHostedJob;
+        }
+        return error.SkipZigTest;
+    }
 }
 
 /// `error.SkipZigTest` unless the `git` on the path is at least `major.minor`.
