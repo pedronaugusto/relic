@@ -331,6 +331,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `object.Signature.write` writes a name and an email as git's `fmt_ident` does: each up to its first NUL, cut of git's crud (a byte up to 32, or one of `,:;<>"\'`) at either end, and with `<`, `>` and newlines inside left out, so what it writes reads back as written. A name with nothing left, empty or all crud, is `error.InvalidSignature`, as git's strict ident refuses it; an email may be empty. It refused any `<`, `>` or newline in either and kept blanks around the name, which `parse` then trimmed, so write and parse were not each other's inverse. The bytes are the real git's for the same `GIT_AUTHOR_NAME` and `GIT_AUTHOR_EMAIL` (a property over `git commit-tree`). The identity a commit is given and `write` read one crud table.
 - Pins xenoglyph 22f2b49, still 0.5.1: `encoding.labels()`, every label of the standard's, which the encodings generator tries on Apple's iconv. Nothing else relic calls changed.
 - parallax at main f473e77, on the aegis line relic is on, where its pin 055179d asked for aegis 0.1.12 and bay refused the graph in CI's setup ("parallax asks for aegis 0.1.12, but aegis 0.2.4 is selected").
 - parallax at main 055179d (from 0.3.0), for a caller's rules as a context whose methods it calls: the function lines, the painters and the word diff reach its unified writer that way.

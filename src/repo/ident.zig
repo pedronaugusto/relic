@@ -6,6 +6,7 @@
 //! give is a refusal.
 
 const object = @import("../object/object.zig");
+const crud_mod = @import("../object/crud.zig");
 const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
@@ -75,25 +76,15 @@ fn environValue(environ: ?*const Environ.Map, name: []const u8) ?[]const u8 {
     return map.get(name);
 }
 
-/// git's `crud`: what an identity's ends are trimmed of.
-fn crud(c: u8) bool {
-    return c <= 32 or c == ',' or c == ':' or c == ';' or c == '<' or c == '>' or c == '"' or c == '\\' or c == '\'';
-}
-
 /// git's `strbuf_addstr_without_crud`: the ends trimmed of crud, and `<`,
-/// `>` and a newline taken out of the rest.
+/// `>` and a newline taken out of the rest, as `Signature.write` writes it.
 fn withoutCrud(arena: Allocator, text: []const u8) Allocator.Error![]const u8 {
-    var start: usize = 0;
-    while (start < text.len and crud(text[start])) start += 1;
-    var end = text.len;
-    while (end > start and crud(text[end - 1])) end -= 1;
     var out: std.ArrayList(u8) = .empty;
-    for (text[start..end]) |c| switch (c) {
-        '\n', '<', '>' => {},
-        else => try out.append(arena, c),
-    };
+    for (crud_mod.trimmed(text)) |c| {
+        if (std.mem.findScalar(u8, crud_mod.delimiters, c) == null) try out.append(arena, c);
+    }
     // A signature line is `name <email> when`: neither field may close it.
-    assert(std.mem.findAny(u8, out.items, "\n<>") == null);
+    assert(std.mem.findAny(u8, out.items, crud_mod.delimiters) == null);
     return out.items;
 }
 
@@ -162,9 +153,7 @@ pub fn signature(arena: Allocator, config: *const config_mod.Config, environ: ?*
         }
     }
     if (name.?.len == 0) return error.EmptyName;
-    for (name.?) |c| {
-        if (!crud(c)) break;
-    } else return error.NameOnlyDisallowedCharacters;
+    if (crud_mod.trimmed(name.?).len == 0) return error.NameOnlyDisallowedCharacters;
 
     var when = now;
     if (date_text) |text| if (text.len != 0) {

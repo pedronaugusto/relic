@@ -3,7 +3,8 @@
 //! "no crash": a loose header is accepted exactly when it is the one
 //! spelling of a header; a tree mode reads as git's `get_mode` and
 //! `canon_mode`; an ident splits where `split_ident_line` splits it, and
-//! one `write` accepts reads back as itself; a tree's entries come back in
+//! `write` writes the bytes the real git's `fmt_ident` writes, refuses the
+//! names git's strict ident refuses, and reads back stripped; a tree's entries come back in
 //! the object's order, a cut or bad entry refused after the whole ones; and
 //! a built tree holds its entries once each, sorted by git's key.
 
@@ -12,6 +13,7 @@ const shakedown = @import("shakedown");
 const object = @import("object.zig");
 const hash = @import("../hash/hash.zig");
 const testing = std.testing;
+const io = testing.io;
 const gen = shakedown.gen;
 const Mode = object.Mode;
 const Signature = object.Signature;
@@ -182,7 +184,33 @@ test "property: an ident line splits where git's split_ident_line splits it" {
     try shakedown.check(testing.allocator, {}, anyIdentLine, .{ .cases = 20000, .seed = 0x0b3 });
 }
 
-const person_pieces = [_][]const u8{ "Ada", "a@b", " ", "\t", "\r", "\x0b", "<", ">", "\n", "x", "", "é" };
+// Signature.write: "the name and the email as git's fmt_ident writes them
+// ... cut of what git calls crud at either end ... and with the <, > and
+// newlines inside left out ... A name with nothing left, empty or all crud,
+// is error.InvalidSignature".
+
+const person_pieces = [_][]const u8{ "Ada", "a@b", " ", "\t", "\r", "\x0b", "\x01", "<", ">", "\n", ",", ";", ":", "\"", "'", "\\", "x", "", "é" };
+
+/// git's `strbuf_addstr_without_crud`, from ident.c: crud (a byte up to
+/// 32, or one of `,:;<>"\'`) cut from both ends, then `\n`, `<` and `>`
+/// left out of the rest.
+fn gitWithoutCrud(text: []const u8, out: []u8) []const u8 {
+    const isCrud = struct {
+        fn f(c: u8) bool {
+            return c <= 32 or std.mem.findScalar(u8, ",:;<>\"\\'", c) != null;
+        }
+    }.f;
+    var start: usize = 0;
+    while (start < text.len and isCrud(text[start])) start += 1;
+    var end = text.len;
+    while (end > start and isCrud(text[end - 1])) end -= 1;
+    var len: usize = 0;
+    for (text[start..end]) |c| if (c != '\n' and c != '<' and c != '>') {
+        out[len] = c;
+        len += 1;
+    };
+    return out[0..len];
+}
 
 fn anySignatureWritten(_: void, case: *shakedown.Case) !void {
     var name_buffer: [24]u8 = undefined;
@@ -197,27 +225,93 @@ fn anySignatureWritten(_: void, case: *shakedown.Case) !void {
         },
         .offset_minutes = gen.int(case.source, i16),
     };
+    var name_out: [24]u8 = undefined;
+    var email_out: [24]u8 = undefined;
+    const name = gitWithoutCrud(sig.name, &name_out);
+    const email = gitWithoutCrud(sig.email, &email_out);
     var out: [128]u8 = undefined;
     var w: std.Io.Writer = .fixed(&out);
     sig.write(&w) catch |err| {
         try testing.expectEqual(error.InvalidSignature, err);
+        try testing.expectEqual(@as(usize, 0), name.len);
         return;
     };
-    // Accepted: it reads back, as parse documents reading it: the email and
-    // the offset as written, the name less the trailing blanks
-    // split_ident_line drops, and the time as written unless it does not
-    // fit (only minInt(i64), whose magnitude no i64 holds), which is zero.
+    try testing.expect(name.len != 0);
+    // Accepted: it reads back as the stripped name and email, and the time
+    // as written unless it does not fit (only minInt(i64), whose magnitude
+    // no i64 holds), which parse documents as zero.
     const back = try Signature.parse(w.buffered());
-    var name = sig.name;
-    while (name.len > 0 and space(name[name.len - 1])) name = name[0 .. name.len - 1];
     try testing.expectEqualStrings(name, back.name);
-    try testing.expectEqualStrings(sig.email, back.email);
+    try testing.expectEqualStrings(email, back.email);
     try testing.expectEqual(if (sig.when_secs == std.math.minInt(i64)) 0 else sig.when_secs, back.when_secs);
     try testing.expectEqual(sig.offset_minutes, back.offset_minutes);
 }
 
-test "property: an ident write accepts reads back as parse reads it: the name less its trailing blanks, a time that fits" {
+test "property: an ident is written as git's fmt_ident writes it, refused where git's strict ident is, and reads back stripped" {
     try shakedown.check(testing.allocator, {}, anySignatureWritten, .{ .cases = 20000, .seed = 0x0b4 });
+}
+
+const testgit = @import("../testing/git.zig");
+
+/// The real git, for the bytes of an ident: `commit-tree` with the name and
+/// email in `GIT_AUTHOR_NAME` and `GIT_AUTHOR_EMAIL`, its author line read.
+const GitIdent = struct {
+    repo: *testgit.Repo,
+    tree: []const u8,
+};
+
+fn anyIdentAsGit(git: *GitIdent, case: *shakedown.Case) !void {
+    const gpa = testing.allocator;
+    var name_buffer: [24]u8 = undefined;
+    var email_buffer: [24]u8 = undefined;
+    // An environment variable holds no NUL, so neither does what is drawn.
+    const name = pieced(case.source, &name_buffer, &person_pieces, 4);
+    const email = pieced(case.source, &email_buffer, &person_pieces, 4);
+    const env = &git.repo.isolated.?;
+    try env.put("GIT_AUTHOR_NAME", name);
+    try env.put("GIT_AUTHOR_EMAIL", email);
+    const sig: Signature = .{ .name = name, .email = email, .when_secs = 1700000000, .offset_minutes = 90 };
+    var out: [128]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&out);
+    const ours: ?[]const u8 = if (sig.write(&w)) w.buffered() else |err| switch (err) {
+        error.InvalidSignature => null,
+        else => |e| return e,
+    };
+    git.repo.report_failures = false;
+    defer git.repo.report_failures = true;
+    const made = git.repo.run(io, &.{ "commit-tree", git.tree, "-m", "m" }) catch |err| switch (err) {
+        error.GitFailed => {
+            // git refused the ident; so does write.
+            try testing.expectEqual(@as(?[]const u8, null), ours);
+            return;
+        },
+        else => |e| return e,
+    };
+    defer gpa.free(made);
+    const commit = try git.repo.run(io, &.{ "cat-file", "commit", std.mem.trimEnd(u8, made, "\n") });
+    defer gpa.free(commit);
+    const author = std.mem.find(u8, commit, "\nauthor ") orelse return error.TestUnexpectedResult;
+    const rest = commit[author + "\nauthor ".len ..];
+    const line = rest[0 .. std.mem.findScalar(u8, rest, '\n') orelse rest.len];
+    try testing.expectEqualStrings(line, ours orelse {
+        std.debug.print("git wrote {s} for name {any}, email {any}; write refused it\n", .{ line, name, email });
+        return error.TestUnexpectedResult;
+    });
+}
+
+test "property: an ident's bytes are git's, for the same name and email" {
+    try testgit.requireGitVersion(testing.allocator, io, 2, 56);
+    var repo = try testgit.Repo.init(testing.allocator, io, &.{});
+    defer repo.deinit();
+    const env = &repo.isolated.?;
+    try env.put("GIT_AUTHOR_DATE", "@1700000000 +0130");
+    try env.put("GIT_COMMITTER_NAME", "C");
+    try env.put("GIT_COMMITTER_EMAIL", "c@d");
+    try env.put("GIT_COMMITTER_DATE", "@1700000000 +0130");
+    const tree = try repo.runInput(io, &.{"mktree"}, "");
+    defer testing.allocator.free(tree);
+    var git: GitIdent = .{ .repo = &repo, .tree = std.mem.trimEnd(u8, tree, "\n") };
+    try shakedown.check(testing.allocator, &git, anyIdentAsGit, .{ .cases = 300, .seed = 0x0b5 });
 }
 
 // Tree.Iterator: "A walk over the entries, in the order the object holds

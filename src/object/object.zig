@@ -12,6 +12,7 @@ const Self = @This();
 const std = @import("std");
 const decimal = @import("../text.zig").decimal;
 const ctype = @import("../text.zig").ctype;
+const crud = @import("crud.zig");
 const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -395,21 +396,29 @@ pub const Signature = struct {
         InvalidSignatureTime,
     };
 
-    /// `Name <email> secs ±hhmm`, appended to `w`.
+    /// `Name <email> secs ±hhmm`, appended to `w`, the name and the email
+    /// as git's `fmt_ident` writes them: each a C string, so up to its
+    /// first NUL, cut of what git calls crud at either end (a control byte
+    /// or a space, or one of `,:;<>"\'`), and with the `<`, `>` and newlines
+    /// inside left out, so the line always reads back, `parse` giving the
+    /// name and the email as written here.
     ///
-    /// A name holding `<`, `>` or a newline is what git's `fsck` calls a bad
-    /// ident; `write` refuses it rather than producing an object that cannot
-    /// be read back.
+    /// A name with nothing left, empty or all crud, is
+    /// `error.InvalidSignature`, as git's strict ident, which a commit and
+    /// a tag are made with, refuses it ("empty ident name not allowed",
+    /// "name consists only of disallowed characters"). An email may be
+    /// empty, as git's may.
     pub const WriteError = Io.Writer.Error || error{InvalidSignature};
 
     pub fn write(sig: Signature, w: *Io.Writer) WriteError!void {
-        if (std.mem.findAny(u8, sig.name, "<>\n") != null) return error.InvalidSignature;
-        if (std.mem.findAny(u8, sig.email, "<>\n") != null) return error.InvalidSignature;
+        const name = crud.trimmed(sig.name);
+        if (name.len == 0) return error.InvalidSignature;
+        try crud.writeWithout(w, name);
+        try w.writeAll(" <");
+        try crud.writeWithout(w, crud.trimmed(sig.email));
         const sign: u8 = if (sig.offset_minutes < 0) '-' else '+';
         const abs: u32 = @intCast(@abs(sig.offset_minutes));
-        try w.print("{s} <{s}> {d} {c}{d:0>2}{d:0>2}", .{
-            sig.name,
-            sig.email,
+        try w.print("> {d} {c}{d:0>2}{d:0>2}", .{
             sig.when_secs,
             sign,
             abs / 60,
