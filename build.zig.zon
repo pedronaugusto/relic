@@ -50,8 +50,8 @@
             .lazy = true,
         },
         .xenoglyph = .{
-            .url = "git+https://github.com/pedronaugusto/xenoglyph#d6432607111da5deb5f0a481d1674da990872c96",
-            .hash = "xenoglyph-0.5.1-YKXZlXX6RgBGRl07HQns6W6M42ZLEP22hg8cEY37HouP",
+            .url = "git+https://github.com/pedronaugusto/xenoglyph#22f2b4957029e25c8fe8b60429a12e8550f83a90",
+            .hash = "xenoglyph-0.5.1-YKXZlbIBVABfd34rUsU2tEzrxgp25K-u-5BQv5X0DELi",
         },
 
         .reactor = .{
