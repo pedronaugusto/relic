@@ -508,7 +508,9 @@ pub fn dev(b: *std.Build, tools: type) void {
         },
     });
     // A project that depends on relic as a fetch gives it, in each of the
-    // four builds the options make: the build a consumer gets, with aegis,
+    // four builds the options make (`configurations` in ci/workflow.json,
+    // where the ci tier also compiles relic's own `check` in each): the
+    // build a consumer gets, with aegis,
     // conduit, reactor, sweep, parallax, airlock, warp and xenoglyph, and
     // uplink, cloak and strand for the builds that take them. Its program
     // names the entry points that may speak HTTP, so each compiles without
@@ -533,12 +535,6 @@ pub fn dev(b: *std.Build, tools: type) void {
             p.dependency("strand", .{}),
             p.dependency("uplink", .{}),
             p.dependency("cloak", .{}),
-        },
-        .configurations = &.{
-            .{ .options = &.{ .{ .name = "http", .value = .{ .flag = true } }, .{ .name = "lfs", .value = .{ .flag = true } } } },
-            .{ .options = &.{ .{ .name = "http", .value = .{ .flag = false } }, .{ .name = "lfs", .value = .{ .flag = true } } } },
-            .{ .options = &.{ .{ .name = "http", .value = .{ .flag = true } }, .{ .name = "lfs", .value = .{ .flag = false } } }, .modules = &.{"relic"} },
-            .{ .options = &.{ .{ .name = "http", .value = .{ .flag = false } }, .{ .name = "lfs", .value = .{ .flag = false } } }, .modules = &.{"relic"} },
         },
     });
     const setup = b.addExecutable(.{ .name = "ci-setup", .root_module = b.createModule(.{ .root_source_file = p.path("ci/setup.zig"), .target = b.graph.host, .optimize = .safe }) });

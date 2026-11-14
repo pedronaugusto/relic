@@ -22,6 +22,12 @@
     "windows_arm": 8
   },
   "windows_git_latest": true,
+  "configurations": [
+    {"name": "default", "options": {"http": true, "lfs": true}},
+    {"name": "no-http", "options": {"http": false, "lfs": true}},
+    {"name": "no-lfs", "options": {"http": true, "lfs": false}, "modules": ["relic"]},
+    {"name": "neither", "options": {"http": false, "lfs": false}, "modules": ["relic"]}
+  ],
   "jobs": [
     {
       "name": "ThreadSanitizer (Linux)",
