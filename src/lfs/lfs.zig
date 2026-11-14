@@ -112,7 +112,9 @@ pub const Pointer = struct {
         return p.extensions[0..p.extension_count];
     }
 
-    /// Read `bytes` as git-lfs reads them: the first 1024, trimmed.
+    /// Read `bytes` as git-lfs reads them: the first 1024, trimmed. No
+    /// bytes at all are the empty file's pointer; blanks alone, which trim
+    /// to nothing, carry no marker and are `error.NotAPointer`.
     pub fn decode(bytes: []const u8) DecodeError!Pointer {
         const head = bytes[0..@min(bytes.len, pointer_size_cutoff)];
         if (head.len == 0) return .{ .oid = empty_oid, .size = 0 };
