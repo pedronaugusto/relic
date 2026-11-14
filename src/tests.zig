@@ -122,6 +122,13 @@ test {
         _ = @import("testing/cancel_history.zig");
         _ = @import("testing/work_count.zig");
         _ = @import("testing/pack_write.zig");
+        // each parser's documented guarantees, as properties
+        _ = @import("codec/guarantees_test.zig");
+        _ = @import("config/guarantees_test.zig");
+        _ = @import("index/guarantees_test.zig");
+        _ = @import("object/guarantees_test.zig");
+        _ = @import("odb/guarantees_test.zig");
+        _ = @import("wire/guarantees_test.zig");
         _ = @import("diff/diff_test.zig");
         _ = @import("diff/blame_test.zig");
         _ = @import("diff/blame/ignore.zig");
