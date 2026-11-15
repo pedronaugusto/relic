@@ -164,15 +164,15 @@ test "snapshot captures a plain folder incrementally and restores additions dele
     defer private.cleanup();
     var store = try snapshot.Store.open(gpa, io, private.dir, .{});
     defer store.deinit(io);
-    const first = (try store.capture(io, .{ .folder = folder.dir }, .{})).snapshot;
+    const first = (try store.capture(io, .{ .folder = .of(folder.dir) }, .{})).snapshot;
     try expectClosure(&store.db, first.tree);
     const written = store.db.stats.loose_written;
-    const again = (try store.capture(io, .{ .folder = folder.dir }, .{})).snapshot;
+    const again = (try store.capture(io, .{ .folder = .of(folder.dir) }, .{})).snapshot;
     try testing.expect(first.tree.eql(again.tree));
     try testing.expectEqual(written, store.db.stats.loose_written);
     try folder.dir.deleteFile(io, "removed");
     try folder.dir.writeFile(io, .{ .sub_path = "added", .data = "new\n" });
-    const second = (try store.capture(io, .{ .folder = folder.dir }, .{})).snapshot;
+    const second = (try store.capture(io, .{ .folder = .of(folder.dir) }, .{})).snapshot;
     // One new blob and the root. The unchanged nested tree is neither
     // copied nor written again.
     try testing.expectEqual(written + 2, store.db.stats.loose_written);
@@ -241,7 +241,7 @@ test "snapshot plain folders keep executable modes symlinks and SHA256 names" {
     defer private.cleanup();
     var store = try snapshot.Store.open(gpa, io, private.dir, .{ .kind = .sha256 });
     defer store.deinit(io);
-    const captured = try store.capture(io, .{ .folder = folder.dir }, .{});
+    const captured = try store.capture(io, .{ .folder = .of(folder.dir) }, .{});
     try testing.expectEqual(hash.Kind.sha256, captured.snapshot.tree.kind);
     try expectClosure(&store.db, captured.snapshot.tree);
     var dest = testing.tmpDir(.{ .iterate = true });
@@ -443,13 +443,13 @@ test "durable snapshots sync their closure and restored files before directories
     var store = try snapshot.Store.open(gpa, io, private.dir, options);
     defer store.deinit(io);
     resetSyncs(h);
-    const captured = try store.capture(io, .{ .folder = folder.dir }, .{});
+    const captured = try store.capture(io, .{ .folder = .of(folder.dir) }, .{});
     // Three trees and the blob; already present objects must be covered too.
     try expectFileSyncs(h, 4);
     if (builtin.target.os.tag == .linux) try testing.expect(h.count(.sync_dir) >= 2);
     try expectSyncOrder(h);
     resetSyncs(h);
-    _ = try store.capture(io, .{ .folder = folder.dir }, .{});
+    _ = try store.capture(io, .{ .folder = .of(folder.dir) }, .{});
     try expectFileSyncs(h, 4);
     try expectSyncOrder(h);
     resetSyncs(h);
@@ -482,7 +482,7 @@ test "durable snapshots sync their closure and restored files before directories
     }
     resetSyncs(h);
     h.setPlan(&.{airlock_testing.fail(batch_sync, 1, airlock_testing.io_error)});
-    try testing.expectError(error.InputOutput, store.capture(io, .{ .folder = folder.dir }, .{}));
+    try testing.expectError(error.InputOutput, store.capture(io, .{ .folder = .of(folder.dir) }, .{}));
     resetSyncs(h);
 }
 
@@ -496,7 +496,7 @@ test "selected object durability syncs a used pack and index once" {
     defer private.cleanup();
     var store = try snapshot.Store.open(gpa, base, private.dir, .{ .odb = .{ .probe_timestamp_resolution = false } });
     defer store.deinit(base);
-    const saved = try store.capture(base, .{ .folder = folder.dir }, .{});
+    const saved = try store.capture(base, .{ .folder = .of(folder.dir) }, .{});
     // This unrelated object is packed too; durable roots need no refs.
     _ = try store.db.write(base, .blob, "unrelated");
     _ = try store.db.repack(base, .{});
@@ -522,9 +522,9 @@ test "durable checkout covers unchanged files and surviving parents of deletions
     defer private.cleanup();
     var store = try snapshot.Store.open(gpa, base, private.dir, .{ .odb = .{ .probe_timestamp_resolution = false } });
     defer store.deinit(base);
-    const before = try store.capture(base, .{ .folder = folder.dir }, .{});
+    const before = try store.capture(base, .{ .folder = .of(folder.dir) }, .{});
     try folder.dir.deleteTree(base, "old");
-    const after = try store.capture(base, .{ .folder = folder.dir }, .{});
+    const after = try store.capture(base, .{ .folder = .of(folder.dir) }, .{});
     var dest = testing.tmpDir(.{ .iterate = true });
     defer dest.cleanup();
     _ = try store.restore(base, before.snapshot, dest.dir, .{});
@@ -673,7 +673,7 @@ test "a large first capture goes into packs, and a small one after it stays loos
     defer private.cleanup();
     var store = try snapshot.Store.open(gpa, io, private.dir, .{});
     defer store.deinit(io);
-    const first = (try store.capture(io, .{ .folder = folder.dir }, .{})).snapshot;
+    const first = (try store.capture(io, .{ .folder = .of(folder.dir) }, .{})).snapshot;
     try expectClosure(&store.db, first.tree);
     // A hundred loose blobs at most; the rest of the blobs and every tree
     // in packs.
@@ -683,7 +683,7 @@ test "a large first capture goes into packs, and a small one after it stays loos
 
     try folder.dir.writeFile(io, .{ .sub_path = "d0/f0", .data = "changed\n" });
     const loose = store.db.stats.loose_written;
-    const second = (try store.capture(io, .{ .folder = folder.dir }, .{})).snapshot;
+    const second = (try store.capture(io, .{ .folder = .of(folder.dir) }, .{})).snapshot;
     try expectClosure(&store.db, second.tree);
     // The changed blob, its tree and the root, loose; no pack more.
     try testing.expectEqual(loose + 3, store.db.stats.loose_written);

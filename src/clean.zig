@@ -26,6 +26,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -164,7 +165,7 @@ pub fn clean(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.E
         .gpa = gpa,
         .a = a,
         .io = io,
-        .wt = wt,
+        .wt = .of(wt),
         .index = &index,
         .standard = if (standard) |*r| r else null,
         .command_line = &command_line,
@@ -186,7 +187,7 @@ pub fn clean(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.E
     var remover: Remover = .{
         .a = a,
         .io = io,
-        .wt = wt,
+        .wt = .of(wt),
         .dry_run = options.dry_run,
         .keep_nested = options.force != .nested_repositories,
         .precompose = precompose,
@@ -239,7 +240,8 @@ const Walk = struct {
     gpa: Allocator,
     a: Allocator,
     io: Io,
-    wt: Io.Dir,
+    /// The working tree, the caller's.
+    wt: aegis.own.Unowned(Io.Dir),
     index: *Index,
     standard: ?*ignore.Rules,
     command_line: *ignore.Rules,
@@ -262,14 +264,14 @@ const Walk = struct {
 
     fn readDirectory(w: *Walk, base: []const u8, depth: u32, excluded: bool) Error!State {
         if (depth > 256) return error.TreeTooDeep;
-        var dir = if (base.len == 0) w.wt else w.wt.openDir(w.io, base, .{ .iterate = true }) catch |err| switch (err) {
+        var dir = if (base.len == 0) w.wt.get() else w.wt.get().openDir(w.io, base, .{ .iterate = true }) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             else => return .none,
         };
         defer if (base.len != 0) dir.close(w.io);
         // Inside an excluded directory everything is excluded, and its own
         // ignore file is not read: git's `prep_exclude`.
-        if (w.standard) |rules| if (!excluded) try rules.addDirectory(w.io, w.wt, base, depth);
+        if (w.standard) |rules| if (!excluded) try rules.addDirectory(w.io, w.wt.get(), base, depth);
         defer if (w.standard) |rules| if (!excluded) rules.popTo(depth + 2);
 
         var names: std.ArrayList(Named) = .empty;
@@ -362,7 +364,7 @@ const Walk = struct {
             how = spec.how(slashed, .{ .leading = true });
             if (how == .none) return .none;
         };
-        if (try gitlink.isRepository(w.gpa, w.io, w.wt, path)) {
+        if (try gitlink.isRepository(w.gpa, w.io, w.wt.get(), path)) {
             if (w.skip_nested or how == .leading) return .none;
             return if (excluded) .excluded else .untracked;
         }
@@ -486,7 +488,8 @@ fn cwdUnder(a: Allocator, io: Io, wt: Io.Dir) Io.Cancelable!?[]const u8 {
 const Remover = struct {
     a: Allocator,
     io: Io,
-    wt: Io.Dir,
+    /// The working tree, the caller's.
+    wt: aegis.own.Unowned(Io.Dir),
     dry_run: bool,
     keep_nested: bool,
     /// `core.precomposeUnicode` on macOS: names read composed.
@@ -527,15 +530,15 @@ const Remover = struct {
         gone.* = true;
         const original_len = path.items.len;
         const bare = std.mem.trimEnd(u8, path.items, "/");
-        if (r.keep_nested and try gitlink.isRepository(r.a, r.io, r.wt, bare)) {
+        if (r.keep_nested and try gitlink.isRepository(r.a, r.io, r.wt.get(), bare)) {
             try r.report(path.items, .skipped_repository);
             gone.* = false;
             return;
         }
-        var dir = r.wt.openDir(r.io, bare, .{ .iterate = true }) catch |open_err| {
+        var dir = r.wt.get().openDir(r.io, bare, .{ .iterate = true }) catch |open_err| {
             if (open_err == error.Canceled) return error.Canceled;
             // an empty directory can go even when it cannot be read
-            if (!r.dry_run) r.wt.deleteDir(r.io, bare) catch |err| {
+            if (!r.dry_run) r.wt.get().deleteDir(r.io, bare) catch |err| {
                 try r.failed(path.items, err);
                 gone.* = false;
             };
@@ -559,7 +562,7 @@ const Remover = struct {
         for (names.items) |name| {
             path.shrinkRetainingCapacity(len);
             try path.appendSlice(r.a, name);
-            const found = (fs.statAt(r.io, r.wt, path.items) catch |err| {
+            const found = (fs.statAt(r.io, r.wt.get(), path.items) catch |err| {
                 try r.failed(path.items, err);
                 gone.* = false;
                 break;
@@ -570,7 +573,7 @@ const Remover = struct {
                 if (child_gone) try dels.append(r.a, try r.a.dupe(u8, path.items)) else gone.* = false;
                 continue;
             }
-            if (!r.dry_run) fs.deleteFile(r.io, r.wt, path.items) catch |err| {
+            if (!r.dry_run) fs.deleteFile(r.io, r.wt.get(), path.items) catch |err| {
                 try r.failed(path.items, err);
                 gone.* = false;
                 continue;
@@ -586,7 +589,7 @@ const Remover = struct {
                 gone.* = false;
             };
         }
-        if (gone.* and !r.dry_run) r.wt.deleteDir(r.io, here) catch |err| {
+        if (gone.* and !r.dry_run) r.wt.get().deleteDir(r.io, here) catch |err| {
             try r.failed(path.items, err);
             gone.* = false;
         };

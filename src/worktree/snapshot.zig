@@ -11,6 +11,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const ignore_mod = @import("../patterns.zig").ignore;
 const attributes_mod = @import("../patterns.zig").attributes;
 const Allocator = std.mem.Allocator;
@@ -39,7 +40,8 @@ pub const Snapshot = struct { tree: hash.Oid };
 /// `.gitattributes`, with no repository configuration or tracked paths.
 pub const Source = union(enum) {
     repository: *repo.Repository,
-    folder: Io.Dir,
+    /// A directory the caller keeps open and closes: `.of(dir)`.
+    folder: aegis.own.Unowned(Io.Dir),
 };
 
 pub const OpenOptions = struct {
@@ -124,7 +126,7 @@ pub const Store = struct {
         }
         const wt = switch (source) {
             .repository => |r| r.workDirectory() orelse return error.BareRepository,
-            .folder => |dir| dir,
+            .folder => |dir| dir.get(),
         };
         var ignored = if (source_repo) |r| try r.loadIgnore(io) else try ignore_mod.Rules.init(store.gpa, .{ .case_fold = false });
         defer ignored.deinit();

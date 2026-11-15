@@ -5,6 +5,7 @@
 
 const Self = @This();
 const std = @import("std");
+const aegis = @import("aegis");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const repo_mod = @import("../repo/repo.zig");
@@ -172,7 +173,7 @@ pub fn move(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.Er
         .gpa = gpa,
         .io = io,
         .repo = repo,
-        .wt = wt,
+        .wt = .of(wt),
         .index = &locked.index,
         .arena = outcome.arena.allocator(),
         .options = options,
@@ -214,7 +215,8 @@ const Mover = struct {
     gpa: Allocator,
     io: Io,
     repo: *Repository,
-    wt: Io.Dir,
+    /// The working tree, the caller's.
+    wt: aegis.own.Unowned(Io.Dir),
     index: *Index,
     /// The outcome's: every path here lives as long as it.
     arena: Allocator,
@@ -246,14 +248,14 @@ const Mover = struct {
             try m.items.append(arena, .{ .source = try pathspec_mod.normalize(arena, t.*), .destination = "" });
         }
         m.trimmed = trimmed;
-        const one_dir = m.options.sources.len == 1 and try isDirectory(m.io, m.wt, m.items.items[0].source) and
-            !try isDirectory(m.io, m.wt, try pathspec_mod.normalize(arena, m.options.destination));
+        const one_dir = m.options.sources.len == 1 and try isDirectory(m.io, m.wt.get(), m.items.items[0].source) and
+            !try isDirectory(m.io, m.wt.get(), try pathspec_mod.normalize(arena, m.options.destination));
         const destination = try pathspec_mod.normalize(arena, if (one_dir) std.mem.trimEnd(u8, m.options.destination, "/") else m.options.destination);
         const dst_w_slash = try addSlash(arena, destination);
 
         if (destination.len == 0) {
             for (m.items.items, trimmed) |*item, t| item.destination = try pathspec_mod.normalize(arena, std.Io.Dir.path.basenamePosix(t));
-        } else if (if (try lstat(m.io, m.wt, std.mem.trimEnd(u8, destination, "/"))) |found| found.kind == .directory else false) {
+        } else if (if (try lstat(m.io, m.wt.get(), std.mem.trimEnd(u8, destination, "/"))) |found| found.kind == .directory else false) {
             try m.into(dst_w_slash);
         } else if (!m.cone.includes(dst_w_slash, false) and emptyDirHasSparseContents(m.index, dst_w_slash)) {
             try m.into(dst_w_slash);
@@ -305,9 +307,9 @@ const Mover = struct {
         const src = item.source;
         const dst = item.destination;
         var is_dir = false;
-        if (try lstat(m.io, m.wt, src)) |found| {
+        if (try lstat(m.io, m.wt.get(), src)) |found| {
             if (std.mem.startsWith(u8, dst, src) and (dst.len == src.len or dst[src.len] == '/')) return .{ .bad = .into_itself };
-            if (found.kind == .directory and try lstat(m.io, m.wt, dst) != null) return .{ .bad = .destination_exists };
+            if (found.kind == .directory and try lstat(m.io, m.wt.get(), dst) != null) return .{ .bad = .destination_exists };
             is_dir = found.kind == .directory;
         } else if (index.find(src)) |entry| {
             if (!entry.skip_worktree) return .{ .bad = .bad_source };
@@ -327,19 +329,19 @@ const Mover = struct {
 
         const entry = anyStage(index, src) orelse return .{ .bad = .not_tracked };
         if (entry.stage != 0) return .{ .bad = .conflicted };
-        if (try lstat(m.io, m.wt, dst)) |found| if (!m.ignore_case or !std.ascii.eqlIgnoreCase(src, dst)) {
+        if (try lstat(m.io, m.wt.get(), dst)) |found| if (!m.ignore_case or !std.ascii.eqlIgnoreCase(src, dst)) {
             if (!options.force) return .{ .bad = .destination_exists };
             // Only files can overwrite each other.
             return if (found.kind == .file or found.kind == .sym_link) .keep else .{ .bad = .cannot_overwrite };
         };
         if (m.src_for_dst.contains(dst)) return .{ .bad = .multiple_sources };
         if (dst[dst.len - 1] == '/') return .{ .bad = .destination_directory_missing };
-        if (try symlinkLeads(m.io, m.wt, dst)) return .{ .bad = .beyond_symlink };
+        if (try symlinkLeads(m.io, m.wt.get(), dst)) return .{ .bad = .beyond_symlink };
         // A move on the disk needs the destination's leading directories,
         // checked here so that a dry run reports what the rename would
         // meet, as git 2.56 checks them.
         if (needsWorktreeRename(item.mode, m.dst_mode)) if (std.mem.findScalarLast(u8, dst, '/')) |slash| {
-            if (try lstat(m.io, m.wt, dst[0..slash])) |found| {
+            if (try lstat(m.io, m.wt.get(), dst[0..slash])) |found| {
                 if (found.kind != .directory) return .{ .bad = .destination_parent_not_directory };
             } else return .{ .bad = .destination_directory_missing };
         };
@@ -405,7 +407,7 @@ const Mover = struct {
     /// file, the index, and across the cone under `sparse`.
     fn apply(m: *Mover) Self.Error!void {
         const io = m.io;
-        const wt = m.wt;
+        const wt = m.wt.get();
         const rules = try m.repo.worktreeRules();
         var renamed: std.ArrayList(Rename) = .empty;
         var gitmodules_modified = false;
@@ -455,7 +457,7 @@ const Mover = struct {
     /// across the cone.
     fn moveEntry(m: *Mover, item: Item, rules: checkout.Rules) Self.Error!void {
         const io = m.io;
-        const wt = m.wt;
+        const wt = m.wt.get();
         const index = m.index;
         const src = item.source;
         const dst = item.destination;
