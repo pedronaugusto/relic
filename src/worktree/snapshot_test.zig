@@ -10,7 +10,6 @@ const object = @import("../object/object.zig");
 const hash = @import("../hash/hash.zig");
 const diff_mod = @import("../diff/diff.zig");
 const fs = @import("../fs/fs.zig");
-const storage = @import("../odb/state.zig");
 const testgit = @import("../testing/git.zig");
 
 fn sourceObjects(dir: Io.Dir) ![:0]u8 {
@@ -80,7 +79,7 @@ test "snapshot owns unchanged nested history before a rewrite and prune" {
     // source is registered, so restore and diff have no alternate reader.
     var store = try snapshot.Store.open(gpa, io, private.dir, .{});
     defer store.deinit(io);
-    try testing.expectEqual(@as(usize, 1), storage.get(store.db.state).sources.items.len);
+    try testing.expectEqual(@as(usize, 1), store.db.state.sources.items.len);
     try expectClosure(&store.db, first.tree);
     try expectClosure(&store.db, second.tree);
     var dest = testing.tmpDir(.{ .iterate = true });
@@ -280,7 +279,7 @@ test "snapshot retains sparse tracked files absent from disk and captures presen
     defer store.deinit(io);
     const captured = try store.capture(io, .{ .repository = &r }, .{});
     try expectClosure(&store.db, captured.snapshot.tree);
-    try testing.expectEqual(@as(usize, 1), storage.get(store.db.state).sources.items.len);
+    try testing.expectEqual(@as(usize, 1), store.db.state.sources.items.len);
     var dest = testing.tmpDir(.{ .iterate = true });
     defer dest.cleanup();
     _ = try store.restore(io, captured.snapshot, dest.dir, .{});
@@ -368,7 +367,7 @@ test "a live snapshot store reads its own objects after source packs are damaged
     var store = try snapshot.Store.open(gpa, io, private.dir, .{});
     defer store.deinit(io);
     const saved = (try store.capture(io, .{ .repository = &r }, .{})).snapshot;
-    const pack_name = storage.get(r.objectDatabase().state).sources.items[0].packs.items[0].name;
+    const pack_name = r.objectDatabase().state.sources.items[0].packs.items[0].name;
     const path = try gpa.print(".git/objects/pack/{s}.pack", .{pack_name});
     defer gpa.free(path);
     try source.writeFile(io, path, "damaged\n");

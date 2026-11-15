@@ -8,7 +8,6 @@ const testgit = @import("git.zig");
 const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
 const odb_mod = @import("../odb/odb.zig");
-const odb_state = @import("../odb/state.zig");
 const pack = @import("../odb/pack.zig");
 const sha1dc = @import("../hash/sha1dc.zig");
 const fs = @import("../fs/fs.zig");
@@ -101,7 +100,7 @@ test "a pack holds both ofs-delta and ref-delta entries and both resolve" {
     defer db.deinit(io);
 
     var saw_ref_delta = false;
-    for (odb_state.get(db.state).sources.items) |source| {
+    for (db.state.sources.items) |source| {
         for (source.packs.items) |named| {
             const p = &named.pack;
             var it = p.index.iterate();
@@ -121,7 +120,7 @@ test "a pack holds both ofs-delta and ref-delta entries and both resolve" {
     var db2 = try odb_mod.Odb.open(gpa, io, git_dir, .sha1, .{});
     defer db2.deinit(io);
     var saw_ofs_delta = false;
-    for (odb_state.get(db2.state).sources.items) |source| {
+    for (db2.state.sources.items) |source| {
         for (source.packs.items) |named| {
             const p = &named.pack;
             var it = p.index.iterate();

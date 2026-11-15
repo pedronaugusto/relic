@@ -7,7 +7,6 @@ const builtin = @import("builtin");
 const testgit = @import("git.zig");
 const hash = @import("../hash/hash.zig");
 const odb_mod = @import("../odb/odb.zig");
-const odb_state = @import("../odb/state.zig");
 const pack_mod = @import("../odb/pack.zig");
 const fs = @import("../fs/fs.zig");
 const worktree = @import("../checkout/checkout.zig");
@@ -150,7 +149,7 @@ fn scanColdWarm(gpa: std.mem.Allocator, git_dir: Io.Dir, options: odb_mod.Option
     }
     scan.cold_reads = faults.count(.fileReadPositional);
     scan.cold_read_bytes = io_mod.moved(faults, .fileReadPositional);
-    scan.cold_bases = odb_state.get(db.state).cache.entries.count();
+    scan.cold_bases = db.state.cache.entries.count();
 
     // A second pass over the same objects, with the delta base cache warm.
     faults.reset();
@@ -163,7 +162,7 @@ fn scanColdWarm(gpa: std.mem.Allocator, git_dir: Io.Dir, options: odb_mod.Option
     }
     scan.warm_reads = faults.count(.fileReadPositional);
     scan.warm_read_bytes = io_mod.moved(faults, .fileReadPositional);
-    scan.warm_bases = odb_state.get(db.state).cache.entries.count();
+    scan.warm_bases = db.state.cache.entries.count();
     return scan;
 }
 
