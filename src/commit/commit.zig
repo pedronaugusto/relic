@@ -705,3 +705,9 @@ test "a message that is commit.template unedited is refused, as git commit refus
     try twin.relic.exec(io, &.{ "add", "b.txt" });
     _ = try commit(io, &repo, .{ .author = Twin.who, .committer = Twin.who, .message = template_text }, .{});
 }
+
+// The layer's files whose tests nothing else reaches: the merge, and the input seam.
+test {
+    _ = @import("merging.zig");
+    _ = @import("input.zig");
+}

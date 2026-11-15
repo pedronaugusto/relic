@@ -128,7 +128,7 @@ pub const Error = error{
     /// The message left after cleanup is empty.
     EmptyMessage,
 } || three_way.Error || head_mod.Error || rev_walk.Error || pretty.Error || refs_mod.ReadError || repo_mod.WriteError || rerere.Error || commit_hooks.Error ||
-    stash.Error;
+    stash.Error || refspec.ParseError;
 
 /// When a merge may be a fast-forward: `merge.ff` and `--ff`, `--no-ff`,
 /// `--ff-only`.
@@ -274,7 +274,7 @@ pub fn upstreams(gpa: Allocator, io: Io, repo: *Repository, options: UpstreamOpt
         var name: []const u8 = try arena.dupe(u8, merge_name);
         if (!std.mem.eql(u8, remote, ".")) {
             const tracking: ?[]const u8 = for (specs) |text| {
-                const spec = refspec.Refspec.parse(text, .fetch, repo.objectFormat()) catch continue;
+                const spec = try refspec.Refspec.parse(text, .fetch, repo.objectFormat());
                 if (try spec.mapSource(arena, name)) |mapped| break mapped;
             } else null;
             name = tracking orelse return error.UpstreamNotFetched;
@@ -1604,4 +1604,23 @@ fn groupSources(arena: Allocator, targets: []const Target) Error![]Source {
         }
     }
     return sources.items;
+}
+
+test "a merge of the upstream refuses a remote whose fetch refspec git cannot read, as git dies on it" {
+    const testgit = @import("../testing/git.zig");
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var fixture = try testgit.Repo.init(gpa, io, &.{});
+    defer fixture.deinit();
+    try fixture.exec(io, &.{ "commit", "-q", "--allow-empty", "-m", "a" });
+    try fixture.exec(io, &.{ "config", "remote.origin.url", "/nonexistent" });
+    // A pattern on one side only: git says "invalid refspec" and stops.
+    try fixture.exec(io, &.{ "config", "remote.origin.fetch", "refs/heads/*:refs/remotes/origin/x" });
+    try fixture.exec(io, &.{ "config", "branch.main.remote", "origin" });
+    try fixture.exec(io, &.{ "config", "branch.main.merge", "refs/heads/main" });
+    var repo = try Repository.open(gpa, io, fixture.dir, .{});
+    defer repo.deinit(io);
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    try std.testing.expectError(error.InvalidRefspec, upstreams(gpa, io, &repo, .{ .arena = arena.allocator() }));
 }
