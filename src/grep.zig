@@ -25,7 +25,7 @@ const std = @import("std");
 const aegis = @import("aegis");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
-const assert = std.debug.assert;
+const assert = aegis.assert;
 const Io = std.Io;
 
 const hash = @import("hash/hash.zig");
@@ -626,11 +626,17 @@ const Format = struct {
     colors: ?*const Colors,
 
     /// What a context hunk is marked with: `--`, in `separator`.
-    fn mark(fmt: *const Format, buf: []u8) []const u8 {
+    /// A colour is at most `color.max_len` bytes, so `buf` holds it, the
+    /// mark and the reset.
+    fn mark(fmt: *const Format, buf: *[mark_max]u8) []const u8 {
         const sep: []const u8 = if (fmt.colors) |c| c.separator.bytes() else "";
         if (sep.len == 0) return "--\n";
-        // unreachable: the buffer holds the longest colour, the mark and a reset
-        return std.mem.print(buf, "{s}--{s}\n", .{ sep, color.reset }) catch unreachable;
+        var len: usize = 0;
+        for ([_][]const u8{ sep, "--", color.reset, "\n" }) |part| {
+            @memcpy(buf[len..][0..part.len], part);
+            len += part.len;
+        }
+        return buf[0..len];
     }
 };
 
@@ -685,9 +691,21 @@ fn isEmptyLine(text: []const u8) bool {
 /// git's `output_color`: `text` in the colour of `slot`, where there are
 /// colours and that one writes something.
 fn outputColor(st: *FileState, text: []const u8, comptime slot: std.meta.FieldEnum(Colors)) Io.Writer.Error!void {
-    const c: []const u8 = if (st.fmt.colors) |colors| @field(colors, @tagName(slot)).bytes() else "";
+    const c = slotColor(st, slot);
     if (c.len == 0) return st.w.writeAll(text);
     try st.w.print("{s}{s}{s}", .{ c, text, color.reset });
+}
+
+/// `outputColor` of a line or column number, in decimal.
+fn outputColorNumber(st: *FileState, n: usize, comptime slot: std.meta.FieldEnum(Colors)) Io.Writer.Error!void {
+    const c = slotColor(st, slot);
+    if (c.len == 0) return st.w.print("{d}", .{n});
+    try st.w.print("{s}{d}{s}", .{ c, n, color.reset });
+}
+
+/// The sequence `slot` writes, empty where there are no colours.
+fn slotColor(st: *const FileState, comptime slot: std.meta.FieldEnum(Colors)) []const u8 {
+    return if (st.fmt.colors) |colors| @field(colors, @tagName(slot)).bytes() else "";
 }
 
 fn outputSep(st: *FileState, sign: u8) Io.Writer.Error!void {
@@ -696,19 +714,16 @@ fn outputSep(st: *FileState, sign: u8) Io.Writer.Error!void {
 
 fn showLineHeader(st: *FileState, lno: usize, cno: usize, sign: u8) Io.Writer.Error!void {
     st.last_shown = lno;
-    var buf: [32]u8 = undefined;
     if (st.fmt.pathname) {
         try outputColor(st, st.name, .filename);
         try outputSep(st, sign);
     }
     if (st.fmt.line_number) {
-        // unreachable: a line number fits
-        try outputColor(st, std.mem.print(&buf, "{d}", .{lno}) catch unreachable, .line_number);
+        try outputColorNumber(st, lno, .line_number);
         try outputSep(st, sign);
     }
     if (st.fmt.column and cno != 0) {
-        // unreachable: a column fits
-        try outputColor(st, std.mem.print(&buf, "{d}", .{cno}) catch unreachable, .column);
+        try outputColorNumber(st, cno, .column);
         try outputSep(st, sign);
     }
 }
@@ -1301,9 +1316,9 @@ const Batch = struct {
             try batch.binaries.append(a, bin);
         }
         // The tasks index both by a file's place in the batch.
-        assert(end > start);
-        assert(batch.contents.items.len == end - start);
-        assert(batch.binaries.items.len == end - start);
+        assert.invariant(end > start, "a batch holds a file at least");
+        assert.invariant(batch.contents.items.len == end - start, "a content for each file of the batch");
+        assert.invariant(batch.binaries.items.len == end - start, "a binary flag for each file of the batch");
         return end;
     }
 
