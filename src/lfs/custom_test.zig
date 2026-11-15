@@ -231,7 +231,7 @@ test "a standalone agent is sent what git-lfs sends it, an upload and a download
     var repo = try repo_mod.Repository.open(gpa, io, ours, .{});
     defer repo.deinit(io);
     var store = try lfs.Lfs.load(gpa, &.{ .gpa = gpa, .config = repo.configuration() }, .{
-        .common_dir = repo.commonDirectory(),
+        .common_dir = .of(repo.commonDirectory()),
         .shared = repo.sharedPermissions(),
     });
     defer store.deinit();
