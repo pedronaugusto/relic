@@ -89,6 +89,10 @@ const TokenUser = extern struct {
     room: [240]u8,
 };
 
+/// TOKEN_LINKED_TOKEN: the handle of the token linked to an elevated or
+/// filtered one, which `GetTokenInformation` writes in place.
+const LinkedToken = extern struct { token: windows.HANDLE };
+
 /// Whether the file at `path`, absolute, is the current user's, as git's
 /// `is_path_owned_by_current_user` asks Windows: its owner is the user's
 /// SID, or the Administrators group when the user is one (or its token's
@@ -113,10 +117,10 @@ pub fn ownedByCurrentUser(path: [:0]const u16) bool {
     if (IsWellKnownSid(sid, win_builtin_administrators_sid).toBool()) {
         var member: windows.BOOL = .FALSE;
         if (CheckTokenMembership(null, sid, &member).toBool() and member.toBool()) return true;
-        var linked: windows.HANDLE = undefined;
-        if (GetTokenInformation(token, token_linked_token, &linked, @sizeOf(windows.HANDLE), &size).toBool()) {
-            defer windows.CloseHandle(linked);
-            if (CheckTokenMembership(linked, sid, &member).toBool() and member.toBool()) return true;
+        var linked: LinkedToken = undefined;
+        if (GetTokenInformation(token, token_linked_token, &linked, @sizeOf(LinkedToken), &size).toBool()) {
+            defer windows.CloseHandle(linked.token);
+            if (CheckTokenMembership(linked.token, sid, &member).toBool() and member.toBool()) return true;
         }
     }
     return false;
