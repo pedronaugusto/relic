@@ -1,0 +1,4 @@
+{"seams": [
+  {"file": "src/fs/platform.zig", "rules": ["P007"], "reason": "the file layer's platform calls std.Io does not give it: the process umask, the effective user, the process id, Windows' CreateHardLinkW, a file's owner checked against the user's token, and NtCreateFile for a handle to a file's attributes alone"},
+  {"file": "src/fs/input.zig", "rules": ["A009"], "reason": "the file layer's input seam: a file's contents (whole, stat-measured, or a secret), a lock's pid record and a link's target enter here, each held to the byte limit its caller names, git's 32-byte pid record, or a path's maximum length"}
+]}

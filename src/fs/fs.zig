@@ -19,12 +19,18 @@ const std = @import("std");
 const decimal = @import("../text.zig").decimal;
 const encoding = @import("../text.zig").encoding;
 const airlock_mod = @import("airlock.testing");
-const assert = std.debug.assert;
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const builtin = @import("builtin");
 
 const platstat = @import("stat.zig");
+const platform = @import("platform.zig");
+const input = @import("input.zig");
+
+test {
+    _ = platform;
+    _ = input;
+}
 const conduit = @import("conduit");
 
 /// The end-of-operation policy for selected objects and checkout.
@@ -88,7 +94,7 @@ pub fn syncDirectory(io: Io, dir: Io.Dir, path: []const u8) SyncError!void {
 }
 
 /// A file or a directory, as `sub_path` below `dir`.
-pub const Named = struct { dir: Io.Dir, sub_path: []const u8 };
+pub const Named = struct { dir: aegis.own.Unowned(Io.Dir), sub_path: []const u8 };
 
 /// Errors from `syncAll`.
 pub const SyncAllError = airlock.Pending.CommitError || airlock.SyncPathError || airlock.DirSyncError || Io.File.StatError || Allocator.Error || error{LevelUnavailable};
@@ -105,8 +111,8 @@ pub fn syncAll(gpa: Allocator, io: Io, files: []const Named, directories: []cons
     var batch: airlock.Batch = .init(slots);
     defer batch.reset(io);
     // A slot for each file and each directory: every add has its room.
-    for (files) |file| batch.addPath(file.dir, file.sub_path);
-    for (directories) |directory| batch.addDirPath(directory.dir, directory.sub_path);
+    for (files) |file| batch.addPath(file.dir.get(), file.sub_path);
+    for (directories) |directory| batch.addDirPath(directory.dir.get(), directory.sub_path);
     _ = try batch.commitOrRefuse(io, .{ .level = .data });
 }
 
@@ -283,6 +289,10 @@ test "core.fsync is read as git reads it" {
     try testing.expectEqual(Sync.none, (Fsync{ .components = .empty, .method = .batch, .object_files = true }).sync(.index));
 }
 
+/// The nanoseconds in a second, which is the coarsest `Resolution` and what
+/// a nanosecond field counts within.
+const second_ns: u64 = aegis.units.Unit.second.nanoseconds();
+
 /// How fine a modification time a filesystem records.
 ///
 /// The old assumption here was that a nanosecond reported is a nanosecond
@@ -307,11 +317,11 @@ pub const Resolution = struct {
     pub const nanosecond: Resolution = .{ .ns = 1 };
     /// Whole seconds only, which is what a filesystem that reports zero
     /// nanoseconds has.
-    pub const second: Resolution = .{ .ns = std.time.ns_per_s };
+    pub const second: Resolution = .{ .ns = second_ns };
 
     /// Whether the filesystem keeps anything below a second.
     pub fn hasSubsecond(r: Resolution) bool {
-        return r.ns < std.time.ns_per_s;
+        return r.ns < second_ns;
     }
 
     /// Two nanosecond fields, as the filesystem can tell them apart.
@@ -383,13 +393,13 @@ pub fn probeTimestampResolution(io: Io, dir: Io.Dir) Io.Cancelable!Resolution {
     if (samples == 0) return .nanosecond;
     // Every sample reported zero: the filesystem keeps seconds and nothing
     // below them. That is a measurement and not an assumption, so it says so.
-    if (divisor == 0) return .{ .ns = std.time.ns_per_s, .measured = true };
+    if (divisor == 0) return .{ .ns = second_ns, .measured = true };
 
-    var unit: u64 = std.time.ns_per_s;
+    var unit: u64 = second_ns;
     while (unit > 1 and divisor % unit != 0) unit /= 10;
     // A power of ten no coarser than a second, which is what a stat
     // comparison rounds a nanosecond field down to.
-    aegis.assert.invariant(std.time.ns_per_s % unit == 0, "a resolution is a power of ten of nanoseconds within a second"); // a divisibility check on the power of ten the loop above made, no unit converted
+    aegis.assert.invariant(second_ns % unit == 0, "a resolution is a power of ten of nanoseconds within a second");
     return .{ .ns = unit, .measured = true };
 }
 
@@ -519,9 +529,14 @@ pub const Stat = struct {
         return @truncate(@as(u96, @intCast(sec)));
     }
 
+    const Nanoseconds = aegis.units.Instant(.real, .nanosecond, i96);
+
+    /// The nanoseconds `t` is past the start of its second, below a
+    /// billion and so within the index's 32 bits.
     fn splitNsec(t: Io.Timestamp) u32 {
-        const rem = @mod(t.nanoseconds, std.time.ns_per_s); // the index's nanoseconds within the second
-        return @intCast(rem);
+        const at = Nanoseconds.fromTimestamp(t, .exact);
+        const second_start = at.floor(.fromRaw(second_ns));
+        return @intCast(second_start.saturatingDurationTo(at).raw());
     }
 };
 
@@ -698,21 +713,7 @@ pub fn isExecutable(p: Io.File.Permissions) bool {
 /// and put back at once, the only way POSIX gives to read it, so a file
 /// another thread creates in that moment is made without it. Windows has
 /// no umask, and git there reads zero.
-pub fn processUmask() u32 {
-    switch (builtin.target.os.tag) {
-        .windows => return 0,
-        .linux => if (!builtin.link_libc) {
-            const linux = std.os.linux;
-            const old = linux.syscall1(.umask, 0);
-            _ = linux.syscall1(.umask, old);
-            return @intCast(old & 0o7777);
-        },
-        else => {},
-    }
-    const old = std.c.umask(0);
-    _ = std.c.umask(old);
-    return @intCast(old & 0o7777);
-}
+pub const processUmask = platform.processUmask;
 
 /// The permissions a blob's mode asks for: 0o777 when executable, 0o666
 /// otherwise, before the process umask — which is what git creates files
@@ -770,7 +771,8 @@ pub const LockFile = struct {
 
     /// The lock, airlock's exact-named temp of the target.
     pending: airlock.Pending,
-    dir: Io.Dir,
+    /// The directory the lock is in, which the caller keeps open.
+    dir: aegis.own.Unowned(Io.Dir),
     /// The name being replaced, relative to `dir`. Borrowed from the caller
     /// for the lifetime of the lock.
     target: []const u8,
@@ -839,7 +841,7 @@ pub const LockFile = struct {
         return .{
             // Its file was lent here: it moves to the lock's address.
             .pending = pending.move(),
-            .dir = dir,
+            .dir = .of(dir),
             .target = sub_path,
             .lock_name = lock_name,
             .pid_name = pid_name,
@@ -881,7 +883,7 @@ pub const LockFile = struct {
     /// Flush, make durable, close and rename over the target. After this the
     /// lock is gone and the new bytes are the file.
     pub fn commit(lock: *LockFile, io: Io) Self.CommitError!void {
-        assert(!lock.finished);
+        aegis.assert.invariant(!lock.finished, "a lock is committed once");
         lock.file_writer.interface.flush() catch |err| return lock.failure(err);
         // The lock's own descriptor is synced before the rename, which is the
         // step that prevents every corruption the field reports: an empty
@@ -897,7 +899,7 @@ pub const LockFile = struct {
             // `target` may be refs/heads/main relative to the repository: it
             // is heads, not the repository directory, that was changed.
             const parent = std.Io.Dir.path.dirname(lock.target) orelse ".";
-            const dir = try lock.dir.openDir(io, parent, .{ .iterate = true });
+            const dir = try lock.dir.get().openDir(io, parent, .{ .iterate = true });
             defer dir.close(io);
             try syncDir(io, dir);
         }
@@ -921,7 +923,7 @@ pub const LockFile = struct {
     /// cancel is returned and the name kept, for `deinit` to remove it.
     fn removePidFile(lock: *LockFile, io: Io) Io.Cancelable!void {
         const name = lock.pid_name orelse return;
-        lock.dir.deleteFile(io, name) catch |err| switch (err) {
+        lock.dir.get().deleteFile(io, name) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             else => std.log.warn("unable to remove '{s}': {t}", .{ name, err }),
         };
@@ -947,8 +949,8 @@ fn writePidFile(gpa: Allocator, io: Io, dir: Io.Dir, sub_path: []const u8, share
     errdefer dir.deleteFile(io, name) catch |e| std.log.warn("unable to remove '{s}': {t}", .{ name, e });
     try adjustShared(io, dir, name, shared);
     var text: [32]u8 = undefined;
-    // unreachable: a u32 pid is at most ten digits
-    const line = std.mem.print(&text, "pid {d}\n", .{currentPid()}) catch unreachable;
+    const line = std.mem.print(&text, "pid {d}\n", .{currentPid()}) catch
+        aegis.assert.never("a u32 pid is at most ten digits: \"pid \", they and a newline fit thirty-two bytes");
     file.writePositionalAll(io, line, 0) catch |err| {
         if (err == error.Canceled) return error.Canceled;
         std.log.warn("could not write lock pid file '{s}': {t}", .{ name, err });
@@ -1042,6 +1044,8 @@ fn baseStart(path: []const u8) usize {
 /// waiting for a holder as `on_contention` says.
 /// How long `createLock` waits for a lock held elsewhere.
 const WaitMillis = aegis.units.Duration(.millisecond, u32);
+/// A wait as std holds it, every one exactly.
+const IoSpan = aegis.units.Duration(.nanosecond, i96);
 
 fn createLock(
     io: Io,
@@ -1052,8 +1056,10 @@ fn createLock(
 ) LockError!airlock.Pending {
     const deadline_ms: u32 = switch (on_contention) {
         .fail => 0,
+        // A wait no u32 of milliseconds holds is none when it is negative,
+        // and as long as there is otherwise.
         .wait => |d| (WaitMillis.fromIoDuration(d, .down) catch
-            WaitMillis.fromRaw(if (d.nanoseconds < 0) 0 else std.math.maxInt(u32))).raw(),
+            WaitMillis.fromRaw(if (IoSpan.fromIoDuration(d, .exact).compare(.fromRaw(0)) == .lt) 0 else std.math.maxInt(u32))).raw(),
     };
     var waited: u32 = 0;
     var attempt: u32 = 0;
@@ -1125,10 +1131,14 @@ pub fn removeIfEmpty(io: Io, dir: Io.Dir, sub_path: []const u8) Io.Cancelable!bo
     return true;
 }
 
+/// How long a rename is retried for while a scanner or an indexer holds a
+/// name, as git for Windows' `mingw_rename` retries.
+const rename_retry = aegis.units.Duration(.millisecond, i64).literal("2s");
+
 /// Rename over the name `new_name`, as git renames: with no sync, and on
 /// Windows retried while a scanner or indexer holds either name.
 pub fn rename(io: Io, dir: Io.Dir, old_name: []const u8, new_name: []const u8) Io.Dir.RenameError!void {
-    return airlock.renameUnsynced(io, dir, old_name, dir, new_name, .fromMilliseconds(2000));
+    return airlock.renameUnsynced(io, dir, old_name, dir, new_name, rename_retry.toIoDuration());
 }
 
 /// Take off `sub_path`'s read-only attribute, when it has one, as git for
@@ -1379,11 +1389,8 @@ pub fn hardLink(io: Io, dir: Io.Dir, old_path: []const u8, new_path: []const u8)
     const new_absolute = if (std.Io.Dir.path.isAbsolute(new_path)) new_path else try std.mem.print(&new_buf, "{s}/{s}", .{ root, new_path });
     const old_w = try Io.Threaded.sliceToPrefixedFileW(null, old_absolute, .{});
     const new_w = try Io.Threaded.sliceToPrefixedFileW(null, new_absolute, .{});
-    if (!CreateHardLinkW(new_w.span().ptr, old_w.span().ptr, null).toBool()) return error.OperationUnsupported;
+    if (!platform.createHardLink(new_w.span(), old_w.span())) return error.OperationUnsupported;
 }
-
-// aegis: boundary(A019): Win32's CreateHardLinkW, the raw call
-extern "kernel32" fn CreateHardLinkW(new_path: [*:0]const u16, old_path: [*:0]const u16, security_attributes: ?*anyopaque) callconv(.winapi) std.os.windows.BOOL;
 
 /// Whether `sub_path` in `dir` is the current user's: git's
 /// `is_path_owned_by_current_user`. On POSIX its owner, not following a
@@ -1404,43 +1411,11 @@ pub fn ownedByCurrentUser(io: Io, dir: Io.Dir, sub_path: []const u8, home: ?[]co
                 .absent => return false,
                 .failed => |err| return if (err == error.Canceled) error.Canceled else false,
             };
-            const euid: u32 = switch (builtin.target.os.tag) {
-                .linux => std.os.linux.geteuid(),
-                else => if (builtin.link_libc) std.c.geteuid() else return false,
-            };
+            const euid = platform.effectiveUid() orelse return false;
             return found.extra.uid == euid;
         },
     }
 }
-
-const se_file_object: c_int = 1;
-const owner_security_information: u32 = 0x1;
-const dacl_security_information: u32 = 0x4;
-const token_query: u32 = 0x8;
-const token_user: c_int = 1;
-const token_linked_token: c_int = 19;
-const win_builtin_administrators_sid: c_int = 26;
-
-// aegis: boundary(A019): Win32's GetNamedSecurityInfoW, the raw call
-extern "advapi32" fn GetNamedSecurityInfoW(object_name: [*:0]const u16, object_type: c_int, info: u32, owner: ?*?*anyopaque, group: ?*?*anyopaque, dacl: ?*?*anyopaque, sacl: ?*?*anyopaque, descriptor: ?*?*anyopaque) callconv(.winapi) u32;
-// aegis: boundary(A019): Win32's OpenProcessToken, the raw call
-extern "advapi32" fn OpenProcessToken(process: std.os.windows.HANDLE, access: u32, token: *std.os.windows.HANDLE) callconv(.winapi) std.os.windows.BOOL;
-// aegis: boundary(A019): Win32's GetTokenInformation, the raw call
-extern "advapi32" fn GetTokenInformation(token: std.os.windows.HANDLE, class: c_int, info: ?*anyopaque, length: u32, returned: *u32) callconv(.winapi) std.os.windows.BOOL;
-// aegis: boundary(A019): Win32's IsValidSid, the raw call
-extern "advapi32" fn IsValidSid(sid: *anyopaque) callconv(.winapi) std.os.windows.BOOL;
-// aegis: boundary(A019): Win32's EqualSid, the raw call
-extern "advapi32" fn EqualSid(a: *anyopaque, b: *anyopaque) callconv(.winapi) std.os.windows.BOOL;
-// aegis: boundary(A019): Win32's IsWellKnownSid, the raw call
-extern "advapi32" fn IsWellKnownSid(sid: *anyopaque, kind: c_int) callconv(.winapi) std.os.windows.BOOL;
-// aegis: boundary(A019): Win32's CheckTokenMembership, the raw call
-extern "advapi32" fn CheckTokenMembership(token: ?std.os.windows.HANDLE, sid: *anyopaque, member: *std.os.windows.BOOL) callconv(.winapi) std.os.windows.BOOL;
-// aegis: boundary(A019): Win32's LocalFree, the raw call
-extern "kernel32" fn LocalFree(memory: ?*anyopaque) callconv(.winapi) ?*anyopaque;
-// aegis: boundary(A019): Win32's GetCurrentProcess, the raw call
-extern "kernel32" fn GetCurrentProcess() callconv(.winapi) std.os.windows.HANDLE;
-// aegis: boundary(A019): Win32's CloseHandle, the raw call
-extern "kernel32" fn CloseHandle(handle: std.os.windows.HANDLE) callconv(.winapi) std.os.windows.BOOL;
 
 fn ownedWindows(io: Io, dir: Io.Dir, sub_path: []const u8, home: ?[]const u8) Io.Cancelable!bool {
     var root_buf: [Io.Dir.max_path_bytes]u8 = undefined;
@@ -1455,67 +1430,13 @@ fn ownedWindows(io: Io, dir: Io.Dir, sub_path: []const u8, home: ?[]const u8) Io
     const wide_len = std.unicode.wtf8ToWtf16Le(&wide_buf, path) catch return false;
     if (wide_len + 1 > wide_buf.len) return false;
     wide_buf[wide_len] = 0;
-    var owner: ?*anyopaque = null;
-    var descriptor: ?*anyopaque = null;
-    if (GetNamedSecurityInfoW(wide_buf[0..wide_len :0].ptr, se_file_object, owner_security_information | dacl_security_information, &owner, null, null, null, &descriptor) != 0) return false;
-    defer _ = LocalFree(descriptor);
-    const sid = owner orelse return false;
-    if (!IsValidSid(sid).toBool()) return false;
-    var token: std.os.windows.HANDLE = undefined;
-    if (!OpenProcessToken(GetCurrentProcess(), token_query, &token).toBool()) return false;
-    defer _ = CloseHandle(token);
-    var user_buf: [256]u8 align(@alignOf(usize)) = undefined;
-    var size: u32 = 0;
-    if (GetTokenInformation(token, token_user, &user_buf, user_buf.len, &size).toBool()) {
-        // TOKEN_USER begins with the user's SID
-        const user_sid: *anyopaque = @as(*const *anyopaque, @ptrCast(&user_buf)).*; // aegis: boundary(A019): TOKEN_USER's first field is a SID pointer, and the buffer is aligned for it
-        if (IsValidSid(user_sid).toBool() and EqualSid(sid, user_sid).toBool()) return true;
-    }
-    if (IsWellKnownSid(sid, win_builtin_administrators_sid).toBool()) {
-        var member: std.os.windows.BOOL = .FALSE;
-        if (CheckTokenMembership(null, sid, &member).toBool() and member.toBool()) return true;
-        var linked: std.os.windows.HANDLE = undefined;
-        if (GetTokenInformation(token, token_linked_token, @ptrCast(&linked), @sizeOf(std.os.windows.HANDLE), &size).toBool()) { // aegis: boundary(A019): TOKEN_LINKED_TOKEN is one handle, which this receives
-            defer _ = CloseHandle(linked);
-            if (CheckTokenMembership(linked, sid, &member).toBool() and member.toBool()) return true;
-        }
-    }
-    return false;
+    return platform.ownedByCurrentUser(wide_buf[0..wide_len :0]);
 }
 
 /// A handle to `sub_path`, a file or a directory, that may read and write
 /// its attributes and times and do nothing else.
-fn openAttributesWindows(dir: Io.Dir, sub_path: []const u8) (Io.Dir.PathNameError || Io.Cancelable || error{ FileNotFound, AccessDenied, Unexpected })!OwnedFile {
-    const windows = std.os.windows;
-    const path_w = try Io.Threaded.sliceToPrefixedFileW(dir.handle, sub_path, .{});
-    const span = path_w.span();
-    var object_name = windows.UNICODE_STRING.init(span);
-    var iosb: windows.IO_STATUS_BLOCK = undefined;
-    var handle: windows.HANDLE = undefined;
-    switch (windows.ntdll.NtCreateFile(
-        &handle,
-        .{
-            .STANDARD = .{ .SYNCHRONIZE = true },
-            .SPECIFIC = .{ .FILE = .{ .READ_ATTRIBUTES = true, .WRITE_ATTRIBUTES = true } },
-        },
-        &.{
-            .RootDirectory = if (Io.Dir.path.isAbsoluteWindowsWtf16(span)) null else dir.handle,
-            .ObjectName = &object_name,
-        },
-        &iosb,
-        null,
-        .{ .NORMAL = true },
-        .VALID_FLAGS,
-        .OPEN,
-        .{ .IO = .SYNCHRONOUS_NONALERT },
-        null,
-        0,
-    )) {
-        .SUCCESS => return .init(.{ .handle = handle, .flags = .{ .nonblocking = false } }),
-        .OBJECT_NAME_NOT_FOUND, .OBJECT_PATH_NOT_FOUND => return error.FileNotFound,
-        .ACCESS_DENIED, .SHARING_VIOLATION => return error.AccessDenied,
-        else => |status| return windows.unexpectedStatus(status),
-    }
+fn openAttributesWindows(dir: Io.Dir, sub_path: []const u8) platform.OpenAttributesError!OwnedFile {
+    return .init(try platform.openAttributes(dir, sub_path));
 }
 
 /// Remove a file, taking a read-only attribute off first where the
@@ -1575,8 +1496,8 @@ pub fn staleReport(io: Io, dir: Io.Dir, sub_path: []const u8) Io.Cancelable!Stal
     // `pid <n>` once the trailing space is gone.
     var pid_buf: [512]u8 = undefined;
     const pid_name = std.mem.print(&pid_buf, "{s}~pid.lock", .{sub_path}) catch return .{ .held = true, .pid = null, .holder_alive = null };
-    var contents: [32]u8 = undefined;
-    const text = dir.readFile(io, pid_name, &contents) catch |err| switch (err) {
+    var contents: [input.pid_record_max]u8 = undefined;
+    const text = input.pidRecord(io, dir, pid_name, &contents) catch |err| switch (err) {
         error.Canceled => return error.Canceled,
         else => return .{ .held = true, .pid = null, .holder_alive = null },
     };
@@ -1589,22 +1510,7 @@ pub fn staleReport(io: Io, dir: Io.Dir, sub_path: []const u8) Io.Cancelable!Stal
 }
 
 /// This process's id.
-pub fn currentPid() u32 {
-    return switch (builtin.target.os.tag) {
-        .windows => std.os.windows.GetCurrentProcessId(),
-        .wasi => 0,
-        else => @intCast(std.posix.system.getpid()),
-    };
-}
-
-test "currentPid uses the host process API" {
-    const expected: u32 = switch (builtin.target.os.tag) {
-        .windows => std.os.windows.GetCurrentProcessId(),
-        .wasi => 0,
-        else => @intCast(std.posix.system.getpid()),
-    };
-    try std.testing.expectEqual(expected, currentPid());
-}
+pub const currentPid = platform.currentPid;
 
 /// Whether a process has the id `pid`, as conduit asks the system; a
 /// number the platform's ids cannot hold names no process at all: the file
@@ -1682,13 +1588,12 @@ pub fn atomicWrite(
 /// this package reads one.
 pub fn tempName(io: Io, buf: []u8, prefix: []const u8) []const u8 {
     var raw: [12]u8 = undefined;
-    var hex: [2 * raw.len]u8 = undefined;
-    assert(buf.len >= prefix.len + hex.len);
     io.random(&raw);
-    // unreachable: twelve bytes are twenty-four hex digits
-    _ = std.mem.print(&hex, "{x}", .{&raw}) catch unreachable;
-    // unreachable: the caller's buffer holds the prefix and the digits, asserted above
-    return std.mem.print(buf, "{s}{s}", .{ prefix, hex }) catch unreachable;
+    const hex = std.fmt.bytesToHex(raw, .lower);
+    aegis.assert.invariant(buf.len >= prefix.len + hex.len, "a temporary name's buffer holds its prefix and twenty-four hex digits");
+    @memcpy(buf[0..prefix.len], prefix);
+    @memcpy(buf[prefix.len..][0..hex.len], &hex);
+    return buf[0 .. prefix.len + hex.len];
 }
 
 /// Six letters or digits, as git's `git_mkstemps_mode` fills `XXXXXX`.
@@ -1775,141 +1680,16 @@ pub const TempFile = struct {
 };
 
 /// Errors from reading a file whose length is already known.
-pub const ReadSizedError = Io.File.OpenError || Io.File.ReadPositionalError ||
-    aegis.own.ReadFileError || Allocator.Error;
-
-pub const ReadSizedOptions = struct { size: u64, max_bytes: usize };
-
-/// Read a file a stat has already measured.
-///
-/// The walk that found the file already knows how long it is, so the `fstat`
-/// a general read does to find that out is one syscall per file that a cold
-/// pass over a working tree pays for nothing. The size is a hint and not a
-/// promise: a file that shrank gives back what is there, and a file that grew
-/// is read again the general way.
-///
-/// The bytes are the caller's.
-pub fn readFileSized(
-    gpa: Allocator,
-    io: Io,
-    dir: Io.Dir,
-    sub_path: []const u8,
-    options: ReadSizedOptions,
-) Self.ReadSizedError![]u8 {
-    const size = options.size;
-    const max_bytes = options.max_bytes;
-    if (size > max_bytes) return error.StreamTooLong;
-    const file = try dir.openFile(io, sub_path, .{});
-    defer file.close(io);
-    const buf = try gpa.alloc(u8, @intCast(size));
-    {
-        errdefer gpa.free(buf);
-        const n = try file.readPositionalAll(io, buf, 0);
-        if (n < buf.len) return gpa.realloc(buf, n);
-        // The file is at least as long as the stat said. One byte past the end
-        // says whether it is longer, which is the only case this cannot finish.
-        var probe: [1]u8 = undefined;
-        if (try file.readPositional(io, &.{&probe}, size) == 0) return buf;
-    }
-    gpa.free(buf);
-    return aegis.own.readFile(io, dir, sub_path, gpa, aegis.units.Bytes(u64).fromRaw(max_bytes));
-}
-
-/// Read a whole file, or `null` if it is not there.
-///
-/// The returned bytes are the caller's. `max_bytes` bounds the allocation, so
-/// a hostile or corrupt path cannot ask for the address space.
-pub fn readFileAlloc(
-    gpa: Allocator,
-    io: Io,
-    dir: Io.Dir,
-    sub_path: []const u8,
-    max_bytes: usize,
-) (aegis.own.ReadFileError)!?[]u8 {
-    return aegis.own.readFile(io, dir, sub_path, gpa, aegis.units.Bytes(u64).fromRaw(max_bytes)) catch |err| switch (err) {
-        error.FileNotFound, error.NotDir, error.IsDir => return null,
-        else => |e| return e,
-    };
-}
-
-/// `readFileAlloc` for a file that holds a secret (`.netrc`, a private
-/// key): read into an owner that wipes its bytes when let go, growing
-/// through `reserve`, which wipes what it leaves, so no copy is freed
-/// unwiped on the way as a growing buffer's would be.
-pub fn readSecretFile(
-    gpa: Allocator,
-    io: Io,
-    dir: Io.Dir,
-    sub_path: []const u8,
-    max_bytes: usize,
-) (aegis.own.ReadFileError)!?aegis.SecretBytes {
-    var file = dir.openFile(io, sub_path, .{ .allow_directory = builtin.os.tag != .windows }) catch |err| switch (err) {
-        error.FileNotFound, error.NotDir, error.IsDir => return null,
-        else => |e| return e,
-    };
-    defer file.close(io);
-    // The length is a first guess: the file may change as it is read.
-    const length = file.length(io) catch |err| switch (err) {
-        error.Canceled => return error.Canceled,
-        else => 0,
-    };
-    const guess = std.math.cast(usize, length) orelse max_bytes;
-    var secret = try aegis.SecretBytes.init(gpa, @min(guess, max_bytes) + 1);
-    errdefer secret.deinit(gpa);
-    var at: Reading = .offset;
-    while (true) {
-        const have = secret.len();
-        if (have == secret.capacity()) {
-            if (have > max_bytes) return error.StreamTooLong;
-            try secret.reserve(gpa, @min(have *| 2, max_bytes + 1));
-        }
-        // unreachable: the capacity was just made room for.
-        secret.resizeWithinCapacity(secret.capacity()) catch unreachable;
-        const read = at.read(io, file, secret.exposeMut()[have..], have) catch |err| switch (err) {
-            error.IsDir => {
-                secret.deinit(gpa);
-                return null;
-            },
-            else => |e| return e,
-        };
-        // unreachable: the read filled no more than the capacity.
-        secret.resizeWithinCapacity(have + (read orelse 0)) catch unreachable;
-        if (read == null) break;
-    }
-    if (secret.len() > max_bytes) return error.StreamTooLong;
-    return secret;
-}
-
-/// How a whole-file read reads: at an offset, as `readFileAlloc` (aegis's
-/// `own.readFile`) reads, so the file's shared position is no part of it;
-/// a file with no offsets (a pipe) as a stream.
-const Reading = enum {
-    offset,
-    stream,
-
-    /// Bytes read into `dest` at `pos`, or null at the end. At an offset a
-    /// read of no bytes is the end; a streamed read may give none short of
-    /// it (std allows "including 0", and reactor's io_uring answers so for
-    /// an interrupted read), and only `EndOfStream` ends it.
-    fn read(at: *Reading, io: Io, file: Io.File, dest: []u8, pos: usize) aegis.own.ReadFileError!?usize {
-        while (true) switch (at.*) {
-            .offset => {
-                const n = file.readPositional(io, &.{dest}, pos) catch |err| switch (err) {
-                    error.Unseekable => {
-                        at.* = .stream;
-                        continue;
-                    },
-                    else => |e| return e,
-                };
-                return if (n == 0) null else n;
-            },
-            .stream => return file.readStreaming(io, &.{dest}) catch |err| switch (err) {
-                error.EndOfStream => null,
-                else => |e| e,
-            },
-        };
-    }
-};
+pub const ReadSizedError = input.ReadSizedError;
+/// How long a stat said the file is, and the most bytes the read takes.
+pub const ReadSizedOptions = input.ReadSizedOptions;
+/// Read a file a stat has already measured (`input.readFileSized`).
+pub const readFileSized = input.readFileSized;
+/// Read a whole file, or `null` if it is not there (`input.readFileAlloc`).
+pub const readFileAlloc = input.readFileAlloc;
+/// Read a whole file holding a secret into an owner that wipes it, or
+/// `null` if it is not there (`input.readSecretFile`).
+pub const readSecretFile = input.readSecretFile;
 
 /// Join path components with `/`, which is the separator every git format
 /// uses whatever the platform underneath. The result is the caller's.
@@ -2078,109 +1858,6 @@ test "a link to a directory is removed as a link, and what it points at stays" {
     try tmp.dir.access(io, "target/keep", .{});
     // A directory itself is still refused, as a file removal must.
     if (builtin.target.os.tag == .windows) try std.testing.expectError(error.IsDir, deleteFile(io, tmp.dir, "target"));
-}
-
-test "a sized read gives the whole file whatever the size said" {
-    const io = std.testing.io;
-    const gpa = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const dir = tmp.dir;
-
-    try dir.writeFile(io, .{ .sub_path = "f", .data = "twelve bytes" });
-
-    // The size a stat reported.
-    const exact = try readFileSized(gpa, io, dir, "f", .{ .size = 12, .max_bytes = 1 << 20 });
-    defer gpa.free(exact);
-    try std.testing.expectEqualStrings("twelve bytes", exact);
-
-    // A file that grew after the stat: the read is started again rather than
-    // cut short at the length the stat gave.
-    const grown = try readFileSized(gpa, io, dir, "f", .{ .size = 4, .max_bytes = 1 << 20 });
-    defer gpa.free(grown);
-    try std.testing.expectEqualStrings("twelve bytes", grown);
-
-    // A file that shrank: what is there is what comes back.
-    const shrunk = try readFileSized(gpa, io, dir, "f", .{ .size = 64, .max_bytes = 1 << 20 });
-    defer gpa.free(shrunk);
-    try std.testing.expectEqualStrings("twelve bytes", shrunk);
-
-    const empty = try readFileSized(gpa, io, dir, "f", .{ .size = 0, .max_bytes = 1 << 20 });
-    defer gpa.free(empty);
-    try std.testing.expectEqualStrings("twelve bytes", empty);
-
-    try std.testing.expectError(error.StreamTooLong, readFileSized(gpa, io, dir, "f", .{ .size = 12, .max_bytes = 4 }));
-}
-
-test "a secret file is read whole into its owner, and refused past its limit as readFileAlloc refuses it" {
-    const io = std.testing.io;
-    const gpa = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const dir = tmp.dir;
-
-    try dir.writeFile(io, .{ .sub_path = "f", .data = "twelve bytes" });
-    try dir.writeFile(io, .{ .sub_path = "empty", .data = "" });
-    try dir.createDirPath(io, "d");
-
-    var whole = (try readSecretFile(gpa, io, dir, "f", 1 << 20)).?;
-    defer whole.deinit(gpa);
-    try std.testing.expectEqualStrings("twelve bytes", whole.expose());
-
-    var at_limit = (try readSecretFile(gpa, io, dir, "f", 12)).?;
-    defer at_limit.deinit(gpa);
-    try std.testing.expectEqualStrings("twelve bytes", at_limit.expose());
-
-    var empty = (try readSecretFile(gpa, io, dir, "empty", 1 << 20)).?;
-    defer empty.deinit(gpa);
-    try std.testing.expectEqual(@as(usize, 0), empty.len());
-
-    try std.testing.expectError(error.StreamTooLong, readSecretFile(gpa, io, dir, "f", 4));
-    try std.testing.expect(try readSecretFile(gpa, io, dir, "missing", 1 << 20) == null);
-    try std.testing.expect(try readSecretFile(gpa, io, dir, "d", 1 << 20) == null);
-}
-
-/// An `Io` with no offsets to read at, as a pipe has, whose first streaming
-/// read gives five bytes and whose second gives none, short of the end: what
-/// reactor's io_uring backend answers for an interrupted read, and what
-/// `readStreaming` allows ("including 0").
-const ZeroMidStream = @import("shakedown").Layer(struct { reads: u32 = 0 }, .{ .operate = ZeroMidStreamOps.operate, .fileReadPositional = ZeroMidStreamOps.unseekable });
-const ZeroMidStreamOps = struct {
-    fn unseekable(userdata: ?*anyopaque, file: Io.File, data: []const []u8, offset: u64) Io.File.ReadPositionalError!usize {
-        _ = .{ userdata, file, data, offset };
-        return error.Unseekable;
-    }
-
-    fn operate(userdata: ?*anyopaque, operation: Io.Operation) Io.Cancelable!Io.Operation.Result {
-        const l = ZeroMidStream.of(userdata);
-        if (operation == .file_read_streaming) {
-            l.state.reads += 1;
-            switch (l.state.reads) {
-                1 => {
-                    var short = operation;
-                    const first = operation.file_read_streaming.data[0];
-                    short.file_read_streaming.data = &.{first[0..@min(first.len, 5)]};
-                    return l.base.vtable.operate(l.base.userdata, short);
-                },
-                2 => return .{ .file_read_streaming = 0 },
-                else => {},
-            }
-        }
-        return l.base.vtable.operate(l.base.userdata, operation);
-    }
-};
-
-test "a secret file is read on past a streamed read that gives no bytes short of the end" {
-    const gpa = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "f", .data = "twelve bytes" });
-
-    var secret: ZeroMidStream = .init(std.testing.io, .{});
-    var kept = (try readSecretFile(gpa, secret.io(), tmp.dir, "f", 1 << 20)).?;
-    defer kept.deinit(gpa);
-    try std.testing.expectEqualStrings("twelve bytes", kept.expose());
-    try std.testing.expect(secret.state.reads > 2);
 }
 
 test "a lock is refused, not broken, and says who holds it" {
@@ -2431,11 +2108,11 @@ test "files and directories are made durable together, and a missing one is the 
     defer h.destroy();
     const io = h.io();
     try syncAll(std.testing.allocator, io, &.{
-        .{ .dir = tmp.dir, .sub_path = "a/b/one" },
-        .{ .dir = tmp.dir, .sub_path = "two" },
+        .{ .dir = .of(tmp.dir), .sub_path = "a/b/one" },
+        .{ .dir = .of(tmp.dir), .sub_path = "two" },
     }, &.{
-        .{ .dir = tmp.dir, .sub_path = "a/b" },
-        .{ .dir = tmp.dir, .sub_path = "." },
+        .{ .dir = .of(tmp.dir), .sub_path = "a/b" },
+        .{ .dir = .of(tmp.dir), .sub_path = "." },
     });
     // Linux syncs each file with a data sync of its own; elsewhere the batch writes each file and
     // directory out and flushes the volume once.
@@ -2447,7 +2124,7 @@ test "files and directories are made durable together, and a missing one is the 
     h.reset();
     try syncAll(std.testing.allocator, io, &.{}, &.{});
     try std.testing.expectEqual(@as(u32, 0), h.syncs());
-    try std.testing.expectError(error.FileNotFound, syncAll(std.testing.allocator, io, &.{.{ .dir = tmp.dir, .sub_path = "missing" }}, &.{}));
+    try std.testing.expectError(error.FileNotFound, syncAll(std.testing.allocator, io, &.{.{ .dir = .of(tmp.dir), .sub_path = "missing" }}, &.{}));
 }
 
 test "a read-only file is replaced and removed, as a lockable one nobody holds must be" {
@@ -2469,13 +2146,6 @@ test "a read-only file is replaced and removed, as a lockable one nobody holds m
 
 /// All errors reported by this namespace.
 pub const Error = SyncError || StatError || LockError || CommitError || LockFile.OpenError || Shared.ParseError || SetTimestampsError || HardLinkError || AtomicWriteError || ReadSizedError || Self.StatError || Self.CommitError || Io.Dir.RenameError || Io.Dir.CreateDirPathError || Io.Dir.SetFilePermissionsError || Io.Dir.DeleteFileError || Self.AtomicWriteError || Self.ReadSizedError || Allocator.Error;
-
-test "sized read releases its hint allocation when a grown file exceeds the limit" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "grown", .data = "twelve bytes" });
-    try std.testing.expectError(error.StreamTooLong, readFileSized(std.testing.allocator, std.testing.io, tmp.dir, "grown", .{ .size = 1, .max_bytes = 4 }));
-}
 
 test "a changed status-change time says a file may have changed under core.trustCtime and a full check, as in git" {
     const a: Stat = .{ .mtime_sec = 1000, .ctime_sec = 1000, .size = 7 };

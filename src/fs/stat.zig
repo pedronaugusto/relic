@@ -28,6 +28,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Io = std.Io;
 const airlock = @import("airlock");
+const input = @import("input.zig");
 
 /// The fields `std.Io.File.Stat` leaves out.
 pub const Extra = struct {
@@ -136,7 +137,7 @@ fn fullWindows(io: Io, dir: Io.Dir, sub_path: []const u8, s: airlock.Stat) FullR
     // fails git's.
     const size: u64 = if (kind == .sym_link) size: {
         var target: [Io.Dir.max_path_bytes]u8 = undefined;
-        break :size dir.readLink(io, sub_path, &target) catch |err| return switch (err) {
+        break :size (input.linkTarget(io, dir, sub_path, &target) catch |err| return switch (err) {
             // Gone, or no longer a link, since it was stat'ed.
             error.FileNotFound, error.NotDir => .absent,
             error.AccessDenied, error.PermissionDenied => .{ .failed = error.AccessDenied },
@@ -147,7 +148,7 @@ fn fullWindows(io: Io, dir: Io.Dir, sub_path: []const u8, s: airlock.Stat) FullR
             error.SystemResources => .{ .failed = error.SystemResources },
             error.Canceled => .{ .failed = error.Canceled },
             else => .{ .failed = error.Unexpected },
-        };
+        }).len;
     } else s.size;
     return .{ .found = .{
         .mtime = s.mtime,
