@@ -687,7 +687,7 @@ fn receiveObjects(
     var links: index_pack.Links = .init(gpa);
     defer links.deinit();
     var to_warnings: fsck.ToWarnings = .{ .warnings = options.warnings };
-    var rules = try fsck.forTransfer(gpa, io, ask.settings, .{ .kind = repo.objectFormat(), .scope = .fetch, .base = repo.topDirectory() }, .{ .explicit = options.check_objects, .sink = to_warnings.sink() });
+    var rules = try fsck.forTransfer(gpa, io, ask.settings, .{ .kind = repo.objectFormat(), .scope = .fetch, .base = .of(repo.topDirectory()) }, .{ .explicit = options.check_objects, .sink = to_warnings.sink() });
     defer if (rules) |*r| r.deinit(gpa);
     // What the lenders' refs name is offered too, as git's fetch-pack
     // offers an alternate's.

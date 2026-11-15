@@ -740,7 +740,7 @@ pub const Server = struct {
     /// `receive.fsckObjects`'s rules.
     fn unpack(s: *Server, in: *Io.Reader, q: *Quarantine, diagnostic: *index_pack.Diagnostic, progress: progress_mod.Progress) !Received {
         const config = s.remote.repo.configuration();
-        var rules = try fsck.forTransfer(s.gpa, s.io, config, .{ .kind = s.kind(), .scope = .receive, .base = s.remote.repo.gitDirectory() }, .{});
+        var rules = try fsck.forTransfer(s.gpa, s.io, config, .{ .kind = s.kind(), .scope = .receive, .base = .of(s.remote.repo.gitDirectory()) }, .{});
         defer if (rules) |*r| r.deinit(s.gpa);
         var received: Received = .{ .result = undefined, .links = .init(s.gpa), .gpa = s.gpa };
         errdefer received.links.deinit();
