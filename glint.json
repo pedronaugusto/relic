@@ -22,11 +22,25 @@
       "reason": "the file layer's platform calls std.Io does not give it: the process umask, the effective user, the process id, Windows' CreateHardLinkW, a file's owner checked against the user's token, and NtCreateFile for a handle to a file's attributes alone"
     },
     {
+      "file": "src/hash/sha1.zig",
+      "rules": [
+        "P007"
+      ],
+      "reason": "SHA-1 on the processor's own instructions: the aarch64 and x86-64 rounds and cpuid as inline assembly, and the feature queries std has no checked form of (Darwin's sysctlbyname, Linux's auxiliary vector)"
+    },
+    {
       "file": "src/lfs/input.zig",
       "rules": [
         "A009"
       ],
       "reason": "relic_lfs's input seam: an object in a store (this repository's, a remote's, a reference directory's, a custom transfer agent's file), a working-tree file a filter cleans and a partial download kept for a resume are read here, a read into a buffer held to the buffer, a whole file to the limit named there, and a stream to the buffer it is read through; everything else in relic_lfs decodes or hashes the bytes it hands back"
+    },
+    {
+      "file": "src/object/input.zig",
+      "rules": [
+        "A009"
+      ],
+      "reason": "the object layer's input seam: the files it reads (an fsck.skipList, a message given to interpret-trailers), each held to a limit named there; everything else in the layer parses the bytes it hands back"
     },
     {
       "file": "src/odb/index_pack/input.zig",
