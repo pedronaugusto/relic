@@ -1,6 +1,13 @@
 {
   "seams": [
     {
+      "file": "src/config/passwd.zig",
+      "rules": [
+        "P007"
+      ],
+      "reason": "the password database asked for a user's home (getpwnam_r), the one call std's checked layer does not give the configuration"
+    },
+    {
       "file": "src/fs/input.zig",
       "rules": [
         "A009"
@@ -48,6 +55,20 @@
         "A009"
       ],
       "reason": "the ref store's input seam: the loose refs and the symbolic links that stand for them, packed-refs and the reftable tables' headers, footers and blocks are read here, each held to a limit named there (a caller's buffer, 256 MiB for a file read whole, a block's most for a table); everything else in the ref store parses the bytes it hands back"
+    },
+    {
+      "file": "src/repo/input.zig",
+      "rules": [
+        "A009"
+      ],
+      "reason": "the repository layer's input seam: a template's files (held to 1 GiB) and links (held to the platform's longest path), and the index's trailing checksum (held to its fixed size); the rest of the layer takes the bytes it hands back"
+    },
+    {
+      "file": "src/repo/kernel.zig",
+      "rules": [
+        "P007"
+      ],
+      "reason": "the kernel's name on FreeBSD (the kern.ostype sysctl), where std has no uname, the one call std's checked layer does not give the repository"
     },
     {
       "file": "src/wire/input.zig",

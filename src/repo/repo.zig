@@ -21,7 +21,6 @@ const std = @import("std");
 const builtin = @import("builtin");
 const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
-const assert = std.debug.assert;
 const Io = std.Io;
 
 const hash = @import("../hash/hash.zig");
@@ -139,7 +138,7 @@ pub fn templateDir(gpa: Allocator, io: Io, base: Io.Dir, config: *const config_m
     var it = config.iterate(&.{"init.templatedir"});
     while (it.next()) |entry| {
         const path: ?[]u8 = if (entry.value) |value| (config_mod.pathSetting(gpa, io, base, config.context.home, value) catch |err| return switch (err) {
-            error.MissingPath => unreachable,
+            error.MissingPath => aegis.assert.never("a value is passed, so its path is never missing"),
             else => |e| e,
         }) orelse try gpa.dupe(u8, value) else null;
         if (found) |old| gpa.free(old);
@@ -154,7 +153,7 @@ const LfsconfigCache = struct {
     key: LfsconfigKey,
     text: ?[]u8,
     /// When the key was taken, by the wall clock files are stamped from.
-    seen_at: Io.Timestamp,
+    seen_at: Wall,
 
     /// Whether the key can prove nothing changed since: each file in it
     /// was stamped well before it was looked at. A file stamped close to
@@ -162,7 +161,7 @@ const LfsconfigCache = struct {
     /// the filesystem's clock and keep every time it had, git's racy-clean
     /// case, so it is read again instead.
     fn settled(cache: LfsconfigCache) bool {
-        const cutoff = cache.seen_at.subDuration(racy_window);
+        const cutoff = cache.seen_at.saturatingSub(racy_window);
         if (cache.key.worktree) |w| if (!w.before(cutoff)) return false;
         if (cache.key.index) |ix| if (!ix.file.before(cutoff)) return false;
         return true;
@@ -172,7 +171,11 @@ const LfsconfigCache = struct {
 /// How far behind the moment it was looked at a file's times must lie for
 /// a rewrite to be sure to move them: filesystems stamp from a coarse clock
 /// (a scheduler tick on Linux, about 16ms on Windows, two seconds on FAT).
-const racy_window = Io.Duration.fromSeconds(2);
+const racy_window = aegis.units.Duration(.nanosecond, i96).literal("2s");
+
+/// The wall clock files are stamped from, to the nanosecond: what `stat`
+/// and `Io.Clock.real` give, held whole.
+const Wall = aegis.units.Instant(.real, .nanosecond, i96);
 
 const LfsconfigKey = struct {
     /// The working tree's `.lfsconfig`, when there is one: nothing else
@@ -185,15 +188,15 @@ const LfsconfigKey = struct {
 /// A file as `stat` sees it, for knowing it has not changed.
 const FileStamp = struct {
     size: u64,
-    mtime: Io.Timestamp,
-    ctime: Io.Timestamp,
+    mtime: Wall,
+    ctime: Wall,
     inode: Io.File.INode,
 
     fn of(st: Io.File.Stat) FileStamp {
-        return .{ .size = st.size, .mtime = st.mtime, .ctime = st.ctime, .inode = st.inode };
+        return .{ .size = st.size, .mtime = .fromTimestamp(st.mtime, .exact), .ctime = .fromTimestamp(st.ctime, .exact), .inode = st.inode };
     }
-    fn before(stamp: FileStamp, cutoff: Io.Timestamp) bool {
-        return stamp.mtime.nanoseconds < cutoff.nanoseconds and stamp.ctime.nanoseconds < cutoff.nanoseconds;
+    fn before(stamp: FileStamp, cutoff: Wall) bool {
+        return stamp.mtime.compare(cutoff) == .lt and stamp.ctime.compare(cutoff) == .lt;
     }
 };
 
@@ -204,8 +207,9 @@ const IndexStamp = struct {
     checksum: [hash.max_raw_len]u8 = @splat(0),
 };
 
-const RefState = opaque {};
 const config_owner = @import("../config/state.zig");
+const kernel = @import("kernel.zig");
+const input = @import("input.zig");
 
 /// The directories `Repository.open` found, before the repository is read,
 /// each with its one owner.
@@ -254,8 +258,9 @@ const RepositoryData = struct {
     common_dir: ?fs.OwnedDir,
     /// The working tree, or `null` in a bare repository.
     work_dir: ?fs.OwnedDir,
-    /// Owned ref state. Its format and cache are opaque to callers.
-    refs_state: *RefState,
+    /// Owned ref store, allocated by `finish`. Its format and cache are
+    /// reached only through `refStore`.
+    refs_state: *refs_mod.Store,
     /// Opaque ownership of the published configuration: what the files
     /// held at `open`, or when `refreshConfig` last found one changed, or
     /// when `writeConfig` last wrote one, with `editConfig`'s values over
@@ -471,18 +476,8 @@ fn untrackedIdent(gpa: Allocator, io: Io, work: Io.Dir) (Allocator.Error || Io.D
     const real = try fs.realPathAlloc(gpa, io, work, ".");
     defer gpa.free(real);
     if (builtin.target.os.tag == .windows) return gpa.print("Location {s}, system Windows", .{real});
-    if (builtin.target.os.tag == .freebsd) {
-        // Zig's std has no utsname for FreeBSD; uname(3)'s sysname is the
-        // kern.ostype sysctl, read here into SYS_NMLN, the size uname gives it.
-        var name: [256]u8 = undefined;
-        var len: usize = name.len;
-        // kern.ostype is a string the kernel always has and is shorter than
-        // SYS_NMLN, so the read has no way to fail; git dies where uname does.
-        if (std.c.sysctlbyname("kern.ostype", &name, &len, null, 0) != 0) unreachable;
-        return gpa.print("Location {s}, system {s}", .{ real, std.mem.sliceTo(name[0..len], 0) });
-    }
-    const uts = std.posix.uname();
-    return gpa.print("Location {s}, system {s}", .{ real, std.mem.sliceTo(&uts.sysname, 0) });
+    var buffer: kernel.Buffer = undefined;
+    return gpa.print("Location {s}, system {s}", .{ real, kernel.name(&buffer) });
 }
 
 pub const Repository = struct {
@@ -549,7 +544,7 @@ pub const Repository = struct {
         /// (`templateDir` reads it) or git's own installed one names, opened by
         /// the caller. Everything in it but dotfiles is copied, nothing already
         /// there replaced, a `config` in it the start of the repository's own.
-        template: ?Io.Dir = null,
+        template: ?aegis.own.Unowned(Io.Dir) = null,
         /// `--shared`: written as `core.sharedRepository`, with
         /// `receive.denyNonFastforwards`, and given to everything made. `null`
         /// takes the template configuration's.
@@ -988,7 +983,7 @@ pub const Repository = struct {
             .system = options.system_config,
             .xdg = options.xdg_config,
             .global = options.global_config,
-            .local = .{ .dir = repo.commonDirectory(), .sub_path = "config" },
+            .local = .{ .dir = .of(repo.commonDirectory()), .sub_path = "config" },
             .command = options.config_overrides,
             .pairs = options.config_pairs,
         }, .{ .git_dir = git_dir_path, .work_tree = work_tree_path, .branch = branch, .home = options.home }, format, null);
@@ -1028,7 +1023,7 @@ pub const Repository = struct {
             .precompose_unicode = repo.data().settings.precompose_unicode,
             .prefer_symlink_refs = repo.data().settings.prefer_symlink_refs,
         });
-        repo.data().refs_state = @ptrCast(store); // the opaque owner retains this allocated Store.
+        repo.data().refs_state = store;
         repo.data().odb.replacements = .{
             .lister = &repo.data().replacement_lister,
             .enabled = options.replace_objects and repo.data().settings.use_replace_refs,
@@ -1044,7 +1039,7 @@ pub const Repository = struct {
     fn readConfig(repo: *Repository, io: Io, sources: config_mod.Sources, context: config_mod.Context, format: RepositoryFormat, worktree_contents: ?[]const u8) ErrorNamespace.Error!config_mod.Config {
         var read = sources;
         read.worktree = if (format.worktree_config)
-            .{ .dir = repo.gitDirectory(), .sub_path = "config.worktree", .contents = worktree_contents }
+            .{ .dir = .of(repo.gitDirectory()), .sub_path = "config.worktree", .contents = worktree_contents }
         else
             null;
         return config_mod.Config.open(repo.data().gpa, io, read, context);
@@ -1253,10 +1248,12 @@ pub const Repository = struct {
             else => entries * max_percent < not_shared * 100,
         };
         if (split.base) |base| if (!too_many) {
+            const prefix = "sharedindex.";
             var name: [hash.max_hex_len + 16]u8 = @splat(0);
             var hex: [hash.max_hex_len]u8 = undefined;
-            // unreachable: a hex name is at most max_hex_len digits, the prefix twelve bytes
-            _ = std.mem.print(&name, "sharedindex.{s}", .{base.hex(&hex)}) catch unreachable;
+            const digits = base.hex(&hex);
+            @memcpy(name[0..prefix.len], prefix);
+            @memcpy(name[prefix.len..][0..digits.len], digits);
             return name;
         };
         const written_at = try index.writeShared(io, repo.gitDirectory(), options);
@@ -1371,7 +1368,8 @@ pub const Repository = struct {
         // leave before it writes its own
         var shared: fs.Shared = options.shared orelse .umask;
         var logs_set = false;
-        if (options.template) |template| {
+        if (options.template) |lent| {
+            const template = lent.get();
             if (try templateUsable(gpa, io, template)) {
                 // Walked through a handle of its own: where a lent handle
                 // stands in its directory is the lender's, and clones
@@ -1461,7 +1459,7 @@ pub const Repository = struct {
             .system = options.system_config,
             .xdg = options.xdg_config,
             .global = options.global_config,
-            .local = .{ .dir = git_dir, .sub_path = "config" },
+            .local = .{ .dir = .of(git_dir), .sub_path = "config" },
             .command = options.config_overrides,
             .pairs = options.config_pairs,
         }, .{ .home = options.home });
@@ -1504,9 +1502,7 @@ pub const Repository = struct {
         }
         _ = config_write.editFile(gpa, io, git_dir, "config", .local, .{ .shared = shared }, edits.items) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            // unreachable: every key is one of git's own, the one file
-            // read is the one written, and no section is renamed or copied
-            error.InvalidKey, error.NoWritableSource, error.InvalidSectionName => unreachable,
+            error.InvalidKey, error.NoWritableSource, error.InvalidSectionName => aegis.assert.never("every key is one of git's own, the one file read is the one written, and no section is renamed or copied"),
             else => |e| return e,
         };
     }
@@ -1518,8 +1514,11 @@ pub const Repository = struct {
             .umask => null,
             .group => "1",
             .everybody => "2",
-            // unreachable: a u16 is at most six octal digits after the zero
-            .mode => |m| std.mem.print(buf, "0{o}", .{m}) catch unreachable,
+            .mode => |m| blk: {
+                // A u16 is at most six octal digits after the zero.
+                buf[0] = '0';
+                break :blk buf[0 .. 1 + std.fmt.printInt(buf[1..], m, 8, .lower, .{})];
+            },
         };
     }
 
@@ -1563,11 +1562,11 @@ pub const Repository = struct {
                 .sym_link => {
                     if (exists) continue;
                     var buf: [Io.Dir.max_path_bytes]u8 = undefined;
-                    const n = from.readLink(io, entry.name, &buf) catch |err| switch (err) {
+                    const target = input.link(io, from, entry.name, &buf) catch |err| switch (err) {
                         error.Canceled => return error.Canceled,
                         else => continue,
                     };
-                    to.symLink(io, buf[0..n], entry.name, .{}) catch |err| switch (err) {
+                    to.symLink(io, target, entry.name, .{}) catch |err| switch (err) {
                         error.Canceled => return error.Canceled,
                         else => continue,
                     };
@@ -1576,7 +1575,7 @@ pub const Repository = struct {
                     if (exists) continue;
                     const stat = try from.statFile(io, entry.name, .{});
                     const executable = fs.isExecutable(stat.permissions);
-                    const bytes = try aegis.own.readFile(io, from, entry.name, gpa, aegis.units.Bytes(u64).fromRaw(1 << 30));
+                    const bytes = try input.file(io, from, entry.name, gpa, .template_file);
                     defer gpa.free(bytes);
                     const file = try to.createFile(io, entry.name, .{ .exclusive = true, .permissions = fs.permissionsFor(executable) });
                     defer file.close(io);
@@ -1674,7 +1673,7 @@ pub const Repository = struct {
     /// The repository owns this store; callers borrow it for ref operations.
     /// Its backend and cache cannot be assigned separately.
     pub fn refStore(repo: *const Repository) *refs_mod.Store {
-        return @ptrCast(@alignCast(repo.data().refs_state)); // finish allocates refs_state as an aligned Store.
+        return repo.data().refs_state;
     }
 
     /// The last published configuration, borrowed until an edit, a write,
@@ -2122,7 +2121,7 @@ pub const Repository = struct {
         var guard = try repo.data().lfsconfig_cache.acquire(io);
         defer guard.deinit(io);
         const cache = guard.value();
-        const seen_at = Io.Clock.real.now(io);
+        const seen_at: Wall = .fromTimestamp(Io.Clock.real.now(io), .exact);
         const key = try repo.lfsconfigKey(io);
         if (cache.*) |cached| {
             if (std.meta.eql(cached.key, key) and cached.settled()) {
@@ -2154,7 +2153,7 @@ pub const Repository = struct {
                 const st = try file.stat(io);
                 var stamp: IndexStamp = .{ .file = .of(st) };
                 const n = repo.objectFormat().rawLen();
-                if (st.size >= n) _ = try file.readPositionalAll(io, stamp.checksum[0..n], st.size - n);
+                if (st.size >= n) _ = try input.at(io, file, stamp.checksum[0..n], st.size - n);
                 key.index = stamp;
             } else |err| switch (err) {
                 error.FileNotFound => {},

@@ -646,7 +646,7 @@ test "the repository's format is its own config file's alone, as git reads it" {
     // A global file naming another hash names nothing about this one.
     try git.writeFile(io, "global.config", "[extensions]\n\tobjectFormat = sha256\n");
     {
-        var repo = try repo_mod.Repository.open(gpa, io, git.dir, .{ .global_config = .{ .dir = git.dir, .sub_path = "global.config" } });
+        var repo = try repo_mod.Repository.open(gpa, io, git.dir, .{ .global_config = .{ .dir = .of(git.dir), .sub_path = "global.config" } });
         defer repo.deinit(io);
         try std.testing.expectEqual(hash.Kind.sha1, repo.objectFormat());
     }
@@ -741,7 +741,7 @@ test "an includeIf gitdir:./ starts from the including file's directory, and -c 
     try std.testing.expectEqualStrings("probe.v yes\nprobe.w fromcmd\n", said.stdout);
 
     var repo = try repo_mod.Repository.open(gpa, io, work, .{
-        .global_config = .{ .dir = home.dir, .sub_path = ".gitconfig" },
+        .global_config = .{ .dir = .of(home.dir), .sub_path = ".gitconfig" },
         .home = home_path,
         .config_overrides = &.{cmd_inc},
         .ownership = .trust,
@@ -802,7 +802,7 @@ test "includeIf gitdir: and onbranch: globs hold where git's wildmatch says they
     defer gpa.free(said.stderr);
 
     var repo = try repo_mod.Repository.open(gpa, io, work, .{
-        .global_config = .{ .dir = home.dir, .sub_path = ".gitconfig" },
+        .global_config = .{ .dir = .of(home.dir), .sub_path = ".gitconfig" },
         .home = home_path,
         .ownership = .trust,
     });
@@ -1550,7 +1550,7 @@ fn compareInit(gpa: std.mem.Allocator, io: Io, scratch: *testgit.Repo, template:
     options.shared = shared;
     var template_dir = try scratch.dir.openDir(io, template, .{ .iterate = true });
     defer template_dir.close(io);
-    options.template = template_dir;
+    options.template = .of(template_dir);
     try scratch.dir.createDir(io, by_relic, .default_dir);
     var relic_dir = try scratch.dir.openDir(io, by_relic, .{ .iterate = true });
     defer relic_dir.close(io);
@@ -2122,7 +2122,7 @@ test "init takes its branch, object format and ref format from the user's config
         var dir = try root.dir.openDir(io, "by-relic", .{ .iterate = true });
         defer dir.close(io);
         const made = repo_mod.Repository.create(gpa, io, dir, .{
-            .global_config = .{ .dir = root.dir, .sub_path = ".gitconfig" },
+            .global_config = .{ .dir = .of(root.dir), .sub_path = ".gitconfig" },
             .config_overrides = case.overrides,
             .home = home,
         });

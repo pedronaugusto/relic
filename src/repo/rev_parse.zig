@@ -203,10 +203,10 @@ const Resolver = struct {
     /// name, an abbreviation.
     fn basic(r: *Resolver, name: []const u8) Error!Oid {
         const kind = r.src.refs.objectFormat();
-        if (name.len == kind.hexLen()) {
-            // glint-ignore: Z026 -- text that is no full object id is resolved as a name below, as git's get_oid_basic reads it
-            if (Oid.parse(kind, name)) |oid| return oid else |_| {}
-        }
+        // Text that is no full object id is resolved as a name below, as
+        // git's get_oid_basic reads it.
+        if (name.len == kind.hexLen() and allHex(name))
+            return Oid.parse(kind, name) catch aegis.assert.never("hexLen hexadecimal digits are an object id");
         if (std.mem.findLast(u8, name, "@{")) |at| {
             if (name[name.len - 1] != '}') return error.BadRevision;
             return r.reflogSelect(name[0..at], name[at + 2 .. name.len - 1]);
@@ -465,10 +465,9 @@ const Resolver = struct {
         // left a detached HEAD, or a ref, and is never read as a
         // revision: a log line naming `@{-1}` would otherwise name
         // itself without end. git's `get_oid_basic` reads it so.
-        if (from.len == r.src.refs.objectFormat().hexLen()) {
-            // glint-ignore: Z026 -- text that is no full object id is resolved as a name below, as git's get_oid_basic reads it
-            if (Oid.parse(r.src.refs.objectFormat(), from)) |oid| return oid else |_| {}
-        }
+        const kind = r.src.refs.objectFormat();
+        if (from.len == kind.hexLen() and allHex(from))
+            return Oid.parse(kind, from) catch aegis.assert.never("hexLen hexadecimal digits are an object id");
         if (try r.refMaybe(try r.a.print("refs/heads/{s}", .{from}))) |oid| return oid;
         return (try r.dwim(from)) orelse error.BadRevision;
     }

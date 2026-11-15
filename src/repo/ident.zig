@@ -84,7 +84,6 @@ pub fn signature(arena: Allocator, config: *const config_mod.Config, environ: ?*
     const role = inputs.role;
     const machine = inputs.machine;
     const now = inputs.now;
-    const role_name = @tagName(role);
     const config_only = try config.getBool("user.useconfigonly", false);
     const email_given = config.has("author.email") or config.has("committer.email") or config.has("user.email");
     const name_given = config.has("author.name") or config.has("committer.name") or config.has("user.name");
@@ -97,10 +96,10 @@ pub fn signature(arena: Allocator, config: *const config_mod.Config, environ: ?*
         name = environValue(environ, "GIT_COMMITTER_NAME");
         date_text = environValue(environ, "GIT_COMMITTER_DATE");
     }
-    var key_buf: [32]u8 = undefined;
     if (email == null) {
-        // unreachable: the longest role, committer, and `.email` are fifteen bytes
-        const key = std.mem.print(&key_buf, "{s}.email", .{role_name}) catch unreachable;
+        const key = switch (role) {
+            inline else => |r| @tagName(r) ++ ".email",
+        };
         if (try configValue(arena, config, key)) |v| {
             if (v.len != 0) email = v;
         }
@@ -122,8 +121,9 @@ pub fn signature(arena: Allocator, config: *const config_mod.Config, environ: ?*
         }
     }
     if (name == null) {
-        // unreachable: the longest role, committer, and `.name` are fourteen bytes
-        const key = std.mem.print(&key_buf, "{s}.name", .{role_name}) catch unreachable;
+        const key = switch (role) {
+            inline else => |r| @tagName(r) ++ ".name",
+        };
         if (try configValue(arena, config, key)) |v| {
             if (v.len != 0) name = v;
         }

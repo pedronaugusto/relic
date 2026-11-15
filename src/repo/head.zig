@@ -255,9 +255,17 @@ fn bisectedFrom(arena: Allocator, io: Io, repo: *Repository, dir: Io.Dir) Checke
     const text = (try state_file.read(arena, io, dir, "BISECT_START")) orelse return null;
     const name = std.mem.trim(u8, text, " \t\r\n");
     if (name.len == 0) return null;
-    // glint-ignore: Z026 -- text that is no object id is a branch name, below
-    if (Oid.parse(repo.objectFormat(), name)) |_| return null else |_| {}
+    // Text that is no object id is a branch name.
+    if (isObjectId(repo.objectFormat(), name)) return null;
     return try arena.print("refs/heads/{s}", .{name});
+}
+
+/// Whether `text` is an object id of `kind`, as `Oid.parse` takes one:
+/// its whole length in hexadecimal digits.
+fn isObjectId(kind: hash.Kind, text: []const u8) bool {
+    if (text.len != kind.hexLen()) return false;
+    for (text) |c| if (!std.ascii.isHex(c)) return false;
+    return true;
 }
 
 /// The branches the worktree whose `HEAD` is `head` holds: that `HEAD`,
@@ -289,8 +297,7 @@ fn addWorktreeBranches(arena: Allocator, io: Io, repo: *Repository, map: *std.St
             if (ref.len == 0) break;
             const before = lines.next() orelse break;
             const after = lines.next() orelse break;
-            _ = Oid.parse(repo.objectFormat(), before) catch break;
-            _ = Oid.parse(repo.objectFormat(), after) catch break;
+            if (!isObjectId(repo.objectFormat(), before) or !isObjectId(repo.objectFormat(), after)) break;
             try map.put(arena, ref, where);
         }
     }

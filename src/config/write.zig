@@ -55,7 +55,9 @@ pub const Pending = struct {
     pub const Error = ErrorNamespace.Error;
 
     gpa: Allocator,
-    dir: Io.Dir,
+    /// The file's directory, lent by `prepare`'s caller, who keeps and
+    /// closes it.
+    dir: aegis.own.Unowned(Io.Dir),
     sub_path: []const u8,
     lock: fs.LockFile,
     /// The lock's write buffer, which must not move while the lock lives.
@@ -76,8 +78,8 @@ pub const Pending = struct {
     /// gives it.
     pub fn commit(p: *Pending, io: Io) CommitError!void {
         if (std.Io.File.Permissions.has_executable_bit) {
-            if (p.dir.statFile(io, p.sub_path, .{})) |st| {
-                p.dir.setFilePermissions(io, p.lock.lock_name, st.permissions, .{}) catch |err| switch (err) {
+            if (p.dir.get().statFile(io, p.sub_path, .{})) |st| {
+                p.dir.get().setFilePermissions(io, p.lock.lock_name, st.permissions, .{}) catch |err| switch (err) {
                     error.Canceled => return error.Canceled,
                     else => std.log.warn("cannot preserve configuration permissions: {s}", .{@errorName(err)}),
                 };
@@ -143,7 +145,7 @@ pub fn prepare(
         .copy_section => |e| _ = try file.copySectionIn(level, e.old, e.new),
     };
     const bytes = try file.renderWritable();
-    return .{ .gpa = gpa, .dir = dir, .sub_path = sub_path, .lock = lock, .buffer = buffer, .bytes = bytes, .outcome = outcome };
+    return .{ .gpa = gpa, .dir = .of(dir), .sub_path = sub_path, .lock = lock, .buffer = buffer, .bytes = bytes, .outcome = outcome };
 }
 
 /// How a configuration file's lock is taken: with the permissions
@@ -154,7 +156,7 @@ pub fn prepare(
 pub const LockOptions = struct {
     shared: fs.Shared = .umask,
     pid_file: bool = false,
-    on_contention: fs.OnContention = .{ .wait = .fromMilliseconds(1000) },
+    on_contention: fs.OnContention = .{ .wait = aegis.units.Duration(.millisecond, u32).literal("1s").toIoDuration() },
 };
 
 /// A whole write of one file: `prepare`, then put it in place.

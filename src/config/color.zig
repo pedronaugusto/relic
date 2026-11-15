@@ -5,6 +5,7 @@
 //! here; what it paints with them is the writer's.
 
 const std = @import("std");
+const aegis = @import("aegis");
 const config_mod = @import("config.zig");
 const decimal = @import("../text.zig").decimal;
 
@@ -25,7 +26,7 @@ pub const Color = struct {
 
     /// A sequence written out, as git's defaults are.
     pub fn of(comptime sequence: []const u8) Color {
-        comptime std.debug.assert(sequence.len <= max_len);
+        if (sequence.len > max_len) @compileError("a colour's sequence is at most max_len bytes");
         var c: Color = .{ .len = sequence.len };
         @memcpy(c.buf[0..sequence.len], sequence);
         return c;
@@ -109,9 +110,8 @@ pub fn parse(value: []const u8) error{InvalidColor}!Color {
     var out: Color = .{};
     if (!reset_asked and attrs == 0 and fg.empty() and bg.empty()) return out;
     var w: std.Io.Writer = .fixed(&out.buf);
-    // git's buffer is sized for two colours and every attribute, and so is this
-    // unreachable: the longest sequence fits in `max_len`
-    writeSequence(&w, reset_asked, attrs, fg, bg) catch unreachable;
+    // git's buffer is sized for two colours and every attribute, and so is this.
+    writeSequence(&w, reset_asked, attrs, fg, bg) catch aegis.assert.never("the longest sequence, a reset, every attribute and two colours, fits in max_len");
     out.len = @intCast(w.end);
     return out;
 }
@@ -135,7 +135,7 @@ fn writeSequence(w: *std.Io.Writer, reset_asked: bool, attrs_in: u32, fg: Single
         if (sep) try w.writeByte(';');
         sep = true;
         switch (c) {
-            .unspecified, .normal => unreachable, // `empty` above
+            .unspecified, .normal => aegis.assert.never("an empty colour is passed over above"),
             .ansi => |n| try w.print("{d}", .{@as(u32, n) + offset}),
             .@"256" => |n| try w.print("{d};5;{d}", .{ 38 + @as(u32, offset), n }),
             .rgb => |rgb| try w.print("{d};2;{d};{d};{d}", .{ 38 + @as(u32, offset), rgb[0], rgb[1], rgb[2] }),
@@ -166,8 +166,8 @@ fn parseSingle(word: []const u8) ?Single {
         for (&rgb, 0..) |*part, i| {
             const at = 1 + i * width;
             // git reads `#rgb` as each digit twice
-            const hi = std.fmt.charToDigit(word[at], 16) catch break;
-            const lo = std.fmt.charToDigit(word[at + width - 1], 16) catch break;
+            const hi = hexDigit(word[at]) orelse break;
+            const lo = hexDigit(word[at + width - 1]) orelse break;
             part.* = (hi << 4) | lo;
         } else return .{ .rgb = rgb };
     }
@@ -188,6 +188,16 @@ fn parseSingle(word: []const u8) ?Single {
     if (n < 16) return .{ .ansi = @as(u8, @intCast(n)) - 8 + 90 };
     if (n < 256) return .{ .@"256" = @intCast(n) };
     return null;
+}
+
+/// A hexadecimal digit's value, or `null` for any other byte.
+fn hexDigit(c: u8) ?u8 {
+    return switch (c) {
+        '0'...'9' => c - '0',
+        'a'...'f' => c - 'a' + 10,
+        'A'...'F' => c - 'A' + 10,
+        else => null,
+    };
 }
 
 /// The attribute's code, or its `no` form's.

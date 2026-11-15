@@ -19,10 +19,10 @@ const ctype = @import("../text.zig").ctype;
 const shakedown = @import("shakedown");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
-const assert = std.debug.assert;
 const Io = std.Io;
 
 const fs = @import("../fs/fs.zig");
+const passwd = @import("passwd.zig");
 const glob_mod = @import("../text.zig").glob;
 
 /// Errors from reading a configuration file.
@@ -216,11 +216,9 @@ pub const SourceFile = struct {
     fn readBack(f: *SourceFile, text: []const u8, parsed: VariableLine) Allocator.Error!struct { name: []const u8, value: []const u8 } {
         var names = f.names.promote(f.gpa);
         defer f.names = names.state;
-        // unreachable: the writer escapes every value it writes so that it
-        // decodes back to itself
         const value = valueIn(names.allocator(), text[parsed.value_start..parsed.value_end]) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            else => unreachable,
+            else => aegis.assert.never("the writer escapes every value it writes so that it decodes back to itself"),
         };
         return .{ .name = try lowered(names.allocator(), parsed.name), .value = value };
     }
@@ -303,7 +301,9 @@ pub const Sources = struct {
 
     /// A file to read, named relative to a directory.
     pub const Path = struct {
-        dir: Io.Dir,
+        /// Lent for the call, and by `Config.read` for `isStale`: its
+        /// owner keeps and closes it.
+        dir: aegis.own.Unowned(Io.Dir),
         sub_path: []const u8,
         /// What the file holds, read as its bytes in place of reading it:
         /// a write about to replace it, checked before it lands. Borrowed
@@ -376,15 +376,17 @@ pub const Config = struct {
     /// may not set a remote URL.
     gathering_urls: bool = false,
 
-    /// What one read covers.
-    const Plan = union(enum) {
+    /// What one read covers: the type of `plan`, which `open` and
+    /// `openFile` set while they read.
+    pub const Plan = union(enum) {
         sources: Sources,
         file: struct { path: Sources.Path, level: Level },
     };
 
     /// One file a read tried.
     pub const Read = struct {
-        dir: Io.Dir,
+        /// The source's directory, which its owner keeps and closes.
+        dir: aegis.own.Unowned(Io.Dir),
         /// Owned.
         sub_path: []const u8,
         /// A digest of what it held; `null` when it was not there.
@@ -666,7 +668,7 @@ pub const Config = struct {
     /// the cheap part. Nothing is parsed and nothing is kept.
     pub fn isStale(config: *const Config, io: Io) IsStaleError!bool {
         for (config.read.items) |r| {
-            const now = try fs.readFileAlloc(config.gpa, io, r.dir, r.sub_path, 1 << 24);
+            const now = try fs.readFileAlloc(config.gpa, io, r.dir.get(), r.sub_path, 1 << 24);
             defer if (now) |b| config.gpa.free(b);
             const was = r.digest orelse {
                 if (now != null) return true;
@@ -683,7 +685,7 @@ pub const Config = struct {
         const read = if (path.contents) |bytes|
             try config.gpa.dupe(u8, bytes)
         else
-            try fs.readFileAlloc(config.gpa, io, path.dir, path.sub_path, max_file_bytes);
+            try fs.readFileAlloc(config.gpa, io, path.dir.get(), path.sub_path, max_file_bytes);
         try config.remember(path, read);
         const text = read orelse return;
         const owned_path = config.gpa.dupe(u8, path.sub_path) catch |err| {
@@ -699,7 +701,7 @@ pub const Config = struct {
                 if (isRemoteUrl(entry)) return error.RemoteUrlInConditionalInclude;
             }
         }
-        try config.followIncludes(io, path.dir, level, first_entry, depth);
+        try config.followIncludes(io, path.dir.get(), level, first_entry, depth);
     }
 
     /// Keep what a read found, so `isStale` can ask again.
@@ -837,7 +839,7 @@ pub const Config = struct {
             const including_path = config.files.items[entry.file_index.raw()].path;
             const resolved = try resolveIncludePath(config.gpa, path, including_path);
             defer config.gpa.free(resolved);
-            try config.addFile(io, .{ .dir = dir, .sub_path = resolved }, level, false, depth + 1, conditional);
+            try config.addFile(io, .{ .dir = .of(dir), .sub_path = resolved }, level, false, depth + 1, conditional);
         }
     }
 
@@ -1313,11 +1315,11 @@ pub const Config = struct {
                     line.text[name_end..],
                 });
             };
-            // the name was read from this line and the escaped value closes every quote it opens
-            const parsed = parseVariableLine(replacement) catch unreachable;
+            const parsed = parseVariableLine(replacement) catch
+                aegis.assert.never("the name was read from this line and the escaped value closes every quote it opens");
             // The line reads back as the variable it replaced, with a value.
-            assert(parsed.has_value);
-            aegis.assert.invariant(std.ascii.eqlIgnoreCase(parsed.name, line.name), "std.ascii.eqlIgnoreCase(parsed.name, line.name)");
+            aegis.assert.invariant(parsed.has_value, "a replaced line reads back with a value");
+            aegis.assert.invariant(std.ascii.eqlIgnoreCase(parsed.name, line.name), "a replaced line reads back as the variable it replaced");
             const read = blk: {
                 errdefer config.gpa.free(replacement);
                 break :blk try file.readBack(replacement, parsed);
@@ -1341,13 +1343,13 @@ pub const Config = struct {
         writeValue(&text.writer, value) catch return error.OutOfMemory;
         text.writer.writeByte('\n') catch return error.OutOfMemory;
         const new_text = try text.toOwnedSlice();
-        // checkKey passed the name and writeValue closes every quote it opens
-        const parsed = parseVariableLine(new_text) catch unreachable;
+        const parsed = parseVariableLine(new_text) catch
+            aegis.assert.never("checkKey passed the name and writeValue closes every quote it opens");
         // The line reads back as the variable written, its value running to
         // the newline: writeValue quotes any space it would otherwise lose.
-        assert(parsed.has_value);
-        aegis.assert.invariant(std.ascii.eqlIgnoreCase(parsed.name, split.name), "std.ascii.eqlIgnoreCase(parsed.name, split.name)");
-        assert(parsed.value_end == new_text.len - 1);
+        aegis.assert.invariant(parsed.has_value, "a written line reads back with a value");
+        aegis.assert.invariant(std.ascii.eqlIgnoreCase(parsed.name, split.name), "a written line reads back as the variable written");
+        aegis.assert.invariant(parsed.value_end == new_text.len - 1, "a written value runs to the newline");
         const read = blk: {
             errdefer config.gpa.free(new_text);
             break :blk try file.readBack(new_text, parsed);
@@ -1400,8 +1402,7 @@ pub const Config = struct {
             config.gpa.free(new_line.text);
             return switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
-                // `checkKey` let through only what writes as a header.
-                else => unreachable,
+                else => aegis.assert.never("checkKey let through only what writes as a header"),
             };
         };
         file.lines.appendAssumeCapacity(.{
@@ -1491,7 +1492,7 @@ pub const Config = struct {
                         removed = true;
                     } else break false,
                     .other => if (isComment(lines[end].text)) break false,
-                    .section => unreachable,
+                    .section => aegis.assert.never("the loop stops at the next section"),
                 }
             } else true;
             if (!whole or !removed) continue;
@@ -1768,7 +1769,7 @@ pub fn interpolatePath(gpa: Allocator, path: []const u8, home: ?[]const u8) Path
     if (path.len == 0 or path[0] != '~') return gpa.dupe(u8, path);
     const slash = std.mem.findScalar(u8, path, '/') orelse path.len;
     const user = path[1..slash];
-    const dir = if (user.len == 0) home orelse return error.UnexpandablePath else try userHome(gpa, user);
+    const dir = if (user.len == 0) home orelse return error.UnexpandablePath else try passwd.home(gpa, user);
     defer if (user.len != 0) gpa.free(dir);
     const out = try gpa.print("{s}{s}", .{ dir, path[slash..] });
     if (builtin.target.os.tag == .windows and user.len == 0) std.mem.replaceScalar(u8, out[0..dir.len], '\\', '/');
@@ -1807,21 +1808,16 @@ pub fn pathSetting(gpa: Allocator, io: Io, base: Io.Dir, home: ?[]const u8, raw:
 /// What marks a path setting's file as one that may be missing.
 const optional_prefix = ":(optional)";
 
-/// The home directory of `user`, from the password database, where the
-/// platform has one this can ask. The result is the caller's.
-fn userHome(gpa: Allocator, user: []const u8) PathError![]u8 {
-    if (comptime !builtin.link_libc or builtin.target.os.tag == .windows or builtin.target.os.tag == .wasi) return error.UnexpandablePath;
-    const name = try gpa.dupeSentinel(u8, user, 0);
-    defer gpa.free(name);
-    // The reentrant call: a library's caller may have threads.
-    var entry: std.c.passwd = undefined;
-    var found: ?*std.c.passwd = null;
-    const buffer = try gpa.alloc(u8, 16 * 1024);
-    defer gpa.free(buffer);
-    if (std.c.getpwnam_r(name, &entry, buffer.ptr, buffer.len, &found) != 0) return error.UnexpandablePath;
-    const record = found orelse return error.UnexpandablePath;
-    const dir = record.dir orelse return error.UnexpandablePath;
-    return gpa.dupe(u8, std.mem.span(dir));
+/// A digit's value in `base` (at most 36, letters past nine either case),
+/// or `null` for a byte that is no digit of it.
+fn digitIn(c: u8, base: u8) ?u8 {
+    const value: u8 = switch (c) {
+        '0'...'9' => c - '0',
+        'a'...'z' => c - 'a' + 10,
+        'A'...'Z' => c - 'A' + 10,
+        else => return null,
+    };
+    return if (value < base) value else null;
 }
 
 /// A number as git spells one: its sign, its magnitude and its size
@@ -1853,7 +1849,7 @@ fn spelling(raw: []const u8, comptime signed: bool) Self.ValueError!Spelling {
     var overflow = false;
     // strto*max reads every digit, saturating, and says ERANGE after.
     while (i < raw.len) : (i += 1) {
-        const digit = std.fmt.charToDigit(raw[i], base) catch break;
+        const digit = digitIn(raw[i], base) orelse break;
         const shifted = std.math.mul(u64, magnitude, base) catch {
             overflow = true;
             continue;
@@ -2328,8 +2324,8 @@ fn parseVariableLine(raw: []const u8) ParseError!VariableLine {
         }
     }
     if (in_quotes) return error.MalformedValue;
-    assert(value_start <= last_significant);
-    assert(last_significant <= raw.len);
+    aegis.assert.invariant(value_start <= last_significant, "a value ends at or after its start");
+    aegis.assert.invariant(last_significant <= raw.len, "a value ends within its line");
     return .{
         .name = name,
         .value_start = value_start,
@@ -2701,7 +2697,7 @@ test "relative includes start beside the including file" {
     try tmp.dir.writeFile(io, .{ .sub_path = "cfg/main", .data = "[include]\n\tpath = child\n" });
     try tmp.dir.writeFile(io, .{ .sub_path = "cfg/child", .data = "[fixture]\n\tvalue = nested\n" });
 
-    var config = try Config.openFile(gpa, io, .{ .dir = tmp.dir, .sub_path = "cfg/main" }, .local, .{});
+    var config = try Config.openFile(gpa, io, .{ .dir = .of(tmp.dir), .sub_path = "cfg/main" }, .local, .{});
     defer config.deinit();
     try std.testing.expectEqualStrings("nested", config.get("fixture.value").?);
     try std.testing.expectEqualStrings("cfg/child", config.origin("fixture.value").?.path);
@@ -2725,7 +2721,7 @@ test "an include is read as git's handle_path_include reads it: a missing file s
         try tmp.dir.writeFile(io, .{ .sub_path = "cfg/main", .data = case.main });
         const home = try tmp.dir.realPathFileAlloc(io, "cfg", gpa);
         defer gpa.free(home);
-        var config = Config.openFile(gpa, io, .{ .dir = tmp.dir, .sub_path = "cfg/main" }, .local, .{ .home = home }) catch |err| {
+        var config = Config.openFile(gpa, io, .{ .dir = .of(tmp.dir), .sub_path = "cfg/main" }, .local, .{ .home = home }) catch |err| {
             try std.testing.expectEqual(case.err.?, err);
             continue;
         };
@@ -3399,14 +3395,24 @@ fn fuzzConfig(_: void, case: *shakedown.Case) anyerror!void {
     const value = value_scratch[0..shakedown.gen.intRange(case.source, usize, 0, value_scratch.len)];
     case.source.bytes(value);
 
-    var config = Config.parseText(gpa, input, .local) catch return;
+    var config = Config.parseText(gpa, input, .local) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        // A malformed input is refused with its name: the fuzzer's case ends.
+        else => return,
+    };
     defer config.deinit();
     _ = config.get("core.autocrlf");
-    // glint-ignore: Z026 -- refusing a malformed input is the expected outcome; only a crash or a leak fails the fuzzer
-    _ = config.getBool("core.bare", false) catch {};
-    // glint-ignore: Z026 -- refusing a malformed input is the expected outcome; only a crash or a leak fails the fuzzer
-    _ = config.getInt(c_ulong, "core.bigfilethreshold", 0) catch {};
-    const values = config.all("core.autocrlf") catch return;
+    // A malformed value is refused with its name; only a crash or a leak
+    // fails the fuzzer.
+    if (config.getBool("core.bare", false)) |_| {} else |err| switch (err) {
+        error.NotABoolean, error.NotAnInteger, error.OutOfRange => {},
+        error.OutOfMemory => return err,
+    }
+    if (config.getInt(c_ulong, "core.bigfilethreshold", 0)) |_| {} else |err| switch (err) {
+        error.NotABoolean, error.NotAnInteger, error.OutOfRange => {},
+        error.OutOfMemory => return err,
+    }
+    const values = try config.all("core.autocrlf");
     gpa.free(values);
 
     // Whatever subsection and value are set, the file written reads back
@@ -3471,7 +3477,7 @@ test "configuration source paths enter their owner only after copying succeeds" 
     try tmp.dir.writeFile(io, .{ .sub_path = "config", .data = "[test]\nvalue = kept\n" });
     const Check = struct {
         fn run(gpa: Allocator, dir: Io.Dir) !void {
-            const path: Sources.Path = .{ .dir = dir, .sub_path = "config" };
+            const path: Sources.Path = .{ .dir = .of(dir), .sub_path = "config" };
             var config = try Config.open(gpa, std.testing.io, .{
                 .system = path,
                 .xdg = path,

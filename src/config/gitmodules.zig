@@ -23,6 +23,7 @@ const testgit = @import("../testing/git.zig");
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const percent = @import("../text.zig").percent;
 const urlmatch = @import("../text.zig").urlmatch;
 const shakedown = @import("shakedown");
@@ -110,10 +111,14 @@ pub const FetchRecurse = enum {
     /// `on-demand`.
     pub fn parse(value: ?[]const u8) error{InvalidFetchRecurse}!FetchRecurse {
         const v = value orelse return .on;
-        // glint-ignore: Z026 -- a value that is no boolean is read as one of the names below, as git reads it
         if (config_mod.parseBool(v)) |b| {
             return if (b) .on else .off;
-        } else |_| {}
+        } else |err| switch (err) {
+            // A value that is no boolean is read as one of the names
+            // below, as git reads it.
+            error.NotABoolean, error.NotAnInteger, error.OutOfRange => {},
+            error.OutOfMemory => aegis.assert.never("parseBool allocates nothing"),
+        }
         if (std.mem.eql(u8, v, "on-demand")) return .on_demand;
         return error.InvalidFetchRecurse;
     }
@@ -574,7 +579,11 @@ fn fuzzGitmodules(_: void, case: *shakedown.Case) anyerror!void {
     case.source.bytes(input);
     _ = try checkUrl(gpa, input);
     _ = checkName(input);
-    var g = Gitmodules.parse(gpa, input) catch return;
+    var g = Gitmodules.parse(gpa, input) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        // A malformed input is refused with its name: the fuzzer's case ends.
+        else => return,
+    };
     defer g.deinit();
     for (g.submodules) |sub| {
         // Whatever was kept, the rules that decided what was left out hold.

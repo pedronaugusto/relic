@@ -88,9 +88,9 @@ pub const Locations = struct {
     pub fn sources(l: *const Locations) config_mod.Sources {
         const cwd = Io.Dir.cwd();
         return .{
-            .system = if (l.system) |p| .{ .dir = cwd, .sub_path = p } else null,
-            .xdg = if (l.xdg) |p| .{ .dir = cwd, .sub_path = p } else null,
-            .global = if (l.globalFile()) |p| .{ .dir = cwd, .sub_path = p } else null,
+            .system = if (l.system) |p| .{ .dir = .of(cwd), .sub_path = p } else null,
+            .xdg = if (l.xdg) |p| .{ .dir = .of(cwd), .sub_path = p } else null,
+            .global = if (l.globalFile()) |p| .{ .dir = .of(cwd), .sub_path = p } else null,
             .pairs = l.pairs,
         };
     }
@@ -160,13 +160,9 @@ pub fn locate(gpa: Allocator, io: Io, environ: *const Environ.Map, programs: ?pr
         if (read.end != count_text.len or read.value > std.math.maxInt(i32)) return error.MalformedConfigEnvironment;
         const count: u32 = @intCast(read.value);
         for (0..count) |i| {
-            var key_buf: [32]u8 = undefined;
-            var value_buf: [32]u8 = undefined;
-            // unreachable: a u32 is at most ten digits after a seventeen-byte prefix
-            const key = environ.get(std.mem.print(&key_buf, "GIT_CONFIG_KEY_{d}", .{i}) catch unreachable) orelse
+            const key = environ.get(try arena.print("GIT_CONFIG_KEY_{d}", .{i})) orelse
                 return error.MalformedConfigEnvironment;
-            // unreachable: a u32 is at most ten digits after a nineteen-byte prefix
-            const value = environ.get(std.mem.print(&value_buf, "GIT_CONFIG_VALUE_{d}", .{i}) catch unreachable) orelse
+            const value = environ.get(try arena.print("GIT_CONFIG_VALUE_{d}", .{i})) orelse
                 return error.MalformedConfigEnvironment;
             try pairs.append(arena, .{ .name = try arena.dupe(u8, key), .value = try arena.dupe(u8, value) });
         }

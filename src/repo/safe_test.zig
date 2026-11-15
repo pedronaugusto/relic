@@ -61,7 +61,7 @@ fn gitUses(gpa: Allocator, io: Io, home: *const Home, dir: Io.Dir, assume_differ
 /// Whether relic opens a repository at `dir` with the same settings.
 fn relicUses(gpa: Allocator, io: Io, home: *const Home, dir: Io.Dir, assume_different: bool, overrides: []const []const u8, explicit: bool) !bool {
     var repo = Repository.open(gpa, io, dir, .{
-        .global_config = .{ .dir = home.tmp.dir, .sub_path = ".gitconfig" },
+        .global_config = .{ .dir = .of(home.tmp.dir), .sub_path = ".gitconfig" },
         .home = home.path,
         .config_overrides = overrides,
         .ownership = if (assume_different) .assume_different else .check,
@@ -170,7 +170,7 @@ test "safe.bareRepository=explicit refuses a bare repository found by discovery,
     var diagnostic = repo_mod.Diagnostic.init(gpa);
     defer diagnostic.deinit();
     try std.testing.expectError(error.ImplicitBareRepository, Repository.open(gpa, io, bare, .{
-        .global_config = .{ .dir = home.tmp.dir, .sub_path = ".gitconfig" },
+        .global_config = .{ .dir = .of(home.tmp.dir), .sub_path = ".gitconfig" },
         .home = home.path,
         .diagnostic = &diagnostic,
     }));
