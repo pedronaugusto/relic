@@ -232,7 +232,7 @@ fn cpuid(leaf: u32, subleaf: u32) [4]u32 {
     var ebx: u32 = 0;
     var ecx: u32 = 0;
     var edx: u32 = 0;
-    // aegis: boundary(A019): the processor's cpuid, the raw instruction alone
+    // The processor's cpuid, the raw instruction alone.
     asm volatile ("cpuid"
         : [eax] "={eax}" (eax),
           [ebx] "={ebx}" (ebx),
@@ -251,7 +251,7 @@ fn compress(s: *[5]u32, block: *const [Sha1.block_length]u8) void {
 
 /// Whole blocks, which is where the hardware arms earn their keep.
 fn compressBlocks(s: *[5]u32, blocks: []const u8) void {
-    std.debug.assert(blocks.len % Sha1.block_length == 0);
+    aegis.assert.invariant(blocks.len % Sha1.block_length == 0, "the blocks are whole");
     if (blocks.len == 0) return;
     switch (backend()) {
         .software => compressSoftware(s, blocks),
@@ -328,7 +328,7 @@ const round_constants: [4]u32 align(16) = .{
 fn compressAarch64(s: *[5]u32, blocks: []const u8) void {
     var p = blocks.ptr;
     var left = blocks.len / Sha1.block_length;
-    asm volatile ( // aegis: boundary(A019): the processor's SHA-1 rounds on whole blocks, as compressBlocks hands them; measured against std's by bench/regressions.zig's SHA-1 row
+    asm volatile (
         \\ .arch_extension crypto
         \\ ld1     {v20.4s}, [%[k]]
         \\ dup     v24.4s, v20.s[0]
@@ -487,7 +487,7 @@ fn compressX86(s: *[5]u32, blocks: []const u8) void {
     // `E` travels in the high lane of a vector. Rather than reach for the
     // SSE4.1 insert and extract, it is carried through a sixteen-byte slot.
     var e_slot: [4]u32 align(16) = .{ 0, 0, 0, s[4] };
-    asm volatile ( // aegis: boundary(A019): the processor's SHA-1 rounds on whole blocks, as compressBlocks hands them; measured against std's by bench/regressions.zig's SHA-1 row
+    asm volatile (
         \\ movdqu  (%[st]), %%xmm0
         \\ pshufd  $0x1b, %%xmm0, %%xmm0
         \\ movdqu  (%[e]), %%xmm1
@@ -650,10 +650,7 @@ const testing = std.testing;
 fn hexDigest(bytes: []const u8) [40]u8 {
     var out: [20]u8 = undefined;
     Sha1.hash(bytes, &out, .{});
-    var text: [40]u8 = undefined;
-    // unreachable: twenty bytes are forty hex digits
-    _ = std.mem.print(&text, "{x}", .{&out}) catch unreachable;
-    return text;
+    return std.fmt.bytesToHex(out, .lower);
 }
 
 test "FIPS 180 test vectors" {

@@ -901,10 +901,11 @@ const collision_b = &hexBytes("255044462d312e330a25e2e3cfd30a0a0a312030206f626a0
     "e74ddc0f2cc1a874cd0c78305a21566461309789606bd0bf3f98cda8044629a1");
 
 fn hexBytes(comptime text: []const u8) [text.len / 2]u8 {
-    var out: [text.len / 2]u8 = undefined;
-    // unreachable: every vector is literal hex of even length
-    _ = std.fmt.hexToBytes(&out, text) catch unreachable;
-    return out;
+    return comptime decoded: {
+        var out: [text.len / 2]u8 = undefined;
+        _ = std.fmt.hexToBytes(&out, text) catch @compileError("a test vector is not literal hex of even length");
+        break :decoded out;
+    };
 }
 
 test "the published colliding pair is detected, and has one name" {

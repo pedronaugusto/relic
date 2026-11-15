@@ -173,7 +173,7 @@ pub const Oid = struct {
     /// always enough.
     pub fn hex(oid: *const Oid, buf: []u8) []const u8 {
         const n = oid.kind.rawLen();
-        std.debug.assert(buf.len >= n * 2);
+        aegis.assert.invariant(buf.len >= n * 2, "the buffer holds the kind's hexadecimal name");
         for (oid.bytes[0..n], 0..) |byte, i| {
             buf[i * 2] = hex_digits[byte >> 4];
             buf[i * 2 + 1] = hex_digits[byte & 0xf];
@@ -190,7 +190,7 @@ pub const Oid = struct {
         var full: [max_hex_len]u8 = undefined;
         const text = oid.hex(&full);
         const take = @min(n, text.len);
-        std.debug.assert(buf.len >= take);
+        aegis.assert.invariant(buf.len >= take, "the buffer holds the abbreviation asked for");
         @memcpy(buf[0..take], text[0..take]);
         return buf[0..take];
     }
@@ -246,7 +246,9 @@ pub const Hasher = struct {
     pub const Error = error{};
     state: State,
 
-    const State = union(enum) {
+    /// The hash being run: public as the type of `state`, which only
+    /// `Hasher`'s functions read or change.
+    pub const State = union(enum) {
         sha1: sha1.Sha1,
         sha1_checked: sha1dc.Sha1Dc,
         sha256: std.crypto.hash.sha2.Sha256,
