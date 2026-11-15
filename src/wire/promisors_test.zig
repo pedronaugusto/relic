@@ -232,7 +232,7 @@ test "git 2.56, a request naming promisor-remote with no value ends the conversa
     try env.put("GIT_PROTOCOL", "version=2");
     var theirs = try program.run(gpa, io, .{ .environ = &env }, .{
         .argv = &.{ "git", "upload-pack", "--stateless-rpc", path },
-        .cwd = .{ .dir = server.dir },
+        .cwd = .{ .dir = .of(server.dir) },
     }, .{ .input = request.written() });
     defer theirs.deinit(gpa);
     try testing.expect(!theirs.succeeded());

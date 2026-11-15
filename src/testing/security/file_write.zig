@@ -17,7 +17,7 @@ const who: object.Signature = .{ .name = "F", .email = "f@example.com", .when_se
 
 fn import(gpa: std.mem.Allocator, io: Io, repo: *repo_mod.Repository, stream: []const u8, cwd: Io.Dir, unsafe: bool) !void {
     var in: Io.Reader = .fixed(stream);
-    var report = try fast_import.import(gpa, io, repo, &in, .{ .who = who, .cwd = cwd, .allow_unsafe_features = unsafe });
+    var report = try fast_import.import(gpa, io, repo, &in, .{ .who = who, .cwd = .of(cwd), .allow_unsafe_features = unsafe });
     report.deinit();
 }
 
