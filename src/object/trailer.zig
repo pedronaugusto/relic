@@ -15,7 +15,6 @@
 
 const fs = @import("../fs/fs.zig");
 const std = @import("std");
-const aegis = @import("aegis");
 const ctype = @import("../text.zig").ctype;
 const percent = @import("../text.zig").percent;
 const Allocator = std.mem.Allocator;
@@ -23,6 +22,7 @@ const Io = std.Io;
 
 const config_mod = @import("../config/config.zig");
 const program = @import("../process.zig").program;
+const input_seam = @import("input.zig");
 
 /// Errors from adding trailers.
 pub const Error = errors: {
@@ -849,7 +849,7 @@ pub fn process(gpa: Allocator, io: Io, w: *std.Io.Writer, input: []const u8, req
 
 /// Errors from processing a file.
 pub const FileError = errors: {
-    break :errors Error || std.Io.Writer.Error || fs.AtomicWriteError || aegis.own.ReadFileError || Io.Dir.OpenError ||
+    break :errors Error || std.Io.Writer.Error || fs.AtomicWriteError || input_seam.FileError || Io.Dir.OpenError ||
         Io.File.StatError || Io.Dir.SetFilePermissionsError;
 };
 
@@ -865,7 +865,7 @@ pub fn processFile(gpa: Allocator, io: Io, dir: Io.Dir, path: []const u8, file_o
     const new = file_options.new;
     const in_place = file_options.in_place;
     const out = file_options.out;
-    var input: std.ArrayList(u8) = .fromOwnedSlice(try aegis.own.readFile(io, dir, path, gpa, aegis.units.Bytes(u64).fromRaw(std.math.maxInt(u64))));
+    var input: std.ArrayList(u8) = .fromOwnedSlice(try input_seam.file(io, dir, path, gpa, .message));
     defer input.deinit(gpa);
     try completeLine(gpa, &input);
     if (!in_place) return process(gpa, io, out, input.items, .{ .settings = settings, .commands = commands, .formatting = options, .new = new });

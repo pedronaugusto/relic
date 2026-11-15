@@ -34,8 +34,14 @@ pub fn timestamp(secs: i64) std.Io.Timestamp {
 /// A moment past what 64 bits of seconds hold, which no clock reads, is
 /// held at that end.
 pub fn instant(t: std.Io.Timestamp) Expiry {
-    return Expiry.fromTimestamp(t, .down) catch .fromRaw(if (t.nanoseconds < 0) std.math.minInt(i64) else std.math.maxInt(i64));
+    return Expiry.fromTimestamp(t, .down) catch {
+        const exact = Nanoseconds.fromTimestamp(t, .exact);
+        return .fromRaw(if (exact.compare(.fromRaw(0)) == .lt) std.math.minInt(i64) else std.math.maxInt(i64));
+    };
 }
+
+/// A moment as `std.Io.Timestamp` holds it, every nanosecond of it.
+const Nanoseconds = aegis.units.Instant(.real, .nanosecond, i96);
 
 /// `instant(t)` as git's `time_t`.
 pub fn seconds(t: std.Io.Timestamp) i64 {
@@ -852,15 +858,16 @@ fn monthStart(year_in: i64, month: u4) ?i64 {
     return std.math.add(i64, days, doe - 719468) catch null;
 }
 
-/// The date `secs` is in UTC, as `YYYY-MM-DD hh:mm:ss`.
-fn formatUtc(buf: *[40]u8, secs: i64) []const u8 {
+/// The date `secs` is in UTC, as `YYYY-MM-DD hh:mm:ss`: twenty bytes for a
+/// u64 year and fifteen for the rest fit `buf`.
+fn formatUtc(buf: *[40]u8, secs: i64) std.mem.PrintError![]const u8 {
     const cal = calendarOf(secs);
     // A year before the first is written as 0, as in `show`.
     const year: u64 = std.math.cast(u64, cal.year) orelse 0;
     return std.mem.print(buf, "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2}", .{
         year,     cal.month + 1, cal.day,
         cal.hour, cal.minute,    cal.second,
-    }) catch unreachable; // a u64 year is at most twenty bytes, the rest of the stamp fifteen
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -1452,7 +1459,7 @@ test "approximate dates read as git's t0006 reads them" {
             return error.TestUnexpectedResult;
         };
         var buf: [40]u8 = undefined;
-        std.testing.expectEqualStrings(case.want, formatUtc(&buf, got)) catch |err| {
+        std.testing.expectEqualStrings(case.want, try formatUtc(&buf, got)) catch |err| {
             std.debug.print("{s} (shifted {d}s)\n", .{ case.text, case.shift });
             return err;
         };
@@ -1469,8 +1476,8 @@ test "an approximate date is taken in the caller's zone" {
     // 22:00 the day before in UTC.
     const ctx: Context = .{ .now = timestamp(1251660000), .local_offset_minutes = 120 };
     var buf: [40]u8 = undefined;
-    try std.testing.expectEqualStrings("2009-08-29 22:00:00", formatUtc(&buf, approximate("today", ctx).?));
-    try std.testing.expectEqualStrings("2009-08-30 10:00:00", formatUtc(&buf, approximate("noon", ctx).?));
+    try std.testing.expectEqualStrings("2009-08-29 22:00:00", try formatUtc(&buf, approximate("today", ctx).?));
+    try std.testing.expectEqualStrings("2009-08-30 10:00:00", try formatUtc(&buf, approximate("noon", ctx).?));
 }
 
 test "fuzz: any text is an approximate date or none, never a crash" {

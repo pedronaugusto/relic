@@ -107,7 +107,15 @@ pub const Mode = enum(u32) {
     /// The octal text a tree entry carries: no leading zero, so a directory
     /// is `40000` and a file is `100644`.
     pub fn text(m: Mode, buf: *[6]u8) []const u8 {
-        return std.mem.print(buf, "{o}", .{m.raw()}) catch unreachable;
+        const octal: []const u8 = switch (m) {
+            .file => "100644",
+            .exec => "100755",
+            .symlink => "120000",
+            .tree => "40000",
+            .gitlink => "160000",
+        };
+        @memcpy(buf[0..octal.len], octal);
+        return buf[0..octal.len];
     }
 
     /// Whether the entry names a subtree.
@@ -1110,6 +1118,12 @@ test "modes read and write the way a tree carries them" {
     try std.testing.expectEqualStrings("40000", Mode.tree.text(&buf));
     try std.testing.expectEqualStrings("100644", Mode.file.text(&buf));
     try std.testing.expectEqualStrings("120000", Mode.symlink.text(&buf));
+    // Every mode's text is its value in octal, which is what parse reads back.
+    for (std.enums.values(Mode)) |m| {
+        var octal: [6]u8 = undefined;
+        try std.testing.expectEqualStrings(try std.mem.print(&octal, "{o}", .{m.raw()}), m.text(&buf));
+        try std.testing.expectEqual(m, try Mode.parse(m.text(&buf)));
+    }
     try std.testing.expectEqual(Mode.file, try Mode.parse("100664"));
     try std.testing.expectEqual(Mode.tree, try Mode.parse("40000"));
 }
@@ -1147,48 +1161,60 @@ test "a loose object header parses and refuses a padded size" {
 }
 
 test "fuzz: any bytes are an object or a named error" {
-    try shakedown.check(std.testing.allocator, {}, fuzzObject, .{});
+    try shakedown.check(std.testing.allocator, {}, fuzzObject, .{ .reach = &.{
+        "header refused",
+        "tree refused",
+        "commit refused",
+        "tag refused",
+        "signature refused",
+        "mode refused",
+    } });
 }
 
+/// Each parser takes the bytes: what parses is checked, a refusal is one of
+/// the parser's named errors and marks its point, and running out of memory
+/// fails the case, since no parser here reserves more than the input asks.
 fn fuzzObject(_: void, case: *shakedown.Case) anyerror!void {
     const gpa = std.testing.allocator;
     var scratch: [2048]u8 = undefined;
     const input = scratch[0..shakedown.gen.intRange(case.source, usize, 0, scratch.len)];
     case.source.bytes(input);
 
-    // glint-ignore: Z026 -- a fuzzed header may parse or not; the target checks only what parses
     if (parseHeader(input)) |parsed| {
-        std.debug.assert(parsed.len <= input.len);
-    } else |_| {}
+        try std.testing.expect(parsed.len <= input.len);
+    } else |_| case.reached("header refused");
 
     for ([_]Kind{ .sha1, .sha256 }) |kind| {
         const tree: Tree = .parse(kind, input);
         var it = tree.iterate();
         while (it.next() catch null) |entry| {
-            std.debug.assert(entry.name.len != 0);
+            try std.testing.expect(entry.name.len != 0);
         }
-        // glint-ignore: Z026 -- refusing a malformed input is the expected outcome; only a crash or a leak fails the fuzzer
-        _ = tree.find("a") catch {};
+        if (tree.find("a")) |found| {
+            if (found) |entry| try std.testing.expectEqualStrings("a", entry.name);
+        } else |_| case.reached("tree refused");
 
-        // glint-ignore: Z026 -- a fuzzed commit may parse or not; the target checks only what parses
         if (Commit.parse(gpa, kind, input)) |parsed| {
             var commit = parsed;
             defer commit.deinit();
             _ = commit.extraHeader("gpgsig");
-        } else |_| {}
+        } else |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => case.reached("commit refused"),
+        }
 
-        // glint-ignore: Z026 -- a fuzzed tag may parse or not; the target checks only what parses
         if (Tag.parse(gpa, kind, input)) |parsed| {
             var tag = parsed;
             defer tag.deinit();
             _ = tag.extraHeader("gpgsig");
-        } else |_| {}
+        } else |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => case.reached("tag refused"),
+        }
     }
 
-    // glint-ignore: Z026 -- refusing a malformed input is the expected outcome; only a crash or a leak fails the fuzzer
-    _ = Signature.parse(input) catch {};
-    // glint-ignore: Z026 -- refusing a malformed input is the expected outcome; only a crash or a leak fails the fuzzer
-    _ = Mode.parse(input[0..@min(input.len, 16)]) catch {};
+    if (Signature.parse(input)) |_| {} else |_| case.reached("signature refused");
+    if (Mode.parse(input[0..@min(input.len, 16)])) |_| {} else |_| case.reached("mode refused");
 }
 
 /// All errors reported by this namespace.

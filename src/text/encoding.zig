@@ -38,7 +38,6 @@ const shakedown = @import("shakedown");
 const xenoglyph = @import("xenoglyph");
 const legacy = @import("legacy.zig");
 const legacy_tables = @import("legacy/tables.zig");
-const assert = std.debug.assert;
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 
@@ -207,7 +206,7 @@ pub fn reencode(a: Allocator, src: []const u8, to: []const u8, from: []const u8)
 /// over every code point and every pair of the plane against the iconv
 /// macOS 26 ships.
 pub fn precompose(name: []const u8, out: []u8) ?[]const u8 {
-    assert(out.len >= name.len);
+    aegis.assert.invariant(out.len >= name.len, "out holds the name");
     for (name) |b| {
         if (b >= 0x80) break;
     } else return null;
@@ -230,15 +229,13 @@ pub fn precompose(name: []const u8, out: []u8) ?[]const u8 {
             // A composite in the plane is never longer than its pair: the
             // second is at least U+0300, two bytes, so the pair is at least
             // three. What is written stays behind what is read.
-            // unreachable: a composite is a scalar value, and `out` holds the name
-            len = last_at + (std.unicode.utf8Encode(composite, out[last_at..]) catch unreachable);
-            assert(len <= i);
+            len = last_at + (std.unicode.utf8Encode(composite, out[last_at..]) catch aegis.assert.never("a composite is a scalar value, and out holds the name"));
+            aegis.assert.invariant(len <= i, "what is written stays behind what is read");
             last = composite;
             continue;
         };
         last_at = len;
-        // unreachable: `c` was decoded, and what is written stays behind what is read
-        len += std.unicode.utf8Encode(c, out[len..]) catch unreachable;
+        len += std.unicode.utf8Encode(c, out[len..]) catch aegis.assert.never("c was decoded, and what is written stays behind what is read");
         last = c;
     }
     if (std.mem.eql(u8, out[0..len], name)) return null;
@@ -469,10 +466,10 @@ pub fn fromUtf8(a: Allocator, e: Encoding, src: []const u8) Self.Error![]const u
         }
     }
     // What `toUtf8` reads back: whole code units after the mark.
-    assert((out.items.len - bom.len) % @as(usize, switch (e.unit()) {
+    aegis.assert.debug((out.items.len - bom.len) % @as(usize, switch (e.unit()) {
         .u16 => 2,
         .u32 => 4,
-    }) == 0);
+    }) == 0, "whole code units follow the mark");
     return out.toOwnedSlice(a);
 }
 

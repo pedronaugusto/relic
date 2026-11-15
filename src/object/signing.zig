@@ -34,6 +34,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const message = @import("message.zig");
 const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
@@ -280,7 +281,7 @@ pub const Signer = struct {
     min_trust: Trust,
     /// Where the programs run, as git runs them, and so where a relative
     /// path in a setting is found from: `init`'s `base`.
-    base: Io.Dir,
+    base: aegis.own.Unowned(Io.Dir),
     /// What the signing program printed when it failed.
     diagnostics: std.ArrayList(u8) = .empty,
 
@@ -358,7 +359,7 @@ pub const Signer = struct {
             .allowed_signers = allowed_signers,
             .revocation_file = revocation_file,
             .min_trust = min_trust,
-            .base = base,
+            .base = .of(base),
         };
     }
 
@@ -403,7 +404,7 @@ pub const Signer = struct {
     fn signGpg(signer: *Signer, io: Io, payload: []const u8, key: []const u8) ErrorNamespace.Error![]u8 {
         var outcome = try program.run(signer.gpa, io, signer.programs, .{
             .argv = &.{ signer.program, "--status-fd=2", "-bsau", key },
-            .cwd = .{ .dir = signer.base },
+            .cwd = .{ .dir = signer.base.get() },
         }, .{
             .input = payload,
         });
@@ -433,7 +434,7 @@ pub const Signer = struct {
         if (key_file != null) try argv.append(arena, "-U");
         // With no file named, `ssh-keygen` signs its standard input and
         // writes the signature to its standard output.
-        var outcome = try program.run(signer.gpa, io, signer.programs, .{ .argv = argv.items, .cwd = .{ .dir = signer.base } }, .{
+        var outcome = try program.run(signer.gpa, io, signer.programs, .{ .argv = argv.items, .cwd = .{ .dir = signer.base.get() } }, .{
             .input = payload,
         });
         defer outcome.deinit(signer.gpa);
@@ -449,7 +450,7 @@ pub const Signer = struct {
         const command = signer.default_key_command orelse return error.NoSigningKey;
         const argv = try splitCommandLine(arena, command);
         if (argv.len == 0) return error.NoSigningKey;
-        var outcome = try program.run(signer.gpa, io, signer.programs, .{ .argv = argv, .cwd = .{ .dir = signer.base } }, .{});
+        var outcome = try program.run(signer.gpa, io, signer.programs, .{ .argv = argv, .cwd = .{ .dir = signer.base.get() } }, .{});
         defer outcome.deinit(signer.gpa);
         if (!outcome.succeeded()) return error.NoSigningKey;
         const end = std.mem.findScalar(u8, outcome.stdout, '\n') orelse outcome.stdout.len;
@@ -480,7 +481,7 @@ pub const Signer = struct {
                 // git runs `ssh-keygen` itself here, not `gpg.ssh.program`.
                 var outcome = try program.run(signer.gpa, io, signer.programs, .{
                     .argv = &.{ "ssh-keygen", "-lf", if (literal != null) "-" else key },
-                    .cwd = .{ .dir = signer.base },
+                    .cwd = .{ .dir = signer.base.get() },
                 }, .{ .input = literal orelse "" });
                 defer outcome.deinit(signer.gpa);
                 if (!outcome.succeeded()) return error.KeyFingerprintFailed;
@@ -529,7 +530,7 @@ pub const Signer = struct {
         try argv.append(arena, program_name);
         if (format == .openpgp) try argv.append(arena, "--keyid-format=long");
         try argv.appendSlice(arena, &.{ "--status-fd=1", "--verify", sig_file.path, "-" });
-        var outcome = try program.run(signer.gpa, io, signer.programs, .{ .argv = argv.items, .cwd = .{ .dir = signer.base } }, .{
+        var outcome = try program.run(signer.gpa, io, signer.programs, .{ .argv = argv.items, .cwd = .{ .dir = signer.base.get() } }, .{
             .input = payload,
         });
         defer outcome.deinit(signer.gpa);
@@ -564,7 +565,7 @@ pub const Signer = struct {
         var find: std.ArrayList([]const u8) = .empty;
         try find.appendSlice(arena, &.{ program_name, "-Y", "find-principals", "-f", allowed, "-s", sig_file.path });
         if (time_arg) |t| try find.append(arena, t);
-        var principals = try program.run(signer.gpa, io, signer.programs, .{ .argv = find.items, .cwd = .{ .dir = signer.base } }, .{});
+        var principals = try program.run(signer.gpa, io, signer.programs, .{ .argv = find.items, .cwd = .{ .dir = signer.base.get() } }, .{});
         defer principals.deinit(signer.gpa);
 
         var output: std.ArrayList(u8) = .empty;
@@ -575,7 +576,7 @@ pub const Signer = struct {
             var check: std.ArrayList([]const u8) = .empty;
             try check.appendSlice(arena, &.{ program_name, "-Y", "check-novalidate", "-n", "git", "-s", sig_file.path });
             if (time_arg) |t| try check.append(arena, t);
-            var checked = try program.run(signer.gpa, io, signer.programs, .{ .argv = check.items, .cwd = .{ .dir = signer.base } }, .{
+            var checked = try program.run(signer.gpa, io, signer.programs, .{ .argv = check.items, .cwd = .{ .dir = signer.base.get() } }, .{
                 .input = payload,
             });
             defer checked.deinit(signer.gpa);
@@ -591,14 +592,14 @@ pub const Signer = struct {
                 if (time_arg) |t| try check.append(arena, t);
                 if (signer.revocation_file) |revoked| {
                     // Relative to where git runs, as git reads it.
-                    if (signer.base.access(io, revoked, .{})) |_| {
+                    if (signer.base.get().access(io, revoked, .{})) |_| {
                         try check.appendSlice(arena, &.{ "-r", revoked });
                     } else |err| switch (err) {
                         error.FileNotFound => {},
                         else => |other| return other,
                     }
                 }
-                var checked = try program.run(signer.gpa, io, signer.programs, .{ .argv = check.items, .cwd = .{ .dir = signer.base } }, .{
+                var checked = try program.run(signer.gpa, io, signer.programs, .{ .argv = check.items, .cwd = .{ .dir = signer.base.get() } }, .{
                     .input = payload,
                 });
                 defer checked.deinit(signer.gpa);

@@ -10,6 +10,7 @@
 //!   `strtoul_ui`).
 
 const std = @import("std");
+const aegis = @import("aegis");
 
 /// All errors reported by this namespace: none, a text that is no number
 /// reads as `null`.
@@ -75,7 +76,7 @@ pub fn strtoul(text: []const u8, base: u8, comptime bits: u16) Read {
 }
 
 fn read(text: []const u8, base_in: u8, min: i128, max: i128, unsigned: bool) Read {
-    std.debug.assert(base_in == 0 or (base_in >= 2 and base_in <= 36));
+    aegis.assert.invariant(base_in == 0 or (base_in >= 2 and base_in <= 36), "a base is 0, or 2 to 36, as strtol takes it");
     var i: usize = 0;
     while (i < text.len and isSpace(text[i])) i += 1;
     var negative = false;

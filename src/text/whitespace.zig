@@ -123,8 +123,8 @@ pub fn forAttribute(attribute: Attribute, configured: Rule) ParseError!Rule {
 /// The errors `line` has under `rule`: a set of the bits above. `line`
 /// includes its newline, if it has one.
 pub fn check(line: []const u8, rule: Rule) Rule {
-    // with nowhere to write, nothing fails
-    return checkEmit(line, rule, null) catch unreachable;
+    // With nowhere to write, the scan's error set is empty.
+    return scan(line, rule, false, {}) catch |err| switch (err) {};
 }
 
 /// Where `checkEmit` writes a line with its errors marked, as git's diff
@@ -142,6 +142,13 @@ pub const Emit = struct {
 /// it is with each error in `ws`, the text in `set`, trailing whitespace
 /// in `ws`, the line's ending after.
 pub fn checkEmit(line: []const u8, rule: Rule, emit: ?Emit) std.Io.Writer.Error!Rule {
+    const e = emit orelse return check(line, rule);
+    return scan(line, rule, true, e);
+}
+
+/// `checkEmit`'s work, its writing compiled in only where `emitting`, so a
+/// scan with nowhere to write cannot fail.
+fn scan(line: []const u8, rule: Rule, comptime emitting: bool, e: if (emitting) Emit else void) (if (emitting) std.Io.Writer.Error else error{})!Rule {
     var result: Rule = 0;
     var len = line.len;
     var trailing_newline = false;
@@ -173,7 +180,7 @@ pub fn checkEmit(line: []const u8, rule: Rule, emit: ?Emit) std.Io.Writer.Error!
         if (line[i] != '\t') break;
         if (rule & space_before_tab != 0 and written < i) {
             result |= space_before_tab;
-            if (emit) |e| {
+            if (emitting) {
                 try e.w.writeAll(e.ws);
                 try e.w.writeAll(line[written..i]);
                 try e.w.writeAll(e.reset);
@@ -181,25 +188,25 @@ pub fn checkEmit(line: []const u8, rule: Rule, emit: ?Emit) std.Io.Writer.Error!
             }
         } else if (rule & tab_in_indent != 0) {
             result |= tab_in_indent;
-            if (emit) |e| {
+            if (emitting) {
                 try e.w.writeAll(line[written..i]);
                 try e.w.writeAll(e.ws);
                 try e.w.writeByte(line[i]);
                 try e.w.writeAll(e.reset);
             }
-        } else if (emit) |e| try e.w.writeAll(line[written .. i + 1]);
+        } else if (emitting) try e.w.writeAll(line[written .. i + 1]);
         written = i + 1;
     }
     if (rule & indent_with_non_tab != 0 and i - written >= tabWidth(rule)) {
         result |= indent_with_non_tab;
-        if (emit) |e| {
+        if (emitting) {
             try e.w.writeAll(e.ws);
             try e.w.writeAll(line[written..i]);
             try e.w.writeAll(e.reset);
         }
         written = i;
     }
-    const e = emit orelse return result;
+    if (!emitting) return result;
     // git's `written` can pass the trailing whitespace only where the
     // whole line is indentation, which leaves nothing in the middle.
     if (trailing_whitespace > written) {

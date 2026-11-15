@@ -33,6 +33,7 @@ const Io = std.Io;
 
 const hash = @import("../hash/hash.zig");
 const object = @import("object.zig");
+const input_seam = @import("input.zig");
 const config_mod = @import("../config/config.zig");
 const gitmodules = @import("../config/gitmodules.zig");
 const safe_path = @import("../names.zig").path;
@@ -348,14 +349,14 @@ pub const Rules = struct {
 
     /// The object format a skip list's names are in, and the directory a
     /// relative path to it is found from.
-    pub const SkipListAt = struct { kind: Kind, dir: Io.Dir };
+    pub const SkipListAt = struct { kind: Kind, dir: aegis.own.Unowned(Io.Dir) };
 
     /// Add the names in the skip list at `path`: one full name a line,
     /// with `#` comments, blank lines and surrounding space allowed, as
     /// git reads `fsck.skipList`.
     pub fn readSkipList(r: *Rules, gpa: Allocator, io: Io, list: SkipListAt, path: []const u8) LoadError!void {
         const kind = list.kind;
-        const text_ = aegis.own.readFile(io, list.dir, path, gpa, aegis.units.Bytes(u64).fromRaw(1 << 30)) catch |err| switch (err) {
+        const text_ = input_seam.file(io, list.dir.get(), path, gpa, .skip_list) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Canceled => return error.Canceled,
             else => return error.SkipListUnreadable,
@@ -381,7 +382,7 @@ pub const Rules = struct {
     /// for a fetch, a clone or a received push, as git checks them.
     /// `fetch.fsck.` and `receive.fsck.` names no message has are left out
     /// and said in `warnings`, as git warns; `fsck.` ones are refused.
-    pub const LoadOptions = struct { kind: Kind, scope: Scope = .fsck, strict: bool = false, sink: ?*Sink = null, base: ?Io.Dir = null };
+    pub const LoadOptions = struct { kind: Kind, scope: Scope = .fsck, strict: bool = false, sink: ?*Sink = null, base: ?aegis.own.Unowned(Io.Dir) = null };
     pub fn load(gpa: Allocator, io: Io, config: *const config_mod.Config, options: LoadOptions) LoadError!Rules {
         const strict = options.strict;
         var rules: Rules = .{ .strict = strict };
@@ -392,7 +393,7 @@ pub const Rules = struct {
 
     /// `load`, over rules already made: `baseline` takes the
     /// configuration this way.
-    pub const ConfigureOptions = struct { kind: Kind, scope: Scope = .fsck, sink: ?*Sink = null, base: ?Io.Dir = null };
+    pub const ConfigureOptions = struct { kind: Kind, scope: Scope = .fsck, sink: ?*Sink = null, base: ?aegis.own.Unowned(Io.Dir) = null };
     pub fn configure(r: *Rules, gpa: Allocator, io: Io, config: *const config_mod.Config, options: ConfigureOptions) LoadError!void {
         const kind = options.kind;
         const scope = options.scope;
@@ -404,7 +405,7 @@ pub const Rules = struct {
             if (std.ascii.eqlIgnoreCase(entry.name, "skiplist")) {
                 // A path setting: an `:(optional)` list that is not there
                 // is passed over, as git passes it over.
-                const base = options.base orelse Io.Dir.cwd();
+                const base = if (options.base) |b| b.get() else Io.Dir.cwd();
                 const read = config_mod.pathSetting(gpa, io, base, config.context.home, value) catch |err| return switch (err) {
                     error.UnexpandablePath, error.UnstatablePath, error.MissingPath => error.SkipListUnreadable,
                     error.OutOfMemory => error.OutOfMemory,
@@ -412,7 +413,7 @@ pub const Rules = struct {
                 };
                 const path = read orelse continue;
                 defer gpa.free(path);
-                try r.readSkipList(gpa, io, .{ .kind = kind, .dir = base }, path);
+                try r.readSkipList(gpa, io, .{ .kind = kind, .dir = .of(base) }, path);
                 continue;
             }
             if (scope != .fsck) {
@@ -475,7 +476,7 @@ pub const TransferInputs = struct {
     kind: Kind,
     scope: Scope,
     /// Where a relative skip list is found from: `ConfigureOptions.base`.
-    base: ?Io.Dir = null,
+    base: ?aegis.own.Unowned(Io.Dir) = null,
 };
 /// Explicit policy and an optional warning sink.
 pub const TransferOptions = struct { explicit: ?bool = null, sink: ?*Sink = null };
@@ -1126,6 +1127,11 @@ fn firstProblem(rules: *const Rules, t: object.Type, bytes: []const u8) !?Proble
 
 fn baselineProblem(t: object.Type, bytes: []const u8) !?Problem {
     return firstProblem(&baseline, t, bytes);
+}
+
+// The layer's input seam, whose tests run with the checks that read through it.
+test {
+    _ = @import("input.zig");
 }
 
 test "a well-formed commit, tree and tag have no problem" {

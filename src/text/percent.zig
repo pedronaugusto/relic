@@ -4,6 +4,7 @@
 //! same pair of digits.
 
 const std = @import("std");
+const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 
 /// The byte two hex digits name, or `null` when either is not one: git's
@@ -50,7 +51,7 @@ pub fn decode(gpa: Allocator, text: []const u8, nul: Nul) Allocator.Error![]u8 {
 /// `decode` into `out`, which holds at least `text.len` bytes and may be
 /// `text` itself: the decoded length.
 pub fn decodeInto(out: []u8, text: []const u8, nul: Nul) usize {
-    std.debug.assert(out.len >= text.len);
+    aegis.assert.invariant(out.len >= text.len, "out holds the text");
     var read: usize = 0;
     var write: usize = 0;
     while (read < text.len) {
