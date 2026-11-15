@@ -1095,7 +1095,7 @@ pub const Lockables = struct {
 
     /// Load them for `repo`.
     pub fn load(io: Io, repo: *Repository) Self.Error!Lockables {
-        return .{ .attrs = try repo.loadAttrs(io), .work_dir = if (repo.workDirectory()) |wt| .of(wt) else null };
+        return .{ .attrs = try repo.loadAttrs(io), .work_dir = if (repo.workDirectory()) |wt| aegis.own.Unowned(Io.Dir).of(wt) else null };
     }
 
     /// Whether `path` has the `lockable` attribute.
