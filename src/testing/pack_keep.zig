@@ -220,7 +220,7 @@ test "local receive owns a keep token with default receive options" {
             var pack_dir = try repository.objectDatabase().objectsDirectory().openDir(io, "pack", .{ .iterate = true });
             defer pack_dir.close(io);
             const oid = try Oid.parse(repository.objectFormat(), head);
-            var fetched = try session.fetch(gpa, io, .{ .db = repository.objectDatabase(), .pack_dir = pack_dir, .request = .{ .wants = &.{oid}, .tips = &.{} } }, .{});
+            var fetched = try session.fetch(gpa, io, .{ .db = repository.objectDatabase(), .pack_dir = .of(pack_dir), .request = .{ .wants = &.{oid}, .tips = &.{} } }, .{});
             var released = false;
             defer if (!released) fetched.deinit(io);
             try testing.expect(fetched.keep != null);
