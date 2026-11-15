@@ -121,7 +121,7 @@ pub const GitClone = struct {
 
     fn clone(transport: *submodule.Transport, gpa: std.mem.Allocator, io: Io, request: submodule.CloneRequest) submodule.TransportError!void {
         const t: *GitClone = @fieldParentPtr("interface", transport);
-        const target = request.git_dir.realPathFileAlloc(io, ".", gpa) catch return error.TransportFailed;
+        const target = request.git_dir.get().realPathFileAlloc(io, ".", gpa) catch return error.TransportFailed;
         defer gpa.free(target);
         t.git.exec(io, &.{ "clone", "-q", "--bare", request.url, target }) catch return error.TransportFailed;
         t.git.exec(io, &.{ "--git-dir", target, "config", "core.bare", "false" }) catch return error.TransportFailed;

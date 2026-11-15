@@ -312,7 +312,7 @@ fn runHook(arena: Allocator, io: Io, wt: Io.Dir, hook: Hook, version: []const u8
     var outcome = program.run(arena, io, hook.programs, .{
         .argv = &.{ hook.command, version, since },
         .shell = true,
-        .cwd = .{ .dir = wt },
+        .cwd = .{ .dir = .of(wt) },
         .stderr = .inherit,
     }, .{}) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,

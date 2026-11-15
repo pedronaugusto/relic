@@ -214,7 +214,7 @@ const Pair = struct {
         defer p.gpa.free(url);
         try argv.append(p.gpa, url);
         try argv.appendSlice(p.gpa, args);
-        var outcome = try program.run(p.gpa, p.io, .{ .environ = &p.env }, .{ .argv = argv.items, .cwd = .{ .dir = p.source.dir } }, .{});
+        var outcome = try program.run(p.gpa, p.io, .{ .environ = &p.env }, .{ .argv = argv.items, .cwd = .{ .dir = .of(p.source.dir) } }, .{});
         defer outcome.deinit(p.gpa);
         var report: std.ArrayList(u8) = .empty;
         errdefer report.deinit(p.gpa);
@@ -320,7 +320,7 @@ const Pair = struct {
         defer p.gpa.free(url);
         try argv.append(p.gpa, url);
         try argv.appendSlice(p.gpa, args);
-        var outcome = try program.run(p.gpa, p.io, .{ .environ = &env }, .{ .argv = argv.items, .cwd = .{ .dir = p.source.dir } }, .{});
+        var outcome = try program.run(p.gpa, p.io, .{ .environ = &env }, .{ .argv = argv.items, .cwd = .{ .dir = .of(p.source.dir) } }, .{});
         defer outcome.deinit(p.gpa);
         try testing.expect(outcome.succeeded());
         var count: usize = 0;

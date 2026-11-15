@@ -2018,7 +2018,7 @@ test "the index is written in the version, trailer and offset extensions git's s
             }
             const git_dir = try repo.gitDir(io);
             defer git_dir.close(io);
-            read[side] = try index_mod.Index.read(gpa, io, git_dir, "index", .{ .git_dir = git_dir, .kind = .sha1 });
+            read[side] = try index_mod.Index.read(gpa, io, git_dir, "index", .{ .git_dir = .of(git_dir), .kind = .sha1 });
         }
         defer for (&read) |*i| i.deinit();
         const theirs = &read[0];

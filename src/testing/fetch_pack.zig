@@ -18,7 +18,7 @@ const testremote = @import("remote.zig");
 fn uploadPack(gpa: Allocator, io: Io, env: *const std.process.Environ.Map, dir: Io.Dir, v2: bool) !*Connection {
     return connection.Process.start(gpa, io, .{ .environ = env }, .{
         .argv = &.{ "git", "upload-pack", "." },
-        .cwd = .{ .dir = dir },
+        .cwd = .{ .dir = .of(dir) },
         .set = if (v2) &.{.{ .name = "GIT_PROTOCOL", .value = "version=2" }} else &.{},
     });
 }

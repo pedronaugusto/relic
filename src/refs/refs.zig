@@ -3117,9 +3117,9 @@ test "reference-transaction hears from a transaction what git's hears" {
     defer work.deinit(io);
     var runner = try hooks.Runner.init(gpa, io, .{
         .config = &config,
-        .git_dir = git_dir.borrow().*,
-        .common_dir = git_dir.borrow().*,
-        .work_dir = work.borrow().*,
+        .git_dir = .of(git_dir.borrow().*),
+        .common_dir = .of(git_dir.borrow().*),
+        .work_dir = .of(work.borrow().*),
     }, .{ .environ = &twin.environ }, .{ .output = .ignore });
     defer runner.deinit();
     var store: Store = try .init(gpa, .sha1, git_dir.borrow().*, git_dir.borrow().*, .{});
@@ -3233,9 +3233,9 @@ test "a cancel that lands in the hook a committed transaction runs is put back f
     defer work.deinit(io);
     var runner = try hooks.Runner.init(gpa, io, .{
         .config = &config,
-        .git_dir = git_dir.borrow().*,
-        .common_dir = git_dir.borrow().*,
-        .work_dir = work.borrow().*,
+        .git_dir = .of(git_dir.borrow().*),
+        .common_dir = .of(git_dir.borrow().*),
+        .work_dir = .of(work.borrow().*),
     }, .{ .environ = &twin.environ }, .{ .output = .ignore });
     defer runner.deinit();
     var store: Store = try .init(gpa, .sha1, git_dir.borrow().*, git_dir.borrow().*, .{});
@@ -3299,9 +3299,9 @@ test "an update goes through HEAD to its branch, and both logs record it, as git
     defer work.deinit(io);
     var runner = try hooks.Runner.init(gpa, io, .{
         .config = &config,
-        .git_dir = git_dir.borrow().*,
-        .common_dir = git_dir.borrow().*,
-        .work_dir = work.borrow().*,
+        .git_dir = .of(git_dir.borrow().*),
+        .common_dir = .of(git_dir.borrow().*),
+        .work_dir = .of(work.borrow().*),
     }, .{ .environ = &twin.environ }, .{ .output = .ignore });
     defer runner.deinit();
     var store: Store = try .init(gpa, .sha1, git_dir.borrow().*, git_dir.borrow().*, .{});
@@ -3416,9 +3416,9 @@ test "a reference-transaction hook refusing a transaction leaves every ref as it
         defer work.deinit(io);
         var runner = try hooks.Runner.init(gpa, io, .{
             .config = &config,
-            .git_dir = git_dir.borrow().*,
-            .common_dir = git_dir.borrow().*,
-            .work_dir = work.borrow().*,
+            .git_dir = .of(git_dir.borrow().*),
+            .common_dir = .of(git_dir.borrow().*),
+            .work_dir = .of(work.borrow().*),
         }, .{ .environ = &twin.environ }, .{ .output = .ignore });
         defer runner.deinit();
         var store: Store = try .init(gpa, .sha1, git_dir.borrow().*, git_dir.borrow().*, .{});
@@ -3466,9 +3466,9 @@ test "a deletion is announced as git announces it, packed or loose" {
     defer work.deinit(io);
     var runner = try hooks.Runner.init(gpa, io, .{
         .config = &config,
-        .git_dir = git_dir.borrow().*,
-        .common_dir = git_dir.borrow().*,
-        .work_dir = work.borrow().*,
+        .git_dir = .of(git_dir.borrow().*),
+        .common_dir = .of(git_dir.borrow().*),
+        .work_dir = .of(work.borrow().*),
     }, .{ .environ = &twin.environ }, .{ .output = .ignore });
     defer runner.deinit();
     var store: Store = try .init(gpa, .sha1, git_dir.borrow().*, git_dir.borrow().*, .{});

@@ -354,7 +354,7 @@ pub fn runCommand(a: Allocator, io: Io, programs: program.Programs, line: []cons
     var outcome = program.run(a, io, programs, .{
         .argv = &.{expanded},
         .shell = true,
-        .cwd = .{ .dir = cwd },
+        .cwd = .{ .dir = .of(cwd) },
         .unset = &program.repository_variables,
         .stderr = .capture,
     }, .{
@@ -677,7 +677,7 @@ pub const Process = struct {
         p.running = program.start(gpa, io, programs, .{
             .argv = &.{command},
             .shell = true,
-            .cwd = .{ .dir = cwd },
+            .cwd = .{ .dir = .of(cwd) },
             .unset = &program.repository_variables,
             .stderr = .ignore,
         }) catch |err| switch (err) {

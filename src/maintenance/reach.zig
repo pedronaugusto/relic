@@ -260,7 +260,7 @@ pub fn hookedObjects(gpa: Allocator, io: Io, repo: *Repository, programs: ?progr
         var outcome = program.run(gpa, io, programs orelse return error.ProgramsNotGranted, .{
             .argv = &.{command},
             .shell = true,
-            .cwd = .{ .dir = repo.topDirectory() },
+            .cwd = .{ .dir = .of(repo.topDirectory()) },
             .unset = &program.repository_variables,
             .stderr = .inherit,
         }, .{}) catch |err| switch (err) {

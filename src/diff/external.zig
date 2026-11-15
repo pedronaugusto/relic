@@ -140,7 +140,7 @@ pub fn run(ext: *const External, gpa: Allocator, io: Io, spec: Run, w: *Io.Write
     var outcome = try program.run(gpa, io, ext.programs, .{
         .argv = argv.items,
         .shell = true,
-        .cwd = if (ext.worktree) |wt| .{ .dir = wt.dir.get() } else .inherit,
+        .cwd = if (ext.worktree) |wt| .{ .dir = wt.dir } else .inherit,
         .set = &set,
         .stderr = .inherit,
     }, .{});

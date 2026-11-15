@@ -28,7 +28,7 @@ fn plant(io: Io, dir: Io.Dir, name: []const u8) !void {
 
 /// Run the bare `name` in `cwd`, asked to make the file `ran` there.
 fn runBare(gpa: std.mem.Allocator, io: Io, env: *const std.process.Environ.Map, name: []const u8, cwd: Io.Dir) !void {
-    var outcome = program.run(gpa, io, .{ .environ = env }, .{ .argv = &.{ name, "touch", "ran" }, .cwd = .{ .dir = cwd } }, .{}) catch |err| switch (err) {
+    var outcome = program.run(gpa, io, .{ .environ = env }, .{ .argv = &.{ name, "touch", "ran" }, .cwd = .{ .dir = .of(cwd) } }, .{}) catch |err| switch (err) {
         error.FileNotFound => return,
         else => return err,
     };

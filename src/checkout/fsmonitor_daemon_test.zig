@@ -400,7 +400,7 @@ fn code(change: worktree.Change) u8 {
 fn tokenOf(gpa: Allocator, io: Io, r: *testgit.Repo) !?[]u8 {
     const git_dir = try r.gitDir(io);
     defer git_dir.close(io);
-    var index = try index_mod.Index.read(gpa, io, git_dir, "index", .{ .git_dir = git_dir, .kind = .sha1 });
+    var index = try index_mod.Index.read(gpa, io, git_dir, "index", .{ .git_dir = .of(git_dir), .kind = .sha1 });
     defer index.deinit();
     const t = index.fsmonitor_token orelse return null;
     // A first token is a time, git's and this package's alike.

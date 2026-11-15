@@ -649,9 +649,9 @@ test "an update goes through HEAD, a deletion takes its log, and the hook hears 
     defer config.deinit();
     var runner = try hooks.Runner.init(gpa, io, .{
         .config = &config,
-        .git_dir = repo.gitDirectory(),
-        .common_dir = repo.commonDirectory(),
-        .work_dir = repo.workDirectory(),
+        .git_dir = .of(repo.gitDirectory()),
+        .common_dir = .of(repo.commonDirectory()),
+        .work_dir = if (repo.workDirectory()) |work| .of(work) else null,
     }, .{ .environ = &environ }, .{ .output = .ignore });
     defer runner.deinit();
     const Step = struct { name: []const u8, new: ?refs.Ref, expected: refs.Expected, no_deref: bool = false, message: ?[]const u8 };

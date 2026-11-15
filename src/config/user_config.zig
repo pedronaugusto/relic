@@ -298,7 +298,7 @@ test "the files are the ones git names, found from the person's environment" {
     try testing.expectEqualStrings(l.global[1], l.globalFile().?);
 
     // git itself names the same files, in the same order.
-    var outcome = try program.run(gpa, io, .{ .environ = &env }, .{ .argv = &.{ "git", "var", "GIT_CONFIG_GLOBAL" }, .cwd = .{ .dir = home.dir } }, .{});
+    var outcome = try program.run(gpa, io, .{ .environ = &env }, .{ .argv = &.{ "git", "var", "GIT_CONFIG_GLOBAL" }, .cwd = .{ .dir = .of(home.dir) } }, .{});
     defer outcome.deinit(gpa);
     if (outcome.succeeded()) {
         var lines = std.mem.tokenizeScalar(u8, outcome.stdout, '\n');
@@ -326,7 +326,7 @@ test "the files are the ones git names, found from the person's environment" {
 fn gitCommandValues(gpa: Allocator, io: Io, dir: Io.Dir, env: *const Environ.Map) !?[]u8 {
     var outcome = try program.run(gpa, io, .{ .environ = env }, .{
         .argv = &.{ "git", "config", "--list", "--show-scope" },
-        .cwd = .{ .dir = dir },
+        .cwd = .{ .dir = .of(dir) },
         .stderr = .ignore,
     }, .{});
     defer outcome.deinit(gpa);
@@ -495,7 +495,7 @@ test "the XDG file and ~/.gitconfig are both read, the second winning, as git re
     for ([_][]const u8{ "x.a", "x.b" }) |name| {
         var outcome = try program.run(gpa, io, .{ .environ = &env }, .{
             .argv = &.{ "git", "config", "--get-all", name },
-            .cwd = .{ .dir = home.dir },
+            .cwd = .{ .dir = .of(home.dir) },
             .unset = &program.repository_variables,
         }, .{});
         defer outcome.deinit(gpa);

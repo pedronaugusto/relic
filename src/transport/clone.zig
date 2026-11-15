@@ -1142,9 +1142,9 @@ fn checkOutCloned(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, s
 fn postCheckout(gpa: Allocator, io: Io, repo: *Repository, hook_options: hooks_mod.Options, options: Options) Error!void {
     var runner = try hooks_mod.Runner.init(gpa, io, .{
         .config = repo.configuration(),
-        .git_dir = repo.gitDirectory(),
-        .common_dir = repo.commonDirectory(),
-        .work_dir = repo.workDirectory(),
+        .git_dir = .of(repo.gitDirectory()),
+        .common_dir = .of(repo.commonDirectory()),
+        .work_dir = if (repo.workDirectory()) |work| .of(work) else null,
     }, options.programs orelse return error.ProgramsNotGranted, hook_options);
     defer runner.deinit();
     const head = (try repo.head(io)) orelse return;
@@ -1443,7 +1443,7 @@ pub const SubmoduleTransport = struct {
         var own = if (request.beside) try apart.options(gpa, shared) else shared;
         var made = made: {
             if (request.within) |w| own.reference = reference.forSubmodule(arena, io, w.superproject, w.name, own.warnings) catch |err| break :made err;
-            break :made clone(gpa, io, request.url, request.git_dir, own);
+            break :made clone(gpa, io, request.url, request.git_dir.get(), own);
         };
         // glint-ignore: Z026 -- a clone that failed has nothing to free; its error is returned below
         defer if (made) |*repo| repo.deinit(io) else |_| {};
@@ -2330,7 +2330,7 @@ test "a submodule URL naming a repository on this machine is refused unless prot
     defer refused_dir.close(io);
     var refused: SubmoduleTransport = .init(.{ .who = test_who });
     defer refused.deinit();
-    try testing.expectError(error.TransportFailed, refused.transport().clone(gpa, io, .{ .url = source_path, .git_dir = refused_dir }));
+    try testing.expectError(error.TransportFailed, refused.transport().clone(gpa, io, .{ .url = source_path, .git_dir = .of(refused_dir) }));
     var kept = refused.take(io);
     defer kept.auth_failure.deinit();
     try testing.expectEqual(@as(?SubmoduleTransport.Error, error.TransportNotAllowed), kept.failure);
@@ -2343,7 +2343,7 @@ test "a submodule URL naming a repository on this machine is refused unless prot
     defer allowed_dir.close(io);
     var allowed: SubmoduleTransport = .init(.{ .who = test_who, .config = &config });
     defer allowed.deinit();
-    try allowed.transport().clone(gpa, io, .{ .url = source_path, .git_dir = allowed_dir });
+    try allowed.transport().clone(gpa, io, .{ .url = source_path, .git_dir = .of(allowed_dir) });
     try testing.expectEqual(@as(u32, 1), allowed.take(io).clones);
 }
 

@@ -399,7 +399,7 @@ test "a repository with git-lfs's hooks works on a machine without git-lfs" {
     const head = (try repo.head(io)).?;
     defer gpa.free(head.name);
     const zero = hash.Oid.zero(repo.objectFormat());
-    const place: hooks.Place = .{ .config = repo.configuration(), .git_dir = repo.gitDirectory(), .common_dir = repo.commonDirectory(), .work_dir = repo.workDirectory() };
+    const place: hooks.Place = .{ .config = repo.configuration(), .git_dir = .of(repo.gitDirectory()), .common_dir = .of(repo.commonDirectory()), .work_dir = if (repo.workDirectory()) |work| .of(work) else null };
 
     // Run as they are, they stop: git-lfs was not found.
     {

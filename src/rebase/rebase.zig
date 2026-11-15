@@ -2465,7 +2465,7 @@ fn doExec(r: *Run, command_line: []const u8) Error!?Outcome {
     var outcome = try program.run(r.gpa, r.io, programs, .{
         .argv = &.{command_line},
         .shell = true,
-        .cwd = .{ .dir = wt },
+        .cwd = .{ .dir = .of(wt) },
         .unset = &.{"GIT_CHERRY_PICK_HELP"},
         .stderr = .inherit,
     }, .{});

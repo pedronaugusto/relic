@@ -304,8 +304,8 @@ pub const Server = struct {
             // git runs them.
             s.runner = try hooks.Runner.init(gpa, io, .{
                 .config = remote.repo.configuration(),
-                .git_dir = remote.repo.gitDirectory(),
-                .common_dir = remote.repo.commonDirectory(),
+                .git_dir = .of(remote.repo.gitDirectory()),
+                .common_dir = .of(remote.repo.commonDirectory()),
                 .work_dir = null,
             }, programs, .{ .output = .capture });
         } else try checkHooks(io, &remote.repo);

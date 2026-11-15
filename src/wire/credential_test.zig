@@ -229,7 +229,7 @@ const Fixture = struct {
         for (case.challenges) |c| try input.print(arena, "wwwauth[]={s}\n", .{c});
         var git = try program.run(fx.gpa, io, .{ .environ = &fx.env }, .{
             .argv = &.{ testgit.program(), "credential", "fill" },
-            .cwd = .{ .dir = fx.tmp.dir },
+            .cwd = .{ .dir = .of(fx.tmp.dir) },
         }, .{ .input = input.items });
         defer git.deinit(fx.gpa);
         const git_logs = try fx.takeLogs(arena, io);

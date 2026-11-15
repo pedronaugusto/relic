@@ -36,7 +36,7 @@ const SServer = struct {
                 "openssl", "s_server", "-accept", "127.0.0.1:0",          "-cert",   "server.pem", "-key",  "server.key",
                 "-www",    "-Verify",  "1",       "-verify_return_error", "-CAfile", "ca.pem",     version,
             },
-            .cwd = .{ .dir = pki.dir.dir },
+            .cwd = .{ .dir = .of(pki.dir.dir) },
             .stderr = .ignore,
         }) catch return error.SkipZigTest;
         errdefer running.deinit(io);

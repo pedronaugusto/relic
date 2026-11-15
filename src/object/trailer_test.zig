@@ -115,7 +115,7 @@ const Fixture = struct {
         if (input.len != 0 and input[input.len - 1] != '\n') try completed.append(arena, '\n');
         var ours: std.Io.Writer.Allocating = .init(gpa);
         defer ours.deinit();
-        try trailer.process(gpa, io, &ours.writer, completed.items, .{ .settings = settings, .commands = .{ .programs = .{ .environ = &f.environ }, .cwd = .{ .dir = f.git.dir } }, .formatting = parsed.options, .new = parsed.new });
+        try trailer.process(gpa, io, &ours.writer, completed.items, .{ .settings = settings, .commands = .{ .programs = .{ .environ = &f.environ }, .cwd = .{ .dir = .of(f.git.dir) } }, .formatting = parsed.options, .new = parsed.new });
         std.testing.expectEqualStrings(theirs, ours.written()) catch |err| {
             std.debug.print("interpret-trailers", .{});
             for (args) |arg| std.debug.print(" {s}", .{arg});
@@ -378,7 +378,7 @@ test "commit --trailer adds trailers as git commit does" {
     const who: object.Signature = .{ .name = "Fixture", .email = "fixture@example.com", .when_secs = testgit.fixture_date, .offset_minutes = 0 };
     _ = try commit_mod.commit(io, &repo, .{ .author = who, .committer = who, .message = "subject\n\nbody\n" }, .{
         .trailers = &.{ "sign: Ann <ann@example.com>", "fix=12", "Acked-by: Bob" },
-        .trailer_commands = .{ .programs = .{ .environ = &b.environ }, .cwd = .{ .dir = b.git.dir } },
+        .trailer_commands = .{ .programs = .{ .environ = &b.environ }, .cwd = .{ .dir = .of(b.git.dir) } },
     });
     const ours = try b.git.run(io, &.{ "log", "-1", "--format=%B" });
     defer gpa.free(ours);

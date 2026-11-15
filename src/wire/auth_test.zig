@@ -109,7 +109,7 @@ const Person = struct {
     /// Each is checked to be the stand-in before any test asks it anything,
     /// so the person's real keychain is never reached.
     fn shadowHelpers(p: *Person, io: Io, names: []const []const u8, answers: []const []const u8) !void {
-        var outcome = try program.run(p.gpa, io, .{ .environ = &p.env }, .{ .argv = &.{ "git", "--exec-path" }, .cwd = .{ .dir = p.tools.dir } }, .{});
+        var outcome = try program.run(p.gpa, io, .{ .environ = &p.env }, .{ .argv = &.{ "git", "--exec-path" }, .cwd = .{ .dir = .of(p.tools.dir) } }, .{});
         defer outcome.deinit(p.gpa);
         if (!outcome.succeeded()) return error.SkipZigTest;
         const real = std.mem.trimEnd(u8, outcome.stdout, "\r\n");
@@ -141,7 +141,7 @@ const Person = struct {
         for (names) |name| {
             var dashed_buf: [64]u8 = undefined;
             const dashed = try std.mem.print(&dashed_buf, "credential-{s}", .{name});
-            var probe = try program.run(p.gpa, io, .{ .environ = &p.env }, .{ .argv = &.{ "git", dashed, "relic-probe" }, .cwd = .{ .dir = p.tools.dir } }, .{});
+            var probe = try program.run(p.gpa, io, .{ .environ = &p.env }, .{ .argv = &.{ "git", dashed, "relic-probe" }, .cwd = .{ .dir = .of(p.tools.dir) } }, .{});
             defer probe.deinit(p.gpa);
             if (!std.mem.eql(u8, probe.stdout, "stand-in\n")) {
                 std.debug.print("git {s} is not the stand-in; stopping before it is asked anything\n", .{dashed});
@@ -174,7 +174,7 @@ const Person = struct {
         try argv.append(p.gpa, "git");
         try argv.appendSlice(p.gpa, &testgit.default_settings);
         try argv.appendSlice(p.gpa, args);
-        return program.run(p.gpa, io, .{ .environ = &p.env }, .{ .argv = argv.items, .cwd = .{ .dir = dir } }, .{});
+        return program.run(p.gpa, io, .{ .environ = &p.env }, .{ .argv = argv.items, .cwd = .{ .dir = .of(dir) } }, .{});
     }
 
     /// Open `dir` as this person's repository, with the configuration

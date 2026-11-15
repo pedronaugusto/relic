@@ -638,7 +638,7 @@ const Resolver = struct {
 
     fn fromIndex(r: *Resolver, stage: u2, path: []const u8) Error!Oid {
         if (std.mem.startsWith(u8, path, "./") or std.mem.startsWith(u8, path, "../")) return error.RelativePathUnsupported;
-        var index = index_mod.Index.read(r.gpa, r.io, r.src.index.git_dir.?, "index", r.src.index) catch |err| return revisionError(err);
+        var index = index_mod.Index.read(r.gpa, r.io, r.src.index.git_dir.?.get(), "index", r.src.index) catch |err| return revisionError(err);
         defer index.deinit();
         for (index.entries.items) |entry| {
             if (entry.stage == stage and std.mem.eql(u8, entry.path, path)) return entry.oid;

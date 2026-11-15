@@ -48,7 +48,7 @@ pub fn gitInput(gpa: Allocator, io: Io, dir: Io.Dir, args: []const []const u8, i
     try argv.appendSlice(gpa, args);
     var outcome = try program.run(gpa, io, .{ .environ = &env }, .{
         .argv = argv.items,
-        .cwd = .{ .dir = dir },
+        .cwd = .{ .dir = .of(dir) },
     }, .{
         .input = input,
     });
@@ -79,7 +79,7 @@ pub fn gitInputSettings(gpa: Allocator, io: Io, dir: Io.Dir, env: *const Environ
     try argv.appendSlice(gpa, args);
     var outcome = try program.run(gpa, io, .{ .environ = env }, .{
         .argv = argv.items,
-        .cwd = .{ .dir = dir },
+        .cwd = .{ .dir = .of(dir) },
     }, .{
         .input = input,
     });
@@ -853,7 +853,7 @@ pub const TlsFront = struct {
         if (options.public_key) for ([_][]const u8{ "PEM", "DER" }, [_][]const u8{ "pub.pem", "pub.der" }) |form, name| {
             var written = try program.run(gpa, io, .{ .environ = &env }, .{
                 .argv = &.{ "openssl", "pkey", "-in", key_path, "-pubout", "-outform", form, "-out", name },
-                .cwd = .{ .dir = dir.dir },
+                .cwd = .{ .dir = .of(dir.dir) },
             }, .{});
             defer written.deinit(gpa);
             if (!written.succeeded()) return error.SkipZigTest;
@@ -870,7 +870,7 @@ pub const TlsFront = struct {
         if (options.version) |flag| try argv.append(gpa, flag);
         var running = program.start(gpa, io, .{ .environ = &env }, .{
             .argv = argv.items,
-            .cwd = .{ .dir = www },
+            .cwd = .{ .dir = .of(www) },
             .stderr = .ignore,
         }) catch return error.SkipZigTest;
         errdefer running.deinit(io);
@@ -1048,7 +1048,7 @@ pub const Pki = struct {
         try argv.appendSlice(p.gpa, args);
         var made = program.run(p.gpa, io, .{ .environ = &p.env }, .{
             .argv = argv.items,
-            .cwd = .{ .dir = p.dir.dir },
+            .cwd = .{ .dir = .of(p.dir.dir) },
         }, .{}) catch return error.SkipZigTest;
         defer made.deinit(p.gpa);
         if (!made.succeeded()) return error.SkipZigTest;

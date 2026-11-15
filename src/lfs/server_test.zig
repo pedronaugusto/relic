@@ -103,7 +103,7 @@ const Bench = struct {
         try argv.appendSlice(b.gpa, &testgit.default_settings);
         try argv.appendSlice(b.gpa, &.{ "-c", hooks });
         try argv.appendSlice(b.gpa, args);
-        var outcome = try program.run(b.gpa, b.io, .{ .environ = b.env }, .{ .argv = argv.items, .cwd = .{ .dir = dir } }, .{});
+        var outcome = try program.run(b.gpa, b.io, .{ .environ = b.env }, .{ .argv = argv.items, .cwd = .{ .dir = .of(dir) } }, .{});
         defer outcome.deinit(b.gpa);
         try testing.expect(!outcome.succeeded());
         if (std.mem.find(u8, outcome.stderr, said) == null) {

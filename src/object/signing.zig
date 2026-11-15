@@ -404,7 +404,7 @@ pub const Signer = struct {
     fn signGpg(signer: *Signer, io: Io, payload: []const u8, key: []const u8) ErrorNamespace.Error![]u8 {
         var outcome = try program.run(signer.gpa, io, signer.programs, .{
             .argv = &.{ signer.program, "--status-fd=2", "-bsau", key },
-            .cwd = .{ .dir = signer.base.get() },
+            .cwd = .{ .dir = signer.base },
         }, .{
             .input = payload,
         });
@@ -434,7 +434,7 @@ pub const Signer = struct {
         if (key_file != null) try argv.append(arena, "-U");
         // With no file named, `ssh-keygen` signs its standard input and
         // writes the signature to its standard output.
-        var outcome = try program.run(signer.gpa, io, signer.programs, .{ .argv = argv.items, .cwd = .{ .dir = signer.base.get() } }, .{
+        var outcome = try program.run(signer.gpa, io, signer.programs, .{ .argv = argv.items, .cwd = .{ .dir = signer.base } }, .{
             .input = payload,
         });
         defer outcome.deinit(signer.gpa);
@@ -450,7 +450,7 @@ pub const Signer = struct {
         const command = signer.default_key_command orelse return error.NoSigningKey;
         const argv = try splitCommandLine(arena, command);
         if (argv.len == 0) return error.NoSigningKey;
-        var outcome = try program.run(signer.gpa, io, signer.programs, .{ .argv = argv, .cwd = .{ .dir = signer.base.get() } }, .{});
+        var outcome = try program.run(signer.gpa, io, signer.programs, .{ .argv = argv, .cwd = .{ .dir = signer.base } }, .{});
         defer outcome.deinit(signer.gpa);
         if (!outcome.succeeded()) return error.NoSigningKey;
         const end = std.mem.findScalar(u8, outcome.stdout, '\n') orelse outcome.stdout.len;
@@ -481,7 +481,7 @@ pub const Signer = struct {
                 // git runs `ssh-keygen` itself here, not `gpg.ssh.program`.
                 var outcome = try program.run(signer.gpa, io, signer.programs, .{
                     .argv = &.{ "ssh-keygen", "-lf", if (literal != null) "-" else key },
-                    .cwd = .{ .dir = signer.base.get() },
+                    .cwd = .{ .dir = signer.base },
                 }, .{ .input = literal orelse "" });
                 defer outcome.deinit(signer.gpa);
                 if (!outcome.succeeded()) return error.KeyFingerprintFailed;
@@ -530,7 +530,7 @@ pub const Signer = struct {
         try argv.append(arena, program_name);
         if (format == .openpgp) try argv.append(arena, "--keyid-format=long");
         try argv.appendSlice(arena, &.{ "--status-fd=1", "--verify", sig_file.path, "-" });
-        var outcome = try program.run(signer.gpa, io, signer.programs, .{ .argv = argv.items, .cwd = .{ .dir = signer.base.get() } }, .{
+        var outcome = try program.run(signer.gpa, io, signer.programs, .{ .argv = argv.items, .cwd = .{ .dir = signer.base } }, .{
             .input = payload,
         });
         defer outcome.deinit(signer.gpa);
@@ -565,7 +565,7 @@ pub const Signer = struct {
         var find: std.ArrayList([]const u8) = .empty;
         try find.appendSlice(arena, &.{ program_name, "-Y", "find-principals", "-f", allowed, "-s", sig_file.path });
         if (time_arg) |t| try find.append(arena, t);
-        var principals = try program.run(signer.gpa, io, signer.programs, .{ .argv = find.items, .cwd = .{ .dir = signer.base.get() } }, .{});
+        var principals = try program.run(signer.gpa, io, signer.programs, .{ .argv = find.items, .cwd = .{ .dir = signer.base } }, .{});
         defer principals.deinit(signer.gpa);
 
         var output: std.ArrayList(u8) = .empty;
@@ -576,7 +576,7 @@ pub const Signer = struct {
             var check: std.ArrayList([]const u8) = .empty;
             try check.appendSlice(arena, &.{ program_name, "-Y", "check-novalidate", "-n", "git", "-s", sig_file.path });
             if (time_arg) |t| try check.append(arena, t);
-            var checked = try program.run(signer.gpa, io, signer.programs, .{ .argv = check.items, .cwd = .{ .dir = signer.base.get() } }, .{
+            var checked = try program.run(signer.gpa, io, signer.programs, .{ .argv = check.items, .cwd = .{ .dir = signer.base } }, .{
                 .input = payload,
             });
             defer checked.deinit(signer.gpa);
@@ -599,7 +599,7 @@ pub const Signer = struct {
                         else => |other| return other,
                     }
                 }
-                var checked = try program.run(signer.gpa, io, signer.programs, .{ .argv = check.items, .cwd = .{ .dir = signer.base.get() } }, .{
+                var checked = try program.run(signer.gpa, io, signer.programs, .{ .argv = check.items, .cwd = .{ .dir = signer.base } }, .{
                     .input = payload,
                 });
                 defer checked.deinit(signer.gpa);

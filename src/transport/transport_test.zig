@@ -636,7 +636,7 @@ fn gitFailure(gpa: Allocator, io: Io, dir: Io.Dir, env: *const std.process.Envir
     try argv.append(gpa, "git");
     try argv.appendSlice(gpa, &testgit.default_settings);
     try argv.appendSlice(gpa, args);
-    var outcome = try program.run(gpa, io, .{ .environ = env }, .{ .argv = argv.items, .cwd = .{ .dir = dir } }, .{});
+    var outcome = try program.run(gpa, io, .{ .environ = env }, .{ .argv = argv.items, .cwd = .{ .dir = .of(dir) } }, .{});
     gpa.free(outcome.stdout);
     if (outcome.succeeded()) {
         gpa.free(outcome.stderr);
@@ -1212,7 +1212,7 @@ test "a 429 is answered as git answers it: http.maxRetries requests in all, Retr
             if (i == 0) {
                 var outcome = try program.run(gpa, io, .{ .environ = &env }, .{
                     .argv = &[_][]const u8{"git"} ++ testgit.default_settings ++ [_][]const u8{ "ls-remote", url },
-                    .cwd = .{ .dir = r.dir },
+                    .cwd = .{ .dir = .of(r.dir) },
                     .stderr = .capture,
                 }, .{});
                 defer outcome.deinit(gpa);
@@ -1263,7 +1263,7 @@ test "a transfer slower than http.lowSpeedLimit for http.lowSpeedTime is given u
     for ([_]*testgit.Repo{ &by_git, &by_relic }) |r| try r.exec(io, &.{ "remote", "add", "origin", url });
     var outcome = try program.run(gpa, io, .{ .environ = &env }, .{
         .argv = &[_][]const u8{"git"} ++ testgit.default_settings ++ [_][]const u8{ "fetch", "-q", "origin" },
-        .cwd = .{ .dir = by_git.dir },
+        .cwd = .{ .dir = .of(by_git.dir) },
         .stderr = .capture,
     }, .{});
     defer outcome.deinit(gpa);
@@ -3089,7 +3089,7 @@ test "an update goes on past submodules whose checkout git refuses and fails at 
     try argv.append(gpa, "git");
     try argv.appendSlice(gpa, &testgit.default_settings);
     try argv.appendSlice(gpa, &.{ "submodule", "update", "-q", "--recursive" });
-    var by_git = try program.run(gpa, io, .{ .environ = &env }, .{ .argv = argv.items, .cwd = .{ .dir = by_git_dir }, .stderr = .capture }, .{});
+    var by_git = try program.run(gpa, io, .{ .environ = &env }, .{ .argv = argv.items, .cwd = .{ .dir = .of(by_git_dir) }, .stderr = .capture }, .{});
     defer by_git.deinit(gpa);
     // git's own exit status, and the submodules it names, in its order.
     try testing.expectEqual(program.Term{ .exited = 1 }, by_git.term);

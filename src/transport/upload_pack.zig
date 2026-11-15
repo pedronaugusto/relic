@@ -1418,7 +1418,7 @@ const Negotiation = struct {
         var running = try program.start(s.gpa, s.io, programs, .{
             .argv = argv.items,
             .shell = true,
-            .cwd = .{ .dir = s.remote.repo.gitDirectory() },
+            .cwd = .{ .dir = .of(s.remote.repo.gitDirectory()) },
             .set = &.{.{ .name = "GIT_DIR", .value = "." }},
             // Without a side band, its words are this process's, as git's
             // are its own standard error.
