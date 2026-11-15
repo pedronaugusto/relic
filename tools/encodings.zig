@@ -357,6 +357,7 @@ const Glibc = struct {
         if (readAll(a, io, root, try a.print("iconvdata/{s}.irreversible", .{name}))) |text| {
             try m.readIrreversible(a, text);
         } else |_| {}
+        try m.writeMarked(a);
         if (readAll(a, io, root, try a.print("iconvdata/{s}.precomposed", .{name}))) |text| {
             try m.readPrecomposed(a, text);
         } else |_| {}
@@ -378,23 +379,37 @@ const Map = struct {
     compose: ?Compose = null,
     /// Two characters written as one sequence, in UTF-8.
     pairs: std.ArrayList([]const u8) = .empty,
+    /// The charmap's `%IRREVERSIBLE%` lines, bytes and then characters:
+    /// read, and written only where the module's irreversible list does not
+    /// name them.
+    marked: std.ArrayList([2][]const u8) = .empty,
+    /// The irreversible list's entries, bytes and then characters joined.
+    listed: std.StringHashMapUnmanaged(void) = .empty,
 
+    /// The charmap as `iconvdata/tst-table-charmap.sh` reads it: a line
+    /// marked `%IRREVERSIBLE%` is the table's like any other, and one
+    /// glibc calls "not a real character" is not.
     fn readCharmap(m: *Map, a: Allocator, text: []const u8) !void {
+        const mark = "%IRREVERSIBLE%";
         var in_map = false;
         var lines = std.mem.splitScalar(u8, text, '\n');
         while (lines.next()) |raw| {
-            const line = std.mem.trim(u8, raw, " \t\r");
-            if (std.mem.eql(u8, line, "CHARMAP")) {
+            const trimmed = std.mem.trim(u8, raw, " \t\r");
+            if (std.mem.eql(u8, trimmed, "CHARMAP")) {
                 in_map = true;
                 continue;
             }
-            if (std.mem.eql(u8, line, "END CHARMAP")) break;
+            if (std.mem.eql(u8, trimmed, "END CHARMAP")) break;
+            const marked = std.mem.startsWith(u8, trimmed, mark);
+            const line = if (marked) trimmed[mark.len..] else trimmed;
             if (!in_map or line.len == 0 or line[0] != '<') continue;
+            if (std.mem.find(u8, line, "not a real character") != null) continue;
             var f = std.mem.tokenizeAny(u8, line, " \t");
             const u = f.next() orelse continue;
             const b = f.next() orelse continue;
             if (!std.mem.startsWith(u8, b, "/x")) continue;
             if (std.mem.find(u8, u, "..")) |dots| {
+                if (marked) return error.MarkedRange;
                 const first = try std.fmt.parseInt(u21, u[2 .. dots - 1], 16);
                 const last = try std.fmt.parseInt(u21, u[dots + 4 .. u.len - 1], 16);
                 const bytes = try parseBytes(a, b);
@@ -406,7 +421,21 @@ const Map = struct {
                 continue;
             }
             const val = parseUnicode(a, u) catch continue;
-            try m.both(a, try parseBytes(a, b), val);
+            const bytes = try parseBytes(a, b);
+            if (marked) {
+                try m.decode.put(a, bytes, val);
+                m.longest = @max(m.longest, bytes.len);
+                try m.marked.append(a, .{ bytes, val });
+            } else try m.both(a, bytes, val);
+        }
+    }
+
+    /// The marked lines the irreversible list does not name, which
+    /// tst-table.sh holds the module to write as well.
+    fn writeMarked(m: *Map, a: Allocator) !void {
+        for (m.marked.items) |entry| {
+            if (m.listed.contains(try std.mem.concat(a, u8, &entry))) continue;
+            _ = try m.encode.getOrPutValue(a, entry[1], entry[0]);
         }
     }
 
@@ -451,6 +480,7 @@ const Map = struct {
             const bytes = try hexBytes(a, f.next() orelse continue);
             const cp = try std.fmt.parseInt(u21, (f.next() orelse continue)[2..], 16);
             const chars = try utf8Of(a, &.{cp});
+            try m.listed.put(a, try std.mem.concat(a, u8, &.{ bytes, chars }), {});
             if (m.decode.get(bytes)) |d| if (std.mem.eql(u8, d, chars)) {
                 if (m.encode.get(chars)) |e| if (std.mem.eql(u8, e, bytes)) {
                     _ = m.encode.remove(chars);
