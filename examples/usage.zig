@@ -28,9 +28,16 @@ fn run(gpa: std.mem.Allocator, io: std.Io, cwd: std.Io.Dir) !void {
         };
         break;
     }
-    // glint-ignore: Z026 -- the example's scratch directory is removed best effort; a leftover is the temporary directory's to clear
-    defer cwd.deleteTree(io, &scratch_name) catch {};
-    var dir = try cwd.openDir(io, &scratch_name, .{ .iterate = true });
+    // The scratch directory goes whether the example passed or not; the
+    // example's own failure is reported first, then one to remove it.
+    const done = cycle(gpa, io, cwd, &scratch_name);
+    const removed = cwd.deleteTree(io, &scratch_name);
+    try done;
+    try removed;
+}
+
+fn cycle(gpa: std.mem.Allocator, io: std.Io, cwd: std.Io.Dir, scratch_name: []const u8) !void {
+    var dir = try cwd.openDir(io, scratch_name, .{ .iterate = true });
     defer dir.close(io);
 
     // The caller supplies the time and the identity: this package reads no
