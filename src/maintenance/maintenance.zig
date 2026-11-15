@@ -273,7 +273,7 @@ fn computeGenerations(arena: Allocator, nodes: []GraphNode, by_name: *const Oid.
                 generation = @max(generation, parent.generation + 1);
             }
             if (wait) continue;
-            std.debug.assert(level >= 1);
+            aegis.assert.invariant(level >= 1, "level >= 1");
             aegis.assert.invariant(generation >= 1, "generation >= 1");
             node.level = level;
             node.generation = generation;

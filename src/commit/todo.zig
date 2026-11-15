@@ -17,7 +17,6 @@ const std = @import("std");
 const aegis = @import("aegis");
 const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
-const assert = std.debug.assert;
 
 const hash = @import("../hash/hash.zig");
 const message = @import("../object/message.zig");
@@ -344,7 +343,7 @@ pub fn format(w: *std.Io.Writer, items: []const Item, options: FormatOptions, na
 pub fn formatItem(w: *std.Io.Writer, item: Item, options: FormatOptions, names: anytype) std.Io.Writer.Error!void {
     // What `parse` reads back: one instruction to a line, and a commit for
     // every instruction that applies one.
-    assert(std.mem.findScalar(u8, item.arg, '\n') == null);
+    aegis.assert.invariant(std.mem.findScalar(u8, item.arg, '\n') == null, "an instruction's argument is one line");
     if (item.command.picksCommit()) aegis.assert.invariant(item.commit != null, "item.commit != null");
     if (item.command == .comment) {
         try w.writeAll(item.arg);

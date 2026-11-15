@@ -547,8 +547,8 @@ pub const Notes = struct {
         const hex = hash.Oid.fromCut(t.repo.objectFormat(), key[0..t.rawLen()]).hex(&hex_buf);
         // Each fanout level is two of the name's digits and a slash, and
         // some of the name is left for the file.
-        assert(2 * fanout < hex.len);
-        assert(buf.len >= hex.len + fanout);
+        aegis.assert.invariant(2 * fanout < hex.len, "the fanout leaves some of the name for the file");
+        aegis.assert.invariant(buf.len >= hex.len + fanout, "the buffer holds the name and a slash for each fanout level");
         var i: usize = 0;
         var j: usize = 0;
         var f = fanout;

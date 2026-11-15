@@ -448,6 +448,11 @@ test "a detached gc a cancel stops returns it and writes no gc.log, which would 
         options: collect.Options,
         repo: repo_mod.Repository = undefined,
         pub fn setUp(g: *@This(), _: *shakedown.FaultIo) !void {
+            // A log an earlier run's old code wrote, which this run would stop at.
+            g.dir.deleteFile(io, ".git/gc.log") catch |err| switch (err) {
+                error.FileNotFound => {},
+                else => return err,
+            };
             g.repo = try repo_mod.Repository.open(gpa, io, g.dir, .{});
         }
         pub fn run(g: *@This(), fio: Io) !void {
@@ -458,8 +463,6 @@ test "a detached gc a cancel stops returns it and writes no gc.log, which would 
             if (result) |_| {} else |err| if (err == error.Canceled) try std.testing.expectError(error.FileNotFound, g.dir.access(io, ".git/gc.log", .{}));
         }
         pub fn tearDown(g: *@This()) void {
-            // A log only the old code wrote, which the next run would stop at.
-            g.dir.deleteFile(io, ".git/gc.log") catch |err| std.debug.assert(err == error.FileNotFound);
             g.repo.deinit(io);
         }
     };

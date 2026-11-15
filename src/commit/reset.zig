@@ -15,7 +15,7 @@
 const std = @import("std");
 const git_mod = @import("../testing/git.zig");
 const Allocator = std.mem.Allocator;
-const assert = std.debug.assert;
+const aegis = @import("aegis");
 const Io = std.Io;
 
 const hash = @import("../hash/hash.zig");
@@ -229,7 +229,7 @@ fn install(
     index.clear();
     try index.addMany(fresh.items);
     // One entry for each path of the tree, at stage 0.
-    assert(index.entries.items.len == wanted.count());
+    aegis.assert.invariant(index.entries.items.len == wanted.count(), "the index holds one entry for each path of the tree");
     const cache_tree = try index.cacheTree();
     cache_tree.invalidateAll();
     cache_tree.root.entry_count = @intCast(index.entries.items.len);

@@ -32,7 +32,7 @@ const state_file = @import("../repo/state.zig");
 const shakedown = @import("shakedown");
 const gitdate = @import("../text.zig").date;
 const Allocator = std.mem.Allocator;
-const assert = std.debug.assert;
+const aegis = @import("aegis");
 const Io = std.Io;
 
 const hash = @import("../hash/hash.zig");
@@ -2825,7 +2825,7 @@ fn reuseMerge(r: *Run, h: head_mod.Head, original: Oid, merge_heads: []const Oid
 /// The subject git gives a merge with no original and no oneline: of the
 /// branch, or the branches, `labels` names.
 fn mergeSubject(arena: Allocator, labels: []const u8, count: usize) Allocator.Error![]const u8 {
-    assert(count != 0);
+    aegis.assert.invariant(count != 0, "a merge names one branch at least");
     const names = std.mem.trim(u8, labels, " \t");
     if (count > 1) return arena.print("Merge branches '{s}'", .{names});
     var first = std.mem.tokenizeAny(u8, names, " \t");

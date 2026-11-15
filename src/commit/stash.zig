@@ -638,7 +638,7 @@ fn save(io: Io, repo: *Repository, options: PushOptions, saving: Saving) Self.Er
     if (untracked_commit) |u| try parents.append(arena, u);
     // `inspect` reads a stash back by these places: what it was made on,
     // the index, then the untracked files.
-    assert(parents.items.len == 2 + @as(usize, @intFromBool(untracked_commit != null)));
+    aegis.assert.invariant(parents.items.len == 2 + @as(usize, @intFromBool(untracked_commit != null)), "a stash's parents are its base, its index and, when kept, its untracked files");
     const stash_commit = try writeCommit(io, repo, work_tree, parents.items, options.who, stash_message);
     if (saving == .create) return stash_commit;
 
