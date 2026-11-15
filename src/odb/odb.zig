@@ -1241,8 +1241,9 @@ pub const Odb = struct {
 
     /// A loose object's file, inflating: its header read by `start`, its
     /// body next from `inflate.interface`. It stays where `start` put it,
-    /// which its readers point into.
-    const LooseInflate = struct {
+    /// which its readers point into. Public as `Stream.Backing` holds one;
+    /// only this file starts and reads it.
+    pub const LooseInflate = struct {
         file_reader: Io.File.Reader,
         inflate: warp.Inflate.Reader,
         header: object.Header,
