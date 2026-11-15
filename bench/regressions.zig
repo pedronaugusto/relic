@@ -899,24 +899,33 @@ const CannedServer = struct {
     }
 
     fn stop(s: *CannedServer) void {
-        // The accept is woken by a connection of the server's own.
+        // The accept is woken by a connection of the server's own; where
+        // none can be made, it is canceled where it waits.
         s.stopping.store(true, .release);
-        const address = Io.net.IpAddress.parse("127.0.0.1", s.port) catch unreachable; // unreachable: a literal address
-        // glint-ignore: Z026 -- a wake that cannot connect finds the server already gone, which is what the stop waits for
-        if (address.connect(s.io, .{ .mode = .stream })) |stream| stream.close(s.io) else |_| {}
-        s.task.await(s.io);
+        const address: Io.net.IpAddress = .{ .ip4 = .loopback(s.port) };
+        if (address.connect(s.io, .{ .mode = .stream })) |stream| {
+            stream.close(s.io);
+            s.task.await(s.io);
+        } else |_| s.task.cancel(s.io);
         s.listener.deinit(s.io);
         std.heap.smp_allocator.destroy(s);
     }
 
     /// One client at a time, as the bench has.
     fn serve(s: *CannedServer) void {
-        while (true) {
-            const stream = s.listener.accept(s.io) catch return;
+        while (!s.stopping.load(.acquire)) {
+            const stream = s.listener.accept(s.io) catch |err| switch (err) {
+                // `stop` cancels an accept no connection of its own woke.
+                error.Canceled => return,
+                else => {
+                    std.log.err("the bench server could not accept: {t}", .{err});
+                    return;
+                },
+            };
             defer stream.close(s.io);
             if (s.stopping.load(.acquire)) return;
-            // glint-ignore: Z026 -- a request the bench server cannot answer fails the client that sent it, which the row reports
-            s.handle(stream) catch {};
+            // The client it failed fails its row too; this names the cause.
+            s.handle(stream) catch |err| std.log.err("the bench server could not answer: {t}", .{err});
         }
     }
 
@@ -927,7 +936,11 @@ const CannedServer = struct {
         var writer = stream.writer(s.io, &write_buffer);
         var server = std.http.Server.init(&reader.interface, &writer.interface);
         while (true) {
-            var request = try server.receiveHead();
+            // A kept connection ends when its client closes it.
+            var request = server.receiveHead() catch |err| switch (err) {
+                error.HttpConnectionClosing => return,
+                else => |e| return e,
+            };
             if (s.mode == .lfs) {
                 if (request.head.method == .GET) {
                     try request.respond(s.answer, .{ .keep_alive = false });
