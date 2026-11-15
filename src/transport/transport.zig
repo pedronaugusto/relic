@@ -490,7 +490,7 @@ pub const Session = struct {
         return .{
             .config = options.config,
             .remote_name = options.remote_name,
-            .base = if (options.repository) |r| r.topDirectory() else null,
+            .base = if (options.repository) |r| .of(r.topDirectory()) else null,
             .proxy = options.proxy,
             .programs = options.programs,
             .protocol_v2 = options.protocol_v2 orelse wantsV2(options.config),
