@@ -442,5 +442,6 @@ fn fuzzReport(_: void, case: *shakedown.Case) anyerror!void {
     var report: Report = .{ .arena = .init(testing.allocator), .unpack_ok = true, .unpack_message = null, .refs = &.{} };
     defer report.deinit();
     const commands = [_]Command{.{ .name = "refs/heads/main", .old = .zero(.sha1), .new = .zero(.sha1) }};
-    readReport(testing.allocator, &report, &in.interface, .{ .commands = &commands, .kind = .sha1 }) catch return;
+    // A named refusal ends the case; running out of memory fails it.
+    readReport(testing.allocator, &report, &in.interface, .{ .commands = &commands, .kind = .sha1 }) catch |err| return testing.expect(err != error.OutOfMemory);
 }

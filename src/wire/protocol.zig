@@ -14,6 +14,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -38,19 +39,25 @@ pub const session_id_len = 48;
 /// as git writes its, then random bits where git names the host and the
 /// process, which say as surely that two are not the same.
 pub fn sessionId(io: Io, buf: *[session_id_len]u8) []const u8 {
-    const ns = Io.Clock.real.now(io).nanoseconds; // trace2's session id writes the time to the microsecond, split from nanoseconds here
-    const secs: u64 = @intCast(@max(0, @divFloor(ns, std.time.ns_per_s)));
-    const micros: u64 = @intCast(@divFloor(@mod(ns, std.time.ns_per_s), std.time.ns_per_us));
-    const epoch: std.time.epoch.EpochSeconds = .{ .secs = secs };
+    // trace2's session id writes the time to the microsecond.
+    const now = Io.Clock.real.now(io);
+    const micro = Microseconds.fromTimestamp(now, .down);
+    // The microseconds into its second: under a million, so never saturated.
+    const micros = micro.floor(.literal("1s")).saturatingDurationTo(micro).raw();
+    // A time before the epoch, or past what a u64 of seconds holds, is written as the epoch.
+    const second = Seconds.fromTimestamp(now, .down) catch Seconds.fromRaw(0);
+    const epoch: std.time.epoch.EpochSeconds = .{ .secs = second.raw() };
     const day = epoch.getEpochDay().calculateYearDay();
     const month = day.calculateMonthDay();
     const clock = epoch.getDaySeconds();
     var random: [8]u8 = undefined;
     io.random(&random);
     const fields = .{ day.year, month.month.numeric(), month.day_index + 1, clock.getHoursIntoDay(), clock.getMinutesIntoHour(), clock.getSecondsIntoMinute(), micros, &random };
-    // unreachable: 24 bytes of time and 18 of the rest fit in 48
-    return std.mem.print(buf, "{d:0>4}{d:0>2}{d:0>2}T{d:0>2}{d:0>2}{d:0>2}.{d:0>6}Z-R{x}", fields) catch unreachable;
+    return std.mem.print(buf, "{d:0>4}{d:0>2}{d:0>2}T{d:0>2}{d:0>2}{d:0>2}.{d:0>6}Z-R{x}", fields) catch aegis.assert.never("24 bytes of time and 18 of the rest fit in 48");
 }
+
+const Microseconds = aegis.units.Instant(.real, .microsecond, i96);
+const Seconds = aegis.units.Instant(.real, .second, u64);
 
 /// Which dialect the server opened in.
 pub const Version = enum { v0, v1, v2 };
@@ -643,15 +650,23 @@ fn fuzzAdvertisement(_: void, case: *shakedown.Case) anyerror!void {
     const input = scratch[0..shakedown.gen.intRange(case.source, usize, 0, scratch.len)];
     case.source.bytes(input);
     var fake: Fake = .init(input);
-    var adv = readAdvertisement(testing.allocator, &fake.connection, null) catch return;
+    var adv = readAdvertisement(testing.allocator, &fake.connection, null) catch |err| return refused(err);
     defer adv.deinit();
     var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena_state.deinit();
     var lines = std.mem.splitScalar(u8, input, '\n');
     while (lines.next()) |line| {
-        // glint-ignore: Z026 -- a refusal is one of the two outcomes the fuzzer allows; only a crash or a leak fails it
-        _ = parseLsRefsLine(arena_state.allocator(), adv.kind, line) catch {};
+        if (parseLsRefsLine(arena_state.allocator(), adv.kind, line)) |ref| {
+            try testing.expect(ref.name.len != 0);
+        } else |err| try refused(err);
     }
+}
+
+/// A named refusal is one of the two outcomes the fuzzer allows (refs are
+/// the other); running out of memory, which the testing allocator never
+/// does here, is neither, and fails the case.
+fn refused(err: anyerror) anyerror!void {
+    if (err == error.OutOfMemory) return err;
 }
 
 /// A connection whose server said `bytes` and hears nothing, for the tests

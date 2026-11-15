@@ -15,6 +15,7 @@ const Self = @This();
 
 const std = @import("std");
 const aegis = @import("aegis");
+const input = @import("../input.zig");
 const SecretBytes = aegis.SecretBytes;
 const reactor = @import("reactor");
 const Allocator = std.mem.Allocator;
@@ -136,7 +137,7 @@ pub fn request(gpa: Allocator, io: Io, socket: []const u8, req: Request) Self.Er
         var into = SecretBytes.Writer.init(&answer, gpa);
         // No buffer of the reader's: each read lands in `answer`'s own
         // storage, wiped as it grows and when it is let go.
-        var r = stream.borrow().reader(io, &.{});
+        var r = input.socket(stream.borrow().*, io, &.{});
         const answered: aegis.io.ReadEnd = .fromStream(&r);
         // One byte past the most an answer may be says it is longer.
         while (into.interface.end <= max_request) {

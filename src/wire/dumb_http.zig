@@ -304,10 +304,9 @@ const Prefetch = struct {
 
         /// The lane free again, its task awaited or canceled.
         fn end(lane: *Lane, io: Io) void {
-            // glint-ignore: Z026 -- what it came to is of no use now
-            if (lane.task) |*task| _ = task.cancel(io) catch |err| switch (err) {
-                error.OutOfMemory, error.Canceled => {},
-            };
+            // What it came to, an answer or a failure, is of no use now:
+            // the lane's ticket is withdrawn.
+            if (lane.task) |*task| _ = task.cancel(io) catch null;
             lane.task = null;
             lane.ticket = null;
             lane.early.reset(io);
@@ -437,12 +436,20 @@ const Walk = struct {
             defer w.db.allocator().free(found.bytes);
             switch (found.type) {
                 .tag => {
-                    var tag = object.Tag.parse(w.r.gpa, w.r.kind, found.bytes) catch return;
+                    var tag = object.Tag.parse(w.r.gpa, w.r.kind, found.bytes) catch |err| switch (err) {
+                        error.OutOfMemory => return error.OutOfMemory,
+                        // A tag that does not parse ends the chain here.
+                        else => return,
+                    };
                     defer tag.deinit();
                     oid = tag.target;
                 },
                 .commit => {
-                    var commit = object.Commit.parse(w.r.gpa, w.r.kind, found.bytes) catch return;
+                    var commit = object.Commit.parse(w.r.gpa, w.r.kind, found.bytes) catch |err| switch (err) {
+                        error.OutOfMemory => return error.OutOfMemory,
+                        // A commit that does not parse ends the chain here.
+                        else => return,
+                    };
                     defer commit.deinit();
                     const f = try w.flagsOf(oid);
                     if (f.complete) return;
@@ -528,7 +535,11 @@ const Walk = struct {
                 else => |e| return e,
             };
             defer w.db.allocator().free(found.bytes);
-            var commit = object.Commit.parse(w.r.gpa, w.r.kind, found.bytes) catch continue;
+            var commit = object.Commit.parse(w.r.gpa, w.r.kind, found.bytes) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                // A commit that does not parse marks nothing further.
+                else => continue,
+            };
             defer commit.deinit();
             for (commit.parents) |parent| {
                 const pf = try w.flagsOf(parent);
@@ -538,7 +549,11 @@ const Walk = struct {
                     else => |e| return e,
                 };
                 defer w.db.allocator().free(parent_found.bytes);
-                var parent_commit = object.Commit.parse(w.r.gpa, w.r.kind, parent_found.bytes) catch continue;
+                var parent_commit = object.Commit.parse(w.r.gpa, w.r.kind, parent_found.bytes) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    // A parent that does not parse is not marked.
+                    else => continue,
+                };
                 defer parent_commit.deinit();
                 pf.complete = true;
                 try w.complete.push(w.r.gpa, .{ .oid = parent, .when = parent_commit.committer.when_secs });
@@ -819,7 +834,8 @@ fn readAlternatesImpl(r: *Remote, io: Io) Self.Error!void {
         const alt = target[0 .. target.len - "objects".len];
         if (!try r.alternateAllowed(alt)) continue;
         try r.warn("adding alternate object store: {s}", .{alt});
-        const parsed = url_mod.Url.parse(alt) catch continue;
+        // An alternate that is no URL relic reads is passed over.
+        const parsed: url_mod.Url = (url_mod.Url.parse(alt) catch null) orelse continue;
         const files = try smart_http.Files.open(r.gpa, io, parsed, r.options.http);
         errdefer {
             var f = files;

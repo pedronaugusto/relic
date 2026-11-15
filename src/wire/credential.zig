@@ -420,16 +420,14 @@ pub const Session = struct {
         const plain_len = user.len + 1 + password.len;
         var plain_secret = SecretBytes.init(s.gpa, plain_len) catch return null;
         defer plain_secret.deinit(s.gpa);
-        // unreachable: the owner was made with exactly this capacity.
-        plain_secret.resizeWithinCapacity(plain_len) catch unreachable;
+        plain_secret.resizeWithinCapacity(plain_len) catch aegis.assert.never("the owner was made with exactly this capacity");
         const plain = plain_secret.exposeMut();
         @memcpy(plain[0..user.len], user);
         plain[user.len] = ':';
         @memcpy(plain[user.len + 1 ..], password);
         const header_len = "Basic ".len + encoder.calcSize(plain_len);
         var header = SecretBytes.init(s.gpa, header_len) catch return null;
-        // unreachable: the owner was made with exactly this capacity.
-        header.resizeWithinCapacity(header_len) catch unreachable;
+        header.resizeWithinCapacity(header_len) catch aegis.assert.never("the owner was made with exactly this capacity");
         const text = header.exposeMut();
         @memcpy(text[0.."Basic ".len], "Basic ");
         _ = encoder.encode(text["Basic ".len..], plain);
@@ -734,8 +732,7 @@ pub const Session = struct {
         try w.optional("oauth_refresh_token", reveal(&s.oauth_refresh_token));
         if (s.password_expiry_utc != no_expiry) {
             var buf: [24]u8 = undefined;
-            // a u64 is at most 20 digits.
-            try w.item("password_expiry_utc", std.mem.print(&buf, "{d}", .{s.password_expiry_utc}) catch unreachable);
+            try w.item("password_expiry_utc", std.mem.print(&buf, "{d}", .{s.password_expiry_utc}) catch aegis.assert.never("a u64 is at most 20 digits"));
         }
         for (s.challenges.items) |c| try w.item("wwwauth[]", c);
         if (state) {
@@ -831,7 +828,7 @@ pub const Session = struct {
         const files = switch (native) {
             .usage => return .{ .failed = true, .any = false },
             .store => |files| files,
-            .cache => unreachable,
+            .cache => aegis.assert.never("the cache is run by runCache, which the caller picks for it"),
         };
         var settled = files;
         if (s.settings) |settings| settled.lock_timeout_ms = settings.store_lock_timeout_ms;
@@ -1104,8 +1101,7 @@ pub const Session = struct {
         // Its first line, as git's `git_prompt` takes it.
         const said = answer.stdout.expose();
         const end = std.mem.findAny(u8, said, "\r\n") orelse said.len;
-        // unreachable: a shorter live length is within any capacity.
-        answer.stdout.resizeWithinCapacity(end) catch unreachable;
+        answer.stdout.resizeWithinCapacity(end) catch aegis.assert.never("a shorter live length is within any capacity");
         return answer.stdout;
     }
 };
@@ -1119,8 +1115,7 @@ fn replace(gpa: Allocator, slot: *?[]u8, value: []const u8) Allocator.Error!void
 /// `replace` for a secret: the old one wiped as it goes.
 fn replaceSecret(gpa: Allocator, slot: *?SecretBytes, value: []const u8) Allocator.Error!void {
     var fresh = try SecretBytes.init(gpa, value.len);
-    // unreachable: a new allocation of the value's length, apart from it.
-    fresh.replace(value) catch unreachable;
+    fresh.replace(value) catch aegis.assert.never("a new allocation of the value's length, apart from it");
     if (slot.*) |*old| old.deinit(gpa);
     slot.* = fresh;
 }
@@ -1184,8 +1179,9 @@ fn interactive(config: ?*const config_mod.Config) bool {
     const c = config orelse return true;
     const entry = c.find("credential.interactive") orelse return true;
     const value = entry.value orelse return true;
-    // glint-ignore: Z026 -- a value that is no boolean is read as below: only `never` refuses
-    if (config_mod.parseBool(value)) |yes| return yes else |_| {}
+    // A value that is no boolean is read as below: only `never` refuses.
+    const as_bool: ?bool = config_mod.parseBool(value) catch null;
+    if (as_bool) |yes| return yes;
     return !std.mem.eql(u8, value, "never");
 }
 

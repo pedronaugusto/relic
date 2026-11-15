@@ -16,6 +16,7 @@ const Self = @This();
 
 const std = @import("std");
 const aegis = @import("aegis");
+const input = @import("../input.zig");
 const SecretBytes = aegis.SecretBytes;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -80,7 +81,7 @@ fn readFile(gpa: Allocator, io: Io, path: []const u8) Self.Error!?SecretBytes {
     errdefer text.deinit(gpa);
     var into = SecretBytes.Writer.init(&text, gpa);
     // No buffer of the reader's: each read lands in `text`'s own storage.
-    var reader = file.reader(io, &.{});
+    var reader = input.file(file, io, &.{});
     _ = reader.interface.streamRemaining(&into.interface) catch |err| switch (err) {
         error.ReadFailed => return reader.err.?,
         // The writer fails only for want of memory.

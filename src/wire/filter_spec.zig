@@ -188,7 +188,8 @@ fn parseUlong(text: []const u8) Error!u64 {
     const start = i;
     var value: u64 = 0;
     while (i < text.len) : (i += 1) {
-        const digit = std.fmt.charToDigit(text[i], base) catch break;
+        // The number ends at the first character that is no digit of it.
+        const digit = (std.fmt.charToDigit(text[i], base) catch null) orelse break;
         value = std.math.mul(u64, value, base) catch return error.InvalidFilter;
         value = std.math.add(u64, value, digit) catch return error.InvalidFilter;
     }

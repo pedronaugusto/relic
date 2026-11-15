@@ -17,13 +17,13 @@ const std = @import("std");
 const aegis = @import("aegis");
 const conduit = @import("conduit");
 const Io = std.Io;
-const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 
 const program = @import("../process.zig").program;
 const warning = @import("../report.zig").warning;
 const pkt_line = @import("../codec.zig").pkt_line;
 const progress = @import("../report.zig").progress;
+const input = @import("input.zig");
 
 /// Which service is asked for.
 pub const Service = enum {
@@ -74,6 +74,10 @@ pub const Connection = struct {
     /// an `ERR` line's text, a side-band's last words, an HTTP status.
     message_buffer: [256]u8 = undefined,
     message_len: usize = 0,
+    /// This connection, as `requestEnd`'s end reaches it to ask for the
+    /// cause of a failed write: set by `requestEnd` each time it hands one
+    /// out, so it is the connection where the end is used.
+    cause_target: ?*Connection = null,
 
     /// What each transport supplies.
     pub const VTable = struct {
@@ -117,13 +121,17 @@ pub const Connection = struct {
     /// The writer for the next request, with the connection's `failure`
     /// as the cause of a failed write.
     pub fn requestEnd(c: *Connection) Self.Error!aegis.io.WriteEnd {
-        return .init(try c.request(), c, causeOf);
+        const writer = try c.request();
+        c.cause_target = c;
+        return .init(writer, &c.cause_target, causeOf);
     }
 
     fn causeOf(context: *const anyopaque) ?anyerror {
-        const held: *const Connection = @ptrCast(@alignCast(context)); // safe: requestEnd passes a Connection
-        // safe: requestEnd was handed the Connection mutable; `failure` may keep the far side's message in it
-        return @constCast(held).failure();
+        // requestEnd passes its connection's `cause_target`, which it set;
+        // `failure` may keep the far side's message in the connection.
+        const target: *const ?*Connection = @ptrCast(@alignCast(context));
+        const c = target.* orelse aegis.assert.never("requestEnd sets the target before it hands its end out");
+        return c.failure();
     }
 
     /// Send the request and hand back the reader for its response.
@@ -178,17 +186,26 @@ const Tail = struct {
     /// The read end, lent to the reading task once the program runs.
     handed: aegis.BlockingGuarded(?Io.File) = .init(null),
     handed_set: aegis.Condition = .init(),
+    /// Why the reading task stopped, once it has: the pipe's end, a failed
+    /// read, or a cancel, which alone leaves something for `finish`.
+    stopped: ?DrainError = null,
+
+    const DrainError = aegis.Condition.WaitError || Io.File.ReadStreamingError;
 
     /// Wait for the program's standard error, then read it to its end,
     /// keeping the last of it. The task begins before the program, so a
     /// program that writes there always has a reader.
     fn drain(tail: *Tail, io: Io) void {
-        const file = tail.wait(io) catch return;
+        const file = tail.wait(io) catch |err| return tail.stop(err);
         var chunk: [1024]u8 = undefined;
         while (true) {
-            const n = file.readStreaming(io, &.{&chunk}) catch return;
+            const n = input.programError(file, io, &chunk) catch |err| return tail.stop(err);
             tail.keep(chunk[0..n]);
         }
+    }
+
+    fn stop(tail: *Tail, why: DrainError) void {
+        tail.stopped = why;
     }
 
     fn wait(tail: *Tail, io: Io) aegis.Condition.WaitError!Io.File {
@@ -217,6 +234,9 @@ const Tail = struct {
     fn finish(tail: *Tail, io: Io) Io.Cancelable!void {
         if (tail.task) |*task| task.cancel(io);
         tail.task = null;
+        // A task that met the pipe's end, or a read that failed, left
+        // nothing more to read: only a cancel stops it short.
+        if (tail.stopped) |why| if (why != error.Canceled) return;
         const owned = if (tail.file) |*owned| owned else return;
         const file = owned.borrow().*;
         var chunk: [1024]u8 = undefined;
@@ -244,7 +264,7 @@ const Tail = struct {
         }
         @memcpy(tail.buffer[tail.len..][0..bytes.len], bytes);
         tail.len += bytes.len;
-        assert(tail.len <= tail.buffer.len);
+        aegis.assert.invariant(tail.len <= tail.buffer.len, "what is kept fits the tail's buffer");
     }
 };
 
@@ -276,8 +296,31 @@ pub const Process = struct {
     /// The captured standard error, when it is captured.
     stderr: ?*Tail = null,
     /// Where what the program said goes when the conversation ends without
-    /// `diagnose` having been asked: `warning.Warning.ssh_said`.
-    said_to: ?*warning.Warnings = null,
+    /// `diagnose` having been asked: `warning.Warning.ssh_said`, in the
+    /// slot `sayTo` kept for it.
+    said_to: ?Said = null,
+
+    /// A warning's place kept in a sink: its index there, and room in the
+    /// sink's arena for as much as a tail keeps, so that filling it as the
+    /// conversation closes, which returns nothing, cannot fail.
+    const Said = struct {
+        sink: *warning.Warnings,
+        index: usize,
+        room: []u8,
+
+        /// Fill the slot with `said`, or give it up when there is nothing.
+        fn give(s: Said, said: []const u8) void {
+            if (said.len == 0) return s.withdraw();
+            const kept = s.room[0..said.len];
+            @memcpy(kept, said);
+            s.sink.items.items[s.index] = .{ .ssh_said = kept };
+        }
+
+        /// Give the slot up: nothing is said there.
+        fn withdraw(s: Said) void {
+            _ = s.sink.items.orderedRemove(s.index);
+        }
+    };
 
     const vtable: Connection.VTable = .{
         .advertisement = advertisement,
@@ -337,7 +380,7 @@ pub const Process = struct {
             .running = running,
             .read_buffer = read_buffer,
             .write_buffer = write_buffer,
-            .reader = running.child.stdoutFile().?.readerStreaming(io, read_buffer),
+            .reader = input.programOutput(running.child.stdoutFile().?, io, read_buffer),
             .writer = running.child.stdinFile().?.writerStreaming(io, write_buffer),
             .connection = .{ .context = undefined, .vtable = &vtable, .stateless = false },
             .stderr = tail,
@@ -432,11 +475,7 @@ pub const Process = struct {
                 put_back = true;
             };
             if (tail.file) |*file| file.deinit(io);
-            if (p.said_to) |sink| {
-                const said = std.mem.trim(u8, tail.buffer[0..tail.len], " \t\r\n");
-                // glint-ignore: Z026 -- the program's words are a courtesy to the caller; losing them to a full allocator loses nothing else
-                if (said.len != 0) sink.add(.{ .ssh_said = said }) catch {};
-            }
+            if (p.said_to) |slot| slot.give(std.mem.trim(u8, tail.buffer[0..tail.len], " \t\r\n"));
             p.gpa.destroy(tail);
         }
         p.running.deinit(io);
@@ -466,10 +505,18 @@ pub const Process = struct {
     }
 
     /// Have what the program writes on its standard error handed to `sink`
-    /// as `ssh_said` when the conversation ends well.
-    pub fn sayTo(c: *Connection, sink: ?*warning.Warnings) void {
+    /// as `ssh_said` when the conversation ends well. Its place among the
+    /// warnings is taken now, where the program starts, as ssh's words come
+    /// before what follows them, and the room for them with it.
+    pub fn sayTo(c: *Connection, sink: ?*warning.Warnings) Allocator.Error!void {
         const p = of(c) orelse return;
-        p.said_to = sink;
+        const w = sink orelse return;
+        // Nothing captured has nothing to say.
+        if (p.stderr == null or p.said_to != null) return;
+        const a = w.arena.allocator();
+        const room = try a.alloc(u8, @sizeOf(@FieldType(Tail, "buffer")));
+        try w.items.append(a, .{ .ssh_said = room[0..0] });
+        p.said_to = .{ .sink = w, .index = w.items.items.len - 1, .room = room };
     }
 
     /// Close the program's input and wait for it: whether it succeeded.
@@ -507,6 +554,7 @@ pub const Process = struct {
     pub fn diagnose(c: *Connection, io: Io) Io.Cancelable!struct { code: ?u32, stderr: []const u8 } {
         const p = of(c) orelse return .{ .code = null, .stderr = "" };
         // What it said is the failure's now, not a warning.
+        if (p.said_to) |slot| slot.withdraw();
         p.said_to = null;
         if (!p.exited) {
             p.exited = true;
@@ -564,7 +612,7 @@ test "a conversation that is not a program's is not read as one" {
     };
     var c: Connection = .{ .context = &other, .vtable = &vtable, .stateless = false };
     try std.testing.expectError(error.ConnectionFailed, Process.streams(&c, std.testing.io));
-    Process.sayTo(&c, null);
+    try Process.sayTo(&c, null);
     for (other) |byte| try std.testing.expectEqual(0xaa, byte);
     try Process.finish(&c, std.testing.io);
     const ended = try Process.diagnose(&c, std.testing.io);
@@ -603,7 +651,7 @@ test "a program's standard error is read from its first byte, and stays its own 
 
 fn closeThenSleep(io: Io, c: *Connection) Io.Cancelable!void {
     c.deinit(io);
-    try io.sleep(.fromSeconds(2), .awake);
+    try io.sleep(aegis.units.Duration(.second, i64).literal("2s").toIoDuration(), .awake);
 }
 
 test "a cancel that lands while a conversation closes is put back for the caller, not lost" {
@@ -616,4 +664,8 @@ test "a cancel that lands while a conversation closes is put back for the caller
     const c = try Process.start(gpa, io, .{ .environ = &env }, .{ .argv = &.{ "sleep", "30" }, .stderr = .ignore });
     var closing = try io.concurrent(closeThenSleep, .{ io, c });
     try std.testing.expectError(error.Canceled, closing.cancel(io));
+}
+
+test {
+    _ = input;
 }

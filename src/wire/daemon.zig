@@ -24,6 +24,7 @@ const config_mod = @import("../config/config.zig");
 const pkt_line = @import("../codec.zig").pkt_line;
 const url_mod = @import("url.zig");
 const connection = @import("connection.zig");
+const input = @import("input.zig");
 
 const Connection = connection.Connection;
 
@@ -80,8 +81,7 @@ pub fn connect(gpa: Allocator, io: Io, url: url_mod.Url, service: connection.Ser
         const programs = options.programs orelse return error.ProgramsNotGranted;
         if (host.len != 0 and host[0] == '-') return error.SuspiciousHostname;
         var port_buf: [8]u8 = undefined;
-        // a u16 is at most five digits
-        const port_text = std.mem.print(&port_buf, "{d}", .{port}) catch unreachable;
+        const port_text = std.mem.print(&port_buf, "{d}", .{port}) catch aegis.assert.never("a u16 is at most five digits");
         break :proxied try connection.Process.start(gpa, io, programs, .{
             .argv = &.{ command, host, port_text },
             .stderr = .inherit,
@@ -144,8 +144,7 @@ fn dial(gpa: Allocator, io: Io, host: []const u8, port: u16) Self.Error!*Connect
     var dialed = uplink.net.dial.dial(io, host, port, .{ .socket = .{ .nodelay = true, .keepalive = .{ .on = .{} } } }) catch |err| switch (err) {
         error.InvalidHostName, error.NameNotResolved, error.ConnectionFailed, error.OptionUnsupported, error.AccessDenied, error.AddressFamilyMismatch, error.TimedOut, error.ConcurrencyUnavailable => return error.ConnectionFailed,
         error.Canceled => return error.Canceled,
-        // unreachable: a host and port, never a named pipe
-        error.NamedPipeUnsupported => unreachable,
+        error.NamedPipeUnsupported => aegis.assert.never("a host and port is dialed, never a named pipe"),
     };
     errdefer dialed.stream.deinit(io);
     return Socket.start(gpa, io, &dialed.stream);
@@ -190,9 +189,8 @@ const Socket = struct {
             .writer = undefined,
             .connection = .{ .context = s, .vtable = &vtable, .stateless = false },
         };
-        // unreachable: a host and port's dial is a socket's
-        const lent = s.stream.borrow().socketStream() orelse unreachable;
-        s.reader = lent.reader(io, read_buffer);
+        const lent = s.stream.borrow().socketStream() orelse aegis.assert.never("a host and port's dial is a socket's");
+        s.reader = input.socket(lent, io, read_buffer);
         s.writer = lent.writer(io, write_buffer);
         return &s.connection;
     }

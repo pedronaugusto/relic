@@ -9,9 +9,9 @@
 //! with the server's message kept.
 
 const std = @import("std");
+const aegis = @import("aegis");
 const shakedown = @import("shakedown");
 const Io = std.Io;
-const assert = std.debug.assert;
 
 const pkt_line = @import("../codec.zig").pkt_line;
 const progress_mod = @import("../report.zig").progress;
@@ -52,7 +52,7 @@ pub const Demux = struct {
     /// `buffer` is the data stream's own, and may be empty.
     pub fn init(in: *Io.Reader, buffer: []u8, progress: ?progress_mod.Progress) Demux {
         // `pending` is a view of `in`'s buffer: a whole line must fit.
-        assert(in.buffer.len >= pkt_line.max_line);
+        aegis.assert.invariant(in.buffer.len >= pkt_line.max_line, "a demultiplexer's reader holds a whole pkt-line");
         return .{
             .in = in,
             .progress = progress,
@@ -296,8 +296,9 @@ pub fn allowedControl(gpa: Allocator, config: *const config_mod.Config, url: ?[]
 /// `true` and `false` separated by commas.
 fn parseControl(value: ?[]const u8) ?progress_mod.Control {
     const text = value orelse return .everything;
-    // glint-ignore: Z026 -- a value that is no boolean is read as one of the names below, as git reads it
-    if (config_mod.parseBool(text)) |on| return if (on) .everything else .none else |_| {}
+    // A value that is no boolean is read as one of the names below, as git reads it.
+    const as_bool: ?bool = config_mod.parseBool(text) catch null;
+    if (as_bool) |on| return if (on) .everything else .none;
     var out: progress_mod.Control = .none;
     var rest = text;
     next: while (rest.len != 0) {
@@ -445,13 +446,12 @@ fn bandLength(of: Band) usize {
 /// git's `send_sideband` cuts them: channel one carries data, two progress
 /// and messages, three a fatal error. Nothing is written for no bytes.
 pub fn send(out: *Io.Writer, framing: Band, channel: u8, bytes: []const u8) Io.Writer.Error!void {
-    assert(framing != .none);
+    aegis.assert.invariant(framing != .none, "a band is sent only with side-band framing");
     var rest = bytes;
     while (rest.len != 0) {
         const n = @min(rest.len, bandLength(framing));
         var head: [5]u8 = undefined;
-        // unreachable: a packet of the band's length fits four hex digits
-        _ = std.mem.print(head[0..4], "{x:0>4}", .{n + 5}) catch unreachable;
+        _ = std.mem.print(head[0..4], "{x:0>4}", .{n + 5}) catch aegis.assert.never("a packet of the band's length fits four hex digits");
         head[4] = channel;
         try out.writeAll(&head);
         try out.writeAll(rest[0..n]);

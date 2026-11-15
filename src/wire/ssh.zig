@@ -22,6 +22,7 @@ const testremote = @import("../testing/remote.zig");
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -127,8 +128,7 @@ pub fn connect(
     if (host.len != 0 and host[0] == '-') return error.SuspiciousHostname;
     if (url.path.len != 0 and url.path[0] == '-') return error.SuspiciousPathname;
     var port_buf: [8]u8 = undefined;
-    // a u16 is at most five digits
-    const port: ?[]const u8 = if (url.port) |p| std.mem.print(&port_buf, "{d}", .{p}) catch unreachable else null;
+    const port: ?[]const u8 = if (url.port) |p| std.mem.print(&port_buf, "{d}", .{p}) catch aegis.assert.never("a u16 is at most five digits") else null;
 
     // The program, and whether it is a command line.
     var command: []const u8 = "ssh";
@@ -188,7 +188,8 @@ pub fn connect(
             .ignore => .ignore,
         },
     });
-    connection.Process.sayTo(conn, options.warnings);
+    errdefer conn.deinit(io);
+    try connection.Process.sayTo(conn, options.warnings);
     return conn;
 }
 
@@ -216,11 +217,12 @@ pub fn explain(gpa: Allocator, io: Io, conn: *Connection, err: anyerror, options
             null;
     if (said.len != 0) conn.setMessage(said[if (std.mem.findScalarLast(u8, said, '\n')) |nl| nl + 1 else 0..]);
     if (refusal) |r| {
-        if (failure) |f| describe: {
-            f.begin(gpa, r.reason, url.scheme, url.raw) catch break :describe;
-            // glint-ignore: Z026 -- the description is a courtesy to the caller; the refusal, returned below, is the outcome
-            f.setServerMessage(said) catch {};
-            if (url.user) |user| f.username = f.allocator().dupe(u8, user) catch null;
+        // A description that runs out of memory is that failure, returned
+        // in place of the refusal it could not describe.
+        if (failure) |f| {
+            try f.begin(gpa, r.reason, url.scheme, url.raw);
+            try f.setServerMessage(said);
+            if (url.user) |user| f.username = try f.allocator().dupe(u8, user);
         }
         return r.e;
     }
@@ -267,7 +269,7 @@ fn pushOptions(arena: Allocator, argv: *std.ArrayList([]const u8), variant: Vari
     if (variant == .tortoiseplink) try argv.append(arena, "-batch");
     if (port) |p| {
         switch (variant) {
-            .auto => unreachable,
+            .auto => aegis.assert.never("an auto variant is probed into another before its options are pushed"),
             .simple => return error.SshVariantRefusesPort,
             .ssh => try argv.append(arena, "-p"),
             .plink, .putty, .tortoiseplink => try argv.append(arena, "-P"),

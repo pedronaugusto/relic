@@ -268,7 +268,7 @@ pub const Settings = struct {
     /// whole from it when one was given, so whatever opens the file finds
     /// the one git would.
     fn pathValue(arena: Allocator, io: Io, paths: Paths, raw: ?[]const u8) Error!?[]const u8 {
-        const base = paths.base orelse Io.Dir.cwd();
+        const base = if (paths.base) |lent| lent.get() else Io.Dir.cwd();
         const read = config_mod.pathSetting(arena, io, base, paths.home, raw) catch |err| return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             error.MissingPath, error.UnexpandablePath, error.UnstatablePath => error.InvalidHttpSetting,
@@ -284,7 +284,7 @@ pub const Settings = struct {
     }
 
     /// Where a path setting's `~` and relative paths are found from.
-    const Paths = struct { home: ?[]const u8, base: ?Io.Dir };
+    const Paths = struct { home: ?[]const u8, base: ?aegis.own.Unowned(Io.Dir) };
 
     /// What the environment says over the configuration, as git reads it:
     /// `GIT_SSL_*`, `GIT_HTTP_*`, `GIT_PROXY_SSL_*`, and the proxy
@@ -411,8 +411,8 @@ pub const Sources = struct {
     /// Where a relative path setting (`http.sslCAInfo` and the rest) is
     /// found from, as git finds it from where it runs: the repository's
     /// working tree, else its git directory. `null` is the process's
-    /// working directory.
-    base: ?Io.Dir = null,
+    /// working directory. The caller keeps it open.
+    base: ?aegis.own.Unowned(Io.Dir) = null,
 };
 
 /// The settings for `url`, from `sources`. Every slice is in `arena`, or

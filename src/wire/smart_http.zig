@@ -63,6 +63,7 @@ const program = @import("../process.zig").program;
 const pkt_line = @import("../codec.zig").pkt_line;
 const url_mod = @import("url.zig");
 const connection = @import("connection.zig");
+const input = @import("input.zig");
 const credential = @import("credential.zig");
 const auth = @import("auth.zig");
 const http_settings = @import("http_settings.zig");
@@ -173,7 +174,8 @@ pub const Options = struct {
     /// The configured remote, for `remote.<name>.proxy`.
     remote_name: ?[]const u8 = null,
     /// Where a relative path setting is found from: `http_settings.Sources.base`.
-    base: ?Io.Dir = null,
+    /// The caller keeps it open.
+    base: ?aegis.own.Unowned(Io.Dir) = null,
     /// The proxy, over the one `remote_name` and the settings choose.
     proxy: http_settings.Proxy = .auto,
     /// The permission to run credential helpers and `askpass`; its
@@ -752,7 +754,7 @@ const Http = struct {
         };
         defer opened.close(h.io);
         var buffer: [8192]u8 = undefined;
-        var reader = opened.reader(h.io, &buffer);
+        var reader = input.file(opened, h.io, &buffer);
         const jar: aegis.io.ReadEnd = .fromFile(&reader);
         h.cookies.?.load(h.io, jar.reader()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
@@ -890,8 +892,7 @@ const Http = struct {
             const user = session.username orelse "";
             const password = session.exposePassword() orelse "";
             var kept = try aegis.SecretBytes.init(h.gpa, user.len + password.len);
-            // the owner was made with exactly this capacity.
-            kept.resizeWithinCapacity(user.len + password.len) catch unreachable;
+            kept.resizeWithinCapacity(user.len + password.len) catch aegis.assert.never("the owner was made with exactly this capacity");
             const bytes = kept.exposeMut();
             @memcpy(bytes[0..user.len], user);
             @memcpy(bytes[user.len..], password);
@@ -1075,8 +1076,7 @@ const Http = struct {
             error.ClientCertificateSchemeUnsupported => h.fail(error.ClientCertificateSchemeUnsupported, "no signature scheme the server takes"),
             error.InvalidUrl => h.fail(error.MalformedUrl, "a URL no request can carry"),
             error.InvalidHeader => h.fail(error.InvalidHttpHeader, "http.extraHeader"),
-            // unreachable: the origin is http or https, a whole body is bytes and a written one is chunked, `finish` runs once, the proxy is fixed, no redirect, retry, credential or hook is uplink's, and no named pipe or extended CONNECT is asked for
-            error.UnsupportedScheme, error.InvalidBody, error.BodyReadFailed, error.BodyTooLong, error.ExchangeOver, error.InvalidProxy, error.BodyNotReplayable, error.TooManyRedirects, error.InsecureRedirect, error.InvalidRedirect, error.CredentialsUnavailable, error.PrepareFailed, error.NamedPipeUnsupported, error.ExtendedConnectUnsupported => unreachable,
+            error.UnsupportedScheme, error.InvalidBody, error.BodyReadFailed, error.BodyTooLong, error.ExchangeOver, error.InvalidProxy, error.BodyNotReplayable, error.TooManyRedirects, error.InsecureRedirect, error.InvalidRedirect, error.CredentialsUnavailable, error.PrepareFailed, error.NamedPipeUnsupported, error.ExtendedConnectUnsupported => aegis.assert.never("the origin is http or https, a whole body is bytes and a written one is chunked, `finish` runs once, the proxy is fixed, no redirect, retry, credential or hook is uplink's, and no named pipe or extended CONNECT is asked for"),
         };
     }
 
@@ -1175,29 +1175,30 @@ const Http = struct {
             if (read.end != 0) {
                 asked = .fromRaw(@intCast(@max(read.value, 0))); // strtol of 64 bits fits an i64
             } else if (h.options.now) |now| if (uplink.wire.date.parse(value)) |at| {
-                asked = .fromRaw(@max(at.raw() - date.seconds(now), 0));
+                // uplink's instant on git's clock, the same seconds since the epoch.
+                const ahead = date.instant(now).saturatingDurationTo(date.Expiry.fromRaw(at.raw()));
+                asked = if (ahead.compare(zero) == .gt) ahead else zero;
             };
         }
         var buf: [160]u8 = undefined;
         if (limit.max_retries > 0 and attempts >= limit.max_retries) {
             const text = if (asked.compare(zero) == .gt)
-                std.mem.print(&buf, "rate limited, please try again in {d} seconds", .{asked.raw()}) catch unreachable // unreachable: two numbers and a sentence fit
+                std.mem.print(&buf, "rate limited, please try again in {d} seconds", .{asked.raw()}) catch aegis.assert.never("a number and a sentence fit")
             else
                 "rate limited, please try again later";
             return h.fail(error.RateLimited, text);
         }
         const delay = if (asked.compare(zero) == .gt) delay: {
-            if (asked.compare(limit.max_retry_time) == .gt) return h.fail(error.RateLimited, std.mem.print(&buf, "response requested a delay greater than http.maxRetryTime ({d} > {d} seconds)", .{ asked.raw(), limit.max_retry_time.raw() }) catch unreachable); // unreachable: as above
+            if (asked.compare(limit.max_retry_time) == .gt) return h.fail(error.RateLimited, std.mem.print(&buf, "response requested a delay greater than http.maxRetryTime ({d} > {d} seconds)", .{ asked.raw(), limit.max_retry_time.raw() }) catch aegis.assert.never("two numbers and a sentence fit"));
             break :delay asked;
         } else delay: {
-            if (limit.retry_after.compare(limit.max_retry_time) == .gt) return h.fail(error.RateLimited, std.mem.print(&buf, "configured http.retryAfter exceeds http.maxRetryTime ({d} > {d} seconds)", .{ limit.retry_after.raw(), limit.max_retry_time.raw() }) catch unreachable); // unreachable: as above
+            if (limit.retry_after.compare(limit.max_retry_time) == .gt) return h.fail(error.RateLimited, std.mem.print(&buf, "configured http.retryAfter exceeds http.maxRetryTime ({d} > {d} seconds)", .{ limit.retry_after.raw(), limit.max_retry_time.raw() }) catch aegis.assert.never("two numbers and a sentence fit"));
             break :delay limit.retry_after;
         };
         // The 429's body is read so its connection can carry the next.
         h.endRequest();
         if (delay.compare(zero) != .gt) return;
-        // unreachable: the delay is above zero, and a second count of an i64 fits a u64 and std's nanoseconds.
-        try warning.note(h.options.warnings, .{ .rate_limited = delay.convert(.second, u64, .exact) catch unreachable });
+        try warning.note(h.options.warnings, .{ .rate_limited = delay.convert(.second, u64, .exact) catch aegis.assert.never("the delay is above zero, and a second count of an i64 fits a u64") });
         try h.io.sleep(delay.toIoDuration(), .awake);
     }
 
@@ -1283,13 +1284,13 @@ const Http = struct {
         const trimmed = std.mem.trim(u8, said, " \t\r\n");
         var status_buf: [16]u8 = undefined;
         h.connection.setMessage(if (trimmed.len != 0) trimmed else std.mem.print(&status_buf, "HTTP {d}", .{status}) catch "HTTP");
-        if (h.options.auth_failure) |described| describe: {
-            described.begin(h.gpa, reason, h.credentials.url.scheme, h.credentials.url.raw) catch break :describe;
+        // A description that runs out of memory is that failure, returned
+        // in place of the error it could not describe.
+        if (h.options.auth_failure) |described| {
+            described.begin(h.gpa, reason, h.credentials.url.scheme, h.credentials.url.raw) catch |e| return e;
             described.status = status;
-            // glint-ignore: Z026 -- the description is a courtesy to the caller; the error, returned below, is the outcome
-            described.setServerMessage(said) catch {};
-            // glint-ignore: Z026 -- as above
-            h.credentials.describeFailure(described, h.options.prompt != null) catch {};
+            described.setServerMessage(said) catch |e| return e;
+            h.credentials.describeFailure(described, h.options.prompt != null) catch |e| return e;
         }
         return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
@@ -1332,13 +1333,11 @@ const Http = struct {
 
     fn advertisementInner(h: *Http) Error!Answer {
         var suffix_buf: [64]u8 = undefined;
-        // unreachable: the longer service name, git-receive-pack, makes 35 bytes
-        const suffix = std.mem.print(&suffix_buf, "/info/refs?service={s}", .{h.service.name()}) catch unreachable;
+        const suffix = std.mem.print(&suffix_buf, "/info/refs?service={s}", .{h.service.name()}) catch aegis.assert.never("the longest service name, git-upload-archive, makes 37 bytes");
         const res = try h.get(suffix);
         try h.checkStatus(res);
         var expected_buf: [64]u8 = undefined;
-        // unreachable: the longer service name, git-receive-pack, makes 44 bytes
-        const expected = std.mem.print(&expected_buf, "application/x-{s}-advertisement", .{h.service.name()}) catch unreachable;
+        const expected = std.mem.print(&expected_buf, "application/x-{s}-advertisement", .{h.service.name()}) catch aegis.assert.never("the longest service name, git-upload-archive, makes 46 bytes");
         const content_type = res.headers.get("content-type") orelse "";
         if (!std.mem.eql(u8, content_type, expected)) {
             // git's `check_smart_http`: anything else is the dumb listing,
@@ -1437,8 +1436,7 @@ const Http = struct {
 
     fn startStreaming(h: *Http) Error!void {
         var suffix_buf: [64]u8 = undefined;
-        // unreachable: a service name is at most 16 bytes
-        const suffix = std.mem.print(&suffix_buf, "/{s}", .{h.service.name()}) catch unreachable;
+        const suffix = std.mem.print(&suffix_buf, "/{s}", .{h.service.name()}) catch aegis.assert.never("a service name is at most 18 bytes");
         const arena = h.arena.allocator();
         const list = try h.headers(arena, true, h.credentials.authorization(), false);
         h.streaming = h.client.begin(h.io, .{
@@ -1467,8 +1465,7 @@ const Http = struct {
             wrote catch return h.fail(error.ConnectionFailed, "write failed");
         } else {
             var suffix_buf: [64]u8 = undefined;
-            // unreachable: a service name is at most 16 bytes
-            const suffix = std.mem.print(&suffix_buf, "/{s}", .{h.service.name()}) catch unreachable;
+            const suffix = std.mem.print(&suffix_buf, "/{s}", .{h.service.name()}) catch aegis.assert.never("a service name is at most 18 bytes");
             var arena_state: std.heap.ArenaAllocator = .init(h.gpa);
             defer arena_state.deinit();
             const arena = arena_state.allocator();
@@ -1488,8 +1485,7 @@ const Http = struct {
         const res = &h.in_flight.?;
         try h.checkStatus(res);
         var expected_buf: [64]u8 = undefined;
-        // unreachable: the longer service name, git-receive-pack, makes 37 bytes
-        const expected = std.mem.print(&expected_buf, "application/x-{s}-result", .{h.service.name()}) catch unreachable;
+        const expected = std.mem.print(&expected_buf, "application/x-{s}-result", .{h.service.name()}) catch aegis.assert.never("the longest service name, git-upload-archive, makes 39 bytes");
         if (!std.mem.eql(u8, res.headers.get("content-type") orelse "", expected)) return h.fail(error.ProtocolError, "unexpected content type");
         h.body_reader = res.readerBuffered(h.io, h.body_buffer);
         return h.body_reader;
@@ -1501,7 +1497,7 @@ const Http = struct {
         const frame: warp.Compressor.Frame = .{ .container = .gzip };
         const out = try arena.alloc(u8, warp.Compressor.bound(bytes.len, frame));
         errdefer arena.free(out);
-        const n = compress.compress(bytes, out, frame) catch unreachable; // unreachable: bound reserves the complete stream
+        const n = compress.compress(bytes, out, frame) catch aegis.assert.never("bound reserves the complete stream of the input it was made for");
         return arena.realloc(out, n);
     }
 

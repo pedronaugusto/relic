@@ -25,10 +25,10 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
-const assert = std.debug.assert;
 
 const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
@@ -808,7 +808,7 @@ fn fetchV0(
             }
         }
         // This round's flush added one before its answers were read.
-        assert(flushes > 0);
+        aegis.assert.invariant(flushes > 0, "this round's flush is counted before its answers are read");
         flushes -= 1;
         if (got_continue and in_vain > max_in_vain) break;
         if (got_ready) break;
@@ -1331,6 +1331,7 @@ fn fuzzAck(_: void, case: *shakedown.Case) anyerror!void {
     var oid: Oid = undefined;
     var n: usize = 0;
     while (n < 64) : (n += 1) {
-        _ = readAck(&fake.connection, in, .sha1, &oid) catch return;
+        // A named refusal ends the case; running out of memory fails it.
+        _ = readAck(&fake.connection, in, .sha1, &oid) catch |err| return testing.expect(err != error.OutOfMemory);
     }
 }

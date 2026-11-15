@@ -34,6 +34,13 @@
         "A009"
       ],
       "reason": "the object store's input seam: the files under objects/ the database reads itself (loose objects, pack entries streamed, .keep markers, cruft .mtimes), a whole file held to a limit named there and an object file's reader to the length the object's own header states; the rest of the database parses the bytes it hands back"
+    },
+    {
+      "file": "src/wire/input.zig",
+      "rules": [
+        "A009"
+      ],
+      "reason": "the wire layer's input seam: what a server, a helper program or a credential daemon says (the readers over a program's output and error output and over a socket) and the files the wire reads (a cookie jar, a credential store's file, a pinned key, held to a limit named there) enter here; everything else in the wire parses what it hands back, each read bounded by its parser"
     }
   ]
 }

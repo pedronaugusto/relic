@@ -11,6 +11,7 @@
 
 const Self = @This();
 const std = @import("std");
+const aegis = @import("aegis");
 const decimal = @import("../text.zig").decimal;
 const percent = @import("../text.zig").percent;
 const win32 = @import("../names.zig").path;
@@ -76,7 +77,7 @@ pub const Url = struct {
                 .file => parseFile(text, sep, rest),
                 .ssh, .git => parseConnect(text, scheme, rest),
                 .http, .https => parseHttp(text, scheme, rest),
-                .local => unreachable,
+                .local => aegis.assert.never("no scheme name is the local scheme's"),
             };
         }
         // `<helper>::<address>` is a helper's before anything else, and
@@ -402,7 +403,7 @@ pub const RelativeError = error{
 /// goes in front of it.
 pub fn relative(gpa: Allocator, base: []const u8, url: []const u8, up_path: ?[]const u8) RelativeError![]u8 {
     if (!isLocal(url) or isAbsolutePath(url)) return gpa.dupe(u8, url);
-    std.debug.assert(base.len != 0);
+    aegis.assert.invariant(base.len != 0, "a relative url is resolved against a base");
 
     var remote: std.ArrayList(u8) = .empty;
     defer remote.deinit(gpa);
@@ -666,9 +667,8 @@ fn fuzzParse(_: void, case: *shakedown.Case) anyerror!void {
     if (relative(testing.allocator, "https://example.com/a/b", input, "../")) |resolved| {
         testing.allocator.free(resolved);
     } else |err| try testing.expectEqual(error.CannotStripComponent, err);
-    const url = Url.parse(input) catch |err| switch (err) {
-        error.UnsupportedTransport, error.MalformedUrl => return,
-    };
+    // Text that is no url is refused, by one of the two names.
+    const url = Url.parse(input) catch |err| return testing.expect(err == error.UnsupportedTransport or err == error.MalformedUrl);
     // Every part is a view of the input.
     const base = @intFromPtr(input.ptr); // compared as a number, never dereferenced
     for ([_]?[]const u8{ url.user, url.password, url.host, url.path }) |part| {

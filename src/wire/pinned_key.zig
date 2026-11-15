@@ -13,24 +13,23 @@
 //! and of the PEM block's key, both kept, match the same keys.
 
 const std = @import("std");
-const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const base64 = std.base64.standard;
+const input = @import("input.zig");
 
 /// Errors from reading the pins.
 pub const Error = Allocator.Error || Io.Cancelable;
 
-/// curl's `MAX_PINNED_PUBKEY_SIZE`: a longer file matches nothing.
-const max_file = 1 << 20;
 const prefix = "sha256//";
 
 /// The pins `value` names, in `arena`: empty when none can match, which
 /// curl fails every handshake on.
 pub fn read(arena: Allocator, io: Io, value: []const u8) Error![]const [32]u8 {
     if (std.mem.startsWith(u8, value, prefix)) return hashes(arena, value);
-    const bytes = aegis.own.readFile(io, Io.Dir.cwd(), value, arena, aegis.units.Bytes(u64).fromRaw(max_file)) catch |err| switch (err) {
+    // A file longer than curl's `MAX_PINNED_PUBKEY_SIZE` matches nothing.
+    const bytes = input.wholeFile(io, Io.Dir.cwd(), value, arena, .pinned_key) catch |err| switch (err) {
         error.Canceled => return error.Canceled,
         error.OutOfMemory => return error.OutOfMemory,
         else => return &.{},
@@ -48,16 +47,21 @@ fn hashes(arena: Allocator, value: []const u8) Allocator.Error![]const [32]u8 {
     var entries = std.mem.splitScalar(u8, value, ';');
     while (entries.next()) |field| {
         if (!std.mem.startsWith(u8, field, prefix)) break;
-        const entry = field[prefix.len..];
-        var pin: [32]u8 = undefined;
-        if (entry.len != base64.Encoder.calcSize(pin.len)) continue;
-        base64.Decoder.decode(&pin, entry) catch continue;
-        // Compared as text: only the one spelling of the hash matches.
-        var spelled: [base64.Encoder.calcSize(32)]u8 = undefined;
-        if (!std.mem.eql(u8, base64.Encoder.encode(&spelled, &pin), entry)) continue;
-        try pins.append(arena, pin);
+        try pins.append(arena, spelledPin(field[prefix.len..]) orelse continue);
     }
     return pins.items;
+}
+
+/// The hash `entry` is the base64 of, spelled as curl writes it; null for
+/// any other text.
+fn spelledPin(entry: []const u8) ?[32]u8 {
+    var pin: [32]u8 = undefined;
+    if (entry.len != base64.Encoder.calcSize(pin.len)) return null;
+    base64.Decoder.decode(&pin, entry) catch return null;
+    // Compared as text: only the one spelling of the hash matches.
+    var spelled: [base64.Encoder.calcSize(32)]u8 = undefined;
+    if (!std.mem.eql(u8, base64.Encoder.encode(&spelled, &pin), entry)) return null;
+    return pin;
 }
 
 /// curl's `pubkey_pem_to_der`: the block from a `-----BEGIN PUBLIC KEY-----`

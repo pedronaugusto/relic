@@ -336,8 +336,10 @@ fn fuzzParse(_: void, case: *shakedown.Case) anyerror!void {
     case.source.bytes(input);
     const gpa = testing.allocator;
     for ([_]Direction{ .fetch, .push }) |direction| {
-        const spec = Refspec.parse(input, direction, .sha1) catch |err| switch (err) {
-            error.InvalidRefspec => continue,
+        const spec = Refspec.parse(input, direction, .sha1) catch |err| {
+            // Text that is no refspec is refused as one.
+            try testing.expectEqual(error.InvalidRefspec, err);
+            continue;
         };
         // A name a pattern maps onto its destination maps back onto itself:
         // the star stands for the same text on both sides.

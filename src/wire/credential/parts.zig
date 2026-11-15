@@ -84,11 +84,9 @@ pub const UrlParts = struct {
     fn decodeSecret(gpa: Allocator, text: []const u8) Allocator.Error!SecretBytes {
         var secret = try SecretBytes.init(gpa, text.len);
         errdefer secret.deinit(gpa);
-        // unreachable: the owner was made with the text's length.
-        secret.resizeWithinCapacity(text.len) catch unreachable;
+        secret.resizeWithinCapacity(text.len) catch aegis.assert.never("the owner was made with the text's length");
         const len = percent.decodeInto(secret.exposeMut(), text, .literal);
-        // unreachable: a decoded text is no longer than the text.
-        secret.resizeWithinCapacity(len) catch unreachable;
+        secret.resizeWithinCapacity(len) catch aegis.assert.never("a decoded text is no longer than the text");
         return secret;
     }
 
@@ -105,7 +103,7 @@ pub const UrlParts = struct {
 pub fn appendParts(gpa: Allocator, text: *SecretBytes, parts: []const []const u8) Allocator.Error!void {
     for (parts) |piece| text.appendSlice(gpa, piece) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        error.Overlap => unreachable,
+        error.Overlap => aegis.assert.never("no caller hands a piece of the text's own storage"),
     };
 }
 

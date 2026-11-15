@@ -16,6 +16,7 @@ const Io = std.Io;
 
 const parts_mod = @import("../parts.zig");
 const cache = @import("../cache.zig");
+const input = @import("../../input.zig");
 const credential = @import("../../credential.zig");
 const decimal = @import("../../../text.zig").decimal;
 const date = @import("../../../text.zig").date;
@@ -168,19 +169,24 @@ pub const Daemon = struct {
     }
 
     const Woken = union(enum) {
-        accepted: Io.net.Server.AcceptError!Io.net.Stream,
+        accepted: Io.net.Server.AcceptError!fs.OwnedStream,
         slept: Io.Cancelable!void,
     };
+
+    /// A client accepted on `server`, its stream owned from the start.
+    fn accept(server: *Io.net.Server, io: Io) Io.net.Server.AcceptError!fs.OwnedStream {
+        return .init(try server.accept(io));
+    }
 
     /// A client, or `null` when `seconds` pass with none.
     fn acceptWithin(d: *Daemon, seconds: i64) RunError!?fs.OwnedStream {
         var buffer: [2]Woken = undefined;
         var select: Io.Select(Woken) = .init(d.io, &buffer);
-        try select.concurrent(.accepted, Io.net.Server.accept, .{ d.server.borrowMut(), d.io });
+        try select.concurrent(.accepted, accept, .{ d.server.borrowMut(), d.io });
         // Concurrently too: `async` runs inline once the `Io`'s async
         // threads are taken, and the daemon would sleep through its wait
         // before it accepted anyone.
-        select.concurrent(.slept, Io.sleep, .{ d.io, .fromSeconds(seconds), .real }) catch |err| {
+        select.concurrent(.slept, Io.sleep, .{ d.io, aegis.units.Duration(.second, i64).fromRaw(seconds).toIoDuration(), .real }) catch |err| {
             d.cancelRest(&select);
             return err;
         };
@@ -190,7 +196,7 @@ pub const Daemon = struct {
         };
         const stream: ?fs.OwnedStream = switch (first) {
             // A failed accept is passed over, as git's "accept failed".
-            .accepted => |r| if (r) |accepted| .init(accepted) else |_| null,
+            .accepted => |r| r catch null,
             .slept => null,
         };
         d.cancelRest(&select);
@@ -199,8 +205,14 @@ pub const Daemon = struct {
 
     fn cancelRest(d: *Daemon, select: *Io.Select(Woken)) void {
         while (select.cancel()) |rest| switch (rest) {
-            // glint-ignore: Z026 -- a late accept that failed made no stream to close
-            .accepted => |r| if (r) |s| s.close(d.io) else |_| {},
+            .accepted => |r| {
+                // A late accept that failed made no stream to close.
+                const late: ?fs.OwnedStream = r catch null;
+                if (late) |stream| {
+                    var owned = stream;
+                    owned.deinit(d.io);
+                }
+            },
             .slept => {},
         };
     }
@@ -216,7 +228,7 @@ pub const Daemon = struct {
             var into = aegis.SecretBytes.Writer.init(&text, d.gpa);
             // No buffer of the reader's: each read lands in `text`'s own
             // storage, wiped as it grows and when it is let go.
-            var r = stream.reader(d.io, &.{});
+            var r = input.socket(stream, d.io, &.{});
             const asked: aegis.io.ReadEnd = .fromStream(&r);
             // One byte past the most a request may be says it is longer.
             while (into.interface.end <= max_request) {
@@ -426,9 +438,11 @@ pub const InProcess = struct {
         };
     }
 
-    fn serve(d: *Daemon) void {
-        // glint-ignore: Z026 -- a daemon's end, however it comes, is its socket gone, which `run` sees to; no one waits on it
-        d.run() catch {};
+    /// The daemon run until it ends. A cancel is the group's, handed back
+    /// to it; any other end is the daemon's own, as git's daemon dies: its
+    /// socket is gone (`run` sees to it), so a client finds no cache.
+    fn serve(d: *Daemon) Io.Cancelable!void {
+        d.run() catch |err| if (err == error.Canceled) return error.Canceled;
     }
 };
 
