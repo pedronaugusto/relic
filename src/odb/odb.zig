@@ -1794,7 +1794,7 @@ pub const Odb = struct {
         const dir = opened_dir.borrow().*;
         var receiving = options;
         receiving.keep = true;
-        return indexpack_mod.receive(db.allocator(), io, db, .{ .pack_dir = dir, .in = input }, receiving);
+        return indexpack_mod.receive(db.allocator(), io, db, .{ .pack_dir = .of(dir), .in = input }, receiving);
     }
 
     /// The commit-graph of this database's objects, when there is one it

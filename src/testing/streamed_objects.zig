@@ -156,7 +156,7 @@ test "index-pack names an entry past its object cap as it inflates it, keeping n
     var in: Io.Reader = .fixed(stream);
     counting.resetPeak();
     const before = counting.live_bytes;
-    var result = try index_pack.receive(gpa, io, repo.objectDatabase(), .{ .pack_dir = pack_dir, .in = &in }, .{ .max_object_bytes = .fromRaw(cap), .threads = 1 });
+    var result = try index_pack.receive(gpa, io, repo.objectDatabase(), .{ .pack_dir = .of(pack_dir), .in = &in }, .{ .max_object_bytes = .fromRaw(cap), .threads = 1 });
     defer result.deinit(io);
     try std.testing.expect(counting.peak_bytes - before < big_len);
     try std.testing.expectEqual(@as(u32, 10), result.objects);
@@ -185,7 +185,7 @@ test "a pack received again compares each object past the threshold as it reads 
     var pack_dir = try ours.dir.openDir(io, ".git/objects/pack", .{});
     defer pack_dir.close(io);
     var first_in: Io.Reader = .fixed(stream);
-    var first = try index_pack.receive(gpa, io, db, .{ .pack_dir = pack_dir, .in = &first_in }, .{ .max_object_bytes = .fromRaw(cap), .threads = 1 });
+    var first = try index_pack.receive(gpa, io, db, .{ .pack_dir = .of(pack_dir), .in = &first_in }, .{ .max_object_bytes = .fromRaw(cap), .threads = 1 });
     defer first.deinit(io);
 
     // Every name is held now: each object is compared with the one held,
@@ -193,7 +193,7 @@ test "a pack received again compares each object past the threshold as it reads 
     var again_in: Io.Reader = .fixed(stream);
     counting.resetPeak();
     var before = counting.live_bytes;
-    var again = try index_pack.receive(gpa, io, db, .{ .pack_dir = pack_dir, .in = &again_in }, .{ .max_object_bytes = .fromRaw(cap), .threads = 1 });
+    var again = try index_pack.receive(gpa, io, db, .{ .pack_dir = .of(pack_dir), .in = &again_in }, .{ .max_object_bytes = .fromRaw(cap), .threads = 1 });
     defer again.deinit(io);
     try std.testing.expect(counting.peak_bytes - before < big_len);
 

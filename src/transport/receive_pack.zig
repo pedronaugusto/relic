@@ -747,7 +747,7 @@ pub const Server = struct {
         try q.db.objectsDirectory().createDirPath(s.io, "pack");
         var pack_dir = try q.db.objectsDirectory().openDir(s.io, "pack", .{ .iterate = true });
         defer pack_dir.close(s.io);
-        received.result = try index_pack.receive(s.gpa, s.io, &q.db, .{ .pack_dir = pack_dir, .in = in }, .{
+        received.result = try index_pack.receive(s.gpa, s.io, &q.db, .{ .pack_dir = .of(pack_dir), .in = in }, .{
             .fsck = if (rules) |*r| r else null,
             .max_pack_bytes = s.settings.max_input_size,
             .reverse_index = try rev_index.wanted(config),
