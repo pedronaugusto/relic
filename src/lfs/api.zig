@@ -611,9 +611,9 @@ pub fn expiresWithin(now_at: Io.Timestamp, in_s: i64, at: time_text.GoTime, marg
     const margin = aegis.units.Duration(.second, i64).fromRaw(margin_s).convert(.nanosecond, i128, .exact);
     // Go's time.Duration: int64 nanoseconds, wrapping as Go wraps them,
     // which is the exact product cut to its low 64 bits.
-    const in_ns: i64 = @truncate(aegis.units.Duration(.second, i64).fromRaw(in_s).convert(.nanosecond, i128, .exact).raw());
+    const in_go: aegis.units.Duration(.nanosecond, i64) = .fromRaw(@truncate(aegis.units.Duration(.second, i64).fromRaw(in_s).convert(.nanosecond, i128, .exact).raw()));
     // Go's nanoseconds, compared as git-lfs compares them
-    if (in_ns != 0) return in_ns < margin.raw();
+    if (!in_go.eql(.fromRaw(0))) return in_go.convert(.nanosecond, i128, .exact).compare(margin) == .lt;
     if (at.isZero()) return false;
     return at.instant().compare(time_text.GoTime.Instant.fromTimestamp(now_at, .exact).saturatingAdd(margin)) == .lt;
 }

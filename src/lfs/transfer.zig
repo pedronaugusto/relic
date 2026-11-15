@@ -1266,7 +1266,7 @@ fn runJob(state: *Run, job: *Job, worker: usize) Error!void {
                     r.message = why.message;
                     return;
                 };
-                if (delay.raw() != 0) try state.io().sleep(delay.toIoDuration(), .awake);
+                if (!delay.eql(.fromRaw(0))) try state.io().sleep(delay.toIoDuration(), .awake);
                 // A fresh batch for the object, as git-lfs retries it: the
                 // action may have expired, or pointed somewhere that failed.
                 const again = batchRequest(state.io(), state.server, state.operation, &.{.{ .oid = r.oid, .size = r.size, .name = r.name }}, state.options.ref, state.limits, null) catch |err| switch (err) {
@@ -1794,7 +1794,7 @@ fn batchRequest(
                 try server.client.noteStatus(io, ex, "batch");
                 return error.LfsBatchFailed;
             };
-            if (delay.raw() != 0) try io.sleep(delay.toIoDuration(), .awake);
+            if (!delay.eql(.fromRaw(0))) try io.sleep(delay.toIoDuration(), .awake);
             continue;
         }
         if (status != .ok) {
@@ -2515,13 +2515,13 @@ pub fn checkoutPointers(gpa: Allocator, io: Io, repo: *Repository, store: *const
     for (index.entries.items) |*entry| {
         if (entry.stage != 0 or entry.skip_worktree) continue;
         if (entry.mode != .file and entry.mode != .exec) continue;
-        const header = repo.objectDatabase().readHeader(io, entry.oid) catch |err| switch (err) {
+        const header = (repo.objectDatabase().readHeader(io, entry.oid) catch |err| switch (err) {
             // An entry whose blob is not here (a partial clone's, its
             // promisor unable to give it) is no pointer to check out, as
             // git-lfs passes over a blob cat-file calls missing.
             error.ObjectNotFound, error.PromisorFetchFailed => null,
             else => |e| return e,
-        } orelse continue;
+        }) orelse continue;
         if (header.size >= lfs.pointer_size_cutoff or header.size == 0) continue;
         const found = try repo.objectDatabase().read(io, entry.oid);
         defer repo.objectDatabase().allocator().free(found.bytes);
