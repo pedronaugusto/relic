@@ -197,7 +197,12 @@ test "keep cleanup failure preserves the marker rather than exposing objects" {
     var token = try Token.open(gpa, io, tmp.dir, oid);
     var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
     token.listing.?.gpa = failing.allocator();
+    // The release's warning is the outcome checked below, by the marker
+    // left: it is kept off the test's output.
+    const level = std.testing.log_level;
+    std.testing.log_level = .err;
     token.deinit(io);
+    std.testing.log_level = level;
     const marker = "pack-1111111111111111111111111111111111111111.keep";
     try tmp.dir.access(io, marker, .{});
     try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, marker ++ ".lock", .{}));
