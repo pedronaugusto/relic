@@ -53,17 +53,3 @@ pub fn stored(opened: Io.File, io: Io, buffer: []u8) Io.File.Reader {
 pub fn said(from: Io.File, io: Io, buffer: []u8) ?usize {
     return from.readStreaming(io, &.{buffer}) catch null;
 }
-
-test "a read past its limit fails, and one within it is the file's bytes" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "small", .data = "record\n" });
-    const bytes = try file(std.testing.io, tmp.dir, "small", std.testing.allocator, .test_record);
-    defer std.testing.allocator.free(bytes);
-    try std.testing.expectEqualStrings("record\n", bytes);
-    const big = try std.testing.allocator.alloc(u8, 1024 * 1024 + 1);
-    defer std.testing.allocator.free(big);
-    @memset(big, 'x');
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "big", .data = big });
-    try std.testing.expectError(error.StreamTooLong, file(std.testing.io, tmp.dir, "big", std.testing.allocator, .test_record));
-}

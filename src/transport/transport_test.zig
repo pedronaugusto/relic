@@ -33,6 +33,7 @@ const builtin = @import("builtin");
 const push_mod = @import("push.zig");
 const pull_mod = @import("pull.zig");
 const program = @import("../process.zig").program;
+const input = @import("input.zig");
 
 const test_who: object.Signature = .{ .name = "F", .email = "f@example.com", .when_secs = 1, .offset_minutes = 0 };
 
@@ -3443,4 +3444,18 @@ test "a cancel that lands in one of several remotes' fetches is returned, and th
     const fetched = try into.run(io, &.{ "for-each-ref", "refs/remotes/b/" });
     defer gpa.free(fetched);
     try testing.expectEqualStrings("", fetched);
+}
+
+test "the input seam: a read past its limit fails, and one within it is the file's bytes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "small", .data = "record\n" });
+    const bytes = try input.file(std.testing.io, tmp.dir, "small", std.testing.allocator, .test_record);
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expectEqualStrings("record\n", bytes);
+    const big = try std.testing.allocator.alloc(u8, 1024 * 1024 + 1);
+    defer std.testing.allocator.free(big);
+    @memset(big, 'x');
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "big", .data = big });
+    try std.testing.expectError(error.StreamTooLong, input.file(std.testing.io, tmp.dir, "big", std.testing.allocator, .test_record));
 }
