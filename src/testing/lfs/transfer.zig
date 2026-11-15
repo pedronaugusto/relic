@@ -53,7 +53,7 @@ pub fn main(init: std.process.Init) !void {
     }
     var objects = try root.createDirPathOpen(io, "lfs-objects", .{});
     defer objects.close(io);
-    var directory: server.Directory = .{ .dir = objects };
+    var directory: server.Directory = .{ .dir = .of(objects) };
 
     const in_buffer = try gpa.alloc(u8, pkt_line.max_line);
     var in = Io.File.stdin().readerStreaming(io, in_buffer);
