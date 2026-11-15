@@ -152,3 +152,8 @@ test "parse takes git's layout and refuses what git refuses" {
     other[0] = 'X';
     try std.testing.expectError(error.InvalidMtimes, parse(gpa, &other, 2));
 }
+
+test {
+    // The seam this reads through, named here for its tests to run.
+    _ = @import("store_input.zig");
+}
