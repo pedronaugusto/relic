@@ -314,7 +314,7 @@ fn ourStatus(gpa: Allocator, io: Io, r: *testgit.Repo) ![]u8 {
     defer env.deinit();
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
-    const source = try fsmonitor.configured(arena.allocator(), io, repo.configuration(), .{ .git_dir = repo.gitDirectory(), .work_tree = repo.workDirectory().? }, .{ .environ = &env });
+    const source = try fsmonitor.configured(arena.allocator(), io, repo.configuration(), .{ .git_dir = .of(repo.gitDirectory()), .work_tree = .of(repo.workDirectory().?) }, .{ .environ = &env });
     var result = try worktree.status(gpa, io, repo.workDirectory().?, .{ .index = index, .db = repo.objectDatabase() }, .{
         .rules = try repo.worktreeRules(),
         .head_tree = try repo.headTree(io),
@@ -373,7 +373,7 @@ fn control(gpa: Allocator, io: Io, r: *testgit.Repo) !Control {
         defer locked_index.deinit(io);
         var arena: std.heap.ArenaAllocator = .init(gpa);
         defer arena.deinit();
-        const source = (try fsmonitor.configured(arena.allocator(), io, repo.configuration(), .{ .git_dir = repo.gitDirectory(), .work_tree = repo.workDirectory().? }, .{ .environ = &env })).?;
+        const source = (try fsmonitor.configured(arena.allocator(), io, repo.configuration(), .{ .git_dir = .of(repo.gitDirectory()), .work_tree = .of(repo.workDirectory().?) }, .{ .environ = &env })).?;
         const index = &locked_index.index;
         try fsmonitor.refresh(gpa, io, repo.workDirectory().?, index, source);
         if (!index.find("control").?.fsmonitor_valid and index.find("a").?.fsmonitor_valid)

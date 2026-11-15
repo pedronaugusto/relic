@@ -20,6 +20,7 @@ const std = @import("std");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const airlock = @import("airlock");
+const aegis = @import("aegis");
 
 const fs = @import("../fs/fs.zig");
 
@@ -45,7 +46,7 @@ pub const Scan = struct {
 
     gpa: Allocator,
     io: Io,
-    dir: Io.Dir,
+    dir: aegis.own.Unowned(Io.Dir),
     buffer: []align(@alignOf(usize)) u8,
     scan: airlock.Scan,
     precompose: bool,
@@ -71,7 +72,7 @@ pub const Scan = struct {
     /// have them.
     pub fn init(gpa: Allocator, io: Io, dir: Io.Dir, options: Options) Allocator.Error!Scan {
         const buffer = try gpa.alignedAlloc(u8, .of(usize), batch_bytes);
-        return .{ .gpa = gpa, .io = io, .dir = dir, .buffer = buffer, .scan = airlock.scan(dir, buffer), .precompose = options.precompose };
+        return .{ .gpa = gpa, .io = io, .dir = .of(dir), .buffer = buffer, .scan = airlock.scan(dir, buffer), .precompose = options.precompose };
     }
 
     /// Begin reading `dir` the ordinary way, whatever the platform has: what
@@ -99,7 +100,7 @@ pub const Scan = struct {
     /// The next entry, or `null` at the end of the directory.
     pub fn next(s: *Scan) Scan.Error!?Item {
         while (try s.scan.next(s.io)) |found| {
-            const entry = (try fs.scannedEntry(s.io, s.dir, found.name, found.stat)) orelse continue;
+            const entry = (try fs.scannedEntry(s.io, s.dir.get(), found.name, found.stat)) orelse continue;
             return .{ .name = fs.readName(found.name, s.precompose, &s.name_buffer), .entry = entry };
         }
         return null;

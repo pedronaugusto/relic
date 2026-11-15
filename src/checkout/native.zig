@@ -48,7 +48,7 @@ pub const Commands = struct {
     process: ?[]const u8 = null,
 };
 
-pub const SessionOptions = struct { wt: Io.Dir, observer: ?*Observer = null };
+pub const SessionOptions = struct { wt: aegis.own.Unowned(Io.Dir), observer: ?*Observer = null };
 pub const CleanInput = struct { bytes: []const u8, storing: Storing = .store };
 pub const FileInput = struct { path: []const u8, storing: Storing = .store };
 pub const SmudgeInput = struct { path: []const u8, bytes: []const u8, can_delay: bool = false };
@@ -139,11 +139,11 @@ pub const Provider = struct {
 };
 
 pub const LoadOptions = struct {
-    common_dir: Io.Dir,
+    common_dir: aegis.own.Unowned(Io.Dir),
     /// The repository's `core.sharedRepository`, for what a driver writes
     /// into it.
     shared: fs.Shared,
-    work_dir: ?Io.Dir = null,
+    work_dir: ?aegis.own.Unowned(Io.Dir) = null,
     config_text: ?[]const u8 = null,
     skip_smudge: bool = false,
 };

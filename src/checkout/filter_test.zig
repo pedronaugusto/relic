@@ -23,10 +23,8 @@ const testing = std.testing;
 
 const ft = @import("../testing/filters.zig");
 const environ = ft.environ;
-const Run = ft.Run;
 const relicAdd = ft.relicAdd;
 const relicCheckout = ft.relicCheckout;
-const relicStatus = ft.relicStatus;
 const emptyWorktree = ft.emptyWorktree;
 const treeOf = ft.treeOf;
 const expectSameFile = ft.expectSameFile;

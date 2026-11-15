@@ -22,7 +22,8 @@ const ErrorNamespace = @This();
 
 const std = @import("std");
 const shakedown = @import("shakedown");
-const assert = std.debug.assert;
+const aegis = @import("aegis");
+const assert = aegis.assert;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -112,7 +113,7 @@ pub const Session = struct {
     /// What a session is given.
     pub const Options = struct {
         /// The working tree, which a filter program runs in.
-        wt: Io.Dir,
+        wt: aegis.own.Unowned(Io.Dir),
         kind: hash.Kind,
         core: attributes.CoreSettings = .{},
         /// What `worktree.Rules.required_filters` said, for a session with
@@ -207,7 +208,7 @@ pub const Session = struct {
             const pointer_bytes = try (try s.nativeOf()).cleanFile(a, s.io, .{ .path = path, .storing = storing });
             return s.afterFilter(a, path, pointer_bytes, applied, storing);
         }
-        const bytes = try fs.readFileSized(a, s.io, s.options.wt, path, .{ .size = size, .max_bytes = 1 << 31 });
+        const bytes = try fs.readFileSized(a, s.io, s.options.wt.get(), path, .{ .size = size, .max_bytes = 1 << 31 });
         return s.convertToGit(a, path, bytes, applied, resolved, storing);
     }
 
@@ -508,7 +509,7 @@ pub const Session = struct {
             if (std.mem.eql(u8, p.command, command)) return p;
         }
         try s.processes.ensureUnusedCapacity(s.gpa, 1);
-        const p = try filter.Process.open(s.gpa, s.io, s.options.programs.?, command, s.options.wt);
+        const p = try filter.Process.open(s.gpa, s.io, s.options.programs.?, command, s.options.wt.get());
         s.processes.appendAssumeCapacity(p);
         return p;
     }
@@ -638,11 +639,11 @@ pub const Session = struct {
             if (try implementation.nextReady(a, s.io)) |ready| return ready;
         }
         while (true) {
-            assert(s.next_available <= s.available.items.len);
+            assert.invariant(s.next_available <= s.available.items.len, "the next available path is within the list");
             if (s.next_available < s.available.items.len) {
                 const d = &s.delayed.items[s.available.items[s.next_available]];
                 // `askAvailable` lists a delayed file once, as it marks it.
-                assert(d.delivered);
+                assert.invariant(d.delivered, "askAvailable lists a delayed file once, as it marks it");
                 s.next_available += 1;
                 const redelivered = try s.redeliver(a, d);
                 return redelivered;
@@ -793,7 +794,8 @@ pub const StreamFilter = struct {
     held_cr: bool = false,
 
     const head = "$Id";
-    const IdentState = union(enum) {
+    /// Where `ident` stands in what it reads: matching `$Id`, or past it.
+    pub const IdentState = union(enum) {
         /// How many bytes of `$Id` have matched.
         matched: u2,
         /// Past `$Id:`, until a `$` or a newline.
@@ -807,9 +809,11 @@ pub const StreamFilter = struct {
 
     /// `ident` set, naming `blob`.
     fn setIdent(f: *StreamFilter, blob: hash.Oid) void {
-        var hex: [hash.max_hex_len]u8 = undefined;
-        // unreachable: the text is the hex name and four bytes, which it holds
-        f.ident_len = (std.mem.print(&f.ident_text, ": {s} $", .{blob.hex(&hex)}) catch unreachable).len;
+        // The text is the hex name and four bytes, which `ident_text` holds.
+        f.ident_text[0..2].* = ": ".*;
+        const name = blob.hex(f.ident_text[2..][0..hash.max_hex_len]);
+        f.ident_text[2 + name.len ..][0..2].* = " $".*;
+        f.ident_len = name.len + 4;
     }
 
     pub fn deinit(f: *StreamFilter, gpa: Allocator) void {
@@ -1096,7 +1100,7 @@ test "conversion cleanup passes its supplied Io to the native owner once" {
     var cleanup: shakedown.Layer(struct { unused: u8 = 0 }, .{}) = .init(io, .{});
     const cleanup_io = cleanup.io();
     var probe: Probe = .{};
-    var session: Session = .open(std.testing.allocator, io, .{ .wt = Io.Dir.cwd(), .kind = .sha1 });
+    var session: Session = .open(std.testing.allocator, io, .{ .wt = .of(Io.Dir.cwd()), .kind = .sha1 });
     session.native_session = .{ .context = &probe, .vtable = &Probe.vtable };
     session.deinit(cleanup_io);
     try std.testing.expectEqual(@as(usize, 1), probe.calls);

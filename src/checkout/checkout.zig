@@ -25,7 +25,7 @@ const ctype = @import("../text.zig").ctype;
 
 const std = @import("std");
 const aegis = @import("aegis");
-const assert = std.debug.assert;
+const assert = aegis.assert;
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -35,6 +35,7 @@ const object = @import("../object/object.zig");
 const odb_mod = @import("../odb/odb.zig");
 const index_mod = @import("../index/index.zig");
 const fs = @import("../fs/fs.zig");
+const input = @import("input.zig");
 const sparse_index = @import("../index/sparse_index.zig");
 const pack_mod = @import("../odb/pack.zig");
 const gitlink = @import("../discover.zig").gitlink;
@@ -368,7 +369,7 @@ pub fn addAll(
     errdefer if (streamed) |open| db.abortPack(io, open);
 
     var conv: convert.Session = .open(gpa, io, .{
-        .wt = wt,
+        .wt = .of(wt),
         .kind = db.objectFormat(),
         .core = options.rules.core,
         .required_filters = options.rules.required_filters,
@@ -386,7 +387,7 @@ pub fn addAll(
         .arena = &arena_instance,
         .scratch = &scratch_instance,
         .io = io,
-        .wt = wt,
+        .wt = .of(wt),
         .index = index,
         .db = db,
         .options = options,
@@ -459,7 +460,7 @@ const Walker = struct {
     /// accumulate over three thousand of them.
     scratch: *std.heap.ArenaAllocator,
     io: Io,
-    wt: Io.Dir,
+    wt: aegis.own.Unowned(Io.Dir),
     index: *Index,
     db: *Odb,
     options: AddOptions,
@@ -479,12 +480,12 @@ const Walker = struct {
     /// The walk from `prefix`: the directory's files, or the one file it
     /// names, under the rules of the directory that holds it.
     fn walkFrom(w: *Walker, prefix: []const u8) Error!void {
-        if (prefix.len != 0) if (try fs.statAt(w.io, w.wt, prefix)) |found| switch (found.kind) {
+        if (prefix.len != 0) if (try fs.statAt(w.io, w.wt.get(), prefix)) |found| switch (found.kind) {
             .sym_link, .file => {
                 const parent = std.Io.Dir.path.dirnamePosix(prefix) orelse "";
-                if (w.options.rules.ignore) |rules| try rules.addDirectory(w.io, w.wt, parent, 0);
+                if (w.options.rules.ignore) |rules| try rules.addDirectory(w.io, w.wt.get(), parent, 0);
                 defer if (w.options.rules.ignore) |rules| rules.popTo(2);
-                if (w.options.rules.attrs) |attrs| try attrs.addDirectory(w.io, w.wt, parent, 0);
+                if (w.options.rules.attrs) |attrs| try attrs.addDirectory(w.io, w.wt.get(), parent, 0);
                 defer if (w.options.rules.attrs) |attrs| attrs.popTo(1);
                 return w.stageFile(prefix, found);
             },
@@ -495,13 +496,13 @@ const Walker = struct {
 
     fn walk(w: *Walker, dir_path: []const u8, depth: u32) Error!void {
         if (depth > 64) return error.TreeTooDeep;
-        var opened = (try openWalkDirectory(w.io, w.wt, dir_path)) orelse return;
+        var opened = (try openWalkDirectory(w.io, w.wt.get(), dir_path)) orelse return;
         defer opened.deinit(w.io);
         const dir = opened.borrow().*;
 
-        if (w.options.rules.ignore) |rules| try rules.addDirectory(w.io, w.wt, dir_path, depth);
+        if (w.options.rules.ignore) |rules| try rules.addDirectory(w.io, w.wt.get(), dir_path, depth);
         defer if (w.options.rules.ignore) |rules| rules.popTo(depth + 2);
-        if (w.options.rules.attrs) |attrs| try attrs.addDirectory(w.io, w.wt, dir_path, depth);
+        if (w.options.rules.attrs) |attrs| try attrs.addDirectory(w.io, w.wt.get(), dir_path, depth);
         defer if (w.options.rules.attrs) |attrs| attrs.popTo(depth + 1);
 
         // The entries are collected first so the directory handle is not held
@@ -551,7 +552,7 @@ const Walker = struct {
         if (w.index.find(path)) |entry| {
             if (entry.mode == .gitlink) {
                 try w.markSeen(path);
-                const checked_out = (try gitlink.head(w.gpa, w.io, w.wt, path)) orelse {
+                const checked_out = (try gitlink.head(w.gpa, w.io, w.wt.get(), path)) orelse {
                     w.outcome.unchanged += 1;
                     return;
                 };
@@ -576,7 +577,7 @@ const Walker = struct {
                 // inside it cannot bring anything back — which is git's rule.
                 if (rules.match(path, .dir).excluded) return;
             }
-            if (try gitlink.isRepository(w.gpa, w.io, w.wt, path)) return w.stageRepository(path, found);
+            if (try gitlink.isRepository(w.gpa, w.io, w.wt.get(), path)) return w.stageRepository(path, found);
         }
         try w.walk(path, depth + 1);
     }
@@ -589,7 +590,7 @@ const Walker = struct {
             w.outcome.unsafe_paths += 1;
             return;
         };
-        const checked_out = (try gitlink.head(w.gpa, w.io, w.wt, path)) orelse {
+        const checked_out = (try gitlink.head(w.gpa, w.io, w.wt.get(), path)) orelse {
             if (w.options.refusal) |r| r.set(null, path);
             return error.NoCommitCheckedOut;
         };
@@ -713,9 +714,8 @@ const Walker = struct {
         const a = w.scratch.allocator();
 
         if (found.kind == .sym_link) {
-            var buf: [4096]u8 = undefined;
-            const len = try w.wt.readLink(w.io, path, &buf);
-            return .{ .bytes = try a.dupe(u8, buf[0..len]) };
+            var buf: [input.max_link_len]u8 = undefined;
+            return .{ .bytes = try a.dupe(u8, try input.link(w.io, w.wt.get(), path, &buf)) };
         }
 
         if (w.options.rules.attrs) |attrs| {
@@ -730,7 +730,7 @@ const Walker = struct {
             return .{ .bytes = converted.bytes };
         }
         if (try streamsIn(w.options.rules.big_file_bytes, found, null)) return .streamed;
-        return .{ .bytes = try fs.readFileSized(a, w.io, w.wt, path, .{ .size = found.size, .max_bytes = 1 << 31 }) };
+        return .{ .bytes = try fs.readFileSized(a, w.io, w.wt.get(), path, .{ .size = found.size, .max_bytes = 1 << 31 }) };
     }
 
     /// Put a blob where this pass puts them: a streamed one into the pack
@@ -743,7 +743,7 @@ const Walker = struct {
                     if (w.streamed.* == null) w.streamed.* = try w.db.beginPack(w.io, streamedPackOptions(w.db));
                     break :blk w.streamed.*.?;
                 };
-                return writeFileInto(w.io, w.wt, w.db, open, path);
+                return writeFileInto(w.io, w.wt.get(), w.db, open, path);
             },
         };
         if (w.filling.*) |open| return w.db.writeInto(w.io, open, .blob, bytes);
@@ -780,7 +780,7 @@ pub fn hashFile(io: Io, wt: Io.Dir, kind: hash.Kind, path: safe_path.Checked) Er
     defer file.close(io);
     const size = (try file.stat(io)).size;
     var buffer: [64 * 1024]u8 = undefined;
-    var reader = file.reader(io, &buffer);
+    var reader = input.fileReader(io, file, &buffer);
     var hasher: hash.Hasher = .init(kind);
     hasher.updateHeader("blob", size);
     var left = size;
@@ -806,7 +806,7 @@ pub fn writeFileInto(io: Io, wt: Io.Dir, db: *Odb, filling: Odb.OpenPack, path: 
     defer file.close(io);
     const size = (try file.stat(io)).size;
     var buffer: [64 * 1024]u8 = undefined;
-    var reader = file.reader(io, &buffer);
+    var reader = input.fileReader(io, file, &buffer);
     return db.writeIntoFrom(io, filling, &reader.interface, .{ .type = .blob, .size = size }) catch |err| switch (err) {
         error.ReadFailed => reader.err.?,
         else => |e| e,
@@ -843,7 +843,7 @@ pub const Tracked = struct {
     pub const Error = ErrorNamespace.Error;
 
     io: Io,
-    wt: Io.Dir,
+    wt: aegis.own.Unowned(Io.Dir),
     index: *const Index,
     db: *Odb,
     conv: *convert.Session,
@@ -866,7 +866,7 @@ pub const Tracked = struct {
         // The stat says it may have changed; the content says whether it
         // did. This is the racy rule doing its work.
         const conversion: ?Conversion = if (t.rules.attrs) |attrs| .{ .session = t.conv, .path = path.bytes, .applied = try attrs.lookup(a, path.bytes, .file) } else null;
-        if (try streamsIn(t.rules.big_file_bytes, found, conversion)) return (try hashFile(t.io, t.wt, t.db.objectFormat(), path)).eql(entry.oid);
+        if (try streamsIn(t.rules.big_file_bytes, found, conversion)) return (try hashFile(t.io, t.wt.get(), t.db.objectFormat(), path)).eql(entry.oid);
         const content = try t.storedBytes(a, path, found);
         return hash.Hasher.object(t.db.objectFormat(), "blob", content).eql(entry.oid);
     }
@@ -876,15 +876,14 @@ pub const Tracked = struct {
     /// git's `diff_populate_filespec` reads a working-tree file.
     pub fn storedBytes(t: Tracked, a: Allocator, path: safe_path.Checked, found: fs.Entry) Self.Error![]const u8 {
         if (found.kind == .sym_link) {
-            var buf: [4096]u8 = undefined;
-            const len = try t.wt.readLink(t.io, path.bytes, &buf);
-            return a.dupe(u8, buf[0..len]);
+            var buf: [input.max_link_len]u8 = undefined;
+            return a.dupe(u8, try input.link(t.io, t.wt.get(), path.bytes, &buf));
         }
         if (t.rules.attrs) |attrs| {
             const applied = try attrs.lookup(a, path.bytes, .file);
             return (try t.conv.toGitFile(a, .{ .path = path.bytes, .size = found.size, .applied = applied }, .{ .storing = .hash_only })).bytes;
         }
-        return aegis.own.readFile(t.io, t.wt, path.bytes, a, aegis.units.Bytes(u64).fromRaw(1 << 31));
+        return input.file(t.io, t.wt.get(), path.bytes, a, .blob);
     }
 };
 
@@ -1191,9 +1190,9 @@ pub const StatusOptions = struct {
         /// `null` for anything else.
         pub fn parse(text: ?[]const u8) ?Untracked {
             const value = text orelse return .normal;
-            // glint-ignore: Z026 -- a value that is no boolean is read as one of the names below, as git reads it
-            if (config_mod.parseBool(value)) |on| return if (on) .normal else .no else |_| {}
-            return std.meta.stringToEnum(Untracked, value);
+            // A value that is no boolean is read as one of the names, as git reads it.
+            const on = config_mod.parseBool(value) catch return std.meta.stringToEnum(Untracked, value);
+            return if (on) .normal else .no;
         }
 
         /// `status.showUntrackedFiles`, `normal` when it says nothing, as
@@ -1367,7 +1366,7 @@ fn recordUnstaged(
     entries: *std.array_hash_map.String(StatusEntry),
 ) Error!void {
     var conv: convert.Session = .open(gpa, io, .{
-        .wt = wt,
+        .wt = .of(wt),
         .kind = db.objectFormat(),
         .core = options.rules.core,
         .required_filters = options.rules.required_filters,
@@ -1384,7 +1383,7 @@ fn recordUnstaged(
         .conv = &conv,
         .arena = arena,
         .io = io,
-        .wt = wt,
+        .wt = .of(wt),
         .index = index,
         .db = db,
         .options = options,
@@ -1430,7 +1429,7 @@ fn keepChanged(
         }
         i += 1;
     }
-    assert(i == kept);
+    assert.invariant(i == kept, "every status entry kept is placed once");
     std.mem.sort(StatusEntry, out, {}, lessThanStatus);
     return out;
 }
@@ -1532,7 +1531,7 @@ const StatusScan = struct {
     conv: *convert.Session,
     arena: Allocator,
     io: Io,
-    wt: Io.Dir,
+    wt: aegis.own.Unowned(Io.Dir),
     index: *Index,
     db: *Odb,
     options: StatusOptions,
@@ -1559,13 +1558,13 @@ const StatusScan = struct {
 
     fn walk(s: *StatusScan, dir_path: []const u8, depth: u32) Error!void {
         if (depth > 64) return error.TreeTooDeep;
-        var opened = (try openWalkDirectory(s.io, s.wt, dir_path)) orelse return;
+        var opened = (try openWalkDirectory(s.io, s.wt.get(), dir_path)) orelse return;
         defer opened.deinit(s.io);
         const dir = opened.borrow().*;
 
-        if (s.options.rules.ignore) |rules| try rules.addDirectory(s.io, s.wt, dir_path, depth);
+        if (s.options.rules.ignore) |rules| try rules.addDirectory(s.io, s.wt.get(), dir_path, depth);
         defer if (s.options.rules.ignore) |rules| rules.popTo(depth + 2);
-        if (s.options.rules.attrs) |attrs| try attrs.addDirectory(s.io, s.wt, dir_path, depth);
+        if (s.options.rules.attrs) |attrs| try attrs.addDirectory(s.io, s.wt.get(), dir_path, depth);
         defer if (s.options.rules.attrs) |attrs| attrs.popTo(depth + 1);
 
         var scan = try dir_scan.Scan.init(s.gpa, s.io, dir, .{ .precompose = s.options.rules.precompose_unicode });
@@ -1602,7 +1601,7 @@ const StatusScan = struct {
                     if (s.options.include_ignored) try s.ignoredDirectory(path, as_directory, depth);
                     continue;
                 }
-                if (try gitlink.isRepository(s.gpa, s.io, s.wt, path)) {
+                if (try gitlink.isRepository(s.gpa, s.io, s.wt.get(), path)) {
                     try s.record(as_directory, .untracked);
                     continue;
                 }
@@ -1662,7 +1661,7 @@ const StatusScan = struct {
             // as the walk finds it.
             if (try s.behindNonDirectory(entry.path, &not_directories)) continue;
             const checked = try readable(entry.path, s.options.rules.protect);
-            const found = (try fs.statAt(s.io, s.wt, checked.bytes)) orelse continue;
+            const found = (try fs.statAt(s.io, s.wt.get(), checked.bytes)) orelse continue;
             if (found.kind == .directory) {
                 if (entry.mode != .gitlink) continue;
                 try s.seen.put(s.gpa, entry.path, {});
@@ -1670,7 +1669,7 @@ const StatusScan = struct {
                 continue;
             }
             try s.seen.put(s.gpa, entry.path, {});
-            if (s.options.rules.attrs) |attrs| try attrs.enter(s.io, s.wt, entry.path);
+            if (s.options.rules.attrs) |attrs| try attrs.enter(s.io, s.wt.get(), entry.path);
             const change = try s.compare(entry, checked, found);
             if (change != .unmodified) try s.recordFound(entry, checked, found, change) else s.vouch(entry);
         }
@@ -1682,7 +1681,7 @@ const StatusScan = struct {
         while (std.mem.findScalarPos(u8, path, at, '/')) |slash| : (at = slash + 1) {
             const dir = path[0..slash];
             if (known.contains(dir)) return true;
-            const found = try fs.statAt(s.io, s.wt, dir);
+            const found = try fs.statAt(s.io, s.wt.get(), dir);
             if (found == null or found.?.kind != .directory) {
                 try known.put(s.arena, dir, {});
                 return true;
@@ -1700,7 +1699,7 @@ const StatusScan = struct {
     /// is one entry, when it holds anything at all; under `all` each file
     /// in it is, though a repository in it is still one.
     fn ignoredDirectory(s: *StatusScan, path: []const u8, as_directory: []const u8, depth: u32) Error!void {
-        if (try gitlink.isRepository(s.gpa, s.io, s.wt, path)) return s.record(as_directory, .ignored);
+        if (try gitlink.isRepository(s.gpa, s.io, s.wt.get(), path)) return s.record(as_directory, .ignored);
         if (s.options.untracked == .normal) {
             if (try s.holdsAnything(path, depth + 1)) try s.record(as_directory, .ignored);
             return;
@@ -1741,7 +1740,7 @@ const StatusScan = struct {
     /// as untracked content, whatever it holds, and is not looked into.
     fn classify(s: *StatusScan, path: []const u8, depth: u32, ignored: *std.ArrayList([]const u8)) Error!bool {
         if (depth > 64) return error.TreeTooDeep;
-        if (s.options.rules.ignore) |rules| try rules.addDirectory(s.io, s.wt, path, depth);
+        if (s.options.rules.ignore) |rules| try rules.addDirectory(s.io, s.wt.get(), path, depth);
         defer if (s.options.rules.ignore) |rules| rules.popTo(depth + 2);
 
         var names = try s.readNames(path);
@@ -1753,12 +1752,12 @@ const StatusScan = struct {
                 const as_directory = try s.arena.print("{s}/", .{child});
                 if (s.excluded(child, true)) {
                     if (!s.options.include_ignored) continue;
-                    if (try gitlink.isRepository(s.gpa, s.io, s.wt, child) or try s.holdsAnything(child, depth + 1)) {
+                    if (try gitlink.isRepository(s.gpa, s.io, s.wt.get(), child) or try s.holdsAnything(child, depth + 1)) {
                         try ignored.append(s.gpa, as_directory);
                     }
                     continue;
                 }
-                if (try gitlink.isRepository(s.gpa, s.io, s.wt, child)) {
+                if (try gitlink.isRepository(s.gpa, s.io, s.wt.get(), child)) {
                     untracked = true;
                 } else {
                     const mark = ignored.items.len;
@@ -1793,7 +1792,7 @@ const StatusScan = struct {
             if (item.kind == .file or item.kind == .sym_link) return true;
             if (item.kind != .directory) continue;
             const child = try s.arena.print("{s}/{s}", .{ path, item.name });
-            if (try gitlink.isRepository(s.gpa, s.io, s.wt, child)) return true;
+            if (try gitlink.isRepository(s.gpa, s.io, s.wt.get(), child)) return true;
             if (try s.holdsAnything(child, depth + 1)) return true;
         }
         return false;
@@ -1807,7 +1806,7 @@ const StatusScan = struct {
     fn readNames(s: *StatusScan, path: []const u8) Error!std.ArrayList(Name) {
         var out: std.ArrayList(Name) = .empty;
         errdefer out.deinit(s.gpa);
-        var opened = (try openWalkDirectory(s.io, s.wt, path)) orelse return out;
+        var opened = (try openWalkDirectory(s.io, s.wt.get(), path)) orelse return out;
         defer opened.deinit(s.io);
         const dir = opened.borrow().*;
         var scan = try dir_scan.Scan.init(s.gpa, s.io, dir, .{ .precompose = s.options.rules.precompose_unicode });
@@ -1871,7 +1870,7 @@ const StatusScan = struct {
         const state: SubmoduleState = if (s.options.submodules) |probe|
             try probe.inspect(s.io, path, entry.oid)
         else blk: {
-            const checked_out = try gitlink.head(s.gpa, s.io, s.wt, path);
+            const checked_out = try gitlink.head(s.gpa, s.io, s.wt.get(), path);
             break :blk .{ .new_commits = checked_out != null and !checked_out.?.eql(entry.oid) };
         };
         if (state.isClean()) return;
@@ -2136,7 +2135,7 @@ pub fn checkout(
     if (options.rules.attrs) |attrs| try addTreeAttributes(arena, io, db, attrs, &wanted);
 
     var conv: convert.Session = .open(gpa, io, .{
-        .wt = wt,
+        .wt = .of(wt),
         .kind = db.objectFormat(),
         .core = options.rules.core,
         .required_filters = options.rules.required_filters,
@@ -2168,7 +2167,7 @@ pub fn checkout(
     var writing: CheckoutWrite = .{
         .gpa = gpa,
         .io = io,
-        .wt = wt,
+        .wt = .of(wt),
         .index = index,
         .db = db,
         .conv = &conv,
@@ -2425,7 +2424,7 @@ pub fn gitmodulesFirst(comptime Path: type, paths: []Path) void {
 const CheckoutWrite = struct {
     gpa: Allocator,
     io: Io,
-    wt: Io.Dir,
+    wt: aegis.own.Unowned(Io.Dir),
     index: *Index,
     db: *Odb,
     conv: *convert.Session,
@@ -2440,14 +2439,25 @@ const CheckoutWrite = struct {
     fn all(c: *const CheckoutWrite, paths: []const safe_path.Checked) Error!void {
         var batch: WriteBatch = .{ .gpa = c.gpa, .workers = checkoutWorkers(c.options.workers) };
         defer batch.deinit();
-        // A path that fails here leaves every path before it written, as a
-        // checkout one file at a time leaves them, a canceled one too.
-        errdefer {
+        c.walk(&batch, paths) catch |err| {
+            // A path that fails here leaves every path before it written, as
+            // a checkout one file at a time leaves them, a canceled one too.
             const protection = c.io.swapCancelProtection(.blocked);
             defer _ = c.io.swapCancelProtection(protection);
-            // glint-ignore: Z026 -- the path's own error is the one returned; flushing only keeps the paths before it written
-            batch.flush(c.io, c.wt, c.index, c.outcome, c.options.rules) catch {};
-        }
+            batch.flush(c.io, c.wt.get(), c.index, c.outcome, c.options.rules) catch |earlier| {
+                // The batch's paths come before the one that failed, so a
+                // checkout one file at a time would have stopped at theirs
+                // first; a cancel is still the cancel.
+                return if (err == error.Canceled) err else earlier;
+            };
+            return err;
+        };
+        try batch.flush(c.io, c.wt.get(), c.index, c.outcome, c.options.rules);
+    }
+
+    /// `all`'s walk over `paths`, leaving in `batch` what it has not yet
+    /// written.
+    fn walk(c: *const CheckoutWrite, batch: *WriteBatch, paths: []const safe_path.Checked) Error!void {
         var leading: LeadingDirs = .{ .hide = c.options.rules.hide_dot_files };
         for (paths) |checked| {
             try c.io.checkCancel();
@@ -2458,12 +2468,11 @@ const CheckoutWrite = struct {
                 continue;
             }
             if (checked.dirname()) |parent| {
-                try leading.make(c.io, c.wt, parent, c.options.force, c.options.refusal);
+                try leading.make(c.io, c.wt.get(), parent, c.options.force, c.options.refusal);
             }
-            try c.one(&batch, &leading, checked, want);
-            if (c.options.rules.submodules != null and std.mem.eql(u8, path, gitmodules_path)) try batch.flush(c.io, c.wt, c.index, c.outcome, c.options.rules);
+            try c.one(batch, &leading, checked, want);
+            if (c.options.rules.submodules != null and std.mem.eql(u8, path, gitmodules_path)) try batch.flush(c.io, c.wt.get(), c.index, c.outcome, c.options.rules);
         }
-        try batch.flush(c.io, c.wt, c.index, c.outcome, c.options.rules);
     }
 
     /// Whether `path` is left as it is: kept with its local changes, or,
@@ -2475,7 +2484,7 @@ const CheckoutWrite = struct {
         if (want.mode == .gitlink and c.options.rules.submodules != null) return false;
         const entry = c.index.find(path) orelse return false;
         if (!entry.oid.eql(want.oid) or entry.mode != want.mode or c.index.isRacy(entry.*)) return false;
-        const on_disk = try fs.statAt(c.io, c.wt, path) orelse return false;
+        const on_disk = try fs.statAt(c.io, c.wt.get(), path) orelse return false;
         return entry.stat.matches(on_disk.stat, c.options.rules.statCompare());
     }
 
@@ -2485,13 +2494,13 @@ const CheckoutWrite = struct {
         const path = checked.bytes;
         switch (want.mode) {
             .gitlink => {
-                try writeGitlink(c.gpa, c.io, c.wt, leading, .{ .path = checked, .oid = want.oid, .rules = c.options.rules, .force = c.options.force, .refusal = c.options.refusal });
+                try writeGitlink(c.gpa, c.io, c.wt.get(), leading, .{ .path = checked, .oid = want.oid, .rules = c.options.rules, .force = c.options.force, .refusal = c.options.refusal });
                 c.outcome.gitlinks += 1;
             },
             .symlink => {
                 const found = try c.db.read(c.io, want.oid);
                 defer c.db.allocator().free(found.bytes);
-                if (try writeLink(c.io, c.wt, checked, found.bytes, c.options.rules.symlinks)) c.outcome.symlinks_as_files += 1;
+                if (try writeLink(c.io, c.wt.get(), checked, found.bytes, c.options.rules.symlinks)) c.outcome.symlinks_as_files += 1;
                 // A link where a proved directory's name folds to it is
                 // looked at again before anything is written under it.
                 leading.forget();
@@ -2507,9 +2516,9 @@ const CheckoutWrite = struct {
                 defer blob.deinit(c.gpa, c.io, c.db);
                 const smudged: native.Content = switch (blob) {
                     .streamed => |*streamed| {
-                        try writeFile(c.io, c.wt, checked, .{ .stream = streamed }, executable);
+                        try writeFile(c.io, c.wt.get(), checked, .{ .stream = streamed }, executable);
                         c.outcome.written += 1;
-                        return recordWritten(c.io, c.wt, c.index, path, want, c.options.rules);
+                        return recordWritten(c.io, c.wt.get(), c.index, path, want, c.options.rules);
                     },
                     .filtered => |bytes| .{ .bytes = bytes },
                     .whole => |bytes| if (applied) |found| try c.conv.toWorktree(a, .{ .path = path, .blob = bytes, .applied = found }, .{
@@ -2523,17 +2532,17 @@ const CheckoutWrite = struct {
                     .delayed => return,
                     .bytes => |bytes| {
                         if (try batch.add(checked, want, bytes, executable)) {
-                            try batch.flush(c.io, c.wt, c.index, c.outcome, c.options.rules);
+                            try batch.flush(c.io, c.wt.get(), c.index, c.outcome, c.options.rules);
                         }
                         return;
                     },
-                    .file => try writeSmudged(c.io, c.wt, checked, smudged, executable),
+                    .file => try writeSmudged(c.io, c.wt.get(), checked, smudged, executable),
                 }
                 c.outcome.written += 1;
             },
             .tree => return error.UnsupportedEntry,
         }
-        try recordWritten(c.io, c.wt, c.index, path, want, c.options.rules);
+        try recordWritten(c.io, c.wt.get(), c.index, path, want, c.options.rules);
     }
 
     /// Write the files a filter delayed, as it hands them over.
@@ -2544,9 +2553,9 @@ const CheckoutWrite = struct {
             defer _ = arena.reset(.retain_capacity);
             const want = c.wanted.get(ready.path).?;
             const path = safe_path.checked(ready.path, .{ .use = .worktree, .protect = c.options.rules.protect }) catch return error.UnsafePath;
-            try writeSmudged(c.io, c.wt, path, ready.content, want.mode == .exec and c.options.rules.file_mode);
+            try writeSmudged(c.io, c.wt.get(), path, ready.content, want.mode == .exec and c.options.rules.file_mode);
             c.outcome.written += 1;
-            try recordWritten(c.io, c.wt, c.index, ready.path, want, c.options.rules);
+            try recordWritten(c.io, c.wt.get(), c.index, ready.path, want, c.options.rules);
         }
     }
 };
@@ -2764,7 +2773,7 @@ const WriteBatch = struct {
 
     comptime {
         // A full batch is one worth spreading over tasks.
-        assert(parallel_threshold < max_files);
+        assert.invariant(parallel_threshold < max_files, "a full batch is one worth spreading over tasks");
     }
 
     const Job = struct {
@@ -2788,7 +2797,7 @@ const WriteBatch = struct {
         defer b.arena = arena.state;
         const owned = try arena.allocator().dupe(u8, bytes);
         // A full batch is flushed before another file is added.
-        assert(b.jobs.items.len < max_files);
+        assert.invariant(b.jobs.items.len < max_files, "a full batch is flushed before another file is added");
         try b.jobs.append(b.gpa, .{ .path = path, .want = want, .bytes = owned, .executable = executable });
         b.bytes += bytes.len;
         return b.bytes >= max_bytes or b.jobs.items.len >= max_files;
@@ -2810,13 +2819,17 @@ const WriteBatch = struct {
         var group: Io.Group = .init;
         var spawned: usize = 1;
         while (spawned < tasks) : (spawned += 1) {
-            group.concurrent(io, run, .{ io, wt, b.jobs.items, &next }) catch break;
+            const started = if (group.concurrent(io, run, .{ io, wt, b.jobs.items, &next })) |_| true else |err| switch (err) {
+                // Where no task more can be had, those started write the rest.
+                error.ConcurrencyUnavailable => false,
+            };
+            if (!started) break;
         }
         // This task writes too; with no others it writes them all.
         run(io, wt, b.jobs.items, &next);
         // It stops only once every job is claimed, so none is read below
         // with the result it started with.
-        assert(next.load(.monotonic).compare(Claims.fromRaw(b.jobs.items.len)) != .lt);
+        assert.invariant(next.load(.monotonic).compare(Claims.fromRaw(b.jobs.items.len)) != .lt, "every job is claimed before the results are read");
         // A cancel that lands in the wait is returned once what was
         // written is recorded, though every job may have finished first.
         var first: ?Error = null;
@@ -3016,7 +3029,7 @@ fn writeSmudged(io: Io, wt: Io.Dir, path: safe_path.Checked, smudged: native.Con
         .bytes => |bytes| try writeFile(io, wt, path, .{ .bytes = bytes }, executable),
         .file => |*file| {
             defer file.deinit(io);
-            try writeFile(io, wt, path, .{ .file = file.borrow().* }, executable);
+            try writeFile(io, wt, path, .{ .file = .of(file.borrow().*) }, executable);
         },
         .delayed => unreachable,
     }
@@ -3070,7 +3083,7 @@ pub fn writePaths(
     }
 
     var conv: convert.Session = .open(gpa, io, .{
-        .wt = wt,
+        .wt = .of(wt),
         .kind = db.objectFormat(),
         .core = options.rules.core,
         .required_filters = options.rules.required_filters,
@@ -3634,7 +3647,7 @@ fn directoryGoes(
 pub const RacyCheck = struct {
     gpa: Allocator,
     io: Io,
-    wt: Io.Dir,
+    wt: aegis.own.Unowned(Io.Dir),
     rules: Rules,
     node: index_mod.WriteOptions.Racy = .{ .changed = changed },
 
@@ -3644,7 +3657,7 @@ pub const RacyCheck = struct {
 
     fn changed(node: *const index_mod.WriteOptions.Racy, index: *const Index, entry: index_mod.Entry) Io.Cancelable!bool {
         const c: *const RacyCheck = @alignCast(@fieldParentPtr("node", node)); // changed is installed only on a RacyCheck's node
-        return differsFromIndex(c.gpa, c.io, c.wt, .{ .index = index, .entry = entry }, c.rules) catch |err| switch (err) {
+        return differsFromIndex(c.gpa, c.io, c.wt.get(), .{ .index = index, .entry = entry }, c.rules) catch |err| switch (err) {
             error.Canceled => error.Canceled,
             else => true,
         };
@@ -3675,13 +3688,12 @@ pub fn differsFromIndex(
     defer scratch.deinit();
     const a = scratch.allocator();
     if (found.kind == .sym_link) {
-        var buf: [4096]u8 = undefined;
-        const len = try wt.readLink(io, path.bytes, &buf);
-        return !hash.Hasher.object(index.kind, "blob", buf[0..len]).eql(entry.oid);
+        var buf: [input.max_link_len]u8 = undefined;
+        return !hash.Hasher.object(index.kind, "blob", try input.link(io, wt, path.bytes, &buf)).eql(entry.oid);
     }
     const attrs = rules.attrs orelse {
         if (try streamsIn(rules.big_file_bytes, found, null)) return !try namedAs(io, wt, path, entry);
-        const bytes = aegis.own.readFile(io, wt, path.bytes, a, aegis.units.Bytes(u64).fromRaw(1 << 31)) catch |err| switch (err) {
+        const bytes = input.file(io, wt, path.bytes, a, .blob) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Canceled => return error.Canceled,
             else => return true,
@@ -3695,7 +3707,7 @@ pub fn differsFromIndex(
     // filesystem whose clock is coarser than the time between writing a
     // file and the index does to them all.
     var conv: convert.Session = .open(gpa, io, .{
-        .wt = wt,
+        .wt = .of(wt),
         .kind = index.kind,
         .core = rules.core,
         .required_filters = rules.required_filters,
@@ -3711,7 +3723,7 @@ pub fn differsFromIndex(
     defer if (!entered) attrs.leave();
     const applied = try attrs.lookup(a, entry.path, .file);
     if (try streamsIn(rules.big_file_bytes, found, .{ .session = &conv, .path = entry.path, .applied = applied })) return !try namedAs(io, wt, path, entry);
-    const bytes = aegis.own.readFile(io, wt, path.bytes, a, aegis.units.Bytes(u64).fromRaw(1 << 31)) catch |err| switch (err) {
+    const bytes = input.file(io, wt, path.bytes, a, .blob) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.Canceled => return error.Canceled,
         else => return true,
@@ -3773,7 +3785,7 @@ fn refuseCaseCollisions(arena: Allocator, wanted: *std.StringHashMapUnmanaged(Tr
 /// pieces.
 const Source = union(enum) {
     bytes: []const u8,
-    file: Io.File,
+    file: aegis.own.Unowned(Io.File),
     stream: *Streamed,
 };
 
@@ -3863,7 +3875,7 @@ fn writeFile(io: Io, wt: Io.Dir, path: safe_path.Checked, source: Source, execut
             .bytes => |bytes| fw.interface.writeAll(bytes) catch return fw.err.?,
             .file => |from| {
                 var in_buf: [64 * 1024]u8 = undefined;
-                var reader = from.reader(io, &in_buf);
+                var reader = input.fileReader(io, from.get(), &in_buf);
                 _ = reader.interface.streamRemaining(&fw.interface) catch |err| switch (err) {
                     error.ReadFailed => return reader.err.?,
                     error.WriteFailed => return fw.err.?,
@@ -3950,7 +3962,7 @@ pub fn applySparse(
     var scratch: std.heap.ArenaAllocator = .init(gpa);
     defer scratch.deinit();
     var conv: convert.Session = .open(gpa, io, .{
-        .wt = wt,
+        .wt = .of(wt),
         .kind = db.objectFormat(),
         .core = options.rules.core,
         .required_filters = options.rules.required_filters,
@@ -3994,9 +4006,8 @@ pub fn applySparse(
                         try hashFile(io, wt, db.objectFormat(), path)
                     else blk: {
                         const raw = if (found.kind == .sym_link) link: {
-                            var buf: [4096]u8 = undefined;
-                            const len = try wt.readLink(io, path.bytes, &buf);
-                            break :link try a.dupe(u8, buf[0..len]);
+                            var buf: [input.max_link_len]u8 = undefined;
+                            break :link try a.dupe(u8, try input.link(io, wt, path.bytes, &buf));
                         } else try fs.readFileSized(a, io, wt, path.bytes, .{ .size = found.size, .max_bytes = 1 << 31 });
                         const content = if (applied) |each| (try conv.toGit(a, .{ .path = entry.path, .bytes = raw, .applied = each }, .{ .storing = .hash_only })).bytes else raw;
                         break :blk hash.Hasher.object(db.objectFormat(), "blob", content);
@@ -4148,7 +4159,7 @@ pub fn list(
         .gpa = gpa,
         .arena = arena,
         .io = io,
-        .wt = wt,
+        .wt = .of(wt),
         .index = index,
         .rules = rules,
         .out = &paths,
@@ -4170,18 +4181,18 @@ const ListScan = struct {
     gpa: Allocator,
     arena: Allocator,
     io: Io,
-    wt: Io.Dir,
+    wt: aegis.own.Unowned(Io.Dir),
     index: *Index,
     rules: Rules,
     out: *std.ArrayList([]const u8),
 
     fn walk(s: *ListScan, dir_path: []const u8, depth: u32) Error!void {
         if (depth > 64) return error.TreeTooDeep;
-        var opened = (try openWalkDirectory(s.io, s.wt, dir_path)) orelse return;
+        var opened = (try openWalkDirectory(s.io, s.wt.get(), dir_path)) orelse return;
         defer opened.deinit(s.io);
         const dir = opened.borrow().*;
 
-        if (s.rules.ignore) |rules| try rules.addDirectory(s.io, s.wt, dir_path, depth);
+        if (s.rules.ignore) |rules| try rules.addDirectory(s.io, s.wt.get(), dir_path, depth);
         defer if (s.rules.ignore) |rules| rules.popTo(depth + 2);
 
         var scan = try dir_scan.Scan.init(s.gpa, s.io, dir, .{ .precompose = s.rules.precompose_unicode });
@@ -4208,7 +4219,7 @@ const ListScan = struct {
                     }
                     // A repository inside the working tree is its own to
                     // list: git names it once, as `sub/`.
-                    if (try gitlink.isRepository(s.gpa, s.io, s.wt, path)) {
+                    if (try gitlink.isRepository(s.gpa, s.io, s.wt.get(), path)) {
                         try s.out.append(s.arena, try s.arena.print("{s}/", .{path}));
                         continue;
                     }

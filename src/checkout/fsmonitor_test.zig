@@ -114,7 +114,7 @@ const Pair = struct {
         const index = &locked_index.index;
         var arena: std.heap.ArenaAllocator = .init(gpa);
         defer arena.deinit();
-        const source = (try fsmonitor.configured(arena.allocator(), io, repo.configuration(), .{ .git_dir = repo.gitDirectory(), .work_tree = repo.workDirectory().? }, .{ .environ = &pair.env })).?;
+        const source = (try fsmonitor.configured(arena.allocator(), io, repo.configuration(), .{ .git_dir = .of(repo.gitDirectory()), .work_tree = .of(repo.workDirectory().?) }, .{ .environ = &pair.env })).?;
         var result = try worktree.status(gpa, io, repo.workDirectory().?, .{ .index = index, .db = repo.objectDatabase() }, .{
             .rules = try repo.worktreeRules(),
             .head_tree = try repo.headTree(io),

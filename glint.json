@@ -1,6 +1,13 @@
 {
   "seams": [
     {
+      "file": "src/checkout/input.zig",
+      "rules": [
+        "A009"
+      ],
+      "reason": "the working tree layer's input seam: the working-tree files it reads whole (held to 2 GiB), worktrees' gitdir files (4096 bytes, or 1 MiB to judge one), symbolic link targets (4096 bytes), and the readers over working-tree files, filter programs' output and the fsmonitor daemon's connection (each holding its buffer); everything else in src/checkout parses the bytes it hands back"
+    },
+    {
       "file": "src/commit/input.zig",
       "rules": [
         "A009"

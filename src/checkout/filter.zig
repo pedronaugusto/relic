@@ -30,7 +30,7 @@ const std = @import("std");
 const aegis = @import("aegis");
 const decimal = @import("../text.zig").decimal;
 const shakedown = @import("shakedown");
-const assert = std.debug.assert;
+const assert = aegis.assert;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -39,6 +39,7 @@ const fs = @import("../fs/fs.zig");
 const program = @import("../process.zig").program;
 const pkt_line = @import("../codec.zig").pkt_line;
 pub const native = @import("native.zig");
+const input = @import("input.zig");
 pub const Error = Drivers.LoadError || RunCommandError || ProtocolError || Process.OpenError;
 
 /// One `filter.<name>` section.
@@ -72,7 +73,7 @@ pub const Drivers = struct {
     pub const Error = LoadError;
     /// The repository's directories, and its `core.sharedRepository` for
     /// what a native driver writes into them.
-    pub const Directories = struct { common: Io.Dir, work: ?Io.Dir = null, shared: fs.Shared };
+    pub const Directories = struct { common: aegis.own.Unowned(Io.Dir), work: ?aegis.own.Unowned(Io.Dir) = null, shared: fs.Shared };
 
     /// The drivers `config` defines, with no LFS of relic's own. Every
     /// string is copied, so the result does not borrow the configuration.
@@ -345,11 +346,10 @@ pub const RunCommandError = Allocator.Error || Io.Cancelable;
 /// Run one `filter.<driver>.clean` or `.smudge` over `input`, from `cwd`,
 /// with the repository's own variables removed from the environment so the
 /// program finds the repository from where it stands.
-pub const RunCommandOptions = struct { cwd: Io.Dir, path: []const u8, input: []const u8 };
+pub const RunCommandOptions = struct { cwd: aegis.own.Unowned(Io.Dir), path: []const u8, input: []const u8 };
 pub fn runCommand(a: Allocator, io: Io, programs: program.Programs, line: []const u8, options: RunCommandOptions) RunCommandError!Ran {
-    const cwd = options.cwd;
+    const cwd = options.cwd.get();
     const path = options.path;
-    const input = options.input;
     const expanded = try expandCommand(a, line, path);
     var outcome = program.run(a, io, programs, .{
         .argv = &.{expanded},
@@ -358,7 +358,7 @@ pub fn runCommand(a: Allocator, io: Io, programs: program.Programs, line: []cons
         .unset = &program.repository_variables,
         .stderr = .capture,
     }, .{
-        .input = input,
+        .input = options.input,
     }) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.Canceled => return error.Canceled,
@@ -449,7 +449,7 @@ pub const Protocol = struct {
     /// `clean`, `smudge` and `delay` all offered.
     pub fn handshake(p: *Protocol) Self.ProtocolError!void {
         // `pktline.read` hands back a packet out of the reader's buffer.
-        assert(p.in.reader().buffer.len >= pkt_line.max_line);
+        assert.invariant(p.in.reader().buffer.len >= pkt_line.max_line, "a packet is read out of the reader's buffer, which holds the longest");
         try p.line("git-filter-client\n");
         try p.line("version=2\n");
         try p.end();
@@ -597,7 +597,7 @@ pub const Protocol = struct {
     fn readLine(p: *Protocol) ProtocolError!?[]const u8 {
         const data = (try p.readPacket()) orelse return null;
         // `readPacket` ends the list at a packet with no data.
-        assert(data.len != 0);
+        assert.invariant(data.len != 0, "readPacket ends the list at a packet with no data");
         const text = if (data[data.len - 1] == '\n') data[0 .. data.len - 1] else data;
         return if (text.len == 0) null else text;
     }
@@ -686,7 +686,7 @@ pub const Process = struct {
             else => return error.FilterNotStarted,
         };
         errdefer p.running.deinit(io);
-        p.reader = p.running.child.stdoutFile().?.readerStreaming(io, p.in_buffer);
+        p.reader = input.pipeReader(io, p.running.child.stdoutFile().?, p.in_buffer);
         p.writer = p.running.child.stdinFile().?.writerStreaming(io, p.out_buffer);
         p.protocol = .{
             .in = .fromFile(&p.reader),
@@ -717,8 +717,10 @@ pub const Process = struct {
             // cancelation point.
             const protection = io.swapCancelProtection(.blocked);
             defer _ = io.swapCancelProtection(protection);
-            // glint-ignore: Z026 -- each reply was already read, so its exit status changes nothing
-            _ = p.running.wait(io) catch {};
+            // Each reply was already read, so its exit status changes
+            // nothing; one that cannot be waited for is killed and reaped.
+            const term: ?program.Term = p.running.wait(io) catch null;
+            if (term == null) p.running.kill(io);
         }
         p.running.deinit(io);
         const gpa = p.gpa;
@@ -905,4 +907,8 @@ fn fuzzProtocol(_: void, case: *shakedown.Case) anyerror!void {
         for (available.paths) |path| testing.allocator.free(path);
         testing.allocator.free(available.paths);
     }
+}
+
+test {
+    _ = @import("input.zig");
 }

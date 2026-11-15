@@ -23,6 +23,7 @@ const Io = std.Io;
 
 const hash = @import("../hash/hash.zig");
 const fs = @import("../fs/fs.zig");
+const input = @import("input.zig");
 const gitfile = @import("../discover.zig").gitfile;
 const safe_path = @import("../names.zig").path;
 const ref_names = @import("../names.zig").ref;
@@ -216,16 +217,16 @@ const Named = struct {
 /// The `gitdir` file of a working tree's administrative directory, or
 /// null where there is none: where the working tree's `.git` file is, as
 /// `worktree add` wrote it.
-fn readGitdir(arena: Allocator, io: Io, admin: Io.Dir, max_bytes: u64) aegis.own.ReadFileError!?[]u8 {
+fn readGitdir(arena: Allocator, io: Io, admin: Io.Dir, limit: input.Limit) aegis.own.ReadFileError!?[]u8 {
     // the gitdir file this program, or git, wrote into the repository's own directory
-    return aegis.own.readFile(io, admin, "gitdir", arena, aegis.units.Bytes(u64).fromRaw(max_bytes)) catch |err| switch (err) {
+    return input.file(io, admin, "gitdir", arena, limit) catch |err| switch (err) {
         error.FileNotFound, error.NotDir, error.IsDir => return null,
         else => |e| return e,
     };
 }
 
 fn namedTree(arena: Allocator, io: Io, admin: Io.Dir) Self.Error!?Named {
-    const text = (try readGitdir(arena, io, admin, 4096)) orelse return null;
+    const text = (try readGitdir(arena, io, admin, .gitdir)) orelse return null;
     const written = std.mem.trim(u8, text, " \t\r\n");
     if (written.len == 0) return null;
     const dot_git = if (std.Io.Dir.path.isAbsolute(written)) written else blk: {
@@ -293,7 +294,7 @@ pub const Added = struct {
 ///
 /// The checkout is a separate call, because it needs an object database and
 /// an index and this does not: `worktree.checkout` into `Added.work_dir`.
-pub const AddInputs = struct { name: []const u8, dest_dir: Io.Dir };
+pub const AddInputs = struct { name: []const u8, dest_dir: aegis.own.Unowned(Io.Dir) };
 
 pub fn add(
     gpa: Allocator,
@@ -303,7 +304,7 @@ pub fn add(
     options: AddOptions,
 ) Self.Error!Added {
     const name = inputs.name;
-    const dest_dir = inputs.dest_dir;
+    const dest_dir = inputs.dest_dir.get();
     const common_dir = refs.commonDir();
     try checkId(name);
     if (options.detach_at == null) {
@@ -607,7 +608,7 @@ fn judge(arena: Allocator, io: Io, worktrees_dir: Io.Dir, name: []const u8, expi
         else => |e| return e,
     };
     if (locked) return .locked;
-    const read = readGitdir(arena, io, admin, 1 << 20) catch |err| switch (err) {
+    const read = readGitdir(arena, io, admin, .gitdir_judged) catch |err| switch (err) {
         error.OutOfMemory, error.Canceled => |e| return e,
         else => return .{ .prune = .unreadable_gitdir },
     };
@@ -706,7 +707,7 @@ pub fn repair(
 /// remove and add again.
 pub const MoveInputs = struct {
     name: []const u8,
-    new_parent: Io.Dir,
+    new_parent: aegis.own.Unowned(Io.Dir),
     new_name: []const u8,
     /// git for Windows' `core.hideDotFiles`, for the worktree's `.git` file.
     hide_dot_files: fs.HideDotFiles = .dot_git_only,
@@ -719,7 +720,7 @@ pub fn move(
     inputs: MoveInputs,
 ) Self.Error!void {
     const name = inputs.name;
-    const new_parent = inputs.new_parent;
+    const new_parent = inputs.new_parent.get();
     const new_name = inputs.new_name;
     try checkId(name);
     try checkId(new_name);

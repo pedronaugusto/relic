@@ -339,7 +339,7 @@ test "a racily clean entry is smudged on the way out only when its file changed,
     try h.repo.writeFile(io, "other.txt", "DDDD\n");
     try fs.setTimestamps(io, h.repo.dir, "other.txt", .{ .modify_timestamp = .{ .new = .{ .nanoseconds = @as(i96, other_stat.mtime_sec) * std.time.ns_per_s + other_stat.mtime_nsec } } });
 
-    var check: worktree.RacyCheck = .{ .gpa = gpa, .io = io, .wt = h.repo.dir, .rules = h.worktreeRules() };
+    var check: worktree.RacyCheck = .{ .gpa = gpa, .io = io, .wt = .of(h.repo.dir), .rules = h.worktreeRules() };
     try h.index.write(io, h.git_dir, "index", .{ .racy = check.racy() });
     var back = try index_mod.Index.read(gpa, io, h.git_dir, "index", .{ .git_dir = .of(h.git_dir), .kind = .sha1 });
     defer back.deinit();
