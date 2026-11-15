@@ -47,7 +47,7 @@ fn compare(gpa: Allocator, io: Io, git: *testgit.Repo, case: Case) !void {
         };
         var line: std.Io.Writer.Allocating = .init(gpa);
         defer line.deinit();
-        try sig.write(&line.writer);
+        try sig.write(&line.writer, .strict);
         try line.writer.writeByte('\n');
         try std.testing.expectEqualStrings(theirs.stdout, line.written());
     }

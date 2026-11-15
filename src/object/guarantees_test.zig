@@ -186,8 +186,9 @@ test "property: an ident line splits where git's split_ident_line splits it" {
 
 // Signature.write: "the name and the email as git's fmt_ident writes them
 // ... cut of what git calls crud at either end ... and with the <, > and
-// newlines inside left out ... A name with nothing left, empty or all crud,
-// is error.InvalidSignature".
+// newlines inside left out ... Strict ... a name with nothing left, empty or
+// all crud, is error.InvalidSignature ... Lenient ... nothing is refused and
+// such a name is written empty".
 
 const person_pieces = [_][]const u8{ "Ada", "a@b", " ", "\t", "\r", "\x0b", "\x01", "<", ">", "\n", ",", ";", ":", "\"", "'", "\\", "x", "", "é" };
 
@@ -225,18 +226,20 @@ fn anySignatureWritten(_: void, case: *shakedown.Case) !void {
         },
         .offset_minutes = gen.int(case.source, i16),
     };
+    const strictness = gen.enumValue(case.source, Signature.Strictness);
     var name_out: [24]u8 = undefined;
     var email_out: [24]u8 = undefined;
     const name = gitWithoutCrud(sig.name, &name_out);
     const email = gitWithoutCrud(sig.email, &email_out);
     var out: [128]u8 = undefined;
     var w: std.Io.Writer = .fixed(&out);
-    sig.write(&w) catch |err| {
+    sig.write(&w, strictness) catch |err| {
         try testing.expectEqual(error.InvalidSignature, err);
+        try testing.expectEqual(Signature.Strictness.strict, strictness);
         try testing.expectEqual(@as(usize, 0), name.len);
         return;
     };
-    try testing.expect(name.len != 0);
+    if (strictness == .strict) try testing.expect(name.len != 0);
     // Accepted: it reads back as the stripped name and email, and the time
     // as written unless it does not fit (only minInt(i64), whose magnitude
     // no i64 holds), which parse documents as zero.
@@ -247,7 +250,7 @@ fn anySignatureWritten(_: void, case: *shakedown.Case) !void {
     try testing.expectEqual(sig.offset_minutes, back.offset_minutes);
 }
 
-test "property: an ident is written as git's fmt_ident writes it, refused where git's strict ident is, and reads back stripped" {
+test "property: an ident is written as git's fmt_ident writes it, refused only where git's strict ident is, and reads back stripped" {
     try shakedown.check(testing.allocator, {}, anySignatureWritten, .{ .cases = 20000, .seed = 0x0b4 });
 }
 
@@ -273,7 +276,7 @@ fn anyIdentAsGit(git: *GitIdent, case: *shakedown.Case) !void {
     const sig: Signature = .{ .name = name, .email = email, .when_secs = 1700000000, .offset_minutes = 90 };
     var out: [128]u8 = undefined;
     var w: std.Io.Writer = .fixed(&out);
-    const ours: ?[]const u8 = if (sig.write(&w)) w.buffered() else |err| switch (err) {
+    const ours: ?[]const u8 = if (sig.write(&w, .strict)) w.buffered() else |err| switch (err) {
         error.InvalidSignature => null,
         else => |e| return e,
     };

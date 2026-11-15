@@ -32,7 +32,7 @@ pub const AppendError = errors: {
     break :errors Io.File.OpenError || Io.Writer.Error ||
         Io.File.WritePositionalError || Io.File.StatError ||
         Io.Dir.CreateDirError || Io.Dir.CreateDirPathError || Allocator.Error ||
-        fs.SyncError || error{InvalidSignature};
+        fs.SyncError;
 };
 
 /// Errors from reading a log.
@@ -156,7 +156,12 @@ pub fn append(gpa: Allocator, io: Io, git_dir: Io.Dir, options: AppendOptions) A
     w.writeByte(' ') catch return error.OutOfMemory;
     w.writeAll(new.hex(&hex)) catch return error.OutOfMemory;
     w.writeByte(' ') catch return error.OutOfMemory;
-    try who.write(w);
+    // A reflog's ident is git's lenient one, which refuses no name.
+    who.write(w, .lenient) catch |err| switch (err) {
+        error.WriteFailed => return error.OutOfMemory,
+        // unreachable: lenient refuses nothing
+        error.InvalidSignature => unreachable,
+    };
     if (message.len != 0) {
         w.writeByte('\t') catch return error.OutOfMemory;
         // A message is one line: a newline inside it would make one entry

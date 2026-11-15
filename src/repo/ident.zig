@@ -8,7 +8,6 @@
 const object = @import("../object/object.zig");
 const crud_mod = @import("../object/crud.zig");
 const std = @import("std");
-const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const Environ = std.process.Environ;
 
@@ -74,18 +73,6 @@ fn configValue(arena: Allocator, config: *const config_mod.Config, name: []const
 fn environValue(environ: ?*const Environ.Map, name: []const u8) ?[]const u8 {
     const map = environ orelse return null;
     return map.get(name);
-}
-
-/// git's `strbuf_addstr_without_crud`: the ends trimmed of crud, and `<`,
-/// `>` and a newline taken out of the rest, as `Signature.write` writes it.
-fn withoutCrud(arena: Allocator, text: []const u8) Allocator.Error![]const u8 {
-    var out: std.ArrayList(u8) = .empty;
-    for (crud_mod.trimmed(text)) |c| {
-        if (std.mem.findScalar(u8, crud_mod.delimiters, c) == null) try out.append(arena, c);
-    }
-    // A signature line is `name <email> when`: neither field may close it.
-    assert(std.mem.findAny(u8, out.items, crud_mod.delimiters) == null);
-    return out.items;
 }
 
 /// Caller-selected role, fallback machine identity and timestamp.
@@ -161,8 +148,8 @@ pub fn signature(arena: Allocator, config: *const config_mod.Config, environ: ?*
         when = .{ .secs = parsed.secs, .offset_minutes = parsed.offset_minutes };
     };
     return .{
-        .name = try withoutCrud(arena, name.?),
-        .email = try withoutCrud(arena, email.?),
+        .name = try crud_mod.without(arena, name.?),
+        .email = try crud_mod.without(arena, email.?),
         .when_secs = when.secs,
         .offset_minutes = @intCast(when.offset_minutes),
     };

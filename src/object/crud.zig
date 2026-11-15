@@ -36,6 +36,16 @@ pub fn writeWithout(w: *Io.Writer, text: []const u8) Io.Writer.Error!void {
     try w.writeAll(rest);
 }
 
+/// `text` as git's `strbuf_addstr_without_crud` writes it, in `a`: the
+/// field a name or an email is in a written ident, and in a reftable log
+/// record, which git splits from that ident.
+pub fn without(a: std.mem.Allocator, text: []const u8) std.mem.Allocator.Error![]u8 {
+    var out: Io.Writer.Allocating = .init(a);
+    errdefer out.deinit();
+    writeWithout(&out.writer, trimmed(text)) catch return error.OutOfMemory;
+    return out.toOwnedSlice();
+}
+
 test "crud is cut from the ends, up to the first NUL, and the delimiters from inside" {
     try std.testing.expectEqualStrings("A, B", trimmed(" \t,A, B;'\"\\"));
     try std.testing.expectEqualStrings("", trimmed(" ,:; <>"));
@@ -45,4 +55,7 @@ test "crud is cut from the ends, up to the first NUL, and the delimiters from in
     var w: Io.Writer = .fixed(&buffer);
     try writeWithout(&w, "a<b>c\nd");
     try std.testing.expectEqualStrings("abcd", w.buffered());
+    const field = try without(std.testing.allocator, " ,a<b>c\nd; ");
+    defer std.testing.allocator.free(field);
+    try std.testing.expectEqualStrings("abcd", field);
 }

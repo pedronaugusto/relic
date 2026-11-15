@@ -8,6 +8,7 @@ const Kind = hash.Kind;
 const fs = @import("../../../fs/fs.zig");
 const reftable = @import("../table.zig");
 const reflog = @import("../../reflog.zig");
+const crud = @import("../../../object/crud.zig");
 const refs = @import("../../value.zig");
 const cache = @import("cache.zig");
 pub const Options = @import("policy.zig").Options;
@@ -540,8 +541,6 @@ pub fn appendLog(
     const new = inputs.new;
     const who = log.who;
     const message = log.message;
-    if (std.mem.findAny(u8, who.name, "<>\n") != null or
-        std.mem.findAny(u8, who.email, "<>\n") != null) return error.InvalidSignature;
     const parent = if (isLinked(store) and ref_names.isCurrentWorktree(name)) store.gitDir() else store.commonDir();
     var locked = try lockStack(gpa, io, parent, store.reftableOptions());
     defer releaseLocked(gpa, io, &locked);
@@ -553,8 +552,8 @@ pub fn appendLog(
     const record: reftable.LogRecord = .{ .name = name, .update_index = update_index, .value = .{ .update = .{
         .old = old,
         .new = new,
-        .name = who.name,
-        .email = who.email,
+        .name = try crud.without(arena_instance.allocator(), who.name),
+        .email = try crud.without(arena_instance.allocator(), who.email),
         .time = std.math.cast(u64, who.when_secs) orelse 0,
         .tz_offset = zoneFromMinutes(who.offset_minutes),
         .message = try logMessage(arena_instance.allocator(), try reflog.normalizeMessage(arena_instance.allocator(), message), store.reftableOptions().write.block_size),
@@ -581,8 +580,6 @@ pub const CopyInputs = struct { old: []const u8, new: []const u8, delete_old: bo
 /// in the new one's way.
 pub fn copyRef(gpa: Allocator, io: Io, store: anytype, inputs: CopyInputs, log: refs.LogMessage) (refs.TransactionError || error{ NoSuchRef, SymbolicRef })!void {
     const who = log.who;
-    if (std.mem.findAny(u8, who.name, "<>\n") != null or
-        std.mem.findAny(u8, who.email, "<>\n") != null) return error.InvalidSignature;
     const parent = store.commonDir();
     var locked = try lockStack(gpa, io, parent, store.reftableOptions());
     defer releaseLocked(gpa, io, &locked);
@@ -612,8 +609,8 @@ pub fn copyRef(gpa: Allocator, io: Io, store: anytype, inputs: CopyInputs, log: 
     const entry: reftable.LogUpdate = .{
         .old = Oid.zero(kind),
         .new = orig,
-        .name = who.name,
-        .email = who.email,
+        .name = try crud.without(arena, who.name),
+        .email = try crud.without(arena, who.email),
         .time = std.math.cast(u64, who.when_secs) orelse 0,
         .tz_offset = zoneFromMinutes(who.offset_minutes),
         .message = message,
@@ -904,8 +901,6 @@ fn addTable(
             // resolve yet.
             .symbolic => (try resolveIn(gpa, &pending.stacks, source.name, tx)) orelse continue,
         } else Oid.zero(store.objectFormat());
-        if (std.mem.findAny(u8, message.who.name, "<>\n") != null or
-            std.mem.findAny(u8, message.who.email, "<>\n") != null) return error.InvalidSignature;
         try logs.append(arena, .{
             .name = edit.name,
             .update_index = update_index,
@@ -913,8 +908,9 @@ fn addTable(
                 .update = .{
                     .old = source.old orelse Oid.zero(store.objectFormat()),
                     .new = new_oid,
-                    .name = message.who.name,
-                    .email = message.who.email,
+                    // The fields git splits from its lenient ident line.
+                    .name = try crud.without(arena, message.who.name),
+                    .email = try crud.without(arena, message.who.email),
                     .time = std.math.cast(u64, message.who.when_secs) orelse 0,
                     .tz_offset = zoneFromMinutes(message.who.offset_minutes),
                     // An edit's own words, or the transaction's.

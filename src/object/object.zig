@@ -403,16 +403,27 @@ pub const Signature = struct {
     /// inside left out, so the line always reads back, `parse` giving the
     /// name and the email as written here.
     ///
-    /// A name with nothing left, empty or all crud, is
-    /// `error.InvalidSignature`, as git's strict ident, which a commit and
-    /// a tag are made with, refuses it ("empty ident name not allowed",
-    /// "name consists only of disallowed characters"). An email may be
-    /// empty, as git's may.
+    /// `strictness` is git's `IDENT_STRICT`. Strict, as a commit and a tag
+    /// are made, a name with nothing left, empty or all crud, is
+    /// `error.InvalidSignature`, as git refuses it ("empty ident name not
+    /// allowed", "name consists only of disallowed characters"). Lenient,
+    /// as a reflog entry is written, nothing is refused and such a name is
+    /// written empty; where git's lenient ident is given an empty name it
+    /// asks the system for the account's, which is the caller's to have
+    /// done. An email may be empty either way, as git's may.
     pub const WriteError = Io.Writer.Error || error{InvalidSignature};
 
-    pub fn write(sig: Signature, w: *Io.Writer) WriteError!void {
+    /// git's `IDENT_STRICT` flag to `fmt_ident`.
+    pub const Strictness = enum {
+        /// A commit's author and committer and a tag's tagger.
+        strict,
+        /// A reflog entry's.
+        lenient,
+    };
+
+    pub fn write(sig: Signature, w: *Io.Writer, strictness: Strictness) WriteError!void {
         const name = crud.trimmed(sig.name);
-        if (name.len == 0) return error.InvalidSignature;
+        if (strictness == .strict and name.len == 0) return error.InvalidSignature;
         try crud.writeWithout(w, name);
         try w.writeAll(" <");
         try crud.writeWithout(w, crud.trimmed(sig.email));
@@ -704,9 +715,9 @@ pub const Commit = struct {
             try w.print("parent {s}\n", .{p.hex(&hex)});
         }
         try w.writeAll("author ");
-        try f.author.write(w);
+        try f.author.write(w, .strict);
         try w.writeAll("\ncommitter ");
-        try f.committer.write(w);
+        try f.committer.write(w, .strict);
         try w.writeByte('\n');
         if (f.encoding) |e| try w.print("encoding {s}\n", .{e});
         for (f.extra) |h| try writeFolded(w, h);
@@ -894,7 +905,7 @@ pub const Tag = struct {
         try w.print("tag {s}\n", .{f.name});
         if (f.tagger) |t| {
             try w.writeAll("tagger ");
-            try t.write(w);
+            try t.write(w, .strict);
             try w.writeByte('\n');
         }
         for (f.extra) |h| try writeFolded(w, h);
