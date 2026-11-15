@@ -17,6 +17,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const state_file = @import("../repo/state.zig");
 const in_progress = @import("../repo/in_progress.zig");
 const shakedown = @import("shakedown");
@@ -441,8 +442,7 @@ fn updateAbortSafety(gpa: Allocator, io: Io, repo: *Repository) Error!void {
     defer head.deinit(gpa);
     var buf: [hash.max_hex_len + 1]u8 = undefined;
     var hex: [hash.max_hex_len]u8 = undefined;
-    // unreachable: a hex name is at most max_hex_len digits, the buffer with its newline
-    const text = std.mem.print(&buf, "{s}\n", .{if (head.oid) |oid| oid.hex(&hex) else ""}) catch unreachable;
+    const text = std.mem.print(&buf, "{s}\n", .{if (head.oid) |oid| oid.hex(&hex) else ""}) catch aegis.assert.never("a hex name is at most max_hex_len digits, which the buffer holds with its newline");
     try state_file.write(io, repo.gitDirectory(), safety_path, text);
 }
 
@@ -1116,8 +1116,7 @@ pub fn resetMerge(
     var buf: ["reset: moving to ".len + hash.max_hex_len]u8 = undefined;
     var hex: [hash.max_hex_len]u8 = undefined;
     const log = if (target) |oid|
-        // unreachable: the buffer is the words and the longest hex name
-        std.mem.print(&buf, "reset: moving to {s}", .{oid.hex(&hex)}) catch unreachable
+        std.mem.print(&buf, "reset: moving to {s}", .{oid.hex(&hex)}) catch aegis.assert.never("the buffer is the words and the longest hex name")
     else
         "reset: moving to HEAD";
     try head_mod.advance(io, repo, head, to, .{ .who = who, .message = log });

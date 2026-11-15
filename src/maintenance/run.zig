@@ -178,8 +178,7 @@ pub fn selectTasks(repo: *Repository, given: []const Task, schedule: ?Schedule) 
     for (std.enums.values(Task)) |task| {
         var entry = table.get(task);
         var name_buf: [64]u8 = undefined;
-        // unreachable: the longest task name and the words around it fit
-        const enabled_name = std.mem.print(&name_buf, "maintenance.{s}.enabled", .{task.name()}) catch unreachable;
+        const enabled_name = std.mem.print(&name_buf, "maintenance.{s}.enabled", .{task.name()}) catch aegis.assert.never("the longest task name and the words around it fit sixty-four bytes");
         if (config.has(enabled_name)) {
             const on = try config.getBool(enabled_name, false);
             entry.manual = on and schedule == null;
@@ -187,8 +186,7 @@ pub fn selectTasks(repo: *Repository, given: []const Task, schedule: ?Schedule) 
         }
         if (schedule) |wanted| {
             if (!entry.scheduled) continue;
-            // unreachable: as above
-            const schedule_name = std.mem.print(&name_buf, "maintenance.{s}.schedule", .{task.name()}) catch unreachable;
+            const schedule_name = std.mem.print(&name_buf, "maintenance.{s}.schedule", .{task.name()}) catch aegis.assert.never("the longest task name and the words around it fit sixty-four bytes");
             if (config.get(schedule_name)) |value| entry.schedule = Schedule.parse(value);
             const every = entry.schedule orelse continue;
             if (@backingInt(every) < @backingInt(wanted)) continue;
@@ -357,8 +355,7 @@ fn hasPhase(task: Task, phase: Phase) bool {
 /// A `maintenance.<task>.<key>` integer.
 fn taskInt(repo: *Repository, task: Task, key: []const u8, default: c_int) config_mod.ValueError!c_int {
     var name_buf: [96]u8 = undefined;
-    // unreachable: the longest task name and key fit
-    const name = std.mem.print(&name_buf, "maintenance.{s}.{s}", .{ task.name(), key }) catch unreachable;
+    const name = std.mem.print(&name_buf, "maintenance.{s}.{s}", .{ task.name(), key }) catch aegis.assert.never("the longest task name and key, and the words around them, fit ninety-six bytes");
     return repo.configuration().getInt(c_int, name, default);
 }
 

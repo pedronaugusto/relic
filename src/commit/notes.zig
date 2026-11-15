@@ -521,7 +521,7 @@ pub const Notes = struct {
         gpa: Allocator,
         fn each(c: Collect, t2: *Notes, key: []const u8, val: Oid, path: []const u8) ErrorNamespace.Error!void {
             _ = path;
-            try c.out.append(c.gpa, .{ .object = Oid.fromRaw(t2.repo.objectFormat(), key[0..t2.rawLen()]) catch unreachable, .note = val }); // unreachable: the key is cut to the format's raw length
+            try c.out.append(c.gpa, .{ .object = Oid.fromCut(t2.repo.objectFormat(), key[0..t2.rawLen()]), .note = val });
         }
     };
 
@@ -2123,6 +2123,16 @@ test "fuzz: any tree reads as notes or a named error, and edits keep exactly the
     try std.testing.expectEqual(0, repo_gpa.deinit());
 }
 
+/// A fuzzed notes tree may be refused only as one git cannot read: bytes that are no tree, a
+/// tree that is no notes tree, or entries naming objects the repository lacks. Any other error
+/// is a fault, and the fuzzer reports it.
+fn expectFuzzedRefusal(err: Notes.Error) Notes.Error!void {
+    switch (err) {
+        error.MalformedNotesTree, error.TruncatedTree, error.InvalidMode, error.InvalidEntryName, error.ObjectNotFound => {},
+        else => return err,
+    }
+}
+
 fn fuzzNotes(repo: *Repository, case: *shakedown.Case) anyerror!void {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
@@ -2136,11 +2146,9 @@ fn fuzzNotes(repo: *Repository, case: *shakedown.Case) anyerror!void {
         defer t.deinit();
         const tree = try repo.objectDatabase().write(io, .tree, input);
         var leaf: Leaf = .{ .key = @splat(0), .val = tree };
-        // glint-ignore: Z026 -- fuzzed notes may load or not; the test asks only that neither crashes
         if (t.loadSubtree(io, &leaf, t.root, 0)) {
-            // glint-ignore: Z026 -- fuzzed notes may list or not; the test asks only that neither crashes
-            if (t.list(gpa, io)) |entries| gpa.free(entries) else |_| {}
-        } else |_| {}
+            if (t.list(gpa, io)) |entries| gpa.free(entries) else |err| try expectFuzzedRefusal(err);
+        } else |err| try expectFuzzedRefusal(err);
     }
 
     // The bytes as edits: two bytes of key prefix and an add or a removal,
@@ -2205,36 +2213,37 @@ test "display notes are the trees git's load_display_notes shows, in its order" 
     for (cases) |case| {
         var i: usize = 0;
         while (i < case.config.len) : (i += 2) try git.exec(io, &.{ "config", case.config[i], case.config[i + 1] });
-        defer {
-            var j: usize = 0;
-            while (j < case.config.len) : (j += 2) git.exec(io, &.{ "config", "--unset", case.config[j] }) catch {};
-        }
-        var repo = try Repository.open(gpa, io, git.dir, .{});
-        defer repo.deinit(io);
-        var display = try DisplayNotes.load(gpa, io, &repo, case.display);
-        defer display.deinit();
-        for ([_]bool{ true, false }) |raw| {
-            var argv: std.ArrayList([]const u8) = .empty;
-            defer argv.deinit(gpa);
-            // `log` shows notes without `--notes` only in its own format:
-            // a `--format` of any kind turns them off.
-            try argv.appendSlice(gpa, if (raw) &.{ "log", "-1", "--format=%N" } else &.{ "log", "-1" });
-            try argv.appendSlice(gpa, case.args);
-            const theirs = try git.run(io, argv.items);
-            defer gpa.free(theirs);
-            var ours: Io.Writer.Allocating = .init(gpa);
-            defer ours.deinit();
-            try display.format(io, head, &ours.writer, .{ .raw = raw });
-            if (raw) {
-                // `%N` and the line `log` ends each commit with.
-                try ours.writer.writeByte('\n');
-                try std.testing.expectEqualStrings(theirs, ours.written());
-            } else {
-                std.testing.expect(std.mem.endsWith(u8, theirs, ours.written())) catch |err| {
-                    std.debug.print("git log {any}:\n{s}\nours:\n{s}\n", .{ case.args, theirs, ours.written() });
-                    return err;
-                };
+        {
+            var repo = try Repository.open(gpa, io, git.dir, .{});
+            defer repo.deinit(io);
+            var display = try DisplayNotes.load(gpa, io, &repo, case.display);
+            defer display.deinit();
+            for ([_]bool{ true, false }) |raw| {
+                var argv: std.ArrayList([]const u8) = .empty;
+                defer argv.deinit(gpa);
+                // `log` shows notes without `--notes` only in its own format:
+                // a `--format` of any kind turns them off.
+                try argv.appendSlice(gpa, if (raw) &.{ "log", "-1", "--format=%N" } else &.{ "log", "-1" });
+                try argv.appendSlice(gpa, case.args);
+                const theirs = try git.run(io, argv.items);
+                defer gpa.free(theirs);
+                var ours: Io.Writer.Allocating = .init(gpa);
+                defer ours.deinit();
+                try display.format(io, head, &ours.writer, .{ .raw = raw });
+                if (raw) {
+                    // `%N` and the line `log` ends each commit with.
+                    try ours.writer.writeByte('\n');
+                    try std.testing.expectEqualStrings(theirs, ours.written());
+                } else {
+                    std.testing.expect(std.mem.endsWith(u8, theirs, ours.written())) catch |err| {
+                        std.debug.print("git log {any}:\n{s}\nours:\n{s}\n", .{ case.args, theirs, ours.written() });
+                        return err;
+                    };
+                }
             }
         }
+        // The next case starts from none of this one's settings.
+        var j: usize = 0;
+        while (j < case.config.len) : (j += 2) try git.exec(io, &.{ "config", "--unset", case.config[j] });
     }
 }

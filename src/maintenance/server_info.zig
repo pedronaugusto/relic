@@ -167,8 +167,7 @@ fn update(arena: Allocator, io: Io, dir: Io.Dir, sub_dir: []const u8, name: []co
     try dir.createDirPath(io, sub_dir);
     var temp_buf: [96]u8 = undefined;
     var prefix_buf: [64]u8 = undefined;
-    // unreachable: as above
-    const prefix = std.mem.print(&prefix_buf, "{s}/{s}_", .{ sub_dir, name }) catch unreachable;
+    const prefix = std.mem.print(&prefix_buf, "{s}/{s}_", .{ sub_dir, name }) catch aegis.assert.never("both names are this file's own, a few bytes each");
     const temp = fs.tempName(io, &temp_buf, prefix);
     {
         const file = try dir.createFile(io, temp, .{ .exclusive = true });

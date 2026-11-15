@@ -9,6 +9,7 @@
 
 const Self = @This();
 const std = @import("std");
+const aegis = @import("aegis");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const fs = @import("../fs/fs.zig");
@@ -131,8 +132,7 @@ fn tempDirectory(io: Io, git_dir: Io.Dir, buf: *[32]u8) Self.Error![]const u8 {
         io.random(&raw);
         var suffix: [6]u8 = undefined;
         for (raw, &suffix) |r, *s| s.* = letters[r % letters.len];
-        // unreachable: the name is twenty bytes
-        const name = std.mem.print(buf, "ref_migration.{s}", .{&suffix}) catch unreachable;
+        const name = std.mem.print(buf, "ref_migration.{s}", .{&suffix}) catch aegis.assert.never("the name is twenty bytes, and the buffer thirty-two");
         git_dir.createDir(io, name, .default_dir) catch |err| switch (err) {
             error.PathAlreadyExists => continue,
             else => |e| return e,

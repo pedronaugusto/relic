@@ -170,7 +170,10 @@ pub fn collectStarts(gpa: Allocator, arena: Allocator, io: Io, repo: *Repository
             // not looked at.
             const hex_len = repo.objectFormat().hexLen();
             if (line.len < hex_len) continue;
-            const oid = Oid.parse(repo.objectFormat(), line[0..hex_len]) catch continue;
+            const named = line[0..hex_len];
+            // Not a name: git's `get_oid_hex` fails and the file names no root.
+            if (std.mem.findNone(u8, named, "0123456789abcdefABCDEF") != null) continue;
+            const oid = Oid.parse(repo.objectFormat(), named) catch aegis.assert.never("the format's count of hexadecimal digits is an object name");
             try roots.append(arena, oid);
         };
     }
