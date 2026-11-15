@@ -228,7 +228,7 @@ refs or objects. Present files are read afresh each time; sparse tracked
 paths absent by policy keep their indexed contents. Configured filter programs
 need `CaptureOptions.programs`; native LFS writes into the private store even
 when the source has its own `lfs.storage`. For a folder without a repository,
-pass `.{ .folder = folder_dir }`: its `.gitignore` and `.gitattributes` apply,
+pass `.{ .folder = .of(folder_dir) }`: its `.gitignore` and `.gitattributes` apply,
 and no configuration is read from outside it.
 
 Like jj's working-copy snapshots, capture includes new files automatically
