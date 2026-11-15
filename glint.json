@@ -15,6 +15,13 @@
       "reason": "the file layer's platform calls std.Io does not give it: the process umask, the effective user, the process id, Windows' CreateHardLinkW, a file's owner checked against the user's token, and NtCreateFile for a handle to a file's attributes alone"
     },
     {
+      "file": "src/odb/pack/input.zig",
+      "rules": [
+        "A009"
+      ],
+      "reason": "the pack layer's input seam: a pack file's bytes (read positionally, a block at a time or into a caller's buffer, or mapped), its .idx read whole under Index.OpenOptions.max_bytes, and the object a pack writer takes in, each read held to the limit named there; pack.zig parses the bytes it hands back"
+    },
+    {
       "file": "src/odb/store_input.zig",
       "rules": [
         "A009"

@@ -17,6 +17,7 @@ const aegis = @import("aegis");
 const shakedown = @import("shakedown");
 const io_mod = @import("../testing/io.zig");
 const entry_mod = @import("pack/entry.zig");
+const input = @import("pack/input.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const warp = @import("warp");
@@ -55,7 +56,7 @@ pub const default_max_chain_bytes: u64 = 1 << 30;
 /// at a multiple of this many bytes into the file and covers one block, so
 /// where a read lands depends on the bytes wanted and never on the reads
 /// before it.
-pub const read_block_bytes = 8 * 1024;
+pub const read_block_bytes = input.read_block_bytes;
 
 /// How many bytes of a pack its positional reads keep by default: up to
 /// 32 MiB, never more than the pack, each block allocated when it is first
@@ -70,22 +71,9 @@ pub const default_read_cache_bytes = 32 * 1024 * 1024;
 const stream_entry_bytes = 64 * 1024;
 /// How much a streamed entry reads at a time.
 const stream_buffer_bytes = 64 * 1024;
-/// Room in front of each block for the few bytes a decoder had not taken
-/// from the block before it, so that the two read as one run.
-const block_prefix = 64;
-/// One slot: the prefix, the block, and one byte past it, so that a reader
-/// at the end of a whole block always asks for the next one rather than for
-/// room in this one.
-const block_stride = block_prefix + read_block_bytes + 1;
-const no_block = std.math.maxInt(u64);
 
-/// One slot of a pack's block cache: the block it holds and that block's
-/// length, and its `block_stride` bytes, allocated when it is first filled.
-const Slot = struct {
-    id: u64 = no_block,
-    len: u32 = 0,
-    bytes: ?*[block_stride]u8 = null,
-};
+/// One slot of a pack's block cache.
+const Slot = input.Slot;
 
 /// The mapped pack's bytes from `at` on, or `null` past their end.
 pub fn mappedFrom(mem: []const u8, at: u64) ?[]const u8 {
@@ -133,8 +121,9 @@ pub const Index = struct {
     version: u32,
     /// How many objects the pack holds: the rows of `names`.
     count: u32,
-    /// How many names begin with a byte up to each byte.
-    fanout_table: *const [256][4]u8,
+    /// How many names begin with a byte up to each byte: 256 big-endian
+    /// 4-byte counts.
+    fanout_table: *const [1024]u8,
     /// One row per object, in name order: the name, which in version 1
     /// follows the object's 4-byte offset (`name_at` into the row).
     names: Rows,
@@ -180,7 +169,7 @@ pub const Index = struct {
         options: OpenOptions,
     ) Self.IndexError!Index {
         const kind = options.kind;
-        const bytes = try aegis.own.readFile(io, dir, sub_path, gpa, aegis.units.Bytes(u64).fromRaw(options.max_bytes));
+        const bytes = try input.indexFile(io, dir, sub_path, gpa, options.max_bytes);
         // parse takes ownership on success and failure.
         return parse(gpa, kind, bytes);
     }
@@ -230,7 +219,7 @@ pub const Index = struct {
             .bytes = bytes,
             .version = 2,
             .count = @intCast(names.count()),
-            .fanout_table = std.mem.bytesAsValue([256][4]u8, bytes[fanout_at..][0..1024]),
+            .fanout_table = bytes[fanout_at..][0..1024],
             .names = names,
             .name_at = 0,
             .offsets = offsets,
@@ -269,7 +258,7 @@ pub const Index = struct {
             .bytes = bytes,
             .version = 1,
             .count = @intCast(names.count()),
-            .fanout_table = std.mem.bytesAsValue([256][4]u8, bytes[0..1024]),
+            .fanout_table = bytes[0..1024],
             .names = names,
             .name_at = 4,
             .offsets = names,
@@ -303,7 +292,7 @@ pub const Index = struct {
 
     /// How many names begin with a byte up to `bucket`.
     fn fanout(index: Index, bucket: u8) u32 {
-        return std.mem.readInt(u32, &index.fanout_table[bucket], .big);
+        return std.mem.readInt(u32, index.fanout_table[@as(usize, bucket) * 4 ..][0..4], .big);
     }
 
     /// Release the index.
@@ -518,21 +507,9 @@ pub const Pack = struct {
     /// time, and a delta chain is resolved one entry after another, so one
     /// Warp decoder serves both partial header and whole-entry reads.
     decoder: *warp.Decompressor,
-    /// The blocks positional reads keep, direct-mapped: block `b` of the
-    /// file can only be in slot `b % slots`, and there are never more slots
-    /// than the file has blocks. A slot's `block_stride` bytes are allocated
-    /// when it is first filled, so a pack holds what of it was read, up to
-    /// `slots` blocks; the table of slots is allocated on the first
-    /// positional read.
-    slots: usize,
-    blocks: []Slot = &.{},
-    /// The reader an entry is inflated through: it walks the blocks.
-    block_reader: Io.Reader = undefined,
-    /// The Io and block of the read in progress through `block_reader`.
-    reader_io: Io = undefined,
-    reader_block: u64 = 0,
-    /// Why the reader in progress failed, when it says `ReadFailed`.
-    read_err: ?ErrorNamespace.Error = null,
+    /// The blocks positional reads keep, and the reader an entry is
+    /// inflated through over them.
+    blocks: input.Blocks,
     /// A large entry's own buffer and reader, made afresh for each one.
     stream_buffer: []u8 = &.{},
     stream_reader: Io.File.Reader = undefined,
@@ -579,7 +556,7 @@ pub const Pack = struct {
         if (stat.size < 12 + raw_len) return error.TruncatedPack;
 
         var header: [12]u8 = undefined;
-        _ = try file.readPositionalAll(io, &header, 0);
+        if (try input.readAt(io, file, 0, &header) != header.len) return error.TruncatedPack;
         if (!std.mem.eql(u8, header[0..4], "PACK")) return error.NotAPack;
         const version = std.mem.readInt(u32, header[4..8], .big);
         if (version != 2 and version != 3) return error.UnsupportedPackVersion;
@@ -588,26 +565,18 @@ pub const Pack = struct {
         // made from, by its count and by the checksum ending both.
         if (count != index.count) return error.PackIndexMismatch;
         var trailer: [hash.max_raw_len]u8 = undefined;
-        if (try file.readPositionalAll(io, trailer[0..raw_len], stat.size - raw_len) != raw_len) return error.TruncatedPack;
+        if (try input.readAt(io, file, stat.size - raw_len, trailer[0..raw_len]) != raw_len) return error.TruncatedPack;
         if (!std.mem.eql(u8, trailer[0..raw_len], index.pack_checksum.raw())) return error.PackIndexMismatch;
 
         var mapping: ?Io.File.MemoryMap = null;
         var memory: ?[]const u8 = null;
+        // A pack too long to map, or one the platform will not map, is read
+        // positionally.
         if (options.access == .map) if (std.math.cast(usize, stat.size)) |len| {
-            // glint-ignore: Z026 -- a pack that cannot be mapped is read into memory below
-            if (Io.File.MemoryMap.create(io, file, .{
-                .len = len,
-                .protection = .{ .read = true, .write = false },
-                .populate = false,
-            })) |created| {
-                var m = created;
-                if (m.read(io)) {
-                    mapping = m;
-                    memory = m.memory;
-                } else |_| {
-                    m.destroy(io);
-                }
-            } else |_| {}
+            if (try input.map(io, file, len)) |m| {
+                mapping = m;
+                memory = m.memory;
+            }
         };
         errdefer if (mapping) |*m| m.destroy(io);
 
@@ -627,123 +596,13 @@ pub const Pack = struct {
             .max_depth = options.max_depth,
             .max_chain_bytes = options.max_chain_bytes,
             .decoder = decoder,
-            // As many blocks as the file has, rounded up, and at least one.
-            .slots = @intCast(@max(1, @min(options.read_cache_bytes / read_block_bytes, stat.size / read_block_bytes + @intFromBool(stat.size % read_block_bytes != 0)))),
+            .blocks = .init(gpa, file, stat.size, options.read_cache_bytes),
         };
     }
-
-    /// The slot block `id` is in, read from the file if it is not there.
-    ///
-    /// A read is exactly one block, so what it costs depends only on which
-    /// block is wanted, and a slot only ever changes to the block wanted.
-    /// That is what makes the cache monotone: a sequence of reads that is
-    /// part of another, block for block, never costs more than it.
-    fn loadBlock(p: *Pack, io: Io, id: u64) ErrorNamespace.Error!*Slot {
-        if (p.blocks.len == 0) {
-            const blocks = try p.gpa.alloc(Slot, p.slots);
-            @memset(blocks, .{});
-            p.blocks = blocks;
-        }
-        const rem = std.math.rem(u64, id, p.blocks.len) catch return error.TruncatedPack;
-        const at = std.math.cast(usize, rem) orelse return error.TruncatedPack;
-        if (at >= p.blocks.len) return error.TruncatedPack;
-        const slot = &p.blocks[at];
-        if (slot.id == id) return slot;
-        const start: u64 = std.math.mul(u64, id, read_block_bytes) catch return error.TruncatedPack;
-        if (start >= p.size) return error.TruncatedPack;
-        const len: usize = @intCast(@min(read_block_bytes, p.size - start));
-        if (slot.bytes == null) slot.bytes = try p.gpa.create([block_stride]u8);
-        // Claimed only once read whole: a failure leaves the slot empty.
-        slot.id = no_block;
-        const dest = slot.bytes.?[block_prefix..][0..len];
-        var done: usize = 0;
-        while (done < len) {
-            const n = try p.file.borrow().*.readPositional(io, &.{dest[done..]}, std.math.add(u64, start, done) catch return error.TruncatedPack);
-            if (n == 0) return error.TruncatedPack;
-            done += n;
-        }
-        slot.id = id;
-        slot.len = @intCast(len);
-        return slot;
-    }
-
-    /// The pack's bytes from `offset` to the end of the block it is in.
-    fn blockBytesAt(p: *Pack, io: Io, offset: u64) ErrorNamespace.Error![]const u8 {
-        const slot = try p.loadBlock(io, offset / read_block_bytes);
-        const block = slot.bytes.?[block_prefix..][0..slot.len];
-        const from: usize = @intCast(offset % read_block_bytes);
-        if (from > block.len) return error.TruncatedPack;
-        return block[from..];
-    }
-
-    const block_vtable: Io.Reader.VTable = .{
-        .stream = blockStream,
-        .readVec = blockReadVec,
-        .rebase = blockRebase,
-    };
 
     /// A reader over the pack from `at`, through the blocks.
     fn blockReaderAt(p: *Pack, io: Io, at: u64) ErrorNamespace.Error!*Io.Reader {
-        const id = at / read_block_bytes;
-        const slot = try p.loadBlock(io, id);
-        p.reader_io = io;
-        p.reader_block = id;
-        p.read_err = null;
-        const within: usize = @intCast(at % read_block_bytes);
-        p.block_reader = .{
-            .vtable = &block_vtable,
-            .buffer = slot.bytes.?,
-            .seek = block_prefix + within,
-            .end = block_prefix + slot.len,
-        };
-        return &p.block_reader;
-    }
-
-    /// Move the reader on to the next block. What the reader had not taken
-    /// from this one — never more than a decoder asks for at once — goes in
-    /// front of the next block, in that slot's prefix, so the two read as
-    /// one run; neither block's own bytes move.
-    fn nextBlock(r: *Io.Reader) Io.Reader.Error!void {
-        const p: *Pack = @alignCast(@fieldParentPtr("block_reader", r)); // installed only on a Pack's block_reader
-        const next = std.math.add(u64, p.reader_block, 1) catch return error.EndOfStream;
-        const next_at = std.math.mul(u64, next, read_block_bytes) catch return error.EndOfStream;
-        if (next_at >= p.size) return error.EndOfStream;
-        const kept = r.buffered();
-        if (kept.len > block_prefix) {
-            p.read_err = error.CorruptPackEntry;
-            return error.ReadFailed;
-        }
-        var carry: [block_prefix]u8 = undefined;
-        @memcpy(carry[0..kept.len], kept);
-        const slot = p.loadBlock(p.reader_io, next) catch |err| {
-            p.read_err = err;
-            return error.ReadFailed;
-        };
-        // The bytes not taken end where the block's own begin.
-        const seek = block_prefix - kept.len;
-        @memcpy(slot.bytes.?[seek..block_prefix], carry[0..kept.len]);
-        r.buffer = slot.bytes.?;
-        r.seek = seek;
-        r.end = block_prefix + slot.len;
-        p.reader_block = next;
-    }
-
-    fn blockReadVec(r: *Io.Reader, data: [][]u8) Io.Reader.Error!usize {
-        _ = data;
-        try nextBlock(r);
-        return 0;
-    }
-
-    fn blockStream(r: *Io.Reader, w: *Io.Writer, limit: Io.Limit) Io.Reader.StreamError!usize {
-        _ = w;
-        _ = limit;
-        try nextBlock(r);
-        return 0;
-    }
-
-    fn blockRebase(r: *Io.Reader, capacity: usize) Io.Reader.RebaseError!void {
-        if (r.seek <= r.buffer.len and r.buffer.len - r.seek >= capacity) return;
-        try nextBlock(r);
+        return p.blocks.readerAt(io, at);
     }
 
     /// A reader over the pack from `at` with a buffer of its own, made
@@ -751,20 +610,14 @@ pub const Pack = struct {
     /// blocks as they were.
     fn streamReaderAt(p: *Pack, io: Io, at: u64) ErrorNamespace.Error!*Io.Reader {
         if (p.stream_buffer.len == 0) p.stream_buffer = try p.gpa.alloc(u8, stream_buffer_bytes);
-        p.stream_reader = p.file.borrow().*.reader(io, p.stream_buffer);
-        p.stream_reader.seekTo(at) catch |err| return switch (err) {
-            error.EndOfStream => error.TruncatedPack,
-            error.ReadFailed => p.stream_reader.err orelse error.ReadFailed,
-            else => |e| e,
-        };
+        p.stream_reader = input.readerAt(io, p.file.borrow().*, p.stream_buffer, at);
         return &p.stream_reader.interface;
     }
 
     /// Close the pack and release everything it holds.
     pub fn deinit(p: *Pack, io: Io) void {
         p.gpa.destroy(p.decoder);
-        for (p.blocks) |slot| if (slot.bytes) |bytes| p.gpa.destroy(bytes);
-        if (p.blocks.len != 0) p.gpa.free(p.blocks);
+        p.blocks.deinit();
         if (p.stream_buffer.len != 0) p.gpa.free(p.stream_buffer);
         if (p.mapping) |*m| m.destroy(io);
         p.file.deinit(io);
@@ -784,12 +637,7 @@ pub const Pack = struct {
             @memcpy(out, from[0..out.len]);
             return;
         }
-        var done: usize = 0;
-        while (done < out.len) {
-            const n = try p.file.borrow().*.readPositional(io, &.{out[done..]}, std.math.add(u64, offset, done) catch return error.TruncatedPack);
-            if (n == 0) return error.TruncatedPack;
-            done += n;
-        }
+        if (try input.readAt(io, p.file.borrow().*, offset, out) != out.len) return error.TruncatedPack;
     }
 
     /// The `out.len` packed bytes from `offset`, as they are in the file,
@@ -803,12 +651,7 @@ pub const Pack = struct {
             @memcpy(out, from[0..out.len]);
             return;
         }
-        var done: usize = 0;
-        while (done < out.len) {
-            const n = try p.file.borrow().*.readPositional(io, &.{out[done..]}, std.math.add(u64, offset, done) catch return error.TruncatedPack);
-            if (n == 0) return error.TruncatedPack;
-            done += n;
-        }
+        if (try input.readAt(io, p.file.borrow().*, offset, out) != out.len) return error.TruncatedPack;
     }
 
     /// The pack's bytes from `offset` on, read through `buffer` (unused for
@@ -816,9 +659,7 @@ pub const Pack = struct {
     pub fn readerAt(p: *Pack, io: Io, offset: u64, buffer: []u8) Self.Error!Positioned {
         if (offset > p.size) return error.TruncatedPack;
         if (p.memory) |mem| return .{ .memory = .fixed(mappedFrom(mem, offset) orelse return error.TruncatedPack) };
-        var file_reader = p.file.borrow().*.reader(io, buffer);
-        try file_reader.seekTo(offset);
-        return .{ .file = file_reader };
+        return .{ .file = input.readerAt(io, p.file.borrow().*, buffer, offset) };
     }
 
     /// What `readerAt` reads from.
@@ -856,7 +697,7 @@ pub const Pack = struct {
         // when the header runs into it.
         var n: usize = 0;
         while (true) {
-            const chunk = try p.blockBytesAt(io, std.math.add(u64, offset, n) catch return error.TruncatedPack);
+            const chunk = try p.blocks.bytesAt(io, std.math.add(u64, offset, n) catch return error.TruncatedPack);
             const take = @min(chunk.len, available - n);
             @memcpy(buf[n..][0..take], chunk[0..take]);
             n += take;
@@ -957,7 +798,7 @@ pub const Pack = struct {
     fn decodeAt(p: *Pack, io: Io, at: u64, result_len: usize, out: []u8) ErrorNamespace.Error!void {
         var fixed_reader: Io.Reader = undefined;
         const streamed = p.memory == null and result_len >= stream_entry_bytes;
-        const input: *Io.Reader = if (p.memory) |mem| blk: {
+        const source: *Io.Reader = if (p.memory) |mem| blk: {
             fixed_reader = .fixed(mappedFrom(mem, at) orelse return error.TruncatedPack);
             break :blk &fixed_reader;
         } else if (streamed)
@@ -967,11 +808,11 @@ pub const Pack = struct {
 
         // The whole entry in one pass, with bounded scratch past the result:
         // Warp keeps only reusable decoding tables, with no copied history.
-        const n = p.decoder.inflateReader(input, out, .{}) catch |err| switch (err) {
+        const n = p.decoder.inflateReader(source, out, .{}) catch |err| switch (err) {
             error.ReadFailed => return if (streamed)
                 p.stream_reader.err orelse error.ReadFailed
             else
-                p.read_err orelse error.ReadFailed,
+                p.blocks.err orelse error.ReadFailed,
             error.Truncated, error.InvalidStream, error.ChecksumMismatch, error.DictionaryMismatch, error.OutputTooSmall => return error.CorruptPackEntry,
         };
         if (n.out_len != result_len) return error.CorruptPackEntry;
@@ -1008,22 +849,17 @@ pub const Pack = struct {
         if (room > out.len) return error.StreamTooLong;
         var fixed_reader: Io.Reader = undefined;
         var file_reader: Io.File.Reader = undefined;
-        const input: *Io.Reader = if (p.memory) |mem| blk: {
+        const source: *Io.Reader = if (p.memory) |mem| blk: {
             fixed_reader = .fixed(mappedFrom(mem, at) orelse return error.TruncatedPack);
             break :blk &fixed_reader;
         } else blk: {
             // No more read ahead than the stream can take: a deflated entry
             // is at most an eighth longer than what it holds.
             const want = @min(reader.buffer.len, result_len +| result_len / 8 +| 64);
-            file_reader = p.file.borrow().*.reader(io, reader.buffer[0..want]);
-            file_reader.seekTo(at) catch |err| return switch (err) {
-                error.EndOfStream => error.TruncatedPack,
-                error.ReadFailed => file_reader.err orelse error.ReadFailed,
-                else => |e| e,
-            };
+            file_reader = input.readerAt(io, p.file.borrow().*, reader.buffer[0..want], at);
             break :blk &file_reader.interface;
         };
-        const n = reader.decoder.inflateReader(input, out[0..room], .{}) catch |err| switch (err) {
+        const n = reader.decoder.inflateReader(source, out[0..room], .{}) catch |err| switch (err) {
             error.ReadFailed => return if (p.memory == null) file_reader.err orelse error.ReadFailed else error.ReadFailed,
             error.Truncated, error.InvalidStream, error.ChecksumMismatch, error.DictionaryMismatch, error.OutputTooSmall => return error.CorruptPackEntry,
         };
@@ -1134,15 +970,13 @@ pub const Pack = struct {
                 out.clearRetainingCapacity();
                 try delta.applyTo(p.gpa, out, base_bytes, delta_bytes);
                 p.gpa.free(base_bytes);
-                // glint-ignore: Z026 -- a base the cache cannot hold is only inflated again; the object is already whole
-                if (cache) |c| c.put(pack_id, delta_offset, base_type, out.items) catch {};
+                if (cache) |c| _ = c.put(pack_id, delta_offset, base_type, out.items);
                 return .{ .type = base_type, .bytes = out.items };
             };
             const applied = try delta.apply(p.gpa, base_bytes, delta_bytes);
             p.gpa.free(base_bytes);
             base_bytes = applied;
-            // glint-ignore: Z026 -- a base the cache cannot hold is only inflated again; the object is already whole
-            if (cache) |c| c.put(pack_id, delta_offset, base_type, base_bytes) catch {};
+            if (cache) |c| _ = c.put(pack_id, delta_offset, base_type, base_bytes);
         }
 
         return .{ .type = base_type, .bytes = base_bytes };
@@ -1246,12 +1080,12 @@ pub const Pack = struct {
         var out: [20]u8 = @splat(0);
         const want: usize = @intCast(@min(size, out.len));
         var fixed_reader: Io.Reader = undefined;
-        const input: *Io.Reader = if (p.memory) |mem| blk: {
+        const source: *Io.Reader = if (p.memory) |mem| blk: {
             fixed_reader = .fixed(mappedFrom(mem, at) orelse return error.TruncatedPack);
             break :blk &fixed_reader;
         } else try p.blockReaderAt(io, at);
-        const result = p.decoder.inflateReader(input, out[0..want], .{ .partial = true }) catch |err| return switch (err) {
-            error.ReadFailed => p.read_err orelse error.ReadFailed,
+        const result = p.decoder.inflateReader(source, out[0..want], .{ .partial = true }) catch |err| return switch (err) {
+            error.ReadFailed => p.blocks.err orelse error.ReadFailed,
             else => error.CorruptPackEntry,
         };
         if (result.out_len != want) return error.CorruptPackEntry;
@@ -1357,7 +1191,7 @@ pub const Pack = struct {
             .object => |t| t,
             .ofs_delta, .ref_delta => return error.CorruptPackEntry,
         };
-        var input: [64 * 1024]u8 = undefined;
+        var buffer: [64 * 1024]u8 = undefined;
         var window: [(1 << 15) + 4096]u8 = undefined;
         var file_reader: Io.File.Reader = undefined;
         var fixed: Io.Reader = undefined;
@@ -1365,8 +1199,7 @@ pub const Pack = struct {
             fixed = .fixed(mappedFrom(mem, entry.data_at) orelse return error.TruncatedPack);
             break :blk &fixed;
         } else blk: {
-            file_reader = p.file.borrow().*.reader(io, &input);
-            try file_reader.seekTo(entry.data_at);
+            file_reader = input.readerAt(io, p.file.borrow().*, &buffer, entry.data_at);
             break :blk &file_reader.interface;
         };
         var inflating = warp.Inflate.Reader.init(source, &window, .{}) catch aegis.assert.never("zlib's default window, and the buffer holds it and a read");
@@ -1377,7 +1210,7 @@ pub const Pack = struct {
         while (left != 0) {
             try io.checkCancel();
             const n: usize = @intCast(@min(@as(u64, chunk.len), left));
-            inflating.interface.readSliceAll(chunk[0..n]) catch |err| return switch (err) {
+            input.exactly(&inflating.interface, chunk[0..n]) catch |err| return switch (err) {
                 error.ReadFailed => if (p.memory == null) file_reader.err orelse error.CorruptPackEntry else error.CorruptPackEntry,
                 error.EndOfStream => error.PackEntrySizeMismatch,
             };
@@ -1385,11 +1218,11 @@ pub const Pack = struct {
             left = std.math.sub(u64, left, n) catch return error.PackEntrySizeMismatch;
         }
         // Nothing past the stated length.
-        _ = inflating.interface.peekByte() catch |err| switch (err) {
-            error.EndOfStream => return hasher.final(),
-            error.ReadFailed => return if (p.memory == null) file_reader.err orelse error.CorruptPackEntry else error.CorruptPackEntry,
+        const ended = input.ended(&inflating.interface) catch |err| return switch (err) {
+            error.ReadFailed => if (p.memory == null) file_reader.err orelse error.CorruptPackEntry else error.CorruptPackEntry,
         };
-        return error.PackEntrySizeMismatch;
+        if (!ended) return error.PackEntrySizeMismatch;
+        return hasher.final();
     }
 
     /// Check the pack's trailing checksum, which names the pack and which the
@@ -1432,12 +1265,14 @@ pub const Cache = struct {
     oldest: ?*Entry = null,
     newest: ?*Entry = null,
 
-    const Key = struct {
+    /// What an object is kept under: its pack and its entry's offset.
+    pub const Key = struct {
         pack: u32,
         offset: u64,
     };
 
-    const Entry = struct {
+    /// One object kept, in its place in the recency list.
+    pub const Entry = struct {
         key: Key,
         type: object.Type,
         bytes: []u8,
@@ -1472,32 +1307,40 @@ pub const Cache = struct {
         return .{ .type = entry.type, .bytes = entry.bytes };
     }
 
-    /// Keep a copy of `bytes`. An object larger than the whole cache is not
-    /// kept, rather than emptying it.
-    pub fn put(c: *Cache, pack_id: u32, offset: u64, t: object.Type, bytes: []const u8) Allocator.Error!void {
-        if (c.limit_bytes == 0 or bytes.len > c.limit_bytes) return;
+    /// Keep a copy of `bytes`, and say whether it is kept. An object larger
+    /// than the whole cache is not kept, rather than emptying it, and nor is
+    /// one there is no memory to copy: the cache only spares a read, so a
+    /// base it does not hold is inflated again when it is next wanted.
+    pub fn put(c: *Cache, pack_id: u32, offset: u64, t: object.Type, bytes: []const u8) bool {
+        if (c.limit_bytes == 0 or bytes.len > c.limit_bytes) return false;
         const key: Key = .{ .pack = pack_id, .offset = offset };
         if (c.entries.get(key)) |entry| {
             c.touch(entry);
-            return;
+            return true;
         }
 
         while (c.bytes + bytes.len > c.limit_bytes) c.evictOldest();
 
-        const copy = try c.gpa.dupe(u8, bytes);
-        errdefer c.gpa.free(copy);
-        const entry = try c.gpa.create(Entry);
-        errdefer c.gpa.destroy(entry);
+        const copy = c.gpa.dupe(u8, bytes) catch return false;
+        const entry = c.gpa.create(Entry) catch {
+            c.gpa.free(copy);
+            return false;
+        };
         entry.* = .{
             .key = key,
             .type = t,
             .bytes = copy,
             .older = c.newest,
         };
-        try c.entries.put(c.gpa, key, entry);
+        c.entries.put(c.gpa, key, entry) catch {
+            c.gpa.destroy(entry);
+            c.gpa.free(copy);
+            return false;
+        };
         if (c.newest) |newest| newest.newer = entry else c.oldest = entry;
         c.newest = entry;
         c.bytes += copy.len;
+        return true;
     }
 
     fn touch(c: *Cache, entry: *Entry) void {
@@ -1537,16 +1380,21 @@ pub const Cache = struct {
     }
 };
 
+test {
+    _ = input;
+}
+
 test "the delta cache is byte-bounded and least recently used" {
     const gpa = std.testing.allocator;
     var cache = try Cache.init(gpa, 6);
     defer cache.deinit();
 
-    try cache.put(0, 10, .blob, "aa");
-    try cache.put(0, 20, .blob, "bb");
-    try cache.put(0, 30, .blob, "cc");
+    try std.testing.expect(cache.put(0, 10, .blob, "aa"));
+    try std.testing.expect(cache.put(0, 20, .blob, "bb"));
+    try std.testing.expect(cache.put(0, 30, .blob, "cc"));
     try std.testing.expectEqualStrings("aa", cache.get(0, 10).?.bytes);
-    try cache.put(0, 40, .blob, "dd");
+    try std.testing.expect(cache.put(0, 40, .blob, "dd"));
+    try std.testing.expect(!cache.put(0, 50, .blob, "longer than six"));
 
     try std.testing.expect(cache.get(0, 20) == null);
     try std.testing.expectEqualStrings("aa", cache.get(0, 10).?.bytes);
@@ -1604,14 +1452,39 @@ fn fuzzIndex(_: void, case: *shakedown.Case) anyerror!void {
     const n = shakedown.gen.intRange(case.source, usize, 0, scratch.len);
     case.source.bytes(scratch[0..n]);
     const bytes = try gpa.dupe(u8, scratch[0..n]);
-    var index = Index.parse(gpa, .sha1, bytes) catch return;
+    // Bytes that are no index are refused by name.
+    var index = Index.parse(gpa, .sha1, bytes) catch |err| return std.testing.expect(refusedIndex(err));
     defer index.deinit();
     var it = index.iterate();
     while (it.next() catch null) |_| {}
-    // glint-ignore: Z026 -- refusing a malformed input is the expected outcome; only a crash or a leak fails the fuzzer
-    _ = index.find(Oid.zero(.sha1)) catch {};
-    // glint-ignore: Z026 -- refusing a malformed input is the expected outcome; only a crash or a leak fails the fuzzer
-    _ = index.findPrefix("ab") catch {};
+    // An index that parsed refuses a lookup only by naming a row its
+    // tables do not hold, or a prefix two names share.
+    if (index.find(Oid.zero(.sha1))) |_| {} else |err| try std.testing.expect(refusedLookup(err));
+    if (index.findPrefix("ab")) |_| {} else |err| try std.testing.expect(refusedLookup(err));
+}
+
+/// Whether `err` says the bytes are no pack index, rather than that they
+/// could not be read.
+fn refusedIndex(err: IndexError) bool {
+    return switch (err) {
+        error.TruncatedIndex,
+        error.UnknownIndexVersion,
+        error.CorruptIndexFanout,
+        error.UnsortedIndex,
+        error.BadLargeOffset,
+        error.ChecksumMismatch,
+        error.PositionOutOfRange,
+        => true,
+        else => false,
+    };
+}
+
+/// Whether `err` is what a lookup in an index that parsed may refuse with.
+fn refusedLookup(err: Index.PrefixError) bool {
+    return switch (err) {
+        error.PositionOutOfRange, error.BadLargeOffset, error.AmbiguousPrefix => true,
+        else => false,
+    };
 }
 
 /// A pack written by hand, for the entries a real packer will not produce.
@@ -2106,7 +1979,9 @@ pub const Writer = struct {
 
     gpa: Allocator,
     kind: Kind,
-    dir: Io.Dir,
+    /// The directory the pack is written in, which the caller keeps open
+    /// and closes.
+    dir: aegis.own.Unowned(Io.Dir),
     options: WriteOptions,
     /// How many objects the header was written with, or `null` when the
     /// count was not known and the header will be patched at the end.
@@ -2137,7 +2012,7 @@ pub const Writer = struct {
     streaming: bool = false,
 
     /// The pack as it was before an entry, so the entry can be taken back.
-    const Mark = struct {
+    pub const Mark = struct {
         at: u64,
         hasher: hash.Hasher,
         entries: usize,
@@ -2151,7 +2026,7 @@ pub const Writer = struct {
     /// Everything written to the pack goes through here, so the pack's own
     /// checksum, the CRC of the entry being written and the offset of the
     /// next one are all kept without a second pass over the bytes.
-    const Sink = struct {
+    pub const Sink = struct {
         out: *Io.Writer,
         hasher: hash.Hasher,
         crc: warp.Crc32,
@@ -2270,7 +2145,7 @@ pub const Writer = struct {
         w.* = .{
             .gpa = gpa,
             .kind = kind,
-            .dir = dir,
+            .dir = .of(dir),
             .options = options,
             .expected = object_count,
             .temp = undefined,
@@ -2326,7 +2201,7 @@ pub const Writer = struct {
         }
         w.file.?.deinit(io);
         // Abandoning cannot fail; a temporary pack left behind is what `git gc` prunes.
-        fs.removeLeftover(io, w.dir, w.temp[0..w.temp_len]);
+        fs.removeLeftover(io, w.dir.get(), w.temp[0..w.temp_len]);
         w.finished = true;
     }
 
@@ -2514,14 +2389,12 @@ pub const Writer = struct {
         var left = size;
         while (left != 0) {
             try io.checkCancel();
-            const piece = in.peekGreedy(1) catch |err| return switch (err) {
+            const taken = input.some(in, left) catch |err| return switch (err) {
                 error.ReadFailed => error.ReadFailed,
                 error.EndOfStream => error.ShortRead,
             };
-            const taken = piece[0..@intCast(@min(@as(u64, piece.len), left))];
             hasher.update(taken);
             try deflating.interface.writeAll(taken);
-            in.toss(taken.len);
             left = std.math.sub(u64, left, taken.len) catch return error.ShortRead;
         }
         try deflating.finish();
@@ -2549,7 +2422,7 @@ pub const Writer = struct {
     }
 
     fn dropLastBody(w: *Writer, io: Io) Self.WriteError!void {
-        std.debug.assert(!w.streaming);
+        aegis.assert.invariant(!w.streaming, "only a pack written to a file takes an entry back");
         const mark = w.mark.?;
         w.mark = null;
         try w.file_writer.interface.flush();
@@ -2640,7 +2513,7 @@ pub const Writer = struct {
         else
             try w.patchCountAndRehash(io);
         try w.sink.out.writeAll(checksum.raw());
-        var token: ?retention.Token = if (w.options.keep) try retention.Token.open(w.gpa, io, w.dir, checksum) else null;
+        var token: ?retention.Token = if (w.options.keep) try retention.Token.open(w.gpa, io, w.dir.get(), checksum) else null;
         errdefer if (token) |*t| t.deinit(io);
         const pack_bytes = w.sink.count + w.kind.rawLen();
         try w.file_writer.interface.flush();
@@ -2664,47 +2537,47 @@ pub const Writer = struct {
         const idx_temp = fs.tempName(io, &idx_temp_buf, "tmp_idx_");
         const index_bytes = try w.writeIndex(io, checksum, idx_temp);
         // The write's error is the one to report; a temporary index left behind is what git gc prunes.
-        errdefer fs.removeLeftover(io, w.dir, idx_temp);
+        errdefer fs.removeLeftover(io, w.dir.get(), idx_temp);
         var rev_temp_buf: [64]u8 = undefined;
         const rev_temp: ?[]const u8 = if (w.options.reverse_index) fs.tempName(io, &rev_temp_buf, "tmp_rev_") else null;
-        if (rev_temp) |t| try rev_index.write(w.gpa, io, w.dir, t, .{ .kind = w.kind, .entries = w.entries.items, .pack_checksum = checksum, .sync = w.options.fsync.sync(.pack_metadata) });
+        if (rev_temp) |t| try rev_index.write(w.gpa, io, w.dir.get(), t, .{ .kind = w.kind, .entries = w.entries.items, .pack_checksum = checksum, .sync = w.options.fsync.sync(.pack_metadata) });
         // The write's error is the one to report; a temporary reverse index left behind is what git gc prunes.
-        errdefer if (rev_temp) |t| fs.removeLeftover(io, w.dir, t);
+        errdefer if (rev_temp) |t| fs.removeLeftover(io, w.dir.get(), t);
         var mtimes_temp_buf: [64]u8 = undefined;
         const mtimes_temp: ?[]const u8 = if (w.options.mtimes != null) fs.tempName(io, &mtimes_temp_buf, "tmp_mtimes_") else null;
-        if (mtimes_temp) |t| try mtimes.write(io, w.dir, t, .{ .kind = w.kind, .entries = w.entries.items, .times = w.options.mtimes.?, .pack_checksum = checksum, .sync = w.options.fsync.sync(.pack_metadata) });
+        if (mtimes_temp) |t| try mtimes.write(io, w.dir.get(), t, .{ .kind = w.kind, .entries = w.entries.items, .times = w.options.mtimes.?, .pack_checksum = checksum, .sync = w.options.fsync.sync(.pack_metadata) });
         // The write's error is the one to report; a temporary left behind is what git gc prunes.
-        errdefer if (mtimes_temp) |t| fs.removeLeftover(io, w.dir, t);
+        errdefer if (mtimes_temp) |t| fs.removeLeftover(io, w.dir.get(), t);
 
         // read-only, as git leaves a pack and its indexes
-        try fs.readOnlyObject(io, w.dir, w.temp[0..w.temp_len], w.options.shared);
-        try fs.readOnlyObject(io, w.dir, idx_temp, w.options.shared);
-        if (rev_temp) |t| try fs.readOnlyObject(io, w.dir, t, w.options.shared);
-        if (mtimes_temp) |t| try fs.readOnlyObject(io, w.dir, t, w.options.shared);
-        fs.rename(io, w.dir, w.temp[0..w.temp_len], pack_name) catch |err| {
+        try fs.readOnlyObject(io, w.dir.get(), w.temp[0..w.temp_len], w.options.shared);
+        try fs.readOnlyObject(io, w.dir.get(), idx_temp, w.options.shared);
+        if (rev_temp) |t| try fs.readOnlyObject(io, w.dir.get(), t, w.options.shared);
+        if (mtimes_temp) |t| try fs.readOnlyObject(io, w.dir.get(), t, w.options.shared);
+        fs.rename(io, w.dir.get(), w.temp[0..w.temp_len], pack_name) catch |err| {
             // The rename's error is the one to report; temporary files left behind are what `git gc` prunes.
-            fs.removeLeftover(io, w.dir, w.temp[0..w.temp_len]);
+            fs.removeLeftover(io, w.dir.get(), w.temp[0..w.temp_len]);
             // The rename's error is the one to report; temporary files left behind are what `git gc` prunes.
-            fs.removeLeftover(io, w.dir, idx_temp);
+            fs.removeLeftover(io, w.dir.get(), idx_temp);
             return err;
         };
         // The reverse index before the index, as git renames them.
         if (rev_temp) |t| {
             var rev_name_buf: [file_name_len]u8 = undefined;
             const rev_name = fileName(&rev_name_buf, w.options.prefix, text, ".rev");
-            try fs.rename(io, w.dir, t, rev_name);
+            try fs.rename(io, w.dir.get(), t, rev_name);
         }
         if (mtimes_temp) |t| {
             var mtimes_name_buf: [file_name_len]u8 = undefined;
             const mtimes_name = fileName(&mtimes_name_buf, w.options.prefix, text, ".mtimes");
-            try fs.rename(io, w.dir, t, mtimes_name);
+            try fs.rename(io, w.dir.get(), t, mtimes_name);
         }
-        fs.rename(io, w.dir, idx_temp, idx_name) catch |err| {
+        fs.rename(io, w.dir.get(), idx_temp, idx_name) catch |err| {
             // The rename's error is the one to report; a pack without its index is unreachable, and `git gc` prunes it.
-            fs.removeLeftover(io, w.dir, idx_temp);
+            fs.removeLeftover(io, w.dir.get(), idx_temp);
             return err;
         };
-        try syncNames(io, w.dir, w.options.fsync);
+        try syncNames(io, w.dir.get(), w.options.fsync);
 
         return .{
             .keep = token,
@@ -2733,7 +2606,7 @@ pub const Writer = struct {
         const buffer = w.file_buffer;
         while (at < w.sink.count) {
             const want: usize = @intCast(@min(buffer.len, w.sink.count - at));
-            const n = try w.file.?.borrow().*.readPositionalAll(io, buffer[0..want], at);
+            const n = try input.readAt(io, w.file.?.borrow().*, at, buffer[0..want]);
             if (n == 0) break;
             hasher.update(buffer[0..n]);
             at += n;
@@ -2742,7 +2615,7 @@ pub const Writer = struct {
     }
 
     fn writeIndex(w: *Writer, io: Io, pack_checksum: Oid, idx_name: []const u8) WriteError!u64 {
-        return writeIndexFile(w.gpa, io, w.dir, idx_name, .{ .kind = w.kind, .entries = w.entries.items, .pack_checksum = pack_checksum, .sync = w.options.fsync.sync(.pack_metadata), .version = w.options.index_version });
+        return writeIndexFile(w.gpa, io, w.dir.get(), idx_name, .{ .kind = w.kind, .entries = w.entries.items, .pack_checksum = pack_checksum, .sync = w.options.fsync.sync(.pack_metadata), .version = w.options.index_version });
     }
 };
 
@@ -2845,7 +2718,7 @@ fn writeIndexBody(gpa: Allocator, out: *Io.Writer, options: IndexWriteOptions, e
         running += slot.*;
         slot.* = running;
     }
-    std.debug.assert(running == entries.len);
+    aegis.assert.invariant(running == entries.len, "the fanout's last row counts every entry");
     for (fanout) |value| {
         var bytes: [4]u8 = undefined;
         std.mem.writeInt(u32, &bytes, value, .big);
@@ -2895,7 +2768,7 @@ fn writeIndexBody(gpa: Allocator, out: *Io.Writer, options: IndexWriteOptions, e
     written += raw_len;
     // The layout `Index.parse` reads back: header, fanout, names, CRCs,
     // offsets, large offsets, two checksums.
-    std.debug.assert(written == if (version == 1) 1024 + entries.len * (raw_len + 4) + 2 * raw_len else 8 + 1024 + entries.len * (raw_len + 8) + large.items.len * 8 + 2 * raw_len);
+    aegis.assert.invariant(written == if (version == 1) 1024 + entries.len * (raw_len + 4) + 2 * raw_len else 8 + 1024 + entries.len * (raw_len + 8) + large.items.len * 8 + 2 * raw_len, "the index is the length its layout gives");
     try out.writeAll(own.raw()[0..raw_len]);
     try out.flush();
     return written;
@@ -3148,9 +3021,9 @@ test "an aborted pack leaves the directory as it was" {
 /// size, and one insert command. Good for a base under 256 bytes and a
 /// suffix under 128, which is what these tests use.
 fn copyThenInsert(gpa: Allocator, base_len: usize, suffix: []const u8) ![]u8 {
-    std.debug.assert(base_len < 256);
-    std.debug.assert(suffix.len < 128);
-    std.debug.assert(suffix.len > 0);
+    aegis.assert.invariant(base_len < 256, "a one-byte copy covers the base");
+    aegis.assert.invariant(suffix.len < 128, "a one-byte insert holds the suffix");
+    aegis.assert.invariant(suffix.len > 0, "an insert carries at least one byte");
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);
     try out.append(gpa, @intCast(base_len));
@@ -3529,7 +3402,7 @@ test "a pack the default block cache holds is read once in any order, and holds 
     try std.testing.expect(faults.count(.fileReadPositional) != 0);
     const held = live.live - opened;
     const tables = blocks * @sizeOf(Slot);
-    if (held > faults.count(.fileReadPositional) * block_stride + tables) {
+    if (held > faults.count(.fileReadPositional) * input.block_stride + tables) {
         std.debug.print("one object read in {d} reads holds {d} bytes\n", .{ faults.count(.fileReadPositional), held });
         return error.TestUnexpectedResult;
     }
