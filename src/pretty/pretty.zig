@@ -394,7 +394,9 @@ pub const Decorations = struct {
                 // git's `get_oid_hex`: the hex at the start, past the base.
                 const rest = entry.name[base.len..];
                 if (rest.len < kind.hexLen()) continue;
-                const original = Oid.parse(kind, rest[0..kind.hexLen()]) catch continue;
+                // A replace ref whose name holds no object id replaces
+                // nothing, as git passes over it.
+                const original = (Oid.parse(kind, rest[0..kind.hexLen()]) catch null) orelse continue;
                 _ = repo.objectDatabase().readHeader(io, original) catch |err| switch (err) {
                     error.ObjectNotFound => continue,
                     else => return err,

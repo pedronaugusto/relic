@@ -26,9 +26,9 @@ const Self = @This();
 
 const std = @import("std");
 const aegis = @import("aegis");
+const input = @import("input.zig");
 const ctype = @import("../text.zig").ctype;
 const Allocator = std.mem.Allocator;
-const assert = std.debug.assert;
 const Io = std.Io;
 
 const patchparse = @import("patch.zig");
@@ -469,7 +469,6 @@ const State = struct {
     a: Allocator,
     repo: *Repository,
     options: Options,
-    wt: ?Io.Dir,
     rules: worktree.Rules,
     conv: convert.Session,
     ws_action: WsAction,
@@ -491,6 +490,12 @@ const State = struct {
     kept_symlinks: std.StringHashMapUnmanaged(void) = .empty,
     notes: std.ArrayList(Note) = .empty,
     p_context: usize,
+
+    /// The working tree, `null` in a bare repository: the repository's,
+    /// which it keeps open.
+    fn workTree(st: *const State) ?Io.Dir {
+        return st.repo.workDirectory();
+    }
 
     fn note(st: *State, n: Note) Allocator.Error!void {
         try st.notes.append(st.a, n);
@@ -564,7 +569,6 @@ pub fn apply(gpa: Allocator, io: Io, repo: *Repository, text: []const u8, option
         .a = a,
         .repo = repo,
         .options = options,
-        .wt = wt,
         .rules = rules,
         .conv = .open(gpa, io, .{
             .wt = wt orelse repo.gitDirectory(),
@@ -829,7 +833,7 @@ fn usePatch(gpa: Allocator, limits: []const Limit, p: *const FilePatch) Allocato
 }
 
 fn wsRuleFor(st: *State, path: []const u8, configured: whitespace.Rule) Error!whitespace.Rule {
-    const rule: diff.WhitespaceRule = .{ .attrs = st.rules.attrs, .work_dir = st.wt, .configured = configured };
+    const rule: diff.WhitespaceRule = .{ .attrs = st.rules.attrs, .work_dir = if (st.workTree()) |wt| .of(wt) else null, .configured = configured };
     return rule.of(st.a, st.io, path);
 }
 
@@ -1111,15 +1115,15 @@ fn updateImage(st: *State, img: *Image, applied_pos: usize, preimage: *const Ima
     const gpa = st.gpa;
     aegis.assert.invariant(applied_pos <= img.lines.items.len, "applied_pos <= img.lines.items.len");
     // The lines replaced and the lines put in their place are each whole.
-    assert(preimage.tableLen() == preimage.buf.items.len);
-    assert(postimage.tableLen() == postimage.buf.items.len);
+    aegis.assert.invariant(preimage.tableLen() == preimage.buf.items.len, "the preimage's lines are its whole buffer");
+    aegis.assert.invariant(postimage.tableLen() == postimage.buf.items.len, "the postimage's lines are its whole buffer");
     var preimage_limit = preimage.lines.items.len;
     if (preimage_limit > img.lines.items.len - applied_pos) preimage_limit = img.lines.items.len - applied_pos;
     var applied_at: usize = 0;
     for (img.lines.items[0..applied_pos]) |l| applied_at += l.len;
     var remove_count: usize = 0;
     for (img.lines.items[applied_pos .. applied_pos + preimage_limit]) |l| remove_count += l.len;
-    assert(applied_at + remove_count <= img.buf.items.len);
+    aegis.assert.invariant(applied_at + remove_count <= img.buf.items.len, "the lines replaced are inside the image");
     try img.buf.replaceRange(gpa, applied_at, remove_count, postimage.buf.items);
     try img.lines.replaceRange(gpa, applied_pos, preimage_limit, postimage.lines.items);
     if (!st.options.allow_overlap) {
@@ -1204,8 +1208,8 @@ fn hunkImages(st: *State, frag: patchparse.Fragment, inaccurate_eof: bool, ws_ru
     }
     // Each line's bytes are in the image's buffer, and nothing else is:
     // `updateImage` splices by these lengths.
-    assert(pre.tableLen() == pre.buf.items.len);
-    assert(post.tableLen() == post.buf.items.len);
+    aegis.assert.invariant(pre.tableLen() == pre.buf.items.len, "the preimage's lines are its whole buffer");
+    aegis.assert.invariant(post.tableLen() == post.buf.items.len, "the postimage's lines are its whole buffer");
     return .{ .count = new_blank_lines_at_end, .first_line = found_new_blank_lines_at_end };
 }
 
@@ -1363,17 +1367,16 @@ fn readBlobFor(st: *State, oid: Oid, mode: Mode, out: *std.ArrayList(u8)) Error!
 /// it: a symlink's target, or a file through the clean filters and line
 /// endings, which `crlf_in_old` keeps.
 fn readOldData(st: *State, raw_path: []const u8, found: fs.Entry, crlf_in_old: bool, out: *std.ArrayList(u8)) Error!void {
-    const wt = st.wt.?;
+    const wt = st.workTree().?;
     // A patch's name reaches the working tree only as a checked path.
     const path = (try worktree.readable(raw_path, st.rules.protect)).bytes;
     switch (found.kind) {
         .sym_link => {
             var buf: [4096]u8 = undefined;
-            const n = try wt.readLink(st.io, path, &buf);
-            try out.appendSlice(st.gpa, buf[0..n]);
+            try out.appendSlice(st.gpa, try input.link(st.io, wt, path, &buf));
         },
         .file => {
-            const bytes = try aegis.own.readFile(st.io, wt, path, st.gpa, aegis.units.Bytes(u64).fromRaw(std.math.maxInt(u64)));
+            const bytes = try input.file(st.io, wt, path, st.gpa, .worktree_file);
             defer st.gpa.free(bytes);
             if (crlf_in_old or st.rules.attrs == null) {
                 try out.appendSlice(st.gpa, bytes);
@@ -1481,7 +1484,7 @@ fn loadCurrent(st: *State, img: *Image, entry: *Entry) Error!bool {
     const name = entry.p.new_name.?;
     const ix = st.index.?;
     const ce = (ix.find(name) orelse return false).*;
-    const wt = st.wt.?;
+    const wt = st.workTree().?;
     var found = try fs.statAt(st.io, wt, name);
     if (found == null) {
         found = try checkoutTarget(st, ce);
@@ -1613,7 +1616,7 @@ fn pathIsBeyondSymlink(st: *State, name: []const u8) Error!bool {
             if (st.index.?.find(dir)) |e| {
                 if (e.mode == .symlink) return true;
             }
-        } else if (st.wt) |wt| {
+        } else if (st.workTree()) |wt| {
             if (try fs.statAt(st.io, wt, dir)) |found| {
                 if (found.kind == .sym_link) return true;
             }
@@ -1642,7 +1645,7 @@ fn modeFromStat(st: *State, found: fs.Entry, ce: ?index_mod.Entry) Mode {
 }
 
 fn checkoutTarget(st: *State, ce: index_mod.Entry) Error!?fs.Entry {
-    const wt = st.wt.?;
+    const wt = st.workTree().?;
     var written = try worktree.writeEntry(st.gpa, st.io, wt, .{ .db = st.repo.objectDatabase(), .conv = &st.conv, .path = ce.path, .mode = ce.mode, .oid = ce.oid, .rules = st.rules });
     if (st.index.?.find(ce.path)) |e| st.rules.fillStat(e, written.stat);
     _ = &written;
@@ -1665,7 +1668,7 @@ fn checkPreimage(st: *State, entry: *Entry) Error!PreimageCheck {
     if (previous) |prev| {
         st_mode = prev.patched.p.new_mode;
     } else if (!st.cached) {
-        out.found = try fs.statAt(st.io, st.wt.?, old_name);
+        out.found = try fs.statAt(st.io, st.workTree().?, old_name);
         stat_missing = out.found == null;
     }
     if (st.check_index and previous == null) {
@@ -1679,7 +1682,7 @@ fn checkPreimage(st: *State, entry: *Entry) Error!PreimageCheck {
             if (out.found) |f| {
                 if (e.mode == .gitlink) {
                     if (f.kind != .directory) return .{ .reason = .does_not_match_index };
-                } else if (try worktree.differsFromIndex(st.gpa, st.io, st.wt.?, .{ .index = st.index.?, .entry = e.* }, st.rules)) {
+                } else if (try worktree.differsFromIndex(st.gpa, st.io, st.workTree().?, .{ .index = st.index.?, .entry = e.* }, st.rules)) {
                     return .{ .reason = .does_not_match_index };
                 }
             }
@@ -1717,7 +1720,7 @@ fn checkToCreate(st: *State, new_name: []const u8, ok_if_exists: bool) Error!Cre
         }
     }
     if (st.cached) return .ok;
-    if (try fs.statAt(st.io, st.wt.?, new_name)) |found| {
+    if (try fs.statAt(st.io, st.workTree().?, new_name)) |found| {
         if (found.kind == .directory or ok_if_exists) return .ok;
         if (try hasSymlinkLeadingPath(st, new_name)) return .ok;
         return .in_worktree;
@@ -1728,7 +1731,7 @@ fn checkToCreate(st: *State, new_name: []const u8, ok_if_exists: bool) Error!Cre
 fn hasSymlinkLeadingPath(st: *State, name: []const u8) Error!bool {
     var at: usize = 0;
     while (std.mem.findScalarPos(u8, name, at, '/')) |slash| {
-        if (try fs.statAt(st.io, st.wt.?, name[0..slash])) |f| {
+        if (try fs.statAt(st.io, st.workTree().?, name[0..slash])) |f| {
             if (f.kind == .sym_link) return true;
         }
         at = slash + 1;
@@ -1820,7 +1823,7 @@ fn removeFile(st: *State, entry: *Entry, rmdir_empty: bool) Error!void {
         _ = ix.remove(old);
     }
     if (!st.cached) {
-        const wt = st.wt.?;
+        const wt = st.workTree().?;
         if (patchparse.isGitlink(entry.p.old_mode)) {
             wt.deleteDir(st.io, old) catch |err| switch (err) {
                 error.DirNotEmpty, error.FileNotFound, error.NotDir => {},
@@ -1888,7 +1891,7 @@ fn createFile(st: *State, entry: *Entry) Error!void {
     var stat: fs.Stat = .none;
     if (!st.cached) {
         if (try pathIsBeyondSymlink(st, path)) return error.UnsafePath;
-        const written = try worktree.writeBytes(st.gpa, st.io, st.wt.?, .{ .conv = &st.conv, .path = path, .mode = objectMode(mode), .bytes = buf, .rules = st.rules });
+        const written = try worktree.writeBytes(st.gpa, st.io, st.workTree().?, .{ .conv = &st.conv, .path = path, .mode = objectMode(mode), .bytes = buf, .rules = st.rules });
         stat = written.stat;
     }
     if (entry.conflicted_threeway) return addConflictedStages(st, entry);
@@ -1925,11 +1928,11 @@ fn writeOutOneReject(st: *State, entry: *Entry) Error!void {
         if (frag.text.len == 0 or frag.text[frag.text.len - 1] != '\n') try out.append(st.gpa, '\n');
     }
     const rej = try st.a.print("{s}.rej", .{name});
-    st.wt.?.deleteFile(st.io, rej) catch |err| switch (err) {
+    st.workTree().?.deleteFile(st.io, rej) catch |err| switch (err) {
         error.FileNotFound => {},
         else => |e| return e,
     };
-    try st.wt.?.writeFile(st.io, .{ .sub_path = rej, .data = out.items, .flags = .{ .exclusive = true } });
+    try st.workTree().?.writeFile(st.io, .{ .sub_path = rej, .data = out.items, .flags = .{ .exclusive = true } });
 }
 
 fn writeOutResults(st: *State, list: []const *Entry, conflicted: *std.ArrayList([]const u8)) Error!void {

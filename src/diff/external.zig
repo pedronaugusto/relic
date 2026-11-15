@@ -16,6 +16,7 @@
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -29,6 +30,7 @@ const attributes = @import("../patterns.zig").attributes;
 const checkout = @import("../checkout/checkout.zig");
 const convert = @import("../checkout/convert.zig");
 const driver_mod = @import("driver.zig");
+const input = @import("input.zig");
 
 const Oid = hash.Oid;
 
@@ -43,7 +45,7 @@ pub const Error = error{
     /// A filter would hand the blob over later, which a diff cannot wait
     /// for.
     DelayedContent,
-} || program.Error || fs.TempFile.Error || fs.StatError || checkout.Error || convert.Error || odb_mod.Error || attributes.Error || Io.File.ReadStreamingError || Io.Writer.Error || Allocator.Error;
+} || program.Error || fs.TempFile.Error || fs.StatError || checkout.Error || convert.Error || odb_mod.Error || attributes.Error || aegis.own.ReadOpenedError || Io.Writer.Error || Allocator.Error;
 
 /// `diff.external` and `diff.trustExitCode`, the last of each deciding;
 /// `null` with no `diff.external`. git takes `GIT_EXTERNAL_DIFF` (with
@@ -76,7 +78,8 @@ pub const External = struct {
 
 /// A working tree as an external diff uses it.
 pub const Worktree = struct {
-    dir: Io.Dir,
+    /// The working tree, which its owner keeps open.
+    dir: aegis.own.Unowned(Io.Dir),
     /// How a blob is written out: as a checkout writes it.
     conv: *convert.Session,
     /// The index and the files it vouches for, where the diff read the
@@ -137,7 +140,7 @@ pub fn run(ext: *const External, gpa: Allocator, io: Io, spec: Run, w: *Io.Write
     var outcome = try program.run(gpa, io, ext.programs, .{
         .argv = argv.items,
         .shell = true,
-        .cwd = if (ext.worktree) |wt| .{ .dir = wt.dir } else .inherit,
+        .cwd = if (ext.worktree) |wt| .{ .dir = wt.dir.get() } else .inherit,
         .set = &set,
         .stderr = .inherit,
     }, .{});
@@ -200,16 +203,14 @@ fn blobBytes(ext: *const External, a: Allocator, io: Io, spec: Run, s: Side) Sel
     const blob = try a.dupe(u8, found.bytes);
     const wt = ext.worktree orelse return blob;
     const attrs = spec.attrs orelse return blob;
-    try attrs.enter(io, wt.dir, s.path);
+    try attrs.enter(io, wt.dir.get(), s.path);
     const applied = try attrs.lookup(a, s.path, .file);
     var content = try wt.conv.toWorktree(a, .{ .path = s.path, .blob = blob, .applied = applied }, .{ .blob = s.oid });
     return switch (content) {
         .bytes => |b| b,
         .file => |*file| blk: {
             defer file.deinit(io);
-            var buf: [4096]u8 = undefined;
-            var reader = file.borrow().*.readerStreaming(io, &buf);
-            break :blk try reader.interface.allocRemaining(a, .unlimited);
+            break :blk try input.opened(io, file.borrow().*, a, .blob);
         },
         .delayed => error.DelayedContent,
     };

@@ -7,6 +7,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -187,8 +188,9 @@ pub const Conversion = struct {
 pub const Drivers = struct {
     attrs: ?*attributes.Attrs = null,
     /// The working tree whose `.gitattributes` are read on the way down to
-    /// a path; `null` reads only what `attrs` holds.
-    work_dir: ?Io.Dir = null,
+    /// a path, which its owner keeps open; `null` reads only what `attrs`
+    /// holds.
+    work_dir: ?aegis.own.Unowned(Io.Dir) = null,
     /// Where `diff.<driver>.*` is read.
     config: ?*const config_mod.Config = null,
 
@@ -201,7 +203,7 @@ pub const Drivers = struct {
         const s = side orelse return .{ .named = "default" };
         if (s.mode != .file and s.mode != .exec) return .{ .named = "default" };
         const attrs = d.attrs orelse return Driver.of(d.config, null);
-        if (d.work_dir) |wt| try attrs.enter(io, wt, s.path);
+        if (d.work_dir) |wt| try attrs.enter(io, wt.get(), s.path);
         return Driver.of(d.config, (try attrs.lookup(a, s.path, .file)).get("diff"));
     }
 
@@ -211,7 +213,7 @@ pub const Drivers = struct {
     /// `default`.
     pub fn ofPath(d: Drivers, a: Allocator, io: Io, path: []const u8) attributes.Error!?Driver {
         const attrs = d.attrs orelse return null;
-        if (d.work_dir) |wt| try attrs.enter(io, wt, path);
+        if (d.work_dir) |wt| try attrs.enter(io, wt.get(), path);
         const state = (try attrs.lookup(a, path, .file)).get("diff") orelse return null;
         return switch (state) {
             .set => .text,
@@ -297,7 +299,9 @@ pub const Rule = struct {
     /// Empty for git's default.
     regs: []Reg,
 
-    const Reg = struct { re: ere.Regex, negate: bool };
+    /// One pattern line: a line it matches is a function line, or with
+    /// `negate` (a leading `!`) a line that is not one.
+    pub const Reg = struct { re: ere.Regex, negate: bool };
 
     /// The rule for the driver `Driver.name` gives, or git's default lines
     /// for `null` and for a driver with no pattern.

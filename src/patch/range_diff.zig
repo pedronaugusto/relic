@@ -16,7 +16,6 @@ const std = @import("std");
 const aegis = @import("aegis");
 const ctype = @import("../text.zig").ctype;
 const Allocator = std.mem.Allocator;
-const assert = std.debug.assert;
 const Io = std.Io;
 
 const hash = @import("../hash/hash.zig");
@@ -295,7 +294,7 @@ const Reader = struct {
         const same = (if (old) |o| o.oid else zero).eql(if (new) |n| n.oid else zero);
         var pair: diff.FilePair = undefined;
         if (!same) {
-            const drivers: driver.Drivers = .{ .attrs = if (r.attrs) |*attrs| attrs else null, .work_dir = r.repo.workDirectory(), .config = r.repo.configuration() };
+            const drivers: driver.Drivers = .{ .attrs = if (r.attrs) |*attrs| attrs else null, .work_dir = if (r.repo.workDirectory()) |work_tree| .of(work_tree) else null, .config = r.repo.configuration() };
             try pair.init(r.gpa, r.io, .{ .db = r.repo.objectDatabase(), .drivers = drivers, .textconv = r.textconv }, sides);
             if (pair.silent(change.status)) {
                 pair.deinit();
@@ -561,9 +560,9 @@ const Costs = struct {
 /// column_count * row]`. Ported line for line, ties included; each phase
 /// of git's function is a step of `Assignment`.
 fn computeAssignment(gpa: Allocator, column_count: usize, row_count: usize, cost: []const i32, column2row: []i32, row2column: []i32) Allocator.Error!void {
-    assert(cost.len == column_count * row_count);
-    assert(column2row.len == column_count);
-    assert(row2column.len == row_count);
+    aegis.assert.invariant(cost.len == column_count * row_count, "a cost for every column in every row");
+    aegis.assert.invariant(column2row.len == column_count, "a row for every column");
+    aegis.assert.invariant(row2column.len == row_count, "a column for every row");
     if (column_count < 2) {
         @memset(column2row, 0);
         @memset(row2column, 0);
@@ -738,7 +737,7 @@ const Assignment = struct {
 
             // augmentation
             while (true) {
-                assert(j >= 0);
+                aegis.assert.invariant(j >= 0, "an augmenting path ends at a column the shortest path found");
                 const i = pred[@intCast(j)];
                 l.column2row[@intCast(j)] = i;
                 std.mem.swap(i32, &j, &l.row2column[@intCast(i)]);
@@ -878,8 +877,8 @@ const Writer = struct {
             return;
         };
         var number: [20]u8 = undefined;
-        // unreachable: a usize is at most 20 digits
-        const text = std.mem.print(&number, "{d}", .{index + 1}) catch unreachable;
+        const text = std.mem.print(&number, "{d}", .{index + 1}) catch
+            aegis.assert.never("a usize is at most 20 decimal digits");
         if (text.len < s.width) try s.w.splatByteAll(' ', s.width - text.len);
         var buf: [hash.max_hex_len]u8 = undefined;
         try s.w.print("{s}:  {s}", .{ text, try abbrev.unique(s.io, s.repo.objectDatabase(), p.oid, s.abbrev_len, &buf) });

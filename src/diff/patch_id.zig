@@ -15,6 +15,7 @@
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const ctype = @import("../text.zig").ctype;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -106,7 +107,8 @@ fn addPath(h: *hash.Hasher, path: []const u8) void {
 
 fn addMode(h: *hash.Hasher, mode: object.Mode) void {
     var buf: [16]u8 = undefined;
-    h.update(std.mem.print(&buf, "{o:0>6}", .{mode.raw()}) catch unreachable);
+    h.update(std.mem.print(&buf, "{o:0>6}", .{mode.raw()}) catch
+        aegis.assert.never("a mode is a u32, at most 11 octal digits in a 16-byte buffer"));
 }
 
 /// Read a side of a change: a blob's bytes, a symlink's target, or what git
@@ -311,7 +313,7 @@ test "a file the attributes call binary, or past core.bigFileThreshold, is hashe
         var attrs: attributes.Attrs = try .init(gpa, .{});
         defer attrs.deinit();
         defer attrs.leave();
-        const rule: driver.Drivers = .{ .attrs = &attrs, .work_dir = repo.dir, .config = &config };
+        const rule: driver.Drivers = .{ .attrs = &attrs, .work_dir = .of(repo.dir), .config = &config };
         const upstream_text = try repo.line(io, &.{ "rev-parse", "main" });
         defer gpa.free(upstream_text);
         const topic_text = try repo.line(io, &.{ "rev-parse", "topic" });

@@ -24,7 +24,7 @@ const ErrorNamespace = @This();
 const unicode_width = @import("../text.zig").unicode_width;
 const builtin = @import("builtin");
 const std = @import("std");
-const aegis = @import("aegis");
+const input = @import("input.zig");
 const ctype = @import("../text.zig").ctype;
 const fs = @import("../fs/fs.zig");
 const decimal = @import("../text.zig").decimal;
@@ -587,8 +587,8 @@ const Value = struct {
 
 const Handler = enum { append, @"align", end, @"if", then, @"else" };
 
-/// An object a value is read from.
-const ObjectData = struct {
+/// An object a value is read from: an item's own, or what it peels to.
+pub const ObjectData = struct {
     oid: Oid,
     type: object.Type,
     bytes: []const u8,
@@ -625,7 +625,9 @@ pub const Format = struct {
     /// `reset`, and the command colours.
     reset_at_end: bool = false,
 
-    const Part = union(enum) {
+    /// A piece of the format: text as written, or the atom at an index
+    /// into the listing's atoms.
+    pub const Part = union(enum) {
         literal: []const u8,
         atom: usize,
     };
@@ -1610,7 +1612,8 @@ pub const Listing = struct {
                     var lines = std.mem.splitScalar(u8, headerBlock(buf), '\n');
                     while (lines.next()) |line| {
                         if (!std.mem.startsWith(u8, line, "parent ")) continue;
-                        const oid = Oid.parse(l.repo.objectFormat(), line["parent ".len..]) catch continue;
+                        // A parent line that names no object is no parent.
+                        const oid = (Oid.parse(l.repo.objectFormat(), line["parent ".len..]) catch null) orelse continue;
                         if (count != 0) try text.append(ar, ' ');
                         try text.appendSlice(ar, try l.showOid(atom.oid, oid));
                         count += 1;
@@ -2154,7 +2157,7 @@ pub const Listing = struct {
 
     /// git's `get_branch` for a state file.
     fn stateBranch(l: *Listing, path: []const u8) ErrorNamespace.Error!?[]const u8 {
-        const bytes = aegis.own.readFile(l.io, l.repo.gitDirectory(), path, l.a(), aegis.units.Bytes(u64).fromRaw(1 << 20)) catch |err| switch (err) {
+        const bytes = input.file(l.io, l.repo.gitDirectory(), path, l.a(), .state_file) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             else => return null,
         };
@@ -2162,13 +2165,12 @@ pub const Listing = struct {
         if (trimmed.len == 0) return null;
         if (std.mem.startsWith(u8, trimmed, "refs/heads/")) return trimmed["refs/heads/".len..];
         if (std.mem.startsWith(u8, trimmed, "refs/")) return trimmed;
-        // glint-ignore: Z026 -- text that is no object id is shown as it is, below
-        if (Oid.parse(l.repo.objectFormat(), trimmed)) |oid| {
-            const value = try l.showOid(.short, oid);
-            return value;
-        } else |_| {}
+        // `detached HEAD` is no object id, so reading it before the id
+        // gives git's answer; other text that is no object id is shown
+        // as it is.
         if (std.mem.eql(u8, trimmed, "detached HEAD")) return null;
-        return trimmed;
+        const oid = Oid.parse(l.repo.objectFormat(), trimmed) catch return trimmed;
+        return try l.showOid(.short, oid);
     }
 
     /// git's `wt_status_get_detached_from`: where the last checkout that
@@ -3014,6 +3016,10 @@ pub fn listTags(gpa: Allocator, io: Io, writer: *Io.Writer, repo: *Repository, o
         try l.sort(keys.items, .{ .ignore_case = options.ignore_case });
     }
     try l.write(writer, format, .{ .count = 0, .omit_empty = options.omit_empty });
+}
+
+test {
+    _ = input;
 }
 
 test "version sort orders numbers by value and prerelease suffixes before their release" {

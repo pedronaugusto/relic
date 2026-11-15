@@ -20,6 +20,7 @@ const Self = @This();
 
 const std = @import("std");
 const aegis = @import("aegis");
+const input = @import("input.zig");
 const ctype = @import("../text.zig").ctype;
 const gitdate = @import("../text.zig").date;
 const Allocator = std.mem.Allocator;
@@ -434,7 +435,7 @@ const Ctx = struct {
 
     /// The drivers the files take, which say which are binary.
     fn drivers(ctx: *const Ctx) driver.Drivers {
-        return .{ .attrs = ctx.attrs, .work_dir = ctx.repo.workDirectory(), .config = ctx.repo.configuration() };
+        return .{ .attrs = ctx.attrs, .work_dir = if (ctx.repo.workDirectory()) |work_tree| .of(work_tree) else null, .config = ctx.repo.configuration() };
     }
 };
 
@@ -665,7 +666,7 @@ fn resolve(a: Allocator, io: Io, repo: *Repository, options: Options) Error!Plan
         .on => |text| text,
         .configured => if (st.signature) |text| text else if (st.signature_file) |path| sig: {
             const full = config_mod.interpolatePath(a, path, config.context.home) catch return error.InvalidFormatSetting;
-            break :sig try aegis.own.readFile(io, Io.Dir.cwd(), full, a, aegis.units.Bytes(u64).fromRaw(std.math.maxInt(u64)));
+            break :sig try input.file(io, Io.Dir.cwd(), full, a, .signature);
         } else null,
     };
     const from: ?Ident = switch (options.from) {
@@ -772,7 +773,7 @@ pub fn format(gpa: Allocator, io: Io, repo: *Repository, range: Range, given: Op
     defer if (own_attrs) |*x| x.deinit();
     if (repo.workDirectory() != null) own_attrs = try repo.loadAttrs(io);
     defer if (own_attrs) |*x| x.leave();
-    const drivers: driver.Drivers = .{ .attrs = if (own_attrs) |*x| x else null, .work_dir = repo.workDirectory(), .config = config };
+    const drivers: driver.Drivers = .{ .attrs = if (own_attrs) |*x| x else null, .work_dir = if (repo.workDirectory()) |work_tree| .of(work_tree) else null, .config = config };
 
     const selected = try selectCommits(gpa, a, io, db, range, options, drivers) orelse return emptySeries(gpa, &arena_instance, options.output_directory);
     const list = selected.list;

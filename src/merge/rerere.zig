@@ -28,13 +28,13 @@ const Self = @This();
 
 const std = @import("std");
 const aegis = @import("aegis");
+const input = @import("input.zig");
 const decimal = @import("../text.zig").decimal;
 const date = @import("../text.zig").date;
 const state_file = @import("../repo/state.zig");
 const shakedown = @import("shakedown");
 const path_mod = @import("../names.zig").path;
 const Allocator = std.mem.Allocator;
-const assert = std.debug.assert;
 const Io = std.Io;
 
 const hash = @import("../hash/hash.zig");
@@ -128,7 +128,8 @@ const Run = struct {
     arena: Allocator,
     io: Io,
     repo: *Repository,
-    wt: Io.Dir,
+    /// The working tree, which `repo` keeps open.
+    wt: aegis.own.Unowned(Io.Dir),
     rules: worktree.Rules,
     /// Per conflict name, which variants have a preimage and a postimage.
     dirs: std.StringHashMapUnmanaged(std.ArrayList(u8)) = .empty,
@@ -364,7 +365,7 @@ pub fn run(gpa: Allocator, io: Io, repo: *Repository, index: *Index, options: Op
     defer attrs.deinit();
     var rules = try repo.worktreeRules();
     rules.attrs = &attrs;
-    var r: Run = .{ .gpa = gpa, .arena = arena, .io = io, .repo = repo, .wt = wt, .rules = rules };
+    var r: Run = .{ .gpa = gpa, .arena = arena, .io = io, .repo = repo, .wt = .of(wt), .rules = rules };
     const autoupdate = options.autoupdate orelse (try repo.configuration().getBool("rerere.autoupdate", false));
 
     try r.hold();
@@ -499,10 +500,10 @@ fn writeMergeRr(r: *Run, rr: *const std.array_hash_map.String(?Id)) Error!void {
         const id = slot orelse continue;
         // What `parseMergeRr` takes back: a name of the format's length, a
         // variant that is not negative, and a path no NUL ends early.
-        assert(id.hex.len == hex_len);
+        aegis.assert.invariant(id.hex.len == hex_len, "a conflict's name is as long as the format's hex names");
         aegis.assert.invariant(id.variant >= 0, "id.variant >= 0");
-        assert(path.len != 0);
-        assert(std.mem.findScalar(u8, path, 0) == null);
+        aegis.assert.invariant(path.len != 0, "a record's path is not empty");
+        aegis.assert.invariant(std.mem.findScalar(u8, path, 0) == null, "a record's path holds no NUL, which ends a record");
         if (id.variant > 0) {
             try out.print(r.arena, "{s}.{d}\t{s}", .{ id.hex, id.variant, path });
         } else try out.print(r.arena, "{s}\t{s}", .{ id.hex, path });
@@ -513,6 +514,14 @@ fn writeMergeRr(r: *Run, rr: *const std.array_hash_map.String(?Id)) Error!void {
     try lock.commit(r.io);
 }
 
+/// Whether `name` is a conflict's directory in `rr-cache`: an object name
+/// in the format's hex, as git's `get_oid_hex` takes one, either case.
+fn isConflictName(kind: hash.Kind, name: []const u8) bool {
+    if (name.len != kind.hexLen()) return false;
+    for (name) |c| if (!std.ascii.isHex(c)) return false;
+    return true;
+}
+
 fn isReg(mode: object.Mode) bool {
     return mode == .file or mode == .exec;
 }
@@ -520,7 +529,7 @@ fn isReg(mode: object.Mode) bool {
 /// `path` in the working tree, or null where it cannot be read; a cancel
 /// is returned.
 fn readWorktree(r: *Run, path: []const u8) Io.Cancelable!?[]u8 {
-    return aegis.own.readFile(r.io, r.wt, path, r.arena, aegis.units.Bytes(u64).fromRaw(1 << 30)) catch |err| switch (err) {
+    return input.file(r.io, r.wt.get(), path, r.arena, .conflicted_file) catch |err| switch (err) {
         error.Canceled => error.Canceled,
         else => null,
     };
@@ -597,7 +606,7 @@ fn replay(r: *Run, vid: Id, path: []const u8, size: u32) Error!bool {
         error.FileNotFound, error.AccessDenied, error.PermissionDenied, error.ReadOnlyFileSystem => {},
         else => |e| return e,
     };
-    try fs.atomicWrite(r.io, r.wt, path, merged, .{ .prefix = ".relic-rerere-", .sync = .none });
+    try fs.atomicWrite(r.io, r.wt.get(), path, merged, .{ .prefix = ".relic-rerere-", .sync = .none });
     return true;
 }
 
@@ -659,7 +668,7 @@ fn stagePath(r: *Run, index: *Index, path: []const u8) Error!void {
         content = (try attributes.toGit(r.arena, bytes, applied, r.rules.core)).bytes;
     }
     const oid = try r.repo.objectDatabase().write(r.io, .blob, content);
-    const found = try fs.statAt(r.io, r.wt, path);
+    const found = try fs.statAt(r.io, r.wt.get(), path);
     // A stage-0 entry replaces the path's stages, which git remembers.
     _ = try index.resolveStages(path);
     _ = index.remove(path);
@@ -677,7 +686,7 @@ pub fn clear(gpa: Allocator, io: Io, repo: *Repository) Self.Error!void {
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
     const arena = arena_instance.allocator();
-    var r: Run = .{ .gpa = gpa, .arena = arena, .io = io, .repo = repo, .wt = repo.workDirectory() orelse return error.BareRepository, .rules = .{} };
+    var r: Run = .{ .gpa = gpa, .arena = arena, .io = io, .repo = repo, .wt = .of(repo.workDirectory() orelse return error.BareRepository), .rules = .{} };
     try r.hold();
     defer r.release();
     // `read_rr`, which refuses a corrupt `MERGE_RR` as git's dies on one:
@@ -762,7 +771,7 @@ fn startRun(gpa: Allocator, arena: Allocator, io: Io, repo: *Repository, attrs: 
     const wt = repo.workDirectory() orelse return error.BareRepository;
     var rules = try repo.worktreeRules();
     rules.attrs = attrs;
-    return .{ .gpa = gpa, .arena = arena, .io = io, .repo = repo, .wt = wt, .rules = rules };
+    return .{ .gpa = gpa, .arena = arena, .io = io, .repo = repo, .wt = .of(wt), .rules = rules };
 }
 
 /// `git rerere status`: the paths `MERGE_RR` records, in path order.
@@ -1023,8 +1032,7 @@ pub fn gc(gpa: Allocator, io: Io, repo: *Repository, now_at: Io.Timestamp) Self.
     var names: std.ArrayList([]const u8) = .empty;
     var it = dir.iterate();
     while (try it.next(io)) |entry| {
-        if (entry.name.len != repo.objectFormat().hexLen()) continue;
-        _ = Oid.parse(repo.objectFormat(), entry.name) catch continue;
+        if (!isConflictName(repo.objectFormat(), entry.name)) continue;
         try names.append(arena, try arena.dupe(u8, entry.name));
     }
     var to_remove: std.ArrayList([]const u8) = .empty;
@@ -1065,8 +1073,7 @@ pub fn gcNeeded(gpa: Allocator, io: Io, repo: *Repository, now_at: Io.Timestamp,
     var count: u64 = 0;
     var it = dir.iterate();
     while (try it.next(io)) |entry| {
-        if (!std.mem.startsWith(u8, entry.name, "17") or entry.name.len != repo.objectFormat().hexLen()) continue;
-        _ = Oid.parse(repo.objectFormat(), entry.name) catch continue;
+        if (!std.mem.startsWith(u8, entry.name, "17") or !isConflictName(repo.objectFormat(), entry.name)) continue;
         const hex = try arena.dupe(u8, entry.name);
         for (0..(try r.status(hex)).items.len) |v| {
             if (!try isStale(&r, .{ .hex = hex, .variant = @intCast(v) }, cutoffs)) continue;
@@ -1120,22 +1127,29 @@ fn mtimeOf(r: *Run, sub: []const u8) Error!i64 {
 /// `never` and `false` for none, `now` and `all` for everything.
 fn expiryInDays(repo: *Repository, key: []const u8, cutoff: *i64, now: i64) Error!void {
     const text = repo.configuration().get(key) orelse return;
-    // An `int` of days, as `git_parse_int` reads one.
-    // glint-ignore: Z026 -- a value that is no number is read as one of the names below, as git reads it
-    if (config_mod.parseInteger(c_int, text)) |days| {
-        cutoff.* = now - @as(i64, days) * 86400;
-        return;
-    } else |_| {}
+    // The names first: none of them is a number, so the order git reads
+    // them in (the number first) gives the same answer.
     if (std.mem.eql(u8, text, "never") or std.mem.eql(u8, text, "false")) {
         cutoff.* = 0;
-    } else if (std.mem.eql(u8, text, "all") or std.mem.eql(u8, text, "now")) {
+        return;
+    }
+    if (std.mem.eql(u8, text, "all") or std.mem.eql(u8, text, "now")) {
         cutoff.* = std.math.maxInt(i64);
-    } else return error.UnsupportedExpiry;
+        return;
+    }
+    // An `int` of days, as `git_parse_int` reads one; anything else is
+    // a value git refuses.
+    const days = config_mod.parseInteger(c_int, text) catch return error.UnsupportedExpiry;
+    cutoff.* = now - @as(i64, days) * 86400;
 }
 
 //=========================================================================
 // Tests
 //=========================================================================
+
+test {
+    _ = input;
+}
 
 test "a conflict is named and normalized as git's rerere names it, whichever side it is met from" {
     const gpa = std.testing.allocator;
@@ -1194,8 +1208,8 @@ test "fuzz: any bytes are a MERGE_RR or a named failure" {
 }
 
 fn fuzzMergeRr(_: void, case: *shakedown.Case) anyerror!void {
-    var input: [512]u8 = undefined;
-    const text = input[0..shakedown.gen.intRange(case.source, usize, 0, input.len)];
+    var buf: [512]u8 = undefined;
+    const text = buf[0..shakedown.gen.intRange(case.source, usize, 0, buf.len)];
     case.source.bytes(text);
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -1211,8 +1225,8 @@ test "fuzz: any bytes normalize or are a named failure" {
 }
 
 fn fuzzNormalize(_: void, case: *shakedown.Case) anyerror!void {
-    var input: [512]u8 = undefined;
-    const text = input[0..shakedown.gen.intRange(case.source, usize, 0, input.len)];
+    var buf: [512]u8 = undefined;
+    const text = buf[0..shakedown.gen.intRange(case.source, usize, 0, buf.len)];
     case.source.bytes(text);
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();

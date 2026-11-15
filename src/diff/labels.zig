@@ -3,6 +3,7 @@
 //! the two-sided patch and the combined diff of a merge.
 
 const std = @import("std");
+const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -42,6 +43,6 @@ pub const gitlink_text_max = "Subproject commit \n".len + hash.max_hex_len;
 /// A gitlink as git diffs it: the commit it names, as a line of text.
 pub fn gitlinkText(buf: *[gitlink_text_max]u8, oid: Oid) []const u8 {
     var hex: [hash.max_hex_len]u8 = undefined;
-    // unreachable: the buffer holds the words and the widest name
-    return std.mem.print(buf, "Subproject commit {s}\n", .{oid.hex(&hex)}) catch unreachable;
+    return std.mem.print(buf, "Subproject commit {s}\n", .{oid.hex(&hex)}) catch
+        aegis.assert.never("the buffer is gitlink_text_max long: the words, the widest name and the newline");
 }

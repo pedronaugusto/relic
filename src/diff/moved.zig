@@ -31,8 +31,9 @@ pub const ColorMoved = enum {
     /// mode by its name. `null` for a value git refuses.
     pub fn parse(value: ?[]const u8) ?ColorMoved {
         const text = value orelse return .zebra;
-        // glint-ignore: Z026 -- a value that is no boolean is read as one of the names below, as git reads it
-        if (config_mod.parseBool(text)) |on| return if (on) .zebra else .no else |_| {}
+        // The names first: the one name that is also a boolean, `no`,
+        // means `no` both ways, so the order git reads them in (the
+        // boolean first) gives the same answer.
         const names = [_]struct { []const u8, ColorMoved }{
             .{ "no", .no },                     .{ "plain", .plain },
             .{ "blocks", .blocks },             .{ "zebra", .zebra },
@@ -40,7 +41,8 @@ pub const ColorMoved = enum {
             .{ "dimmed_zebra", .dimmed_zebra },
         };
         for (names) |entry| if (std.mem.eql(u8, text, entry[0])) return entry[1];
-        return null;
+        const on = config_mod.parseBool(text) catch return null;
+        return if (on) .zebra else .no;
     }
 };
 

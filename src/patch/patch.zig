@@ -24,7 +24,6 @@ const aegis = @import("aegis");
 const ctype = @import("../text.zig").ctype;
 const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
-const assert = std.debug.assert;
 
 const c_quote = @import("../text.zig").c_quote;
 const hash = @import("../hash/hash.zig");

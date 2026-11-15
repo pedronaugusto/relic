@@ -397,7 +397,9 @@ fn header(a: Allocator, io: Io, db: *odb_mod.Odb, out: *std.ArrayList(u8), msg: 
 /// the date the format shows.
 fn userInfo(a: Allocator, out: *std.ArrayList(u8), what: []const u8, line: []const u8, ctx: Context, fmt: Builtin) Self.Error!void {
     if (fmt == .oneline) return;
-    const ident = object.Signature.parse(std.mem.trimEnd(u8, line, "\n")) catch return;
+    // A line git's `split_ident_line` cannot split shows nothing, as
+    // `pp_user_info` returns before it writes: no person is no line.
+    const ident = (object.Signature.parse(std.mem.trimEnd(u8, line, "\n")) catch null) orelse return;
     const person: mailmap_mod.Identity = if (ctx.mailmap) |m| m.map(ident.name, ident.email) else .{ .name = ident.name, .email = ident.email };
     try out.print(a, "{s}: {s}{s} <{s}>\n", .{ what, if (fmt == .fuller) "    " else "", person.name, person.email });
     switch (fmt) {

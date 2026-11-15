@@ -21,7 +21,6 @@ const rename = @This();
 const std = @import("std");
 const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
-const assert = std.debug.assert;
 const Io = std.Io;
 
 const hash = @import("../hash/hash.zig");
@@ -656,8 +655,8 @@ pub fn GitMap(comptime V: type) type {
         fn allocTable(self: *Self, arena: Allocator, size: u32) Allocator.Error!void {
             // A bucket is the hash masked by `size - 1`, as git's is, and the
             // table never shrinks below its first size.
-            assert(std.math.isPowerOfTwo(size));
-            assert(size >= 64);
+            aegis.assert.invariant(std.math.isPowerOfTwo(size), "a table's size is a power of two, so a hash masked by size - 1 is a bucket");
+            aegis.assert.invariant(size >= 64, "a table never shrinks below its first size, 64");
             self.table = try arena.alloc(?u32, size);
             @memset(self.table, null);
             self.grow_at = @intCast(@as(u64, size) * 80 / 100);
@@ -731,7 +730,7 @@ pub fn GitMap(comptime V: type) type {
             }
             self.size -= 1;
             if (self.size < self.shrink_at) try self.rehash(arena, @intCast(self.table.len >> 2));
-            assert(self.size == self.index.count());
+            aegis.assert.invariant(self.size == self.index.count(), "the count of entries is the index's count after a removal");
         }
 
         /// A walk in git's order.

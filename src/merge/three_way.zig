@@ -15,8 +15,12 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
+/// The working tree as a merge holds it: the repository opened it and
+/// closes it.
+const WorkTree = aegis.own.Unowned(Io.Dir);
 
 const hash = @import("../hash/hash.zig");
 const index_mod = @import("../index/index.zig");
@@ -248,7 +252,7 @@ fn run(
     rules.attrs = &attrs;
     rules.filters = options.filters;
     var machinery: Machinery = undefined;
-    try machinery.init(gpa, arena, io, repo, .{ .wt = wt, .rules = rules, .options = options });
+    try machinery.init(gpa, arena, io, repo, wt, .{ .rules = rules, .options = options });
     defer machinery.deinit(io);
     var merged = switch (sides) {
         .trees => |t| try ort.trees(gpa, io, db, .{ .base = t.base, .ours = t.ours, .theirs = t.theirs }, machinery.ort),
@@ -483,7 +487,7 @@ fn carry(
         .gpa = gpa,
         .arena = arena,
         .io = io,
-        .wt = wt,
+        .wt = .of(wt),
         .db = db,
         .index = index,
         .conv = &conv,
@@ -625,7 +629,7 @@ const Writer = struct {
     gpa: Allocator,
     arena: Allocator,
     io: Io,
-    wt: Io.Dir,
+    wt: WorkTree,
     db: *odb_mod.Odb,
     index: *const Index,
     conv: *convert.Session,
@@ -653,19 +657,20 @@ fn writeChanged(
         }
         // Past a symbolic link nothing is removed; `writeEntry` refuses
         // the write.
-        const in_tree = try worktree.realLeadingPath(w.io, w.wt, path);
-        if (if (in_tree) try fs.statAt(w.io, w.wt, path) else null) |found| {
+        const wt = w.wt.get();
+        const in_tree = try worktree.realLeadingPath(w.io, wt, path);
+        if (if (in_tree) try fs.statAt(w.io, wt, path) else null) |found| {
             if (found.kind == .directory) {
                 // A submodule's checkout is left as it is, as git leaves it
                 // without `--recurse-submodules`, the index recording the
                 // new commit; with it, the mover moves the submodule.
                 const was_gitlink = if (w.index.find(path)) |old| old.mode == .gitlink else false;
                 if (want.mode == .gitlink and was_gitlink and w.rules.submodules == null) continue;
-                if (!(want.mode == .gitlink and was_gitlink)) try w.wt.deleteTree(w.io, path);
+                if (!(want.mode == .gitlink and was_gitlink)) try wt.deleteTree(w.io, path);
             }
         }
-        try w.attrs.enter(w.io, w.wt, path);
-        const written = try worktree.writeEntry(w.gpa, w.io, w.wt, .{ .db = w.db, .conv = w.conv, .path = path, .mode = want.mode, .oid = want.oid, .rules = w.rules });
+        try w.attrs.enter(w.io, wt, path);
+        const written = try worktree.writeEntry(w.gpa, w.io, wt, .{ .db = w.db, .conv = w.conv, .path = path, .mode = want.mode, .oid = want.oid, .rules = w.rules });
         try stats.put(w.arena, path, written.stat);
         written_count += 1;
     }
@@ -717,7 +722,7 @@ fn updateIndex(
 const SubmoduleOpener = struct {
     gpa: Allocator,
     io: Io,
-    wt: Io.Dir,
+    wt: WorkTree,
     opened: std.ArrayList(*Opened) = .empty,
     interface: ort.Submodules = .{ .vtable = &.{ .open = open } },
 
@@ -744,7 +749,7 @@ const SubmoduleOpener = struct {
     }
 
     fn openInner(s: *SubmoduleOpener, path: []const u8) !?ort.SubmoduleHistory {
-        var dir = s.wt.openDir(s.io, path, .{}) catch |err| switch (err) {
+        var dir = s.wt.get().openDir(s.io, path, .{}) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             else => return null,
         };
@@ -818,7 +823,7 @@ fn inMemory(gpa: Allocator, io: Io, repo: *Repository, what: InMemory, options: 
     rules.required_filters = try repo.requiredFilters(arena);
     rules.filters = options.filters;
     var machinery: Machinery = undefined;
-    try machinery.init(gpa, arena, io, repo, .{ .wt = repo.workDirectory(), .rules = rules, .options = options });
+    try machinery.init(gpa, arena, io, repo, repo.workDirectory(), .{ .rules = rules, .options = options });
     defer machinery.deinit(io);
     return switch (what.sides) {
         .trees => |t| ort.trees(gpa, io, what.db, .{ .base = t.base, .ours = t.ours, .theirs = t.theirs }, machinery.ort),
@@ -840,14 +845,13 @@ const Machinery = struct {
     ort: ort.Options,
 
     const Setup = struct {
-        /// The working tree, or `null` in a bare repository: the merged
-        /// paths' `.gitattributes` and the submodules are read from it.
-        wt: ?Io.Dir,
         rules: worktree.Rules,
         options: Options,
     };
 
-    fn init(m: *Machinery, gpa: Allocator, arena: Allocator, io: Io, repo: *Repository, setup: Setup) Error!void {
+    /// `wt` is the working tree, or `null` in a bare repository: the
+    /// merged paths' `.gitattributes` and the submodules are read from it.
+    fn init(m: *Machinery, gpa: Allocator, arena: Allocator, io: Io, repo: *Repository, wt: ?Io.Dir, setup: Setup) Error!void {
         const options = setup.options;
         const rules = setup.rules;
         const merge_config = try MergeConfig.read(repo.configuration());
@@ -865,7 +869,7 @@ const Machinery = struct {
         // whether a stored version kept its CRLF endings. A filter runs
         // where git runs it, in the working tree or the bare repository.
         m.normalizer = .open(gpa, io, .{
-            .wt = setup.wt orelse repo.gitDirectory(),
+            .wt = wt orelse repo.gitDirectory(),
             .kind = repo.objectFormat(),
             .core = rules.core,
             .required_filters = rules.required_filters,
@@ -873,7 +877,7 @@ const Machinery = struct {
             .programs = options.programs,
         });
         errdefer m.normalizer.deinit(io);
-        m.submodules = if (setup.wt) |wt| .{ .gpa = gpa, .io = io, .wt = wt } else null;
+        m.submodules = if (wt) |dir| .{ .gpa = gpa, .io = io, .wt = .of(dir) } else null;
         const db = repo.objectDatabase();
         m.ort = .{
             .labels = options.blob.labels,
@@ -888,7 +892,7 @@ const Machinery = struct {
             .rename_limit = merge_config.rename_limit,
             .directory_renames = options.directory_renames orelse merge_config.directory_renames,
             .attributes = &m.attrs,
-            .attributes_dir = setup.wt,
+            .attributes_dir = if (wt) |dir| .of(dir) else null,
             .configured_drivers = try configuredDrivers(arena, repo),
             .default_driver = repo.configuration().get("merge.default"),
             .submodules = if (m.submodules) |*s| &s.interface else null,
@@ -897,8 +901,8 @@ const Machinery = struct {
             .renormalize = if (settings.renormalize) &m.normalizer else null,
             // A cancel in looking for the working tree's attributes is
             // returned, not taken for none there.
-            .attributes_from_merge = if (setup.wt) |wt| from_merge: {
-                wt.access(io, ".gitattributes", .{}) catch |err| switch (err) {
+            .attributes_from_merge = if (wt) |dir| from_merge: {
+                dir.access(io, ".gitattributes", .{}) catch |err| switch (err) {
                     error.Canceled => return error.Canceled,
                     else => break :from_merge true,
                 };

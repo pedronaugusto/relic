@@ -14,6 +14,7 @@ const Self = @This();
 const ort = @import("ort.zig");
 
 const std = @import("std");
+const aegis = @import("aegis");
 const shakedown = @import("shakedown");
 const repeat = shakedown.corpus.repeat;
 const Allocator = std.mem.Allocator;
@@ -176,7 +177,8 @@ pub const TreeOptions = struct {
     /// Where the `.gitattributes` files along a merged path are read from,
     /// into `attributes`, the first time a path under them is merged. Without
     /// it `attributes` is used as the caller loaded it.
-    attributes_dir: ?Io.Dir = null,
+    /// Its owner keeps it open for the merge.
+    attributes_dir: ?aegis.own.Unowned(Io.Dir) = null,
     /// The names of the merge drivers `merge.<name>.driver` configures.
     /// Such a driver is a program; a path whose `merge` attribute names one
     /// is `error.UnsupportedMergeDriver`.

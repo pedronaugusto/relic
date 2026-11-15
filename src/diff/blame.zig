@@ -22,7 +22,6 @@ const Self = @This();
 const std = @import("std");
 const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
-const assert = std.debug.assert;
 const Io = std.Io;
 
 const hash = @import("../hash/hash.zig");
@@ -179,13 +178,13 @@ pub fn file(gpa: Allocator, io: Io, db: *odb_mod.Odb, inputs: Inputs, options: O
     }
     // What `Blame` promises: every line blamed once, the hunks running from
     // the first line to the last without a gap or an overlap.
-    assert(s.guilty.items.len == line_count);
+    aegis.assert.invariant(s.guilty.items.len == line_count, "every line of the final file is blamed once");
     var next_line: usize = 1;
     for (hunks.items) |h| {
         aegis.assert.invariant(h.final_start == next_line, "h.final_start == next_line");
         next_line += h.count;
     }
-    assert(next_line == line_count + 1);
+    aegis.assert.invariant(next_line == line_count + 1, "the hunks run to the last line of the final file");
     return .{ .gpa = gpa, .arena = out_arena.state, .hunks = hunks.items };
 }
 
@@ -201,15 +200,15 @@ pub fn file(gpa: Allocator, io: Io, db: *odb_mod.Odb, inputs: Inputs, options: O
 pub const IgnoreSources = struct {
     /// Read for `blame.ignoreRevsFile`.
     config: *const config_mod.Config,
-    /// Where a relative path is found from.
-    base: Io.Dir,
+    /// Where a relative path is found from, which its owner keeps open.
+    base: aegis.own.Unowned(Io.Dir),
     /// `--ignore-revs-file`, after the configured ones.
     files: []const []const u8 = &.{},
 };
 
 pub fn ignoredRevisions(arena: Allocator, io: Io, db: *odb_mod.Odb, sources: IgnoreSources) IgnoreError![]Oid {
     const config = sources.config;
-    const base = sources.base;
+    const base = sources.base.get();
     const files = sources.files;
     var names: std.ArrayList([]const u8) = .empty;
     var it = config.iterate(&.{"blame.ignorerevsfile"});

@@ -33,7 +33,6 @@ const std = @import("std");
 const aegis = @import("aegis");
 const decimal = @import("../text.zig").decimal;
 const Allocator = std.mem.Allocator;
-const assert = std.debug.assert;
 const Io = std.Io;
 
 const hash = @import("../hash/hash.zig");
@@ -173,7 +172,8 @@ pub const Options = struct {
     /// The attributes that decide how a path is merged: `merge` and
     /// `conflict-marker-size`, read along the way from `attributes_dir`.
     attributes: ?*attributes.Attrs = null,
-    attributes_dir: ?Io.Dir = null,
+    /// The working tree, which its owner keeps open for the merge.
+    attributes_dir: ?aegis.own.Unowned(Io.Dir) = null,
     /// The names of the merge drivers `merge.<name>.driver` configures;
     /// a path whose `merge` attribute names one is refused.
     configured_drivers: []const []const u8 = &.{},
@@ -940,7 +940,8 @@ const Merge = struct {
     /// as they are needed. `null` without attributes to read.
     fn attributesOf(m: *Merge, path: []const u8) Error!?attributes.Attributes {
         const attrs = m.options.attributes orelse return null;
-        if (m.options.attributes_dir) |dir| {
+        if (m.options.attributes_dir) |held| {
+            const dir = held.get();
             var depth: u32 = 0;
             var at: usize = 0;
             while (true) : (depth += 1) {
@@ -2088,8 +2089,7 @@ const Merge = struct {
     fn fakeOid(m: *Merge, n: usize) Oid {
         var bytes: [hash.max_raw_len]u8 = @splat(0xff);
         std.mem.writeInt(u64, bytes[0..8], n, .big);
-        // unreachable: the bytes are cut to the format's raw length
-        return Oid.fromRaw(m.db.objectFormat(), bytes[0..m.db.objectFormat().rawLen()]) catch unreachable;
+        return Oid.fromCut(m.db.objectFormat(), bytes[0..m.db.objectFormat().rawLen()]);
     }
 
     fn treeOf(m: *Merge, ref: CommitRef) Error!Oid {

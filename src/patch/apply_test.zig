@@ -198,6 +198,10 @@ fn changeMany(p: *Pair, io: Io) !void {
     try r.writeFile(io, "bin.dat", repeat("\x00\x01\x02binary\x00", 29) ++ "\x00changed!");
 }
 
+test {
+    _ = @import("input.zig");
+}
+
 test "a patch with every kind of change applies as git applies it, to the working tree, the index or the index alone" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;

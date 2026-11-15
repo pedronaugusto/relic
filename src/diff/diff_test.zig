@@ -78,6 +78,10 @@ fn setupMixed(io: Io, repo: *testgit.Repo) anyerror!void {
     try repo.exec(io, &.{ "commit", "-q", "-m", "two" });
 }
 
+test {
+    _ = @import("input.zig");
+}
+
 test "name-status agrees with git diff-tree" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
@@ -259,7 +263,7 @@ test "numstat decides binary as git's --numstat: a driver's binary, -diff and co
         defer config.deinit();
         var attrs = try attributes.Attrs.init(gpa, .{});
         defer attrs.deinit();
-        const drivers: driver.Drivers = .{ .attrs = &attrs, .work_dir = pair.repo.dir, .config = &config };
+        const drivers: driver.Drivers = .{ .attrs = &attrs, .work_dir = .of(pair.repo.dir), .config = &config };
         const counts = try diff.numstat(gpa, io, .{ .db = &pair.db, .changes = changes.items, .drivers = drivers }, .{});
         defer gpa.free(counts);
 
@@ -1375,7 +1379,7 @@ test "a patch's headers are git diff's: a change of kind split, binary files by 
     const attributes = @import("../patterns.zig").attributes;
     var attrs = try attributes.Attrs.init(gpa, .{});
     defer attrs.deinit();
-    const drivers: driver.Drivers = .{ .attrs = &attrs, .work_dir = pair.repo.dir };
+    const drivers: driver.Drivers = .{ .attrs = &attrs, .work_dir = .of(pair.repo.dir) };
 
     const Variant = struct { args: []const []const u8, options: diff.Options, prefix: []const u8 = "" };
     const variants = [_]Variant{

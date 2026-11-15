@@ -14,6 +14,7 @@ const similarity = @import("similarity.zig");
 
 const std = @import("std");
 const aegis = @import("aegis");
+const input = @import("input.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -278,7 +279,7 @@ pub const Order = struct {
     /// Everything is `arena`'s.
     pub fn configured(arena: Allocator, io: Io, base: Io.Dir, config: *const config_mod.Config) ConfiguredError!Order {
         const path = (try config.getPath(arena, io, base, "diff.orderfile")) orelse return .{};
-        const text = aegis.own.readFile(io, base, path, arena, aegis.units.Bytes(u64).fromRaw(std.math.maxInt(u64))) catch |err| switch (err) {
+        const text = input.file(io, base, path, arena, .order_file) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Canceled => return error.Canceled,
             else => return error.OrderFileUnreadable,
@@ -303,7 +304,7 @@ pub fn tree(gpa: Allocator, io: Io, db: *odb_mod.Odb, inputs: TreeInputs, option
     const arena = arena_instance.allocator();
 
     // git's `diff_setup_done` refuses the two together; its walk asserts it.
-    if (options.max_depth != null) if (options.paths) |paths| std.debug.assert(!paths.hasWildcard());
+    if (options.max_depth != null) if (options.paths) |paths| aegis.assert.invariant(!paths.hasWildcard(), "a depth limit is never given with wildcard paths: git's diff_setup_done refuses the two together");
     var changes: std.ArrayList(Change) = .empty;
     var walk: Walk = .{ .arena = arena, .io = io, .db = db, .prefix = options.prefix, .out = &changes, .paths = options.paths, .max_depth = options.max_depth, .list_trees = options.trees };
     try walk.trees(old, new, "", 0);
@@ -1159,14 +1160,15 @@ pub fn isBinary(bytes: []const u8) bool {
 pub const WhitespaceRule = struct {
     attrs: ?*attributes.Attrs = null,
     /// The working tree whose `.gitattributes` are read on the way down to
-    /// a path; `null` reads only what `attrs` holds.
-    work_dir: ?Io.Dir = null,
+    /// a path, which its owner keeps open; `null` reads only what `attrs`
+    /// holds.
+    work_dir: ?aegis.own.Unowned(Io.Dir) = null,
     configured: u32 = whitespace.default_rule,
 
     /// The rule for `path`. `a` holds the lookup.
     pub fn of(rule: WhitespaceRule, a: Allocator, io: Io, path: []const u8) (attributes.Error || error{ConflictingWhitespaceRules})!u32 {
         const attrs = rule.attrs orelse return rule.configured;
-        if (rule.work_dir) |wt| try attrs.enter(io, wt, path);
+        if (rule.work_dir) |wt| try attrs.enter(io, wt.get(), path);
         const attribute: whitespace.Attribute = if ((try attrs.lookup(a, path, .file)).get("whitespace")) |state| switch (state) {
             .set => .set,
             .unset => .unset,

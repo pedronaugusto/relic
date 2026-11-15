@@ -220,7 +220,6 @@ const Session = struct {
     io: Io,
     repo: *Repository,
     options: Options,
-    dir: Io.Dir,
     cur: usize = 1,
     last: usize = 0,
     prec: usize = 4,
@@ -404,7 +403,7 @@ pub fn start(gpa: Allocator, io: Io, repo: *Repository, mailboxes: []const []con
     errdefer arena_instance.deinit();
     const a = arena_instance.allocator();
     const config = repo.configuration();
-    var s: Session = .{ .gpa = gpa, .a = a, .io = io, .repo = repo, .options = options, .dir = repo.gitDirectory(), .rebasing = options.rebasing };
+    var s: Session = .{ .gpa = gpa, .a = a, .io = io, .repo = repo, .options = options, .rebasing = options.rebasing };
 
     const format: Format = if (options.mboxrd) .mboxrd else if (mailboxes.len == 0) .mbox else try detectFormat(mailboxes[0]);
 
@@ -487,7 +486,7 @@ fn destroy(io: Io, repo: *Repository) Error!void {
 
 fn load(gpa: Allocator, a: Allocator, io: Io, repo: *Repository, options: Options) Error!Session {
     if (!(try inProgress(io, repo))) return error.NoAmInProgress;
-    var s: Session = .{ .gpa = gpa, .a = a, .io = io, .repo = repo, .options = options, .dir = repo.gitDirectory() };
+    var s: Session = .{ .gpa = gpa, .a = a, .io = io, .repo = repo, .options = options };
     try reload(&s);
     return s;
 }
@@ -665,7 +664,7 @@ fn writeCommitPatch(s: *Session, parents: []const Oid, tree: Oid) Error!void {
     diff.unified(s.gpa, s.io, &out.writer, .{
         .db = db,
         .changes = changes.items,
-        .drivers = .{ .attrs = &attrs, .work_dir = s.repo.workDirectory(), .config = s.repo.configuration() },
+        .drivers = .{ .attrs = &attrs, .work_dir = if (s.repo.workDirectory()) |work_tree| .of(work_tree) else null, .config = s.repo.configuration() },
     }, .{
         .full_index = true,
         .binary_patches = true,
@@ -1072,7 +1071,7 @@ pub fn abort(gpa: Allocator, io: Io, repo: *Repository, who: object.Signature) S
     var arena_instance: std.heap.ArenaAllocator = .init(gpa);
     defer arena_instance.deinit();
     const a = arena_instance.allocator();
-    var s: Session = .{ .gpa = gpa, .a = a, .io = io, .repo = repo, .options = .{ .committer = who }, .dir = repo.gitDirectory() };
+    var s: Session = .{ .gpa = gpa, .a = a, .io = io, .repo = repo, .options = .{ .committer = who } };
     var head = try head_mod.read(gpa, io, repo);
     defer head.deinit(gpa);
     // safe to abort only when the index was clean and HEAD has not moved

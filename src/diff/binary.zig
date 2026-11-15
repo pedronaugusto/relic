@@ -18,10 +18,10 @@
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const shakedown = @import("shakedown");
 const repeat = shakedown.corpus.repeat;
 const Allocator = std.mem.Allocator;
-const assert = std.debug.assert;
 const Io = std.Io;
 
 const delta = @import("../codec.zig").delta;
@@ -35,7 +35,7 @@ const en85 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%
 comptime {
     // Every digit a value below 85, and every value one digit, which `de85`
     // keeps one above it so that zero is no digit.
-    assert(en85.len == 85);
+    if (en85.len != 85) @compileError("git's base-85 alphabet has 85 digits");
 }
 
 const de85: [256]u8 = blk: {
@@ -133,7 +133,8 @@ pub fn deflate(gpa: Allocator, data: []const u8) Allocator.Error![]u8 {
     defer compress.deinit();
     const out = try gpa.alloc(u8, warp.Compressor.bound(data.len, .{}));
     errdefer gpa.free(out);
-    const n = compress.compress(data, out, .{}) catch unreachable; // bound reserves the complete stream
+    const n = compress.compress(data, out, .{}) catch
+        aegis.assert.never("out is Compressor.bound long, which holds the complete stream: OutputTooSmall cannot happen");
     return gpa.realloc(out, n);
 }
 

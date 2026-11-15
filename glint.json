@@ -15,6 +15,13 @@
       "reason": "the password database asked for a user's home (getpwnam_r), the one call std's checked layer does not give the configuration"
     },
     {
+      "file": "src/diff/input.zig",
+      "rules": [
+        "A009"
+      ],
+      "reason": "the diff layer's input seam: the order file diff.orderFile names and the working-tree copy a filter writes out for an external diff, each held to a limit named there; the rest of the diff layer parses the bytes it hands back"
+    },
+    {
       "file": "src/fs/input.zig",
       "rules": [
         "A009"
@@ -50,6 +57,13 @@
       "reason": "the maintenance layer's input seam: a gc lock's gc.pid, a rebase's state lines and the server info files, each held to a limit named there; everything else in gc, repack and the server info parses the bytes it hands back"
     },
     {
+      "file": "src/merge/input.zig",
+      "rules": [
+        "A009"
+      ],
+      "reason": "the merge layer's input seam: the conflicted working-tree files rerere reads, held to a limit named there; the rest of the merge layer parses the bytes it hands back"
+    },
+    {
       "file": "src/object/input.zig",
       "rules": [
         "A009"
@@ -76,6 +90,20 @@
         "A009"
       ],
       "reason": "the object store's input seam: the files under objects/ the database reads itself (loose objects, pack entries streamed, .keep markers, cruft .mtimes), a whole file held to a limit named there and an object file's reader to the length the object's own header states; the rest of the database parses the bytes it hands back"
+    },
+    {
+      "file": "src/patch/input.zig",
+      "rules": [
+        "A009"
+      ],
+      "reason": "the patch layer's input seam: the working tree's copy of a path a patch applies to (a file's bytes or a link's target) and the signature file format.signatureFile names, each held to a limit named there; the rest of the patch layer parses the bytes it hands back"
+    },
+    {
+      "file": "src/pretty/input.zig",
+      "rules": [
+        "A009"
+      ],
+      "reason": "the pretty layer's input seam: the rebase and bisect state files a ref listing reads for the branch they name, held to a limit named there; the rest of the pretty layer parses the bytes it hands back"
     },
     {
       "file": "src/refs/input.zig",

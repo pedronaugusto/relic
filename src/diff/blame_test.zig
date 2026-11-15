@@ -323,12 +323,12 @@ test "an ignored commit's changed lines go where git's guess sends them, marked 
     try git.exec(io, &.{ "config", "--add", "blame.ignoreRevsFile", "ignore-a" });
     var config_repo = try repo_mod.Repository.open(gpa, io, git.dir, .{});
     defer config_repo.deinit(io);
-    const both = try blame.ignoredRevisions(a, io, config_repo.objectDatabase(), .{ .config = config_repo.configuration(), .base = git.dir });
+    const both = try blame.ignoredRevisions(a, io, config_repo.objectDatabase(), .{ .config = config_repo.configuration(), .base = .of(git.dir) });
     try std.testing.expectEqual(@as(usize, 3), both.len);
-    const reset = try blame.ignoredRevisions(a, io, config_repo.objectDatabase(), .{ .config = config_repo.configuration(), .base = git.dir, .files = &.{ "", "ignore-a" } });
+    const reset = try blame.ignoredRevisions(a, io, config_repo.objectDatabase(), .{ .config = config_repo.configuration(), .base = .of(git.dir), .files = &.{ "", "ignore-a" } });
     try std.testing.expectEqual(@as(usize, 2), reset.len);
-    try std.testing.expectError(error.InvalidIgnoreRev, blame.ignoredRevisions(a, io, config_repo.objectDatabase(), .{ .config = config_repo.configuration(), .base = git.dir, .files = &.{"bad"} }));
-    try std.testing.expectError(error.IgnoreRevsFileMissing, blame.ignoredRevisions(a, io, config_repo.objectDatabase(), .{ .config = config_repo.configuration(), .base = git.dir, .files = &.{"missing"} }));
+    try std.testing.expectError(error.InvalidIgnoreRev, blame.ignoredRevisions(a, io, config_repo.objectDatabase(), .{ .config = config_repo.configuration(), .base = .of(git.dir), .files = &.{"bad"} }));
+    try std.testing.expectError(error.IgnoreRevsFileMissing, blame.ignoredRevisions(a, io, config_repo.objectDatabase(), .{ .config = config_repo.configuration(), .base = .of(git.dir), .files = &.{"missing"} }));
 }
 
 test "blame ignoring random reformats, lines changed a little and moved about, agrees with git" {
@@ -428,7 +428,7 @@ test "with a driver's textconv each line goes where git blame sends it, by the t
     var attrs = try attributes.Attrs.init(gpa, .{});
     defer attrs.deinit();
     const tc: textconv.Textconv = .{ .programs = .{ .environ = &env } };
-    const drivers: driver.Drivers = .{ .attrs = &attrs, .work_dir = git.dir, .config = repo.configuration() };
+    const drivers: driver.Drivers = .{ .attrs = &attrs, .work_dir = .of(git.dir), .config = repo.configuration() };
     try expectSameAsGit(gpa, io, &git, &repo, tip, "notes.txt", .{ .textconv = &tc, .drivers = drivers });
     try expectSameAsGit(gpa, io, &git, &repo, tip, "notes.dat", .{ .textconv = &tc, .drivers = drivers });
 }
