@@ -97,7 +97,7 @@ test "a global file the caller named is read again, whether or not it was there 
 
     var repo = try Repository.open(gpa, io, git.dir, .{
         .discover = false,
-        .global_config = .{ .dir = home.dir, .sub_path = ".gitconfig" },
+        .global_config = .{ .dir = .of(home.dir), .sub_path = ".gitconfig" },
     });
     defer repo.deinit(io);
     try expectValue(&repo, "user.email", null);
@@ -178,7 +178,7 @@ test "includeIf hasconfig:remote.*.url: holds for the URLs of every file, as it 
 
     var repo = try Repository.open(gpa, io, proj, .{
         .discover = false,
-        .global_config = .{ .dir = home_tmp.dir, .sub_path = ".gitconfig" },
+        .global_config = .{ .dir = .of(home_tmp.dir), .sub_path = ".gitconfig" },
         .home = home,
     });
     defer repo.deinit(io);
@@ -280,7 +280,7 @@ test "includeIf gitdir:, gitdir/i: and onbranch: in ~/.gitconfig hold for a repo
 
     var repo = try Repository.open(gpa, io, proj, .{
         .discover = false,
-        .global_config = .{ .dir = home_tmp.dir, .sub_path = ".gitconfig" },
+        .global_config = .{ .dir = .of(home_tmp.dir), .sub_path = ".gitconfig" },
         .home = home,
     });
     defer repo.deinit(io);
@@ -359,7 +359,7 @@ test "includeIf worktree: and worktree/i: hold for the work tree as they hold fo
     for (cases) |case| {
         var repo = try Repository.open(gpa, io, case.dir, .{
             .discover = false,
-            .global_config = .{ .dir = home_tmp.dir, .sub_path = ".gitconfig" },
+            .global_config = .{ .dir = .of(home_tmp.dir), .sub_path = ".gitconfig" },
             .home = home,
         });
         defer repo.deinit(io);

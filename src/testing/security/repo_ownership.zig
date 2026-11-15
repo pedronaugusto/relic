@@ -41,7 +41,7 @@ const Home = struct {
 
     fn options(h: *const Home, ownership: safe.Ownership) Repository.OpenOptions {
         return .{
-            .global_config = .{ .dir = h.tmp.dir, .sub_path = ".gitconfig" },
+            .global_config = .{ .dir = .of(h.tmp.dir), .sub_path = ".gitconfig" },
             .home = h.path,
             .ownership = ownership,
             .discover = false,

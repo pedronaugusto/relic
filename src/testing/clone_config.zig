@@ -44,7 +44,7 @@ test "a clone given no settings of its own reaches the remote with the person's,
     var repo = try clone_mod.clone(gpa, io, url, d, .{
         .who = test_who,
         .programs = .{ .environ = &env },
-        .user_config = .{ .global = .{ .dir = root.dir, .sub_path = "gitconfig" } },
+        .user_config = .{ .global = .{ .dir = .of(root.dir), .sub_path = "gitconfig" } },
     });
     defer repo.deinit(io);
     const theirs = try source.line(io, &.{ "rev-parse", "HEAD" });
@@ -100,7 +100,7 @@ test "a clone goes where url.<base>.insteadOf sends it and records the URL as gi
     var repo = try clone_mod.clone(gpa, io, "here:repo.git", d, .{
         .who = test_who,
         .programs = .{ .environ = &env },
-        .user_config = .{ .global = .{ .dir = root.dir, .sub_path = ".gitconfig" } },
+        .user_config = .{ .global = .{ .dir = .of(root.dir), .sub_path = ".gitconfig" } },
     });
     defer repo.deinit(io);
     var git_dir = try root.dir.openDir(io, "by-git", .{});

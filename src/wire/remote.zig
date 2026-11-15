@@ -662,7 +662,7 @@ test "URL rewriting agrees with git ls-remote --get-url, for fetch and for push"
 
     var git_dir = try repo.gitDir(io);
     defer git_dir.close(io);
-    var config = try Config.openFile(gpa, io, .{ .dir = git_dir, .sub_path = "config" }, .local, .{});
+    var config = try Config.openFile(gpa, io, .{ .dir = .of(git_dir), .sub_path = "config" }, .local, .{});
     defer config.deinit();
 
     for ([_][]const u8{ "a", "b", "c", "d" }) |name| {

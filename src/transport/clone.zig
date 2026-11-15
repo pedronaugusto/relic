@@ -446,7 +446,7 @@ fn userConfiguration(gpa: Allocator, io: Io, options: Options) Error!?config_mod
     if (options.config != null) return null;
     const user = options.user_config;
     const local: ?config_mod.Sources.Path = if (options.template) |template|
-        (if (try Repository.templateUsable(gpa, io, template)) .{ .dir = template, .sub_path = "config" } else null)
+        (if (try Repository.templateUsable(gpa, io, template)) .{ .dir = .of(template), .sub_path = "config" } else null)
     else
         null;
     const has_config = local != null or user.system != null or user.xdg != null or user.global != null or user.command.len != 0 or user.pairs.len != 0;
@@ -1207,7 +1207,7 @@ fn initRepository(gpa: Allocator, io: Io, dir: Io.Dir, options: Options, object_
         .object_format = object_format,
         .ref_format = options.ref_format,
         .default_branch = initial,
-        .template = options.template,
+        .template = if (options.template) |t| .of(t) else null,
         .bare = options.bare or options.separate_git_dir,
         .odb = options.odb,
         .system_config = user.system,

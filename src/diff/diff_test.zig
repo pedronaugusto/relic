@@ -830,7 +830,7 @@ test "diff.algorithm picks the algorithm git picks when none is asked for" {
         try pair.repo.exec(io, &.{ "config", "diff.algorithm", value });
         var git_dir = try pair.repo.gitDir(io);
         defer git_dir.close(io);
-        var config = try config_mod.Config.openFile(gpa, io, .{ .dir = git_dir, .sub_path = "config" }, .local, .{});
+        var config = try config_mod.Config.openFile(gpa, io, .{ .dir = .of(git_dir), .sub_path = "config" }, .local, .{});
         defer config.deinit();
         const options = try diff.configured(&config, .{});
         expectPatches(&pair, io, options, &.{}) catch |err| {

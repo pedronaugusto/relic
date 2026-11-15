@@ -2288,7 +2288,7 @@ fn emptyOrAbsent(io: Io, wt: Io.Dir, path: []const u8) Error!bool {
 fn correctCoreWorktree(arena: Allocator, gpa: Allocator, io: Io, repo: *const Repository, wt: Io.Dir, path: []const u8) Error!void {
     var found = (try gitlink.open(gpa, io, wt, path)) orelse return;
     defer found.deinit(io);
-    var config = try config_mod.Config.openFile(gpa, io, .{ .dir = found.commonDirectory(), .sub_path = "config" }, .local, .{});
+    var config = try config_mod.Config.openFile(gpa, io, .{ .dir = .of(found.commonDirectory()), .sub_path = "config" }, .local, .{});
     defer config.deinit();
     if (config.get("core.worktree") == null) return;
     var work = try wt.openDir(io, path, .{});

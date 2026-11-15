@@ -2999,7 +2999,7 @@ test "learned LFS policy writes the shared source without replacing worktree con
     defer client.deinit(io);
     try client.learnLocksVerify(io, "https://example.com/project", false);
     try client.remember(io, &repo);
-    var shared = try Config.openFile(gpa, io, .{ .dir = repo.commonDirectory(), .sub_path = "config" }, .local, .{});
+    var shared = try Config.openFile(gpa, io, .{ .dir = .of(repo.commonDirectory()), .sub_path = "config" }, .local, .{});
     defer shared.deinit();
     try testing.expect(shared.get("fixture.shared") != null);
     try testing.expectEqualStrings("kept", shared.get("fixture.shared").?);

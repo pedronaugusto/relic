@@ -595,7 +595,7 @@ test "includeIf reads the file git reads" {
     const abs_len = try git_dir.realPath(io, &abs);
 
     var cfg = try config_mod.Config.open(gpa, io, .{
-        .local = .{ .dir = git_dir, .sub_path = "config" },
+        .local = .{ .dir = .of(git_dir), .sub_path = "config" },
     }, .{ .git_dir = abs[0..abs_len] });
     defer cfg.deinit();
 

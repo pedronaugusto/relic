@@ -98,7 +98,7 @@ test "CVE-2025-48384, t7450-bad-git-dotfiles 'submodule must not checkout into d
     // The submodule's own configuration, where there is one, still says
     // where it is.
     target.access(io, ".git/modules/sub/config", .{}) catch return;
-    var written = try config_mod.Config.openFile(gpa, io, .{ .dir = target, .sub_path = ".git/modules/sub/config" }, .local, .{});
+    var written = try config_mod.Config.openFile(gpa, io, .{ .dir = .of(target), .sub_path = ".git/modules/sub/config" }, .local, .{});
     defer written.deinit();
     if (written.get("core.worktree")) |value| try std.testing.expect(std.mem.endsWith(u8, value, "sub\r"));
 }
