@@ -228,18 +228,12 @@ pub const Walk = struct {
         // A commit-graph knows the parents a shallow repository does not
         // have, so a shallow walk reads the commits themselves.
         if (walk.db.shallow.count() == 0) if (walk.graph) |graph| {
-            if (graph.find(n.oid) catch null) |position| {
-                // glint-ignore: Z026 -- the commit graph is a shortcut: a commit it cannot give is read from the object below
-                if (graph.commitAt(position)) |entry| {
-                    // glint-ignore: Z026 -- the commit graph is a shortcut: parents it cannot give are read from the object below
-                    if (graph.parentsOf(walk.gpa, position)) |parents| {
-                        n.parents = parents;
-                        n.time = entry.time;
-                        n.tree = entry.tree;
-                        n.parsed = true;
-                        return;
-                    } else |_| {}
-                } else |_| {}
+            if (try fromGraph(graph, walk.gpa, n.oid)) |cached| {
+                n.parents = cached.parents;
+                n.time = cached.entry.time;
+                n.tree = cached.entry.tree;
+                n.parsed = true;
+                return;
             }
         };
         const found = try walk.db.read(io, n.oid);
@@ -560,6 +554,29 @@ pub fn parentsOf(db: *const odb_mod.Odb, oid: Oid, parents: []const Oid) []const
     return if (db.shallow.contains(oid)) &.{} else parents;
 }
 
+/// A commit as a commit-graph gives it: its row and its parents, which are
+/// the caller's.
+const GraphCommit = struct { entry: commit_graph.Commit, parents: []Oid };
+
+/// git's `parse_commit_in_graph`: `oid` from the commit-graph, or `null`
+/// where the graph does not have it or cannot give it (a row past one of
+/// its own tables), when the commit is read from its object instead, as
+/// git falls back. A graph is a shortcut, so only running out of memory
+/// fails here.
+fn fromGraph(graph: *const commit_graph.Graph, gpa: Allocator, oid: Oid) Allocator.Error!?GraphCommit {
+    const position = (graph.find(oid) catch |err| switch (err) {
+        error.CorruptCommitGraph => return null,
+    }) orelse return null;
+    const entry = graph.commitAt(position) catch |err| switch (err) {
+        error.CorruptCommitGraph => return null,
+    };
+    const parents = graph.parentsOf(gpa, position) catch |err| switch (err) {
+        error.OutOfMemory => |e| return e,
+        else => return null,
+    };
+    return .{ .entry = entry, .parents = parents };
+}
+
 /// Every merge base of `a` and `b`: the common ancestors none of whose
 /// descendants is also a common ancestor, newest committer date first.
 ///
@@ -817,17 +834,11 @@ const Painter = struct {
             return loaded;
         }
         if (p.db.shallow.count() == 0) if (p.graph) |graph| {
-            if (graph.find(oid) catch null) |position| {
-                // glint-ignore: Z026 -- the commit graph is a shortcut: a commit it cannot give is read from the object below
-                if (graph.commitAt(position)) |entry| {
-                    // glint-ignore: Z026 -- the commit graph is a shortcut: parents it cannot give are read from the object below
-                    if (graph.parentsOf(p.gpa, position)) |parents| {
-                        const loaded: Loaded = .{ .parents = parents, .time = entry.time, .generation = entry.generation orelse infinity };
-                        errdefer p.gpa.free(loaded.parents);
-                        try p.commits.put(p.gpa, OidKey.of(oid), loaded);
-                        return loaded;
-                    } else |_| {}
-                } else |_| {}
+            if (try fromGraph(graph, p.gpa, oid)) |cached| {
+                const loaded: Loaded = .{ .parents = cached.parents, .time = cached.entry.time, .generation = cached.entry.generation orelse infinity };
+                errdefer p.gpa.free(loaded.parents);
+                try p.commits.put(p.gpa, OidKey.of(oid), loaded);
+                return loaded;
             }
         };
         const found = try p.db.read(p.io, oid);
@@ -1344,9 +1355,17 @@ fn walkLikeRevList(gpa: Allocator, io: Io, seed: u64) !void {
         for (names) |y| {
             repo.report_failures = false;
             defer repo.report_failures = true;
-            const x_text = repo.line(io, &.{ "rev-parse", "--verify", "-q", x }) catch continue;
+            const x_text = repo.line(io, &.{ "rev-parse", "--verify", "-q", x }) catch |err| switch (err) {
+                // A history the seed made without this branch.
+                error.GitFailed => continue,
+                else => |e| return e,
+            };
             defer gpa.free(x_text);
-            const y_text = repo.line(io, &.{ "rev-parse", "--verify", "-q", y }) catch continue;
+            const y_text = repo.line(io, &.{ "rev-parse", "--verify", "-q", y }) catch |err| switch (err) {
+                // A history the seed made without this branch.
+                error.GitFailed => continue,
+                else => |e| return e,
+            };
             defer gpa.free(y_text);
             const xo = try Oid.parse(.sha1, x_text);
             const yo = try Oid.parse(.sha1, y_text);
