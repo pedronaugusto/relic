@@ -22,6 +22,20 @@
       "reason": "the diff layer's input seam: the order file diff.orderFile names and the working-tree copy a filter writes out for an external diff, each held to a limit named there; the rest of the diff layer parses the bytes it hands back"
     },
     {
+      "file": "src/discover/input.zig",
+      "rules": [
+        "A009"
+      ],
+      "reason": "discovery's input seam: a candidate git directory's HEAD (file or link target), commondir and a .git file's first byte, each read into a buffer the size of a limit named there; the rest of discovery parses the bytes it hands back"
+    },
+    {
+      "file": "src/fast/input.zig",
+      "rules": [
+        "A009"
+      ],
+      "reason": "fast-import and fast-export's input seam for the marks files they read, held to the limit named there; the rest of the layer parses the bytes it hands back"
+    },
+    {
       "file": "src/fs/input.zig",
       "rules": [
         "A009"
@@ -41,6 +55,13 @@
         "P007"
       ],
       "reason": "SHA-1 on the processor's own instructions: the aarch64 and x86-64 rounds and cpuid as inline assembly, and the feature queries std has no checked form of (Darwin's sysctlbyname, Linux's auxiliary vector)"
+    },
+    {
+      "file": "src/hooks/input.zig",
+      "rules": [
+        "A009"
+      ],
+      "reason": "the hooks' input seam: the first bytes of a hook's file (to know git-lfs's own hook, and a script's #!), each held to a limit named there"
     },
     {
       "file": "src/lfs/input.zig",
@@ -106,6 +127,13 @@
       "reason": "the pretty layer's input seam: the rebase and bisect state files a ref listing reads for the branch they name, held to a limit named there; the rest of the pretty layer parses the bytes it hands back"
     },
     {
+      "file": "src/process/input.zig",
+      "rules": [
+        "A009"
+      ],
+      "reason": "the process layer's input seam: the #! line of a program run on Windows, held to the limit named there"
+    },
+    {
       "file": "src/refs/input.zig",
       "rules": [
         "A009"
@@ -125,6 +153,13 @@
         "P007"
       ],
       "reason": "the kernel's name on FreeBSD (the kern.ostype sysctl), where std has no uname, the one call std's checked layer does not give the repository"
+    },
+    {
+      "file": "src/rev_walk/input.zig",
+      "rules": [
+        "A009"
+      ],
+      "reason": "the history walks' input seam: a bisect's state files and a mailmap, each held to a limit named there; the rest of the layer parses the bytes it hands back"
     },
     {
       "file": "src/walk/input.zig",

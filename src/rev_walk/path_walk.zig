@@ -110,7 +110,9 @@ pub const Batch = struct {
     oids: []const Oid,
 };
 
-const List = struct {
+/// The objects of one kind gathered so far at one path: a walk's own
+/// state, which its fields hold and its batches are made from.
+pub const List = struct {
     kind: object.Type,
     oids: std.ArrayList(Oid) = .empty,
 };

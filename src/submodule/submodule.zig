@@ -37,9 +37,9 @@ const discover = @import("../discover.zig");
 const gitfile = @import("../discover.zig").gitfile;
 
 const std = @import("std");
+const aegis = @import("aegis");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
-const assert = std.debug.assert;
 const Io = std.Io;
 
 const hash = @import("../hash/hash.zig");
@@ -521,7 +521,7 @@ fn connect(
 ) Error!void {
     const to_git_dir = try relativePath(arena, git_dir_abs, work_abs);
     // `gitfile.target` refuses a `.git` file with no path in it.
-    assert(to_git_dir.len != 0);
+    aegis.assert.invariant(to_git_dir.len != 0, "the work tree and its git directory are two directories, so one is a path from the other");
     try gitfile.write(io, work, to_git_dir, repo.settings().hide_dot_files);
     try setCoreWorktree(io, repo, git_dir, try relativePath(arena, work_abs, git_dir_abs));
 }
@@ -580,7 +580,7 @@ pub fn openRepository(gpa: Allocator, io: Io, repo: *Repository, module: PathNam
         error.NoSubmoduleGitDir, error.GitDirInsideGitDir => return null,
         else => |e| return e,
     };
-    var dir = where.base.openDir(io, where.path, .{}) catch |err| switch (err) {
+    var dir = where.base.get().openDir(io, where.path, .{}) catch |err| switch (err) {
         error.FileNotFound, error.NotDir => return null,
         else => |e| return e,
     };
@@ -1164,7 +1164,7 @@ pub fn deinit(gpa: Allocator, io: Io, repo: *Repository, options: DeinitOptions)
             try wt.deleteTree(io, entry.path);
             outcome.cleared += 1;
             const where = try moduleDir(arena, io, repo, module.name, entry.path, options.refusal);
-            var module_dir = where.base.openDir(io, where.path, .{}) catch |err| switch (err) {
+            var module_dir = where.base.get().openDir(io, where.path, .{}) catch |err| switch (err) {
                 error.Canceled => return error.Canceled,
                 else => null,
             };
@@ -1222,12 +1222,13 @@ pub fn migrateGitDirConfigs(gpa: Allocator, io: Io, repo: *Repository) Self.Erro
 /// names -- from the top of the working tree, as git writes it, unless
 /// absolute. Checked as git checks it each time.
 const ModuleDir = struct {
-    base: Io.Dir,
+    /// The repository's, or the process's working directory: never closed here.
+    base: aegis.own.Unowned(Io.Dir),
     path: []const u8,
 
     fn absolute(m: ModuleDir, arena: Allocator, io: Io) Error![]const u8 {
         if (std.Io.Dir.path.isAbsolute(m.path)) return m.path;
-        const base = try fs.realPathAlloc(arena, io, m.base, ".");
+        const base = try fs.realPathAlloc(arena, io, m.base.get(), ".");
         return arena.print("{s}/{s}", .{ base, m.path });
     }
 };
@@ -1235,14 +1236,14 @@ const ModuleDir = struct {
 fn moduleDir(arena: Allocator, io: Io, repo: *Repository, name: []const u8, display: []const u8, refusal: ?*Refusal) Error!ModuleDir {
     if (!repo.submodulePathConfig()) {
         try validateGitDir(arena, io, repo.gitDirectory(), name, display, refusal);
-        return .{ .base = repo.gitDirectory(), .path = try arena.print("modules/{s}", .{name}) };
+        return .{ .base = .of(repo.gitDirectory()), .path = try arena.print("modules/{s}", .{name}) };
     }
     const value = repo.configuration().get(try configKey(arena, name, "gitdir")) orelse
         return refuse(refusal, display, try configKey(arena, name, "gitdir"), error.NoSubmoduleGitDir);
     const found: ModuleDir = if (std.Io.Dir.path.isAbsolute(value))
-        .{ .base = Io.Dir.cwd(), .path = value }
+        .{ .base = .of(Io.Dir.cwd()), .path = value }
     else
-        .{ .base = repo.topDirectory(), .path = value };
+        .{ .base = .of(repo.topDirectory()), .path = value };
     if (!try encodedGitDirOk(arena, io, repo, found, name)) return refuse(refusal, display, value, error.GitDirInsideGitDir);
     return found;
 }
@@ -1256,7 +1257,7 @@ fn encodedGitDirOk(arena: Allocator, io: Io, repo: *Repository, dir: ModuleDir, 
     const at = std.mem.findLast(u8, dir.path, marker) orelse return false;
     const last = dir.path[at + marker.len ..];
     if (std.mem.findScalar(u8, last, '/') != null) return false;
-    const is_git_dir = if (dir.base.openDir(io, dir.path, .{})) |d_const| blk: {
+    const is_git_dir = if (dir.base.get().openDir(io, dir.path, .{})) |d_const| blk: {
         var d = d_const;
         defer d.close(io);
         break :blk try discover.directory.isGitDirectory(io, d);
@@ -1271,14 +1272,14 @@ fn encodedGitDirOk(arena: Allocator, io: Io, repo: *Repository, dir: ModuleDir, 
             if (!std.ascii.eqlIgnoreCase(entry.section, "submodule") or !std.ascii.eqlIgnoreCase(entry.name, "gitdir")) continue;
             if (std.mem.eql(u8, entry.subsection, name)) continue;
             const value = entry.value orelse continue;
-            const theirs: ModuleDir = if (std.Io.Dir.path.isAbsolute(value)) .{ .base = Io.Dir.cwd(), .path = value } else .{ .base = repo.topDirectory(), .path = value };
+            const theirs: ModuleDir = if (std.Io.Dir.path.isAbsolute(value)) .{ .base = .of(Io.Dir.cwd()), .path = value } else .{ .base = .of(repo.topDirectory()), .path = value };
             if (std.mem.eql(u8, mine, try theirs.absolute(arena, io))) return false;
         }
     }
     if (repo.settings().ignore_case) {
         // `check_casefolding_conflict`.
         const parent = std.Io.Dir.path.dirnamePosix(dir.path) orelse return true;
-        var modules = dir.base.openDir(io, parent, .{ .iterate = true }) catch |err| switch (err) {
+        var modules = dir.base.get().openDir(io, parent, .{ .iterate = true }) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             else => return true,
         };
@@ -1317,7 +1318,7 @@ fn setDefaultGitDir(arena: Allocator, io: Io, repo: *Repository, name: []const u
     try candidates.append(arena, try arena.dupe(u8, hasher.final().hex(&hex)));
     for (candidates.items) |candidate| {
         const path = try arena.print("{s}/modules/{s}", .{ git_dir, candidate });
-        const dir: ModuleDir = if (std.Io.Dir.path.isAbsolute(path)) .{ .base = Io.Dir.cwd(), .path = path } else .{ .base = repo.topDirectory(), .path = path };
+        const dir: ModuleDir = if (std.Io.Dir.path.isAbsolute(path)) .{ .base = .of(Io.Dir.cwd()), .path = path } else .{ .base = .of(repo.topDirectory()), .path = path };
         // git checks each as `validate_submodule_git_dir` does: before the
         // extension is on, as a migration runs, the plain name alone.
         if (repo.submodulePathConfig()) {
@@ -1466,7 +1467,7 @@ fn absorbIn(
             // with the submodule this one lives in.
             const module = entry.module orelse return refuse(options.refusal, display, "", error.NoSubmoduleMapping);
             const where = try moduleDir(arena, io, repo, module.name, display, options.refusal);
-            var module_dir = where.base.openDir(io, where.path, .{}) catch |err| switch (err) {
+            var module_dir = where.base.get().openDir(io, where.path, .{}) catch |err| switch (err) {
                 error.Canceled => return error.Canceled,
                 else => continue,
             };
@@ -1504,13 +1505,13 @@ fn relocate(
     } else |err| if (err == error.Canceled) return error.Canceled;
     const where = try moduleDir(arena, io, repo, module.name, display, refusal);
     const target = where.path;
-    if (try fs.statAt(io, where.base, target) != null) return refuse(refusal, display, target, error.GitDirExists);
-    if (std.Io.Dir.path.dirnamePosix(target)) |parent| try fs.makeDirs(io, where.base, parent, repo.sharedPermissions());
-    try wt.rename(dot_git, where.base, target, io);
+    if (try fs.statAt(io, where.base.get(), target) != null) return refuse(refusal, display, target, error.GitDirExists);
+    if (std.Io.Dir.path.dirnamePosix(target)) |parent| try fs.makeDirs(io, where.base.get(), parent, repo.sharedPermissions());
+    try wt.rename(dot_git, where.base.get(), target, io);
 
     var work = try wt.openDir(io, path, .{});
     defer work.close(io);
-    var module_dir = try where.base.openDir(io, target, .{});
+    var module_dir = try where.base.get().openDir(io, target, .{});
     defer module_dir.close(io);
     try connect(arena, io, repo, work, try fs.realPathAlloc(arena, io, work, "."), module_dir, try fs.realPathAlloc(arena, io, module_dir, "."));
 }
@@ -1701,7 +1702,8 @@ const Promised = struct {
 /// What `Transport.VTable.clone` is asked to clone.
 pub const CloneRequest = struct {
     url: []const u8,
-    git_dir: Io.Dir,
+    /// The empty directory to fill, which `update` opened and closes.
+    git_dir: aegis.own.Unowned(Io.Dir),
     /// The submodule's name and the repository it is a submodule of, whose
     /// `submodule.alternateLocation` and lenders the clone may borrow from;
     /// `null` for a clone that borrows nothing.
@@ -1976,9 +1978,9 @@ fn updateOne(
     defer if (promised) |*p| p.uninstall();
     var runner: ?hooks_mod.Runner = if (options.hooks) |hook_options| try hooks_mod.Runner.init(gpa, io, .{
         .config = sub.configuration(),
-        .git_dir = sub.gitDirectory(),
-        .common_dir = sub.commonDirectory(),
-        .work_dir = sub.workDirectory(),
+        .git_dir = .of(sub.gitDirectory()),
+        .common_dir = .of(sub.commonDirectory()),
+        .work_dir = if (sub.workDirectory()) |work| .of(work) else null,
     }, options.programs orelse return error.ProgramsNotGranted, hook_options) else null;
     defer if (runner) |*r| r.deinit();
     const hooks: ?*hooks_mod.Runner = if (runner) |*r| r else null;
@@ -2171,7 +2173,7 @@ fn populate(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, item: *
     const target = where.path;
     var populated: Populated = .reconnected;
     var module_dir: Io.Dir = blk: {
-        if (where.base.openDir(io, target, .{})) |dir| {
+        if (where.base.get().openDir(io, target, .{})) |dir| {
             const is_git = discover.directory.isGitDirectory(io, dir) catch |err| {
                 dir.close(io);
                 return err;
@@ -2193,10 +2195,10 @@ fn populate(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, item: *
         // git's `clone_submodule` under `--init`: a path that is there and
         // is not an empty directory is not cloned into.
         if (options.init and !try emptyOrAbsent(io, wt, item.path)) return refuse(options.refusal, display, url, error.DirectoryNotEmpty);
-        try fs.makeDirs(io, where.base, target, repo.sharedPermissions());
-        const dir = try where.base.openDir(io, target, .{ .iterate = true });
+        try fs.makeDirs(io, where.base.get(), target, repo.sharedPermissions());
+        const dir = try where.base.get().openDir(io, target, .{ .iterate = true });
         errdefer dir.close(io);
-        transport.clone(gpa, io, .{ .url = url, .git_dir = dir, .within = .{ .name = item.module.name, .superproject = repo }, .beside = beside }) catch |err| switch (err) {
+        transport.clone(gpa, io, .{ .url = url, .git_dir = .of(dir), .within = .{ .name = item.module.name, .superproject = repo }, .beside = beside }) catch |err| switch (err) {
             error.TransportFailed => return refuse(options.refusal, display, url, error.TransportFailed),
             else => |e| return e,
         };
@@ -2460,7 +2462,7 @@ fn runUpdateCommand(
     var outcome = try program.run(gpa, io, programs, .{
         .argv = argv.items,
         .shell = true,
-        .cwd = .{ .dir = sub.workDirectory() orelse return error.BareRepository },
+        .cwd = .{ .dir = .of(sub.workDirectory() orelse return error.BareRepository) },
         .unset = &local_repo_env,
         .stderr = .inherit,
     }, .{});
@@ -2608,7 +2610,7 @@ pub const Mover = struct {
     fn populate(m: *Mover, arena: Allocator, io: Io, target: Target) MoveError!void {
         const request = target.request;
         const wt = m.repo.workDirectory().?;
-        var module_dir = target.where.base.openDir(io, target.where.path, .{}) catch |err| switch (err) {
+        var module_dir = target.where.base.get().openDir(io, target.where.path, .{}) catch |err| switch (err) {
             error.FileNotFound, error.NotDir => return refuse(m.options.refusal, target.display, target.where.path, error.NotCloned),
             else => |e| return e,
         };
@@ -2725,7 +2727,7 @@ pub const Mover = struct {
             error.DirNotEmpty, error.FileNotFound => {},
             else => |e| return e,
         };
-        var module_dir = try target.where.base.openDir(io, target.where.path, .{});
+        var module_dir = try target.where.base.get().openDir(io, target.where.path, .{});
         defer module_dir.close(io);
         try setCoreWorktree(io, m.repo, module_dir, null);
     }
@@ -2940,8 +2942,9 @@ pub const WalkOptions = struct {
     refusal: ?*Refusal = null,
 };
 
-/// One repository a `Walk` is inside: its listing and how far through it.
-const WalkFrame = struct {
+/// One repository a `Walk` is inside: its listing and how far through it,
+/// the walk's own state.
+pub const WalkFrame = struct {
     /// `null` for the top superproject, which the caller owns.
     repo_storage: ?Repository,
     repo: *Repository,
@@ -2984,9 +2987,9 @@ pub const Walk = struct {
             const frame = w.frames.items[w.frames.items.len - 1];
             // Each frame is one level below the one under it, and only the
             // caller's superproject, at the bottom, is not the walk's to close.
-            assert(frame.depth == w.frames.items.len - 1);
-            assert((frame.repo_storage == null) == (frame.depth == 0));
-            assert(frame.next <= frame.listing.entries.len);
+            aegis.assert.invariant(frame.depth == w.frames.items.len - 1, "each frame is one level below the one under it");
+            aegis.assert.invariant((frame.repo_storage == null) == (frame.depth == 0), "only the superproject, at the bottom, is not the walk's to close");
+            aegis.assert.invariant(frame.next <= frame.listing.entries.len, "a frame's next entry is within its listing");
             if (frame.next == frame.listing.entries.len) {
                 _ = w.frames.pop();
                 frame.destroy(w.gpa, w.io);

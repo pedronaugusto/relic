@@ -38,6 +38,7 @@ pub const update = @import("submodule/submodule.zig").update;
 pub const Visit = @import("submodule/submodule.zig").Visit;
 pub const WalkOptions = @import("submodule/submodule.zig").WalkOptions;
 pub const Walk = @import("submodule/submodule.zig").Walk;
+pub const WalkFrame = @import("submodule/submodule.zig").WalkFrame;
 pub const walk = @import("submodule/submodule.zig").walk;
 pub const gitmodulesStaged = @import("submodule/submodule.zig").gitmodulesStaged;
 pub const removeFromGitmodules = @import("submodule/submodule.zig").removeFromGitmodules;

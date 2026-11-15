@@ -41,6 +41,7 @@ const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
 const config_mod = @import("../config/config.zig");
 const program = @import("../process.zig").program;
+const hook_input = @import("input.zig");
 
 const Oid = hash.Oid;
 
@@ -199,12 +200,12 @@ fn matchesTemplate(text: []const u8, template: []const u8, event: []const u8) bo
 /// What a runner needs to know about the repository.
 pub const Place = struct {
     config: *const config_mod.Config,
-    /// The per-worktree directory.
-    git_dir: Io.Dir,
+    /// The per-worktree directory, which the repository keeps open.
+    git_dir: aegis.own.Unowned(Io.Dir),
     /// The shared directory, where `hooks/` lives.
-    common_dir: Io.Dir,
+    common_dir: aegis.own.Unowned(Io.Dir),
     /// The working tree, or `null` in a bare repository.
-    work_dir: ?Io.Dir,
+    work_dir: ?aegis.own.Unowned(Io.Dir),
 };
 
 /// How a hook that failed ended.
@@ -337,7 +338,7 @@ pub const Runner = struct {
         const arena = arena_instance.allocator();
 
         var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const top = place.work_dir orelse place.git_dir;
+        const top = (place.work_dir orelse place.git_dir).get();
         const cwd = try arena.dupe(u8, try fs.realPath(io, top, &buf));
 
         // Read as git's configset reads it: the last value alone.
@@ -352,7 +353,7 @@ pub const Runner = struct {
             else
                 try std.mem.concat(arena, u8, &.{ cwd, "/", configured })
         else blk: {
-            const common = try fs.realPath(io, place.common_dir, &buf);
+            const common = try fs.realPath(io, place.common_dir.get(), &buf);
             break :blk try std.mem.concat(arena, u8, &.{ common, "/hooks" });
         };
 
@@ -486,9 +487,12 @@ pub const Runner = struct {
         var work: AtOnceWork = .{ .runner = runner, .io = io, .request = merged, .planned = planned, .results = results };
         var group: Io.Group = .init;
         var spawned: usize = 1;
-        while (spawned < @min(jobs, planned.len)) : (spawned += 1) {
-            group.concurrent(io, AtOnceWork.run, .{&work}) catch |err| switch (err) {
-                error.ConcurrencyUnavailable => break,
+        var available = true;
+        while (available and spawned < @min(jobs, planned.len)) : (spawned += 1) {
+            // An `Io` with no more concurrency to give starts no more
+            // workers: this task runs whatever the started ones leave.
+            available = if (group.concurrent(io, AtOnceWork.run, .{&work})) |_| true else |err| switch (err) {
+                error.ConcurrencyUnavailable => false,
             };
         }
         work.run();
@@ -981,12 +985,12 @@ pub const Runner = struct {
 /// Whether the file at `path` is git-lfs's own hook for `event`; one that
 /// cannot be read is not.
 fn gitLfsHookFile(io: Io, event: []const u8, path: []const u8) Io.Cancelable!bool {
-    var buf: [1025]u8 = undefined;
+    var buf: [hook_input.Limit.lfs_hook.bytes()]u8 = undefined;
     const file = Io.Dir.openFileAbsolute(io, path, .{}) catch |err| return if (err == error.Canceled) error.Canceled else false;
     defer file.close(io);
-    const n = file.readPositionalAll(io, &buf, 0) catch |err| return if (err == error.Canceled) error.Canceled else false;
-    if (n > 1024) return false;
-    return isGitLfsHook(event, buf[0..n]);
+    const text = hook_input.head(io, file, .lfs_hook, &buf) catch |err| return if (err == error.Canceled) error.Canceled else false;
+    if (text.len > 1024) return false;
+    return isGitLfsHook(event, text);
 }
 
 fn writeValue(w: *Io.Writer, kind: hash.Kind, value: ?Runner.RefUpdate.Value) Io.Writer.Error!void {
@@ -1001,9 +1005,9 @@ fn writeValue(w: *Io.Writer, kind: hash.Kind, value: ?Runner.RefUpdate.Value) Io
 /// `@<secs> <±hhmm>`, the form git exports `GIT_AUTHOR_DATE` in.
 fn formatDate(buf: *[64]u8, who: object.Signature) []const u8 {
     const sign: u8 = if (who.offset_minutes < 0) '-' else '+';
-    const abs: u32 = @intCast(@abs(who.offset_minutes));
-    // an i64 is at most twenty characters and an i16 offset seven, well under 64
-    return std.mem.print(buf, "@{d} {c}{d:0>2}{d:0>2}", .{ who.when_secs, sign, abs / 60, abs % 60 }) catch unreachable;
+    const abs: u16 = @abs(who.offset_minutes);
+    return std.mem.print(buf, "@{d} {c}{d:0>2}{d:0>2}", .{ who.when_secs, sign, abs / 60, abs % 60 }) catch
+        aegis.assert.never("an i64 is at most twenty characters and an i16 offset's hours and minutes seven, well under 64");
 }
 
 /// Read `hook.<name>.*` in git's way: an event list per name in the order the
@@ -1042,8 +1046,9 @@ fn readConfigured(
         } else if (std.ascii.eqlIgnoreCase(entry.name, "command")) {
             try commands.put(arena, name, value);
         } else if (std.ascii.eqlIgnoreCase(entry.name, "enabled")) {
-            // git_parse_maybe_bool: an unrecognised value is ignored.
-            const on = config_mod.parseBool(value) catch continue;
+            // git_parse_maybe_bool: an unrecognised value is no value,
+            // and is ignored.
+            const on = (config_mod.parseBool(value) catch null) orelse continue;
             if (on) _ = disabled.remove(name) else try disabled.put(arena, name, {});
         } else if (std.ascii.eqlIgnoreCase(entry.name, "parallel")) {
             // git's "must be a boolean, ignoring": a value it cannot read
@@ -1138,9 +1143,9 @@ fn runsOnWindows(io: Io, path: []const u8) Io.Cancelable!bool {
     }
     const file = Io.Dir.openFileAbsolute(io, path, .{}) catch |err| return if (err == error.Canceled) error.Canceled else false;
     defer file.close(io);
-    var head: [2]u8 = undefined;
-    const n = file.readPositionalAll(io, &head, 0) catch |err| return if (err == error.Canceled) error.Canceled else false;
-    return n == 2 and head[0] == '#' and head[1] == '!';
+    var buf: [hook_input.Limit.shebang.bytes()]u8 = undefined;
+    const head = hook_input.head(io, file, .shebang, &buf) catch |err| return if (err == error.Canceled) error.Canceled else false;
+    return std.mem.eql(u8, head, "#!");
 }
 
 //=========================================================================
@@ -1170,9 +1175,9 @@ fn openRunner(gpa: Allocator, io: Io, repo: *testgit.Repo, environ: *const std.p
     errdefer config.deinit();
     const runner = try Runner.init(gpa, io, .{
         .config = &config,
-        .git_dir = git_dir.borrow().*,
-        .common_dir = git_dir.borrow().*,
-        .work_dir = work.borrow().*,
+        .git_dir = .of(git_dir.borrow().*),
+        .common_dir = .of(git_dir.borrow().*),
+        .work_dir = .of(work.borrow().*),
     }, .{ .environ = environ }, .{ .output = .capture });
     return .{ .runner = runner, .config = config, .git_dir = git_dir.move() };
 }

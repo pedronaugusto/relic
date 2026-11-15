@@ -1241,7 +1241,7 @@ const GitTransport = struct {
 
     fn clone(seam: *submodule.Transport, gpa: Allocator, io: Io, request: submodule.CloneRequest) submodule.TransportError!void {
         const t: *GitTransport = @fieldParentPtr("interface", seam);
-        const target = absolute(gpa, io, request.git_dir) catch return error.TransportFailed;
+        const target = absolute(gpa, io, request.git_dir.get()) catch return error.TransportFailed;
         defer gpa.free(target);
         t.git.exec(io, &.{ "clone", "-q", "--bare", request.url, target }) catch return error.TransportFailed;
         t.git.exec(io, &.{ "--git-dir", target, "config", "core.bare", "false" }) catch return error.TransportFailed;

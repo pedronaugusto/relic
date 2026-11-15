@@ -145,7 +145,7 @@ fn compare(gpa: Allocator, io: Io, git: *testgit.Repo, args: []const []const u8,
     var mine: Io.Writer.Allocating = .init(gpa);
     errdefer mine.deinit();
     var opts = options;
-    opts.cwd = git.dir;
+    opts.cwd = .of(git.dir);
     try fast_export.write(gpa, io, &mine.writer, &repo, opts);
     std.testing.expectEqualStrings(theirs, mine.written()) catch |err| {
         std.debug.print("git fast-export {any}\n", .{args});

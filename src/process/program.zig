@@ -25,12 +25,14 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const suite = @import("../testing/helpers.zig");
 const builtin = @import("builtin");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const Environ = std.process.Environ;
 const conduit = @import("conduit");
+const program_input = @import("input.zig");
 pub const Child = conduit.Child;
 /// What a program's pipe holds now, read without waiting for more: once the
 /// program has ended, the rest of what it wrote, even while something it
@@ -84,7 +86,7 @@ pub const Var = struct {
 };
 
 /// Where a program starts. The directory is borrowed for the launch.
-pub const Cwd = union(enum) { inherit, path: []const u8, dir: Io.Dir };
+pub const Cwd = union(enum) { inherit, path: []const u8, dir: aegis.own.Unowned(Io.Dir) };
 
 pub const Invocation = struct {
     /// The program and its arguments. With `shell`, the first is a command
@@ -220,6 +222,10 @@ pub const Running = struct {
     child: Child,
     spawn: ?*SpawnHook,
     terminated: bool = false,
+    /// Why `kill` could not confirm the program ended, or `null`: `kill`
+    /// cannot fail its caller, which is most often a cleanup path, so a
+    /// caller that must know the program is gone reads this after it.
+    kill_failure: ?Child.KillWaitError = null,
     environ: Environ.Map,
     line: CommandLine,
     gpa: Allocator,
@@ -243,8 +249,9 @@ pub const Running = struct {
                 return;
             }
         }
-        // glint-ignore: Z026 -- killing cannot fail its caller; a child already gone has nothing left to reap
-        _ = running.child.killWait(io, .fromRaw(0)) catch {};
+        if (running.child.killWait(io, .fromRaw(0))) |_| {} else |err| {
+            running.kill_failure = err;
+        }
     }
 
     /// Stop it if it is still running and release everything.
@@ -283,7 +290,7 @@ pub fn start(gpa: Allocator, io: Io, programs: Programs, invocation: Invocation)
     // start, is handed to the interpreter its `#!` line names, looked for
     // on `PATH` by its base name, as that interpreter's first argument.
     if (builtin.target.os.tag == .windows) {
-        var head: [100]u8 = undefined;
+        var head: [program_input.Limit.interpreter.bytes()]u8 = undefined;
         if (try interpreterOf(io, line.argv[0], &head)) |name| {
             const found = try lookupOnPath(gpa, io, pathOf(&environ), name) orelse return error.FileNotFound;
             try line.runThrough(gpa, found);
@@ -294,7 +301,7 @@ pub fn start(gpa: Allocator, io: Io, programs: Programs, invocation: Invocation)
     const cwd: ?[]const u8 = switch (invocation.cwd) {
         .inherit => null,
         .path => |path| path,
-        .dir => |dir| cwd_buffer[0..try dir.realPath(io, &cwd_buffer)],
+        .dir => |dir| cwd_buffer[0..try dir.get().realPath(io, &cwd_buffer)],
     };
     // Keep the default descendant policy: git helpers may deliberately leave
     // a credential-cache daemon running after their normal, reaped exit.
@@ -325,8 +332,9 @@ pub fn start(gpa: Allocator, io: Io, programs: Programs, invocation: Invocation)
 /// The argv a process is started with. A command line with nothing a shell
 /// interprets runs directly; otherwise `sh -c '<line> "$@"' '<line>' args…`,
 /// which is git's own spelling, so its arguments reach it as arguments and
-/// never as text the shell reads again.
-const CommandLine = struct {
+/// never as text the shell reads again. `Running` keeps it for as long as
+/// the program runs.
+pub const CommandLine = struct {
     argv: [][]const u8,
     /// The `<line> "$@"` the argv points into, or empty.
     owned: []const u8 = "",
@@ -337,7 +345,7 @@ const CommandLine = struct {
 
     fn init(gpa: Allocator, invocation: Invocation) Allocator.Error!CommandLine {
         const argv = invocation.argv;
-        std.debug.assert(argv.len > 0);
+        aegis.assert.invariant(argv.len > 0, "an invocation names the program it runs");
         if (!invocation.shell or !needsShell(argv[0])) return .{ .argv = try gpa.dupe([]const u8, argv) };
         const out = try gpa.alloc([]const u8, argv.len + 3);
         errdefer gpa.free(out);
@@ -372,18 +380,18 @@ const CommandLine = struct {
 /// the file at `path` names, by its base name and without its options, read
 /// from its first bytes into `head`; `null` for a `.exe`, a file that cannot
 /// be read, or anything else.
-fn interpreterOf(io: Io, path: []const u8, head: *[100]u8) Io.Cancelable!?[]const u8 {
+fn interpreterOf(io: Io, path: []const u8, head: *[program_input.Limit.interpreter.bytes()]u8) Io.Cancelable!?[]const u8 {
     if (std.ascii.endsWithIgnoreCase(path, ".exe")) return null;
     const file = Io.Dir.cwd().openFile(io, path, .{}) catch |err| switch (err) {
         error.Canceled => return error.Canceled,
         else => return null,
     };
     defer file.close(io);
-    const n = file.readPositionalAll(io, head[0 .. head.len - 1], 0) catch |err| switch (err) {
+    const text = program_input.head(io, file, .interpreter, head) catch |err| switch (err) {
         error.Canceled => return error.Canceled,
         else => return null,
     };
-    return parseInterpreter(head[0..n]);
+    return parseInterpreter(text);
 }
 
 fn parseInterpreter(head: []const u8) ?[]const u8 {
@@ -498,6 +506,8 @@ const SpawnHooks = struct {
     /// The options carried the program, its argument and the variable set.
     prepared: bool = false,
     ended: bool = false,
+    /// Why ending the child failed, which the test refuses.
+    failure: ?Child.KillWaitError = null,
     interface: SpawnHook = .{ .vtable = &.{ .start = startChild, .terminate = endChild } },
 
     fn startChild(hook: *SpawnHook, gpa: Allocator, io: Io, options: Child.SpawnOptions) Child.SpawnError!Child {
@@ -513,8 +523,9 @@ const SpawnHooks = struct {
     fn endChild(hook: *SpawnHook, io: Io, child: *Child) void {
         const self: *SpawnHooks = @fieldParentPtr("interface", hook);
         self.ended = true;
-        // glint-ignore: Z026 -- termination cannot fail its caller; a child already gone has nothing left to reap
-        _ = child.killWait(io, .fromRaw(0)) catch {};
+        if (child.killWait(io, .fromRaw(0))) |_| {} else |err| {
+            self.failure = err;
+        }
     }
 };
 
@@ -531,6 +542,7 @@ test "Programs spawn hook receives prepared options and owns termination" {
     defer outcome.deinit(testing.allocator);
     try testing.expectEqualStrings("hello", outcome.stdout);
     try testing.expect(hooks.started and hooks.ended);
+    try testing.expectEqual(null, hooks.failure);
     try testing.expect(hooks.prepared);
 }
 
@@ -671,7 +683,7 @@ test "timeout bounds a helper that closes its output and keeps running" {
                 .argv = &.{ suite.path(.process_fixture), "closed-output" },
                 .stdout = if (capture) .capture else .ignore,
                 .stderr = if (capture) .capture else .ignore,
-                .cwd = .{ .dir = tmp.dir },
+                .cwd = .{ .dir = .of(tmp.dir) },
             }, .{ .input = bytes, .timeout = .{ .duration = .{ .raw = .fromMilliseconds(20), .clock = .awake } } });
             defer if (result) |value| {
                 var outcome = value;
@@ -701,7 +713,7 @@ test "opposite full pipes refuse unavailable concurrency instead of deadlocking"
     }) |limits| {
         const result = run(testing.allocator, threaded.io(), .{ .environ = &env }, .{
             .argv = &.{ suite.path(.process_fixture), "opposite-pipes" },
-            .cwd = .{ .dir = tmp.dir },
+            .cwd = .{ .dir = .of(tmp.dir) },
         }, blk: {
             var run_with: RunOptions = limits;
             run_with.input = input;
@@ -718,7 +730,7 @@ test "opposite full pipes refuse unavailable concurrency instead of deadlocking"
     defer arena.deinit();
     var outcome = try run(arena.allocator(), testing.io, .{ .environ = &env }, .{
         .argv = &.{ suite.path(.process_fixture), "opposite-pipes" },
-        .cwd = .{ .dir = tmp.dir },
+        .cwd = .{ .dir = .of(tmp.dir) },
     }, .{
         .input = input,
     });

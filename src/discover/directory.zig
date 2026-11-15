@@ -8,6 +8,7 @@ const Self = @This();
 const std = @import("std");
 const Io = std.Io;
 const fs = @import("../fs/fs.zig");
+const discover_input = @import("input.zig");
 
 /// All errors reported by this namespace.
 pub const Error = error{
@@ -19,14 +20,14 @@ pub const Error = error{
 /// file `ref: refs/...` (spaces allowed after the colon), or a file that
 /// starts with an object name of either hash.
 pub fn validHead(io: Io, dir: Io.Dir) Io.Cancelable!bool {
-    var buf: [256]u8 = undefined;
-    if (dir.readLink(io, "HEAD", &buf)) |len| {
-        return std.mem.startsWith(u8, buf[0..len], "refs/");
+    var buf: [discover_input.Limit.head.bytes()]u8 = undefined;
+    if (discover_input.link(io, dir, "HEAD", .head, &buf)) |target| {
+        return std.mem.startsWith(u8, target, "refs/");
     } else |err| switch (err) {
         error.Canceled => return error.Canceled,
         else => {},
     }
-    const text = dir.readFile(io, "HEAD", &buf) catch |err| switch (err) {
+    const text = discover_input.file(io, dir, "HEAD", .head, &buf) catch |err| switch (err) {
         error.Canceled => return error.Canceled,
         else => return false,
     };
@@ -49,10 +50,10 @@ fn startsWithHex(text: []const u8, n: usize) bool {
 /// has none: a linked worktree's shared directory. A relative name is taken
 /// from `git_dir`, as git's `get_common_dir_noenv` takes it.
 pub fn openCommon(io: Io, git_dir: Io.Dir) Self.Error!?fs.OwnedDir {
-    var buf: [Io.Dir.max_path_bytes + 2]u8 = undefined;
+    var buf: [discover_input.Limit.commondir.bytes()]u8 = undefined;
     // One that is there but cannot be read is an error, as git dies on it
     // ("failed to read"), never a repository without one.
-    const text = git_dir.readFile(io, "commondir", &buf) catch |err| return switch (err) {
+    const text = discover_input.file(io, git_dir, "commondir", .commondir, &buf) catch |err| return switch (err) {
         error.FileNotFound => null,
         error.Canceled => error.Canceled,
         else => error.BrokenCommonDir,

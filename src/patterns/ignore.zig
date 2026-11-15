@@ -138,11 +138,9 @@ pub const Rules = struct {
     /// `depth` decides precedence; the walker passes the directory's depth
     /// below the working tree's root, offset past the two global levels.
     pub fn addDirectory(rules: *Rules, io: Io, wt: Io.Dir, base: []const u8, depth: u32) Self.Error!void {
-        var path_buf: [4096]u8 = undefined;
-        const path = if (base.len == 0)
-            ".gitignore"
-        else
-            std.mem.print(&path_buf, "{s}/.gitignore", .{base}) catch return;
+        const joined = if (base.len == 0) null else try rules.gpa.print("{s}/.gitignore", .{base});
+        defer if (joined) |owned| rules.gpa.free(owned);
+        const path = joined orelse ".gitignore";
         // An in-tree `.gitignore` is read only as a file, never through a
         // symbolic link, as git's `PATTERN_NOFOLLOW` reads it.
         const found = (fs.statAt(io, wt, path) catch |err| switch (err) {
@@ -164,7 +162,8 @@ pub const Rules = struct {
     ) ErrorNamespace.Error!void {
         const a = rules.arena.allocator();
         const bytes = (try fs.readFileAlloc(a, io, dir, path, 1 << 24)) orelse return;
-        try rules.addText(bytes, base, source, depth);
+        // The rules name their source for as long as they live.
+        try rules.addText(bytes, base, try a.dupe(u8, source), depth);
     }
 
     /// Add a level from text already in memory.
@@ -310,8 +309,9 @@ pub const Checker = struct {
     pub const Error = ErrorNamespace.Error;
 
     rules: Rules,
-    /// The working tree the paths are relative to. Borrowed.
-    wt: Io.Dir,
+    /// The working tree the paths are relative to, which its caller keeps
+    /// open.
+    wt: aegis.own.Unowned(Io.Dir),
     unreadable: Unreadable,
     /// The folders whose `.gitignore` is in `rules`, or was found absent,
     /// `""` the root. The keys live in the rules' arena.
@@ -333,7 +333,7 @@ pub const Checker = struct {
 
     /// A checker over `rules`, which it now owns, for the working tree `wt`.
     pub fn init(rules: Rules, wt: Io.Dir, options: Options) Checker {
-        return .{ .rules = rules, .wt = wt, .unreadable = options.unreadable };
+        return .{ .rules = rules, .wt = .of(wt), .unreadable = options.unreadable };
     }
 
     /// Release the rules and what was read into them.
@@ -375,7 +375,7 @@ pub const Checker = struct {
             if (!checker.read.contains(dir)) {
                 try checker.read.ensureUnusedCapacity(gpa, 1);
                 const key = try checker.rules.arena.allocator().dupe(u8, dir);
-                checker.rules.addDirectory(io, checker.wt, key, depth) catch |err| switch (err) {
+                checker.rules.addDirectory(io, checker.wt.get(), key, depth) catch |err| switch (err) {
                     error.OutOfMemory, error.Canceled => |e| return e,
                     else => if (checker.unreadable == .fail) return err,
                 };
@@ -645,10 +645,10 @@ fn fuzzIgnore(_: void, case: *shakedown_mod.Case) anyerror!void {
     case.source.bytes(path);
     var rules: Rules = try .init(gpa, .{ .case_fold = false });
     defer rules.deinit();
-    rules.addText(text, "", "fuzz", 2) catch return;
+    try rules.addText(text, "", "fuzz", 2);
     // the same bytes as one pattern given whole, as `clean -e` gives it
     _ = parsePattern(text, .{});
-    rules.addPatterns(&.{text}, "", "fuzz", 3) catch return;
+    try rules.addPatterns(&.{text}, "", "fuzz", 3);
     _ = rules.match(path, .file);
     _ = rules.matchPath(path, .dir);
 }

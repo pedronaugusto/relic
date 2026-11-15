@@ -54,7 +54,7 @@ pub const WriteError = Io.File.OpenError || Io.Writer.Error || Io.File.Writer.Er
 /// it is there, as git for Windows' `mingw_open` does, since Windows will
 /// not replace a hidden file.
 pub fn write(io: Io, dir: Io.Dir, path: []const u8, hide: fs.HideDotFiles) WriteError!void {
-    std.debug.assert(path.len != 0);
+    aegis.assert.invariant(path.len != 0, "a .git file names a directory; one with no path in it is refused when read");
     fs.showIfAsked(io, dir, ".git", hide);
     var file = try dir.createFile(io, ".git", .{});
     defer file.close(io);

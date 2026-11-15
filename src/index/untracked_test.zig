@@ -63,7 +63,7 @@ fn indexBytes(repo: *testgit.Repo) ![]u8 {
 fn readIndex(repo: *testgit.Repo) !index_mod.Index {
     const git_dir = try repo.gitDir(io);
     defer git_dir.close(io);
-    return index_mod.Index.read(gpa, io, git_dir, "index", .{ .git_dir = git_dir, .kind = .sha1 });
+    return index_mod.Index.read(gpa, io, git_dir, "index", .{ .git_dir = .of(git_dir), .kind = .sha1 });
 }
 
 test "an untracked cache git filled is read and written back byte for byte" {

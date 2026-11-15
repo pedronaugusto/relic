@@ -31,6 +31,7 @@ const Self = @This();
 
 const std = @import("std");
 const aegis = @import("aegis");
+const walk_input = @import("input.zig");
 const ctype = @import("../text.zig").ctype;
 const quote = @import("../text.zig").quote;
 const decimal = @import("../text.zig").decimal;
@@ -190,7 +191,7 @@ const Ctx = struct {
     }
 
     fn readState(c: *Ctx, name: []const u8) Error!?[]u8 {
-        return aegis.own.readFile(c.io, c.dir(), name, c.a, aegis.units.Bytes(u64).fromRaw(std.math.maxInt(u64))) catch |err| switch (err) {
+        return walk_input.file(c.io, c.dir(), name, c.a, .bisect) catch |err| switch (err) {
             error.FileNotFound => null,
             else => |e| return e,
         };
@@ -1213,7 +1214,7 @@ fn resetTo(c: *Ctx, commit: ?[]const u8) Error!void {
 
 /// `git bisect log`: what `BISECT_LOG` holds. The result is the caller's.
 pub fn log(gpa: Allocator, io: Io, repo: *Repository) Self.Error![]u8 {
-    const text = aegis.own.readFile(io, repo.gitDirectory(), "BISECT_LOG", gpa, aegis.units.Bytes(u64).fromRaw(std.math.maxInt(u64))) catch |err| switch (err) {
+    const text = walk_input.file(io, repo.gitDirectory(), "BISECT_LOG", gpa, .bisect) catch |err| switch (err) {
         error.FileNotFound => return error.NoLog,
         else => |e| return e,
     };
@@ -1364,7 +1365,7 @@ fn runCommand(c: *Ctx, line: []const u8, run_options: RunOptions) Error!i32 {
     var outcome = try program.run(c.gpa, c.io, run_options.programs, .{
         .argv = &.{line},
         .shell = true,
-        .cwd = if (c.repo.workDirectory()) |wt| .{ .dir = wt } else .inherit,
+        .cwd = if (c.repo.workDirectory()) |wt| .{ .dir = .of(wt) } else .inherit,
     }, .{});
     defer outcome.deinit(c.gpa);
     return switch (outcome.term) {

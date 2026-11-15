@@ -53,7 +53,7 @@ const Pair = struct {
         defer printed.deinit();
         var opts = options;
         opts.output = &printed.writer;
-        opts.cwd = p.mine.dir;
+        opts.cwd = .of(p.mine.dir);
         var input: Io.Reader = .fixed(stream);
         const report = fast_import.import(gpa, io, &repo, &input, opts) catch |err| {
             std.debug.print("fastimport: {t}\n", .{err});

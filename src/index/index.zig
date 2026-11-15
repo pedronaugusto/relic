@@ -666,7 +666,7 @@ const ieot_version: u32 = 1;
 /// Where split-index files live, the object format and an optional measured
 /// filesystem timestamp resolution. Without a measurement, read probes it.
 pub const ReadOptions = struct {
-    git_dir: ?Io.Dir = null,
+    git_dir: ?aegis.own.Unowned(Io.Dir) = null,
     kind: Kind,
     timestamp_resolution: ?fs.Resolution = null,
     /// What `Index.add` refuses, as `core.protectNTFS` and `core.protectHFS`
@@ -845,7 +845,7 @@ pub const Index = struct {
     /// with no `.git/index` has nothing staged. `git_dir` is where a split
     /// index's shared file is looked for, and may be the same directory.
     pub fn read(gpa: Allocator, io: Io, dir: Io.Dir, sub_path: []const u8, options: ReadOptions) Self.ReadError!Index {
-        const git_dir = options.git_dir orelse dir;
+        const git_dir = if (options.git_dir) |kept| kept.get() else dir;
         const kind = options.kind;
         const timestamp_resolution = options.timestamp_resolution;
         const bytes = (try fs.readFileAlloc(gpa, io, dir, sub_path, 1 << 31)) orelse {
@@ -1090,8 +1090,8 @@ pub const Index = struct {
     fn mergeShared(index: *Index, gpa: Allocator, io: Io, git_dir: Io.Dir, base: Oid) ReadError!void {
         var hex: [hash.max_hex_len]u8 = undefined;
         var name_buf: [hash.max_hex_len + 16]u8 = undefined;
-        // unreachable: a hex name is at most max_hex_len digits, the prefix twelve bytes
-        const name = std.mem.print(&name_buf, "sharedindex.{s}", .{base.hex(&hex)}) catch unreachable;
+        const name = std.mem.print(&name_buf, "sharedindex.{s}", .{base.hex(&hex)}) catch
+            aegis.assert.never("a hex name is at most max_hex_len digits and the prefix twelve bytes, within the buffer's sixteen spare");
         const shared_bytes = (try fs.readFileAlloc(gpa, io, git_dir, name, 1 << 31)) orelse
             return error.SharedIndexMissing;
         defer gpa.free(shared_bytes);
@@ -1663,8 +1663,8 @@ pub const Index = struct {
         const checksum = Oid.fromCut(index.kind, written[written.len - raw_len ..]);
         var hex: [hash.max_hex_len]u8 = undefined;
         var name_buf: [hash.max_hex_len + 16]u8 = undefined;
-        // unreachable: a hex name is at most max_hex_len digits, the prefix twelve bytes
-        const name = std.mem.print(&name_buf, "sharedindex.{s}", .{checksum.hex(&hex)}) catch unreachable;
+        const name = std.mem.print(&name_buf, "sharedindex.{s}", .{checksum.hex(&hex)}) catch
+            aegis.assert.never("a hex name is at most max_hex_len digits and the prefix twelve bytes, within the buffer's sixteen spare");
         const buffer = try index.gpa.alloc(u8, 64 * 1024);
         defer index.gpa.free(buffer);
         var lock = try fs.LockFile.open(index.gpa, io, git_dir, .{ .sub_path = name, .buffer = buffer }, options.lock);
@@ -1940,7 +1940,7 @@ pub const Index = struct {
     /// on unless the entry starts an `IEOT` block, and NUL-padded to eight
     /// bytes before it.
     fn writeEntry(index: *const Index, out: *Io.Writer, entry: Entry, name: []const u8, version: u32, previous: []const u8, starts_block: bool, options: WriteOptions) (Io.Writer.Error || Io.Cancelable)!void {
-        std.debug.assert(name.len <= std.math.maxInt(u16));
+        aegis.assert.invariant(name.len <= std.math.maxInt(u16), "writeTo refuses a path past 65535 bytes before it writes an entry");
         aegis.assert.invariant(version >= 3 or !entry.needsExtendedFlags(), "version >= 3 or !entry.needsExtendedFlags()");
         const raw_len = index.kind.rawLen();
         var fixed: [40 + hash.max_raw_len + 4]u8 = @splat(0);
@@ -2548,7 +2548,7 @@ test "an index read from a disk measures the filesystem it was read from" {
     defer written.deinit();
     try written.write(io, tmp.dir, "index", .{});
 
-    var index = try Index.read(gpa, io, tmp.dir, "index", .{ .git_dir = tmp.dir, .kind = .sha1 });
+    var index = try Index.read(gpa, io, tmp.dir, "index", .{ .git_dir = .of(tmp.dir), .kind = .sha1 });
     defer index.deinit();
     try std.testing.expect(index.timestamp_resolution.measured);
     try std.testing.expect(index.timestamp_resolution.ns >= 1);
@@ -2602,7 +2602,7 @@ test "an index git writes with names only Windows refuses is read, as git reads 
     defer gpa.free(listed);
     var git_dir = try repo.gitDir(io);
     defer git_dir.close(io);
-    var index = try Index.read(gpa, io, git_dir, "index", .{ .git_dir = git_dir, .kind = .sha1 });
+    var index = try Index.read(gpa, io, git_dir, "index", .{ .git_dir = .of(git_dir), .kind = .sha1 });
     defer index.deinit();
     var ours: std.ArrayList(u8) = .empty;
     defer ours.deinit(gpa);
@@ -2662,7 +2662,7 @@ test "a split index is checked once merged: no empty name, no name twice, and th
         const linked = try withLink(gpa, plain, base);
         defer gpa.free(linked);
         try tmp.dir.writeFile(io, .{ .sub_path = "index", .data = linked });
-        try std.testing.expectError(case.err, Index.read(gpa, io, tmp.dir, "index", .{ .git_dir = tmp.dir, .kind = .sha1 }));
+        try std.testing.expectError(case.err, Index.read(gpa, io, tmp.dir, "index", .{ .git_dir = .of(tmp.dir), .kind = .sha1 }));
     }
 
     // A shared file under a name its checksum is not.
@@ -2677,7 +2677,7 @@ test "a split index is checked once merged: no empty name, no name twice, and th
     const linked = try withLink(gpa, plain, other);
     defer gpa.free(linked);
     try tmp.dir.writeFile(io, .{ .sub_path = "index", .data = linked });
-    try std.testing.expectError(error.ChecksumMismatch, Index.read(gpa, io, tmp.dir, "index", .{ .git_dir = tmp.dir, .kind = .sha1 }));
+    try std.testing.expectError(error.ChecksumMismatch, Index.read(gpa, io, tmp.dir, "index", .{ .git_dir = .of(tmp.dir), .kind = .sha1 }));
 }
 
 test "a split index's link is held to its shared index as git's merge_base_index holds it" {
@@ -2743,10 +2743,10 @@ test "a split index's link is held to its shared index as git's merge_base_index
         try tmp.dir.writeFile(io, .{ .sub_path = "index", .data = out.items });
 
         const want = case.want orelse {
-            try std.testing.expectError(error.CorruptLinkExtension, Index.read(gpa, io, tmp.dir, "index", .{ .git_dir = tmp.dir, .kind = .sha1 }));
+            try std.testing.expectError(error.CorruptLinkExtension, Index.read(gpa, io, tmp.dir, "index", .{ .git_dir = .of(tmp.dir), .kind = .sha1 }));
             continue;
         };
-        var index = try Index.read(gpa, io, tmp.dir, "index", .{ .git_dir = tmp.dir, .kind = .sha1 });
+        var index = try Index.read(gpa, io, tmp.dir, "index", .{ .git_dir = .of(tmp.dir), .kind = .sha1 });
         defer index.deinit();
         var got: std.ArrayList(u8) = .empty;
         defer got.deinit(gpa);
@@ -2879,19 +2879,20 @@ test "an entry's mode is read as git reads it, any bits, and written back as it 
 }
 
 test "fuzz: any bytes are an index or a named error" {
-    try shakedown.check(std.testing.allocator, {}, fuzzIndex, .{});
-}
-
-fn fuzzIndex(_: void, case: *shakedown.Case) anyerror!void {
-    const gpa = std.testing.allocator;
-    var scratch: [4096]u8 = undefined;
-    const input = scratch[0..shakedown.gen.intRange(case.source, usize, 0, scratch.len)];
-    case.source.bytes(input);
-    var index = Index.parse(gpa, .sha1, input) catch return;
-    defer index.deinit();
-    _ = index.find("a");
-    const bytes = index.toBytes(.{}) catch return;
-    gpa.free(bytes);
+    try shakedown.check(std.testing.allocator, {}, struct {
+        fn run(_: void, case: *shakedown.Case) anyerror!void {
+            const gpa = std.testing.allocator;
+            var scratch: [4096]u8 = undefined;
+            const input = scratch[0..shakedown.gen.intRange(case.source, usize, 0, scratch.len)];
+            case.source.bytes(input);
+            // A refusal is the named error the property allows.
+            var index = Index.parse(gpa, .sha1, input) catch return;
+            defer index.deinit();
+            _ = index.find("a");
+            const bytes = index.toBytes(.{}) catch return;
+            gpa.free(bytes);
+        }
+    }.run, .{});
 }
 
 test "entries removed by the paths they hold themselves all go, and the rest stay in order" {

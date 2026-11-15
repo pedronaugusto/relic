@@ -32,6 +32,7 @@ const Self = @This();
 
 const std = @import("std");
 const aegis = @import("aegis");
+const walk_input = @import("input.zig");
 const ctype = @import("../text.zig").ctype;
 const shakedown = @import("shakedown");
 const builtin = @import("builtin");
@@ -270,7 +271,7 @@ pub const Mailmap = struct {
             };
             if (st.kind == .sym_link) return;
         }
-        const bytes = aegis.own.readFile(io, dir, path, m.gpa, aegis.units.Bytes(u64).fromRaw(std.math.maxInt(u64))) catch |err| switch (err) {
+        const bytes = walk_input.file(io, dir, path, m.gpa, .mailmap) catch |err| switch (err) {
             error.OutOfMemory, error.Canceled => |e| return e,
             else => return,
         };

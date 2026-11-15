@@ -25,6 +25,7 @@ const repository_format = @import("format.zig");
 const gitfile = @import("gitfile.zig");
 const directory = @import("directory.zig");
 const fs = @import("../fs/fs.zig");
+const discover_input = @import("input.zig");
 
 const Oid = hash.Oid;
 
@@ -145,8 +146,8 @@ pub fn isRepository(gpa: Allocator, io: Io, wt: Io.Dir, path: []const u8) Self.E
             else => return true,
         };
         defer file.close(io);
-        var probe: [1]u8 = undefined;
-        _ = file.readPositional(io, &.{&probe}, 0) catch |err| switch (err) {
+        var probe: [discover_input.Limit.probe.bytes()]u8 = undefined;
+        _ = discover_input.head(io, file, .probe, &probe) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             else => return true,
         };

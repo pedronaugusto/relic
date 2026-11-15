@@ -20,6 +20,7 @@ const Self = @This();
 
 const std = @import("std");
 const aegis = @import("aegis");
+const fast_input = @import("input.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -133,7 +134,7 @@ pub const Options = struct {
     export_marks: ?[]const u8 = null,
     /// What marks file paths are relative to; `null` is the process's
     /// working directory.
-    cwd: ?Io.Dir = null,
+    cwd: ?aegis.own.Unowned(Io.Dir) = null,
 };
 
 /// Write the stream for `options.tips` to `w`.
@@ -465,9 +466,7 @@ const Exporter = struct {
                     }
                 },
                 .added, .modified, .type_changed => {},
-                // unreachable: the changes are two trees', which hold no
-                // conflict stages.
-                .unmerged => unreachable,
+                .unmerged => aegis.assert.never("the changes are two trees', which hold no conflict stages"),
             }
             const new = c.new.?;
             if (ex.options.no_data or new.mode == .gitlink) {
@@ -574,9 +573,14 @@ const Exporter = struct {
     // Marks
     //=================================================================
 
+    /// What marks file paths are relative to.
+    fn marksDir(ex: *const Exporter) Io.Dir {
+        return if (ex.options.cwd) |cwd| cwd.get() else Io.Dir.cwd();
+    }
+
     /// git's `import_marks`: every commit marked is taken as written.
     fn importMarks(ex: *Exporter, path: []const u8) Error!void {
-        const bytes = aegis.own.readFile(ex.io, (ex.options.cwd orelse Io.Dir.cwd()), path, ex.gpa, aegis.units.Bytes(u64).fromRaw(std.math.maxInt(u64))) catch |err| switch (err) {
+        const bytes = fast_input.file(ex.io, ex.marksDir(), path, ex.gpa, .marks) catch |err| switch (err) {
             error.FileNotFound => if (ex.options.import_marks_if_exists) return else return error.FileNotFound,
             else => |e| return e,
         };
@@ -610,7 +614,7 @@ const Exporter = struct {
             if (try ex.typeOf(e.key_ptr.*) != .commit) continue;
             try out.put(ex.gpa, e.value_ptr.*, e.key_ptr.*);
         }
-        const dir = ex.options.cwd orelse Io.Dir.cwd();
+        const dir = ex.marksDir();
         if (std.Io.Dir.path.dirname(path)) |parent| try dir.createDirPath(ex.io, parent);
         var buffer: [4096]u8 = undefined;
         var lock = try fs.LockFile.open(ex.gpa, ex.io, dir, .{ .sub_path = path, .buffer = &buffer }, .{ .sync = .none });

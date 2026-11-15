@@ -28,10 +28,10 @@ const Self = @This();
 
 const std = @import("std");
 const aegis = @import("aegis");
+const fast_input = @import("input.zig");
 const config_mod = @import("../config/config.zig");
 const decimal = @import("../text.zig").decimal;
 const Allocator = std.mem.Allocator;
-const assert = std.debug.assert;
 const Io = std.Io;
 
 const hash = @import("../hash/hash.zig");
@@ -198,7 +198,7 @@ pub const Options = struct {
     relative_marks: bool = false,
     /// What marks file paths are relative to, for both the options and the
     /// stream's features; `null` is the process's working directory.
-    cwd: ?Io.Dir = null,
+    cwd: ?aegis.own.Unowned(Io.Dir) = null,
     /// `--allow-unsafe-features`: let the stream name marks files.
     allow_unsafe_features: bool = false,
     /// git's standard output: `progress` lines, and the answers to
@@ -588,8 +588,8 @@ const Importer = struct {
 
     fn readMarks(imp: *Importer) Error!void {
         const path = imp.import_marks.?;
-        const dir = if (imp.marksInRepository(path)) imp.repo.commonDirectory() else imp.options.cwd orelse Io.Dir.cwd();
-        const bytes = aegis.own.readFile(imp.io, dir, path, imp.gpa, aegis.units.Bytes(u64).fromRaw(std.math.maxInt(u64))) catch |err| switch (err) {
+        const dir = if (imp.marksInRepository(path)) imp.repo.commonDirectory() else if (imp.options.cwd) |cwd| cwd.get() else Io.Dir.cwd();
+        const bytes = fast_input.file(imp.io, dir, path, imp.gpa, .marks) catch |err| switch (err) {
             error.FileNotFound => {
                 if (!imp.import_marks_if_exists) return error.FileNotFound;
                 imp.import_marks_done = true;
@@ -613,7 +613,7 @@ const Importer = struct {
     fn dumpMarks(imp: *Importer) Error!void {
         const path = imp.export_marks orelse return;
         if (imp.import_marks != null and !imp.import_marks_done) return;
-        const dir = if (imp.marksInRepository(path)) imp.repo.commonDirectory() else imp.options.cwd orelse Io.Dir.cwd();
+        const dir = if (imp.marksInRepository(path)) imp.repo.commonDirectory() else if (imp.options.cwd) |cwd| cwd.get() else Io.Dir.cwd();
         if (std.Io.Dir.path.dirname(path)) |parent| try dir.createDirPath(imp.io, parent);
         var buffer: [4096]u8 = undefined;
         var lock = try fs.LockFile.open(imp.gpa, imp.io, dir, .{ .sub_path = path, .buffer = &buffer }, .{ .sync = .none });
@@ -988,10 +988,9 @@ const Importer = struct {
 
     /// A commit-ish that is not a branch or a mark: git's `get_oid`.
     fn resolve(imp: *Importer, text: []const u8) Error!Oid {
-        if (text.len == imp.kind.hexLen()) {
-            // glint-ignore: Z026 -- text that is no full object id is resolved as a mark or a name below
-            if (Oid.parse(imp.kind, text)) |oid| return oid else |_| {}
-        }
+        // Text that is no full object id is a name, which rev_parse resolves below.
+        const full: ?Oid = Oid.parse(imp.kind, text) catch null;
+        if (full) |oid| return oid;
         return rev_parse.resolve(imp.gpa, imp.io, imp.repo.revisionSource(), text) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Canceled => return error.Canceled,
@@ -1307,7 +1306,7 @@ const Importer = struct {
     }
 
     fn markNumber(text: []const u8) Error!struct { mark: u64, len: usize } {
-        assert(text[0] == ':');
+        if (text.len == 0 or text[0] != ':') return error.MalformedCommand;
         var i: usize = 1;
         while (i < text.len and std.ascii.isDigit(text[i])) : (i += 1) {}
         if (i == 1) return error.MalformedCommand;

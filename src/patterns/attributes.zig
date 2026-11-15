@@ -211,8 +211,8 @@ pub const Attrs = struct {
     }
     /// Release matchers added since the checkpoint before dropping levels.
     pub fn restore(attrs: *Attrs, before: Checkpoint) void {
-        std.debug.assert(before.levels <= attrs.levels.items.len);
-        std.debug.assert(before.macros <= attrs.macros.items.len);
+        aegis.assert.invariant(before.levels <= attrs.levels.items.len, "a checkpoint is restored before the levels it saw are dropped");
+        aegis.assert.invariant(before.macros <= attrs.macros.items.len, "a checkpoint is restored before the macros it saw are dropped");
         for (attrs.levels.items[before.levels..]) |level| levelMatcher(level).deinit();
         attrs.levels.shrinkRetainingCapacity(before.levels);
         attrs.macros.shrinkRetainingCapacity(before.macros);
@@ -323,11 +323,9 @@ pub const Attrs = struct {
     /// `depth` is how far `base` is below the root of the working tree;
     /// deeper wins, so the precedence rises with it.
     pub fn addDirectory(attrs: *Attrs, io: Io, wt: Io.Dir, base: []const u8, depth: u32) Self.Error!void {
-        var path_buf: [4096]u8 = undefined;
-        const path = if (base.len == 0)
-            ".gitattributes"
-        else
-            std.mem.print(&path_buf, "{s}/.gitattributes", .{base}) catch return;
+        if (base.len == 0) return attrs.addFileIfPresent(io, wt, ".gitattributes", base, ".gitattributes", depth + 1, .no_follow);
+        const path = try attrs.gpa.print("{s}/.gitattributes", .{base});
+        defer attrs.gpa.free(path);
         try attrs.addFileIfPresent(io, wt, path, base, path, depth + 1, .no_follow);
     }
 
@@ -365,7 +363,8 @@ pub const Attrs = struct {
             error.StreamTooLong => return,
             else => |e| return e,
         }) orelse return;
-        try attrs.addText(bytes, .{ .base = base, .source = source, .precedence = precedence });
+        // The rules name their source for as long as they live.
+        try attrs.addText(bytes, .{ .base = base, .source = try a.dupe(u8, source), .precedence = precedence });
     }
 
     /// Add a level from text already in memory, which must outlive the
@@ -1202,12 +1201,12 @@ fn fuzzAttrs(_: void, case: *shakedown_mod.Case) anyerror!void {
     case.source.bytes(path);
     var attrs: Attrs = try .init(gpa, .{ .case_fold = false });
     defer attrs.deinit();
-    attrs.addText(text, .{ .base = "", .source = "fuzz", .precedence = 1 }) catch return;
+    try attrs.addText(text, .{ .base = "", .source = "fuzz", .precedence = 1 });
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
-    const a = attrs.lookup(arena.allocator(), path, .file) catch return;
+    const a = try attrs.lookup(arena.allocator(), path, .file);
     _ = unsupported(a, &.{"lfs"});
-    const converted = toGit(gpa, text, a, .{ .autocrlf = .true }) catch return;
+    const converted = try toGit(gpa, text, a, .{ .autocrlf = .true });
     converted.deinit(gpa);
 }
 
