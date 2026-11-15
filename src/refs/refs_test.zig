@@ -20,6 +20,11 @@ const Repository = repo_mod.Repository;
 
 const object = @import("../object/object.zig");
 
+// The input seam's own tests: reached by no public name.
+test {
+    _ = @import("input.zig");
+}
+
 const who: object.Signature = .{ .name = "Fixture", .email = "fixture@example.com", .when_secs = 1_700_000_000, .offset_minutes = 0 };
 
 /// A repository of two commits on `main`, and a branch `side` at the
