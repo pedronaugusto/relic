@@ -219,6 +219,9 @@ test "a cancel that lands in any read of a refused request comes back as Cancele
         }
     }
     try testing.expect(reads != 0);
+    // A run whose socket reads the body in fewer pieces than the first's
+    // never makes read `n`, and is passed over (as `eachCallCanceled` does).
+    var landed: u32 = 0;
     var n: u32 = 1;
     while (n <= reads) : (n += 1) {
         const plan = [_]shakedown.IoPlan.Entry{.{ .at = .{ .nth = .{ .call = .net_read, .n = n } }, .fault = .cancel, .times = 1 }};
@@ -228,11 +231,16 @@ test "a cancel that lands in any read of a refused request comes back as Cancele
             var session = opened;
             session.deinit(io);
             return error.TestUnexpectedResult;
-        } else |err| testing.expectEqual(error.Canceled, err) catch |e| {
-            std.debug.print("read {d} of {d} canceled: {t}\n", .{ n, reads, err });
-            return e;
-        };
+        } else |err| {
+            if (faults.fired().len == 0) continue;
+            landed += 1;
+            testing.expectEqual(error.Canceled, err) catch |e| {
+                std.debug.print("read {d} of {d} canceled: {t}\n", .{ n, reads, err });
+                return e;
+            };
+        }
     }
+    try testing.expect(landed != 0);
 }
 
 test "a redirect whose user decodes to a newline is refused before any helper hears of it" {
