@@ -15,6 +15,13 @@
       "reason": "the file layer's platform calls std.Io does not give it: the process umask, the effective user, the process id, Windows' CreateHardLinkW, a file's owner checked against the user's token, and NtCreateFile for a handle to a file's attributes alone"
     },
     {
+      "file": "src/odb/index_pack/input.zig",
+      "rules": [
+        "A009"
+      ],
+      "reason": "the received pack's bytes enter index-pack here, read back from the temporary pack the stream is copied into, through a reader over a 64 KiB buffer, a positional read held to its caller's end, or a test Io layer's forwarded read into the caller's buffers; every other part of index-pack parses what these return"
+    },
+    {
       "file": "src/odb/pack/input.zig",
       "rules": [
         "A009"

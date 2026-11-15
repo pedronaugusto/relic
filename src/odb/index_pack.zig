@@ -47,6 +47,8 @@ const policy = @import("policy.zig");
 const Database = @import("database.zig").Database;
 const odb_mod = @import("odb.zig"); // Test fixtures only.
 const fsck = @import("../object/fsck.zig");
+const pack_input = @import("index_pack/input.zig");
+const PackFile = pack_input.PackFile;
 const warning = @import("../report.zig").warning;
 const progress_mod = @import("../report.zig").progress;
 
@@ -390,7 +392,11 @@ const OfsBase = struct {
 /// `db` is where a thin pack's missing bases are read from and where the
 /// received objects' names are checked for a collision attack when it asks
 /// for that. On any error nothing is left in `pack_dir`.
-pub const Inputs = struct { pack_dir: Io.Dir, in: *Io.Reader };
+pub const Inputs = struct {
+    /// `objects/pack`, which the caller keeps open and closes.
+    pack_dir: aegis.own.Unowned(Io.Dir),
+    in: *Io.Reader,
+};
 
 pub fn receive(
     gpa: Allocator,
@@ -399,7 +405,7 @@ pub fn receive(
     inputs: Inputs,
     options: Options,
 ) Self.Error!Result {
-    const pack_dir = inputs.pack_dir;
+    const pack_dir = inputs.pack_dir.get();
     // git's index-pack reads with replace refs off: a thin pack's bases and
     // a collision check take the objects of their names.
     const pauses = @hasDecl(@typeInfo(@TypeOf(db)).pointer.child, "pauseReplacements");
@@ -417,7 +423,7 @@ pub fn receive(
         if (!kept) fs.removeLeftover(io, pack_dir, temp);
     }
 
-    var indexer: Indexer = try .init(gpa, io, Database.from(db), file, options);
+    var indexer: Indexer = try .init(gpa, io, Database.from(db), .of(file), options);
     defer indexer.deinit();
     const streamed = try indexStream(&indexer, inputs.in) orelse return .{ .name = null, .objects = 0, .deltas = 0, .appended = 0 };
 
@@ -441,7 +447,7 @@ pub fn receive(
         .appended = streamed.appended,
     };
     const published = try publish(gpa, io, db, .{
-        .pack_dir = pack_dir,
+        .pack_dir = .of(pack_dir),
         .temp = temp,
         .name = streamed.name,
         .entries = index_entries,
@@ -485,7 +491,8 @@ fn indexStream(indexer: *Indexer, in: *Io.Reader) Self.Error!?Streamed {
 /// A received pack, closed at `temp` in `pack_dir`, and what `publish`
 /// writes beside it.
 const Publication = struct {
-    pack_dir: Io.Dir,
+    /// `objects/pack`, which the receive's caller keeps open.
+    pack_dir: aegis.own.Unowned(Io.Dir),
     temp: []const u8,
     name: Oid,
     entries: []pack.IndexEntry,
@@ -502,16 +509,14 @@ const Publication = struct {
 /// twice has the same name, and the one already there, which a reader may
 /// have open, is kept: `false`, nothing put in place.
 fn publish(gpa: Allocator, io: Io, db: anytype, p: Publication, options: Options) Self.Error!bool {
-    const pack_dir = p.pack_dir;
+    const pack_dir = p.pack_dir.get();
     const kind = db.objectFormat();
     var hex: [hash.max_hex_len]u8 = undefined;
     const text = p.name.hex(&hex);
-    var pack_name_buf: [96]u8 = undefined;
-    // unreachable: a hex name is at most max_hex_len digits, the rest ten bytes
-    const pack_name = std.mem.print(&pack_name_buf, "pack-{s}.pack", .{text}) catch unreachable;
-    var idx_name_buf: [96]u8 = undefined;
-    // unreachable: a hex name is at most max_hex_len digits, the rest nine bytes
-    const idx_name = std.mem.print(&idx_name_buf, "pack-{s}.idx", .{text}) catch unreachable;
+    var pack_name_buf: PackFileName = undefined;
+    const pack_name = packFileName(&pack_name_buf, text, "pack");
+    var idx_name_buf: PackFileName = undefined;
+    const idx_name = packFileName(&idx_name_buf, text, "idx");
 
     if (pack_dir.access(io, idx_name, .{})) |_| {
         return false;
@@ -539,14 +544,24 @@ fn publish(gpa: Allocator, io: Io, db: anytype, p: Publication, options: Options
     try fs.rename(io, pack_dir, p.temp, pack_name);
     p.kept.* = true;
     if (rev_temp) |t| {
-        var rev_name_buf: [96]u8 = undefined;
-        // unreachable: a hex name is at most max_hex_len digits, the rest nine bytes
-        const rev_name = std.mem.print(&rev_name_buf, "pack-{s}.rev", .{text}) catch unreachable;
+        var rev_name_buf: PackFileName = undefined;
+        const rev_name = packFileName(&rev_name_buf, text, "rev");
         try renameBesidePack(io, pack_dir, t, rev_name, pack_name);
     }
     try renameBesidePack(io, pack_dir, idx_temp, idx_name, pack_name);
     try pack.syncNames(io, pack_dir, p.fsync);
     return true;
+}
+
+/// Room for `pack-<name>.<extension>`: the longest hex name, and an
+/// extension of at most four letters.
+const PackFileName = [hash.max_hex_len + "pack-.pack".len]u8;
+
+/// `pack-<text>.<extension>` in `buf`, `text` a hex name.
+fn packFileName(buf: *PackFileName, text: []const u8, comptime extension: []const u8) []const u8 {
+    if (extension.len > "pack".len) @compileError("a pack's file name has an extension of at most four letters");
+    aegis.assert.invariant(text.len <= hash.max_hex_len, "a hex name is at most max_hex_len digits");
+    return std.mem.print(buf, "pack-{s}." ++ extension, .{text}) catch aegis.assert.never("the buffer holds pack-, the longest hex name, a dot and four letters");
 }
 
 /// Read every entry of the stream through `tee` into `indexer`, then the
@@ -639,7 +654,8 @@ const Copied = struct {
 const Tee = struct {
     interface: Io.Reader,
     io: Io,
-    file: Io.File,
+    /// The temporary pack, which `receive` opened and closes.
+    file: PackFile,
     in: *Io.Reader,
     kind: Kind,
     options: Options,
@@ -650,7 +666,7 @@ const Tee = struct {
     tail_len: usize = 0,
     err: ?Error = null,
 
-    fn init(io: Io, file: Io.File, in: *Io.Reader, kind: Kind, buffer: []u8, options: Options) Tee {
+    fn init(io: Io, file: PackFile, in: *Io.Reader, kind: Kind, buffer: []u8, options: Options) Tee {
         return .{
             .interface = .{ .vtable = &.{ .stream = stream }, .buffer = buffer, .seek = 0, .end = 0 },
             .io = io,
@@ -692,7 +708,7 @@ const Tee = struct {
 
     fn keep(t: *Tee, chunk: []const u8) Error!void {
         const raw_len = t.kind.rawLen();
-        try t.file.writePositionalAll(t.io, chunk, t.written);
+        try t.file.get().writePositionalAll(t.io, chunk, t.written);
         t.written += chunk.len;
         if (t.options.max_pack_bytes) |most| {
             if (Bytes.fromRaw(t.written).compare(most) == .gt) return error.PackTooLarge;
@@ -743,11 +759,12 @@ const Indexer = struct {
     io: Io,
     db: Database,
     kind: Kind,
-    file: Io.File,
+    /// The temporary pack, which `receive` opened and closes.
+    file: PackFile,
     options: Options,
     /// `Options.max_object_bytes`, as the most a whole object is held in.
     object_limit: aegis.bounded.Limit(usize),
-    read_buffer: []u8,
+    read_buffer: *pack_input.Buffer,
     /// How the stream's entries are decoded while it is parsed.
     inflater: Inflater,
     reader: Io.File.Reader,
@@ -788,9 +805,9 @@ const Indexer = struct {
         resolved: u64 = 0,
     };
 
-    fn init(gpa: Allocator, io: Io, db: Database, file: Io.File, options: Options) Allocator.Error!Indexer {
-        const read_buffer = try gpa.alloc(u8, 64 * 1024);
-        errdefer gpa.free(read_buffer);
+    fn init(gpa: Allocator, io: Io, db: Database, file: PackFile, options: Options) Allocator.Error!Indexer {
+        const read_buffer = try gpa.create(pack_input.Buffer);
+        errdefer gpa.destroy(read_buffer);
         const inflater: Inflater = try .init(gpa, db.big_file_bytes);
         return .{
             .gpa = gpa,
@@ -802,7 +819,7 @@ const Indexer = struct {
             .object_limit = .init(std.math.cast(usize, options.max_object_bytes.raw()) orelse std.math.maxInt(usize)),
             .read_buffer = read_buffer,
             .inflater = inflater,
-            .reader = file.reader(io, read_buffer),
+            .reader = pack_input.readPack(io, file, read_buffer),
         };
     }
 
@@ -811,7 +828,7 @@ const Indexer = struct {
         x.ofs_bases.deinit(x.gpa);
         x.ref_bases.deinit(x.gpa);
         x.thin_bases.deinit(x.gpa);
-        x.gpa.free(x.read_buffer);
+        x.gpa.destroy(x.read_buffer);
         x.inflater.deinit();
         x.gpa.free(x.roots);
         x.shared.teardown().found.deinit(x.gpa);
@@ -1150,11 +1167,11 @@ const Indexer = struct {
     /// its name, both inflated as they are read and neither held, as git's
     /// `check_collision` compares an object past the threshold.
     fn sameStreamed(x: *Indexer, entry: Entry) Error!bool {
-        const buffer = try x.gpa.alloc(u8, 64 * 1024);
-        defer x.gpa.free(buffer);
+        const buffer = try x.gpa.create(pack_input.Buffer);
+        defer x.gpa.destroy(buffer);
         const window = try x.gpa.alloc(u8, (1 << 15) + 4096);
         defer x.gpa.free(window);
-        var file_reader = x.file.reader(x.io, buffer);
+        var file_reader = pack_input.readPack(x.io, x.file, buffer);
         file_reader.seekTo(entry.data_at) catch |err| return switch (err) {
             error.ReadFailed => file_reader.err orelse error.ReadFailed,
             else => error.TruncatedPack,
@@ -1202,11 +1219,10 @@ const Indexer = struct {
         var buf: [16 * 1024]u8 = undefined;
         var at = start;
         while (at < end) {
-            const want: usize = @intCast(@min(@as(u64, buf.len), end - at));
-            const n = try x.file.readPositionalAll(x.io, buf[0..want], at);
-            if (n == 0) return error.TruncatedPack;
-            crc.update(buf[0..n]);
-            at += n;
+            const got = try pack_input.readPackAt(x.io, x.file, &buf, at, end);
+            if (got.len == 0) return error.TruncatedPack;
+            crc.update(got);
+            at += got.len;
         }
         return crc.final();
     }
@@ -1286,10 +1302,12 @@ const Indexer = struct {
         while (made < threads) : (made += 1) workers[made] = try .init(x);
 
         var group: Io.Group = .init;
-        var spawned: usize = 1;
-        while (spawned < threads) : (spawned += 1) {
-            group.concurrent(x.io, Worker.run, .{&workers[spawned]}) catch break;
-        }
+        for (workers[1..]) |*w| group.concurrent(x.io, Worker.run, .{w}) catch |err| switch (err) {
+            // No task to spare: the worker runs as the Io can, here before
+            // this thread's own or later, and takes whatever whole objects
+            // are left when it does.
+            error.ConcurrencyUnavailable => group.async(x.io, Worker.run, .{w}),
+        };
         // This thread is a worker too; with no others it is the only one.
         workers[0].run();
         // A failure stops the others at their next object, but one may be
@@ -1373,7 +1391,7 @@ const Indexer = struct {
     /// checksum.
     fn appendBases(x: *Indexer, body_end: u64, count: u32) Error!Oid {
         const io = x.io;
-        try x.file.setLength(io, body_end);
+        try x.file.get().setLength(io, body_end);
         var end = body_end;
         var compressed: Io.Writer.Allocating = try .initCapacity(x.gpa, 4096);
         defer compressed.deinit();
@@ -1391,8 +1409,8 @@ const Indexer = struct {
             var crc: warp.Crc32 = .init;
             crc.update(head[0..head_len]);
             crc.update(compressed.written());
-            try x.file.writePositionalAll(io, head[0..head_len], end);
-            try x.file.writePositionalAll(io, compressed.written(), end + head_len);
+            try x.file.get().writePositionalAll(io, head[0..head_len], end);
+            try x.file.get().writePositionalAll(io, compressed.written(), end + head_len);
             try x.entries.append(x.gpa, .{
                 .offset = end,
                 .data_at = end + head_len,
@@ -1409,19 +1427,18 @@ const Indexer = struct {
         var count_bytes: [4]u8 = undefined;
         const thin = std.math.cast(u32, x.thin_bases.items.len) orelse return error.PackTooLarge;
         std.mem.writeInt(u32, &count_bytes, std.math.add(u32, count, thin) catch return error.PackTooLarge, .big);
-        try x.file.writePositionalAll(io, &count_bytes, 8);
+        try x.file.get().writePositionalAll(io, &count_bytes, 8);
 
         var hasher: hash.Hasher = .init(x.kind);
         var at: u64 = 0;
         while (at < end) {
-            const want: usize = @intCast(@min(@as(u64, x.read_buffer.len), end - at));
-            const n = try x.file.readPositionalAll(io, x.read_buffer[0..want], at);
-            if (n == 0) return error.TruncatedPack;
-            hasher.update(x.read_buffer[0..n]);
-            at += n;
+            const got = try pack_input.readPackAt(io, x.file, x.read_buffer, at, end);
+            if (got.len == 0) return error.TruncatedPack;
+            hasher.update(got);
+            at += got.len;
         }
         const checksum = hasher.final();
-        try x.file.writePositionalAll(io, checksum.raw(), end);
+        try x.file.get().writePositionalAll(io, checksum.raw(), end);
         return checksum;
     }
 };
@@ -1554,7 +1571,7 @@ const Inflater = struct {
 /// decoder, and the chain it holds.
 const Worker = struct {
     x: *Indexer,
-    read_buffer: []u8,
+    read_buffer: *pack_input.Buffer,
     reader: Io.File.Reader,
     inflater: Inflater,
     stack: std.ArrayList(Indexer.Frame) = .empty,
@@ -1562,12 +1579,12 @@ const Worker = struct {
     held: u64 = 0,
 
     fn init(x: *Indexer) Allocator.Error!Worker {
-        const read_buffer = try x.gpa.alloc(u8, 64 * 1024);
-        errdefer x.gpa.free(read_buffer);
+        const read_buffer = try x.gpa.create(pack_input.Buffer);
+        errdefer x.gpa.destroy(read_buffer);
         return .{
             .x = x,
             .read_buffer = read_buffer,
-            .reader = x.file.reader(x.io, read_buffer),
+            .reader = pack_input.readPack(x.io, x.file, read_buffer),
             .inflater = try .init(x.gpa, x.db.big_file_bytes),
         };
     }
@@ -1576,7 +1593,7 @@ const Worker = struct {
         for (w.stack.items) |frame| w.x.gpa.free(frame.bytes);
         w.stack.deinit(w.x.gpa);
         w.inflater.deinit();
-        w.x.gpa.free(w.read_buffer);
+        w.x.gpa.destroy(w.read_buffer);
         w.* = undefined;
     }
 
@@ -1770,6 +1787,11 @@ fn encodeTypeAndSize(buf: *[16]u8, t: object.Type, size: u64) usize {
 }
 
 const testing = std.testing;
+
+test {
+    _ = pack_input;
+}
+
 const testgit = @import("../testing/git.zig");
 const testremote = @import("../testing/remote.zig");
 
@@ -1859,7 +1881,7 @@ fn appendDelta(gpa: Allocator, base_len: usize, suffix: []const u8) ![]u8 {
     if (base_len != 0) {
         // One copy from offset zero, its size in as many of the three size
         // bytes as it needs.
-        std.debug.assert(base_len < 1 << 24);
+        aegis.assert.invariant(base_len < 1 << 24, "one copy's size is at most three bytes");
         var op: u8 = 0x80 | 0x01;
         var size_bytes: [3]u8 = undefined;
         var n: usize = 0;
@@ -1955,7 +1977,7 @@ test "a pack git wrote is received, and its index is byte for byte the one git w
         defer pack_dir.close(io);
 
         var in: Io.Reader = .fixed(pack_bytes);
-        const result = try receive(gpa, io, &repo, .{ .pack_dir = pack_dir, .in = &in }, .{ .threads = threads });
+        const result = try receive(gpa, io, &repo, .{ .pack_dir = .of(pack_dir), .in = &in }, .{ .threads = threads });
         try testing.expect(result.deltas > 0);
         try testing.expectEqual(@as(u32, 0), result.appended);
 
@@ -2008,7 +2030,7 @@ test "a pack git wrote is received, and its index is byte for byte the one git w
                 var in: Io.Reader = .fixed(bytes);
                 var tasks: io_mod.Tasks = .init(each_io, .{ .inline_groups = executor != 0 });
                 const counted = tasks.io();
-                const result = try receive(gpa, counted, &repo, .{ .pack_dir = pack_dir, .in = &in }, .{ .threads = threads });
+                const result = try receive(gpa, counted, &repo, .{ .pack_dir = .of(pack_dir), .in = &in }, .{ .threads = threads });
                 // The caller resolves too, and there are only four roots.
                 try tasks.state.expect(0, @min(threads, 4) - 1);
                 try testing.expectEqual(@as(u32, 8), result.objects);
@@ -2055,7 +2077,7 @@ test "a thin pack is completed from the database, and git indexes the result ide
     const first = try testremote.gitInput(gpa, io, source.dir, &.{ "pack-objects", "--revs", "--stdout", "-q" }, first_input);
     defer gpa.free(first);
     var first_in: Io.Reader = .fixed(first);
-    _ = try receive(gpa, io, &repo, .{ .pack_dir = pack_dir, .in = &first_in }, .{});
+    _ = try receive(gpa, io, &repo, .{ .pack_dir = .of(pack_dir), .in = &first_in }, .{});
     const packs_before = try countEntries(io, pack_dir);
 
     // Then a thin pack of what is new, its deltas against what is not in it.
@@ -2067,7 +2089,7 @@ test "a thin pack is completed from the database, and git indexes the result ide
     // Refused whole when completing it is not allowed, and nothing is left.
     var diagnostic: Diagnostic = .{};
     var refused_in: Io.Reader = .fixed(thin);
-    try testing.expectError(error.DeltaBaseMissing, receive(gpa, io, &repo, .{ .pack_dir = pack_dir, .in = &refused_in }, .{
+    try testing.expectError(error.DeltaBaseMissing, receive(gpa, io, &repo, .{ .pack_dir = .of(pack_dir), .in = &refused_in }, .{
         .fix_thin = false,
         .diagnostic = &diagnostic,
     }));
@@ -2075,7 +2097,7 @@ test "a thin pack is completed from the database, and git indexes the result ide
     try testing.expectEqual(packs_before, try countEntries(io, pack_dir));
 
     var thin_in: Io.Reader = .fixed(thin);
-    const result = try receive(gpa, io, &repo, .{ .pack_dir = pack_dir, .in = &thin_in }, .{});
+    const result = try receive(gpa, io, &repo, .{ .pack_dir = .of(pack_dir), .in = &thin_in }, .{});
     try testing.expect(result.appended > 0);
 
     var hex: [hash.max_hex_len]u8 = undefined;
@@ -2126,14 +2148,14 @@ test "a malformed tree is refused by name, and nothing is kept" {
     defer gpa.free(bytes);
     var diagnostic: Diagnostic = .{};
     var in: Io.Reader = .fixed(bytes);
-    try testing.expectError(error.MalformedTree, receive(gpa, io, &repo, .{ .pack_dir = pack_dir, .in = &in }, .{ .diagnostic = &diagnostic }));
+    try testing.expectError(error.MalformedTree, receive(gpa, io, &repo, .{ .pack_dir = .of(pack_dir), .in = &in }, .{ .diagnostic = &diagnostic }));
     try testing.expectEqual(fsck.Problem.tree_not_sorted, diagnostic.problem.?);
     try testing.expect(diagnostic.oid.?.eql(hash.Hasher.object(.sha1, "tree", tree.items)));
     try testing.expectEqual(@as(usize, 0), try countEntries(io, pack_dir));
 
     // Asked not to check, the same pack is kept.
     var unchecked: Io.Reader = .fixed(bytes);
-    const kept = try receive(gpa, io, &repo, .{ .pack_dir = pack_dir, .in = &unchecked }, .{ .fsck = null });
+    const kept = try receive(gpa, io, &repo, .{ .pack_dir = .of(pack_dir), .in = &unchecked }, .{ .fsck = null });
     try testing.expectEqual(@as(u32, 2), kept.objects);
 }
 
@@ -2227,7 +2249,7 @@ test "a pack is refused where git's index-pack --fsck-objects refuses it, at the
         }
         var diagnostic: Diagnostic = .{};
         var in: Io.Reader = .fixed(bytes);
-        const refused = if (receive(gpa, io, &repo, .{ .pack_dir = pack_dir, .in = &in }, .{ .fsck = &rules, .diagnostic = &diagnostic })) |_| false else |err| switch (err) {
+        const refused = if (receive(gpa, io, &repo, .{ .pack_dir = .of(pack_dir), .in = &in }, .{ .fsck = &rules, .diagnostic = &diagnostic })) |_| false else |err| switch (err) {
             error.MalformedCommit, error.MalformedTree, error.MalformedTag, error.MalformedBlob => true,
             else => return err,
         };
@@ -2262,12 +2284,12 @@ test "a .gitmodules a tree names and nobody has is refused unless promised" {
     const strict: fsck.Rules = .{ .strict = true };
     var diagnostic: Diagnostic = .{};
     var in: Io.Reader = .fixed(bytes);
-    try testing.expectError(error.MalformedBlob, receive(gpa, io, &repo, .{ .pack_dir = pack_dir, .in = &in }, .{ .fsck = &strict, .diagnostic = &diagnostic }));
+    try testing.expectError(error.MalformedBlob, receive(gpa, io, &repo, .{ .pack_dir = .of(pack_dir), .in = &in }, .{ .fsck = &strict, .diagnostic = &diagnostic }));
     try testing.expectEqual(fsck.Problem.gitmodules_missing, diagnostic.problem.?);
     var promised: Io.Reader = .fixed(bytes);
     var warnings: warning.Warnings = .init(gpa);
     defer warnings.deinit();
-    _ = try receive(gpa, io, &repo, .{ .pack_dir = pack_dir, .in = &promised }, .{ .fsck = &strict, .promised = true, .warnings = &warnings });
+    _ = try receive(gpa, io, &repo, .{ .pack_dir = .of(pack_dir), .in = &promised }, .{ .fsck = &strict, .promised = true, .warnings = &warnings });
     try testing.expectEqual(@as(usize, 0), warnings.items.items.len);
 }
 
@@ -2309,12 +2331,12 @@ test "a damaged stream is a named error and leaves nothing behind" {
     };
     for (cases) |case| {
         var in: Io.Reader = .fixed(case.bytes);
-        try testing.expectError(case.err, receive(gpa, io, &repo, .{ .pack_dir = pack_dir, .in = &in }, .{}));
+        try testing.expectError(case.err, receive(gpa, io, &repo, .{ .pack_dir = .of(pack_dir), .in = &in }, .{}));
         try testing.expectEqual(@as(usize, 0), try countEntries(io, pack_dir));
     }
 
     var in: Io.Reader = .fixed(good);
-    const result = try receive(gpa, io, &repo, .{ .pack_dir = pack_dir, .in = &in }, .{});
+    const result = try receive(gpa, io, &repo, .{ .pack_dir = .of(pack_dir), .in = &in }, .{});
     try testing.expectEqual(@as(u32, 2), result.objects);
     const found = try repo.read(io, hash.Hasher.object(.sha1, "blob", "basemore\n"));
     defer repo.allocator().free(found.bytes);
@@ -2411,7 +2433,7 @@ fn receiveChain(chain: usize, seed: u8) !usize {
 
     var in: Io.Reader = .fixed(bytes);
     var peak: Peak = .{ .child = gpa };
-    const result = try receive(peak.allocator(), io, &repo, .{ .pack_dir = pack_dir, .in = &in }, .{ .delta_base_cache_limit = .literal("100KiB"), .threads = 1 });
+    const result = try receive(peak.allocator(), io, &repo, .{ .pack_dir = .of(pack_dir), .in = &in }, .{ .delta_base_cache_limit = .literal("100KiB"), .threads = 1 });
     try testing.expectEqual(@as(u32, @intCast(chain + 2)), result.objects);
     const expected = try gpa.alloc(u8, base_len + chain + "side".len);
     defer gpa.free(expected);
@@ -2467,7 +2489,7 @@ test "an object the database holds under the same name with other bytes is refus
         defer gpa.free(bytes);
         var diagnostic: Diagnostic = .{};
         var in: Io.Reader = .fixed(bytes);
-        try testing.expectError(error.HashCollision, receive(gpa, io, &repo, .{ .pack_dir = pack_dir, .in = &in }, .{ .diagnostic = &diagnostic }));
+        try testing.expectError(error.HashCollision, receive(gpa, io, &repo, .{ .pack_dir = .of(pack_dir), .in = &in }, .{ .diagnostic = &diagnostic }));
         try testing.expect(diagnostic.oid.?.eql(oid));
         try testing.expectEqual(@as(usize, 0), try countEntries(io, pack_dir));
     }
@@ -2478,7 +2500,7 @@ test "an object the database holds under the same name with other bytes is refus
     var in: Io.Reader = .fixed(same);
     const evil = hash.Hasher.object(.sha1, "blob", "evil");
     _ = try repo.write(io, .blob, "evil");
-    _ = try receive(gpa, io, &repo, .{ .pack_dir = pack_dir, .in = &in }, .{});
+    _ = try receive(gpa, io, &repo, .{ .pack_dir = .of(pack_dir), .in = &in }, .{});
     try testing.expect(try repo.exists(io, evil));
 }
 
@@ -2512,7 +2534,7 @@ test "a pack added in front of an alternate's never reads that pack's cached del
         var pack_dir = try theirs_dir.openDir(io, "objects/pack", .{ .iterate = true });
         defer pack_dir.close(io);
         var in: Io.Reader = .fixed(packs[0]);
-        _ = try receive(gpa, io, &theirs, .{ .pack_dir = pack_dir, .in = &in }, .{});
+        _ = try receive(gpa, io, &theirs, .{ .pack_dir = .of(pack_dir), .in = &in }, .{});
     }
     const their_objects = try theirs_dir.realPathFileAlloc(io, "objects", gpa);
     defer gpa.free(their_objects);
@@ -2526,7 +2548,7 @@ test "a pack added in front of an alternate's never reads that pack's cached del
     var pack_dir = try ours_dir.openDir(io, "objects/pack", .{ .iterate = true });
     defer pack_dir.close(io);
     var in: Io.Reader = .fixed(packs[1]);
-    _ = try receive(gpa, io, &ours, .{ .pack_dir = pack_dir, .in = &in }, .{});
+    _ = try receive(gpa, io, &ours, .{ .pack_dir = .of(pack_dir), .in = &in }, .{});
     const b = try ours.read(io, hash.Hasher.object(.sha1, "blob", "BBBB1"));
     defer gpa.free(b.bytes);
     try testing.expectEqualStrings("BBBB1", b.bytes);
@@ -2537,6 +2559,8 @@ test "a pack added in front of an alternate's never reads that pack's cached del
 /// calling task itself, so the cancel reaches the caller while another task
 /// waits in a read. The calling task resolves too, and could take every
 /// object before another task starts: its read waits for one to park.
+const Milliseconds = aegis.units.Duration(.millisecond, i64);
+
 const Park = struct {
     const Layer = shakedown.Layer(State, .{ .fileReadPositional = read });
     const State = struct {
@@ -2572,20 +2596,20 @@ const Park = struct {
                 return error.Unexpected;
             }
         }
-        return l.base.vtable.fileReadPositional(l.base.userdata, file, data, offset);
+        return pack_input.forwardRead(l.base, file, data, offset);
     }
 
     /// Until canceled, a short sleep at a time, since a sleep may also end
     /// early; twenty seconds is a hang, not a pass.
     fn wait(base: Io) Io.Cancelable!void {
-        for (0..2000) |_| try base.sleep(.fromMilliseconds(10), .awake);
+        for (0..2000) |_| try base.sleep(Milliseconds.fromRaw(10).toIoDuration(), .awake);
     }
 
     /// Until a task beside the calling one parks, or twenty seconds.
     fn waitBeside(s: *State, base: Io) Io.Cancelable!void {
         for (0..20_000) |_| {
             if (s.beside.load(.acquire) == .set) return;
-            try base.sleep(.fromMilliseconds(1), .awake);
+            try base.sleep(Milliseconds.fromRaw(1).toIoDuration(), .awake);
         }
     }
 
@@ -2594,7 +2618,7 @@ const Park = struct {
         s.caller = std.Thread.getCurrentId();
         defer s.armed.store(.unset, .release);
         var in: Io.Reader = .fixed(bytes);
-        return receive(gpa, io, db, .{ .pack_dir = pack_dir, .in = &in }, .{ .threads = 3, .progress = .{ .reporter = &s.armer } });
+        return receive(gpa, io, db, .{ .pack_dir = .of(pack_dir), .in = &in }, .{ .threads = 3, .progress = .{ .reporter = &s.armer } });
     }
 
     /// Armed once every entry is indexed, so that what parks is a read
@@ -2667,7 +2691,7 @@ test "a receive canceled while it resolves stops every resolving task, even one 
 
     // Unarmed, the same stream is received whole.
     var in: Io.Reader = .fixed(bytes);
-    const result = try receive(gpa, io, &repo, .{ .pack_dir = pack_dir, .in = &in }, .{ .threads = 3 });
+    const result = try receive(gpa, io, &repo, .{ .pack_dir = .of(pack_dir), .in = &in }, .{ .threads = 3 });
     try testing.expectEqual(@as(u32, 3 * pairs), result.objects);
 }
 
@@ -2731,7 +2755,7 @@ fn fuzzReceive(_: void, case: *shakedown.Case) anyerror!void {
     }
 
     var in: Io.Reader = .fixed(stream);
-    const result = receive(gpa, io, &db, .{ .pack_dir = pack_dir, .in = &in }, .{}) catch {
+    const result = receive(gpa, io, &db, .{ .pack_dir = .of(pack_dir), .in = &in }, .{}) catch {
         // Whatever the refusal, nothing is left behind.
         if (try countEntries(io, pack_dir) != 0) return error.TemporaryLeftBehind;
         return;
@@ -2770,7 +2794,7 @@ test "the names a pack holds are collected as it is indexed, and one that is now
     var links: Links = .init(gpa);
     defer links.deinit();
     var in: Io.Reader = .fixed(bytes);
-    const result = try receive(gpa, io, &repo, .{ .pack_dir = pack_dir, .in = &in }, .{ .fsck = null, .links = &links });
+    const result = try receive(gpa, io, &repo, .{ .pack_dir = .of(pack_dir), .in = &in }, .{ .fsck = null, .links = &links });
     var hex: [hash.max_hex_len]u8 = undefined;
     var idx_buf: [96]u8 = undefined;
     const idx_name = try std.mem.print(&idx_buf, "pack-{s}.idx", .{result.name.?.hex(&hex)});
@@ -2802,7 +2826,7 @@ test "a thin pack canceled as a task while its bases are read from the database 
                 var repo = try odb_mod.Odb.open(testing.allocator, io, c.target.dir, .sha1, .{});
                 defer repo.deinit(io);
                 var in: Io.Reader = .fixed(c.thin);
-                var result = try receive(testing.allocator, io, &repo, .{ .pack_dir = pack_dir, .in = &in }, .{ .threads = threads, .fix_thin = fix_thin });
+                var result = try receive(testing.allocator, io, &repo, .{ .pack_dir = .of(pack_dir), .in = &in }, .{ .threads = threads, .fix_thin = fix_thin });
                 defer result.deinit(io);
                 break :received .{ result.name.?, [2]u32{ result.objects, result.appended } };
             };
@@ -2879,7 +2903,7 @@ test "a thin pack canceled as a task while its bases are read from the database 
         var pack_dir = try target.dir.openDir(io, "objects/pack", .{ .iterate = true });
         defer pack_dir.close(io);
         var in: Io.Reader = .fixed(old);
-        var result = try receive(gpa, io, &repo, .{ .pack_dir = pack_dir, .in = &in }, .{});
+        var result = try receive(gpa, io, &repo, .{ .pack_dir = .of(pack_dir), .in = &in }, .{});
         result.deinit(io);
     }
     const thin = try testremote.gitInput(gpa, io, source.dir, &.{ "pack-objects", "--revs", "--thin", "--stdout", "-q" }, "HEAD\n^HEAD~1\n");
@@ -2930,7 +2954,7 @@ test "a pack received as a task and canceled, reading its stream or resolving it
             var buffer: [256]u8 = undefined;
             var in: Trickle = .init(pack_bytes, &buffer);
             defer read.* = in.at;
-            var result = try receive(gpa, io, &repo, .{ .pack_dir = pack_dir, .in = &in.interface }, .{ .threads = threads });
+            var result = try receive(gpa, io, &repo, .{ .pack_dir = .of(pack_dir), .in = &in.interface }, .{ .threads = threads });
             defer result.deinit(io);
             return .{ result.objects, result.deltas };
         }
