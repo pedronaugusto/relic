@@ -23,7 +23,14 @@
     "linux_arm": 2,
     "windows_arm": 8
   },
-  "windows_git_latest": true,
+  "git": {
+    "version": "2.56.0",
+    "sha256": "26c56c296b38c0695b26fa95f475f1d01704d2d38e73465ca30b0b2f5dc789d3",
+    "windows": {
+      "x86_64": "bfe94e7b419b16eee9fecbd1253a98e3d4f49ba8f029630549052278ffe286a6",
+      "aarch64": "c130c04301d06995ef08f1cbd895342844d1fbb3312f5d32cb27cc05b4b394dc"
+    }
+  },
   "configurations": [
     {"name": "default", "options": {"http": true, "lfs": true}},
     {"name": "no-http", "options": {"http": false, "lfs": true}},
