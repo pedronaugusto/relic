@@ -89,7 +89,7 @@ fn ours(gpa: Allocator, io: Io, git: *testgit.Repo, env: *const std.process.Envi
     defer repo.deinit(io);
     var attrs = try attributes.Attrs.init(gpa, .{});
     defer attrs.deinit();
-    const drivers: driver.Drivers = .{ .attrs = &attrs, .work_dir = git.dir, .config = repo.configuration() };
+    const drivers: driver.Drivers = .{ .attrs = &attrs, .work_dir = .of(git.dir), .config = repo.configuration() };
     const tc: textconv.Textconv = .{ .programs = .{ .environ = env } };
     const db = repo.objectDatabase();
     const old = try repo.commitTree(io, try oidOf(gpa, io, git, "HEAD~1"));

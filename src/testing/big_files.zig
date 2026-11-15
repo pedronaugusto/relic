@@ -57,7 +57,7 @@ test "a file past core.bigFileThreshold is binary to git diff, unless its driver
     const new = try repo.commitTree(io, try oidOf(gpa, io, &git, "HEAD"));
     var changes = try diff.tree(gpa, io, db, .{ .old = old, .new = new }, .{});
     defer changes.deinit();
-    const drivers: driver.Drivers = .{ .attrs = &attrs, .work_dir = git.dir, .config = repo.configuration() };
+    const drivers: driver.Drivers = .{ .attrs = &attrs, .work_dir = .of(git.dir), .config = repo.configuration() };
     // `--binary` reads both sides for the `index` line before it asks, so
     // the size decides nothing -- unless a stat asked first.
     const Case = struct { args: []const []const u8, options: diff.Options };

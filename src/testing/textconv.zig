@@ -113,7 +113,7 @@ test "a driver's textconv makes the patches git diff prints: case changes gone, 
     defer repo.deinit(io);
     var attrs = try attributes.Attrs.init(gpa, .{});
     defer attrs.deinit();
-    const drivers: driver.Drivers = .{ .attrs = &attrs, .work_dir = pair.ours.dir, .config = repo.configuration() };
+    const drivers: driver.Drivers = .{ .attrs = &attrs, .work_dir = .of(pair.ours.dir), .config = repo.configuration() };
     const tc: textconv.Textconv = .{ .programs = .{ .environ = &pair.env } };
     try expectSamePatches(gpa, io, &pair, &repo, .{ .drivers = drivers, .textconv = &tc });
     // `--no-textconv` is the bytes.
@@ -138,7 +138,7 @@ test "cachetextconv writes git's refs/notes/textconv/<driver>, and a text kept t
             defer repo.deinit(io);
             var attrs = try attributes.Attrs.init(gpa, .{});
             defer attrs.deinit();
-            const drivers: driver.Drivers = .{ .attrs = &attrs, .work_dir = pair.ours.dir, .config = repo.configuration() };
+            const drivers: driver.Drivers = .{ .attrs = &attrs, .work_dir = .of(pair.ours.dir), .config = repo.configuration() };
             var caches: notes.TextconvCaches = .init(gpa, &repo, history.who);
             defer caches.deinit();
             const tc: textconv.Textconv = .{ .programs = .{ .environ = &pair.env }, .cache = caches.cache() };
@@ -192,7 +192,7 @@ test "a textconv that fails is error.TextconvFailed, where git diff dies" {
     defer repo.deinit(io);
     var attrs = try attributes.Attrs.init(gpa, .{});
     defer attrs.deinit();
-    const drivers: driver.Drivers = .{ .attrs = &attrs, .work_dir = pair.ours.dir, .config = repo.configuration() };
+    const drivers: driver.Drivers = .{ .attrs = &attrs, .work_dir = .of(pair.ours.dir), .config = repo.configuration() };
     const tc: textconv.Textconv = .{ .programs = .{ .environ = &pair.env } };
     try std.testing.expectError(error.TextconvFailed, ourPatches(gpa, io, &pair, &repo, .{ .drivers = drivers, .textconv = &tc }));
 }

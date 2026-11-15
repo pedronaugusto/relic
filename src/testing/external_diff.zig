@@ -94,7 +94,7 @@ fn ours(gpa: Allocator, io: Io, pair: *history.Pair, cached: bool, out: *Io.Writ
         .programs = .{ .environ = &pair.env },
         .command = try external.configured(repo.configuration()),
         .worktree = .{
-            .dir = wt,
+            .dir = .of(wt),
             .conv = &conv,
             .lends = if (cached) .{ .io = io, .wt = wt, .index = &index, .db = db, .conv = &conv, .rules = rules } else null,
         },
@@ -107,7 +107,7 @@ fn ours(gpa: Allocator, io: Io, pair: *history.Pair, cached: bool, out: *Io.Writ
     else
         try diff.tree(gpa, io, db, .{ .old = old, .new = new }, .{ .renames = .{} });
     defer changes.deinit();
-    const drivers: driver.Drivers = .{ .attrs = &attrs, .work_dir = wt, .config = repo.configuration() };
+    const drivers: driver.Drivers = .{ .attrs = &attrs, .work_dir = .of(wt), .config = repo.configuration() };
     try diff.unified(gpa, io, out, .{ .db = db, .changes = changes.items, .drivers = drivers, .external = &ext }, options);
 }
 

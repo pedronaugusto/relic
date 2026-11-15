@@ -226,7 +226,7 @@ fn ours(gpa: Allocator, io: Io, git: *testgit.Repo, env: *const std.process.Envi
     try combined.write(gpa, io, &out.writer, .{
         .db = db,
         .paths = found.items,
-        .drivers = .{ .attrs = &attrs, .work_dir = git.dir, .config = repo.configuration() },
+        .drivers = .{ .attrs = &attrs, .work_dir = .of(git.dir), .config = repo.configuration() },
         .textconv = if (case.textconv) &tc else null,
     }, .{
         .diff = .{ .context = case.context, .ignore_whitespace_change = case.ignore_change, .colors = if (case.color) &colors else null },

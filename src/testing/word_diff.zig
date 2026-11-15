@@ -86,7 +86,7 @@ fn expectSame(gpa: Allocator, io: Io, git: *testgit.Repo, v: Variant) !void {
     defer repo.deinit(io);
     var attrs = try attributes.Attrs.init(gpa, .{});
     defer attrs.deinit();
-    const drivers: driver.Drivers = .{ .attrs = &attrs, .work_dir = git.dir, .config = repo.configuration() };
+    const drivers: driver.Drivers = .{ .attrs = &attrs, .work_dir = .of(git.dir), .config = repo.configuration() };
     const colors = try diff.Colors.configured(repo.configuration(), .always);
     var options = try diff.configured(repo.configuration(), .{ .word_diff = v.style, .word_regex = v.regex });
     if (v.color) options.colors = &colors.?;

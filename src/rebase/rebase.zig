@@ -785,7 +785,7 @@ fn upstreamHas(r: *Run, w: *Walker, left: []const Oid, right: []const Oid) Error
     var attrs = try r.repo.loadAttrs(r.io);
     defer attrs.deinit();
     defer attrs.leave();
-    const drivers: driver.Drivers = .{ .attrs = &attrs, .work_dir = r.repo.workDirectory(), .config = r.repo.configuration() };
+    const drivers: driver.Drivers = .{ .attrs = &attrs, .work_dir = if (r.repo.workDirectory()) |work_tree| .of(work_tree) else null, .config = r.repo.configuration() };
     var ids: std.AutoHashMapUnmanaged([hash.max_raw_len]u8, void) = .empty;
     for (left) |oid| {
         if ((try w.load(oid)).parents.len > 1) continue;
