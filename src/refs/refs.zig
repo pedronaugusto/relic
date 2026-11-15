@@ -266,7 +266,7 @@ pub const Store = struct {
     /// refuses. The directory is borrowed; release with `deinit`.
     pub fn sibling(store: *const Store, git_dir: Io.Dir) Allocator.Error!Store {
         const d = store.state;
-        return Store.init(d.gpa, d.kind, git_dir, d.common_dir, .{
+        return Store.init(d.gpa, d.kind, git_dir, d.common_dir.get(), .{
             .format = d.format,
             .reftable = d.options,
             .shared = d.shared,
