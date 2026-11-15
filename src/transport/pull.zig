@@ -388,17 +388,27 @@ fn defaultAction(arena: Allocator, remote: ?[]const u8, refspecs: []const []cons
 fn configuredFastForward(config: *const config_mod.Config) Self.Error!?merging.FastForward {
     const entry = config.find("pull.ff") orelse return null;
     const value = entry.value orelse return .allow;
-    // glint-ignore: Z026 -- a value that is no boolean is read as one of the names below, as git reads pull.ff
-    if (config_mod.parseBool(value)) |on| return if (on) .allow else .never else |_| {}
+    // A value that is no boolean is read as one of the names below, as
+    // git reads pull.ff.
+    if (try boolean(value)) |on| return if (on) .allow else .never;
     if (std.mem.eql(u8, value, "only")) return .only;
     return error.InvalidFastForwardSetting;
+}
+
+/// `value` as git's boolean spellings read it, or null where it is none.
+fn boolean(value: []const u8) Self.Error!?bool {
+    return config_mod.parseBool(value) catch |err| switch (err) {
+        error.NotABoolean => null,
+        else => |other| other,
+    };
 }
 
 /// git's `rebase_parse_value`; a bare name is true.
 fn parseMode(raw: ?[]const u8) Self.Error!Mode {
     const value = raw orelse return .rebase;
-    // glint-ignore: Z026 -- a value that is no boolean is read as one of the names below, as git reads pull.rebase
-    if (config_mod.parseBool(value)) |on| return if (on) .rebase else .merge else |_| {}
+    // A value that is no boolean is read as one of the names below, as
+    // git reads pull.rebase.
+    if (try boolean(value)) |on| return if (on) .rebase else .merge;
     if (std.mem.eql(u8, value, "merges") or std.mem.eql(u8, value, "m")) return .rebase_merges;
     if (std.mem.eql(u8, value, "interactive") or std.mem.eql(u8, value, "i")) return .rebase_interactive;
     return error.InvalidRebaseSetting;

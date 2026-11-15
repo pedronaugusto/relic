@@ -33,6 +33,7 @@ const index_pack = @import("../odb/index_pack.zig");
 
 const send_pack = @import("../wire.zig").send_pack;
 const local = @import("local.zig");
+const input = @import("input.zig");
 const ssh = @import("../wire.zig").ssh;
 const daemon = @import("../wire.zig").daemon;
 const smart_http = @import("../wire.zig").smart_http;
@@ -59,7 +60,7 @@ const std = @import("std");
 const keep_mod = @import("../odb/keep.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
-const assert = std.debug.assert;
+const assert = aegis.assert;
 
 const hash = @import("../hash/hash.zig");
 const odb_mod = @import("../odb/odb.zig");
@@ -369,7 +370,10 @@ pub const Session = struct {
         if (parsed.scheme == .local and service == .upload_pack) bundled: {
             // `url_is_local_not_ssh && is_file && is_bundle`: a path to a
             // bundle is fetched from as one; a `file://` URL never is.
-            var identity = url.Identity.parse(gpa, remote_url) catch break :bundled;
+            var identity = url.Identity.parse(gpa, remote_url) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.UnsupportedTransport, error.MalformedUrl => assert.never("the URL parsed above, and a local path is parsed as written, not decoded"),
+            };
             defer identity.deinit();
             const f = bundle.File.open(gpa, io, Io.Dir.cwd(), identity.url.path) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
@@ -735,10 +739,10 @@ pub const Session = struct {
     /// Send a push, reading the objects from `db`, and return the remote's
     /// report of each command.
     pub fn push(s: *Session, gpa: Allocator, io: Io, db: *odb_mod.Odb, request: PushRequest) Self.Error!send_pack.Report {
-        assert(s.service == .receive_pack);
+        assert.invariant(s.service == .receive_pack, "a push is sent on a receive-pack session");
         // A helper's sources and `+`s go with the commands by position.
-        assert(request.sources.len == 0 or request.sources.len == request.commands.len);
-        assert(request.force.len == 0 or request.force.len == request.commands.len);
+        assert.invariant(request.sources.len == 0 or request.sources.len == request.commands.len, "sources are given with every command or not at all");
+        assert.invariant(request.force.len == 0 or request.force.len == request.commands.len, "force flags are given with every command or not at all");
         switch (s.impl) {
             // A repository on this machine is pushed to through its
             // receive-pack, and a bundle is only ever fetched from.
@@ -831,7 +835,7 @@ pub const Session = struct {
         keep: ?keep_mod.Token = null,
     };
 
-    pub const FetchInputs = struct { db: *odb_mod.Odb, pack_dir: Io.Dir, request: FetchRequest };
+    pub const FetchInputs = struct { db: *odb_mod.Odb, pack_dir: aegis.own.Unowned(Io.Dir), request: FetchRequest };
 
     /// Bring every object reachable from `inputs.request.wants` into `inputs.db`, whose
     /// `objects/pack` is `pack_dir`, as one new pack.
@@ -843,17 +847,17 @@ pub const Session = struct {
         options: fetch_pack.Options,
     ) Self.Error!Fetched {
         const db = inputs.db;
-        const pack_dir = inputs.pack_dir;
+        const pack_dir = inputs.pack_dir.get();
         const request = inputs.request;
-        assert(s.service == .upload_pack);
+        assert.invariant(s.service == .upload_pack, "a fetch is sent on an upload-pack session");
         // The names go with the wants by position, or are not given.
-        assert(request.want_names.len == 0 or request.want_names.len == request.wants.len);
+        assert.invariant(request.want_names.len == 0 or request.want_names.len == request.wants.len, "names are given with every want or not at all");
         if (request.wants.len == 0) return .{ .pack = null, .objects = 0 };
         switch (s.impl) {
             .local => |here| {
                 // A local copy writes the pack the receive would index, so
                 // `pack.threads` sizes it, as git's pack-objects reads it.
-                const report = try here.copyObjects(io, db, request.wants, .{ .pack_dir = pack_dir, .haves = request.tips, .include_tags = request.include_tag, .pack = .{
+                const report = try here.copyObjects(io, db, request.wants, .{ .pack_dir = .of(pack_dir), .haves = request.tips, .include_tags = request.include_tag, .pack = .{
                     .keep = true,
                     .reverse_index = options.receive.reverse_index,
                     .threads = std.math.lossyCast(u16, options.receive.threads),
@@ -997,7 +1001,7 @@ pub const Session = struct {
             else => |e| e,
         };
         w.interface.flush() catch return w.err orelse error.WriteFailed;
-        var r = file.reader(io, &buf);
+        var r = input.stored(file, io, &buf);
         return db.receivePack(io, &r.interface, receive) catch |err| switch (err) {
             error.ReadFailed => r.err orelse error.ReadFailed,
             else => |e| e,

@@ -24,11 +24,12 @@ const Self = @This();
 
 const std = @import("std");
 const aegis = @import("aegis");
+const input = @import("input.zig");
 const ctype = @import("../text.zig").ctype;
 const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
-const assert = std.debug.assert;
+const assert = aegis.assert;
 
 const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
@@ -181,8 +182,8 @@ pub const Header = struct {
         h.references = try references.toOwnedSlice(a);
         // Only v3 says anything but SHA-1 and no filter, as `write` writes.
         if (h.version == .v2) {
-            assert(h.object_format == .sha1);
-            assert(h.filter == null);
+            assert.invariant(h.object_format == .sha1, "a v2 header names no object format, so the format is SHA-1");
+            assert.invariant(h.filter == null, "a v2 header names no filter");
         }
         return h;
     }
@@ -269,7 +270,7 @@ pub const File = struct {
         f.gpa = gpa;
         f.file = .init(try dir.openFile(io, path, .{}));
         errdefer f.file.deinit(io);
-        f.reader = f.file.borrow().*.reader(io, &f.buffer);
+        f.reader = input.stored(f.file.borrow().*, io, &f.buffer);
         f.header = Header.read(gpa, &f.reader.interface) catch |err| {
             // A read that failed keeps its cause in the file's reader: a
             // cancel is returned as itself.
@@ -480,12 +481,14 @@ pub const CreateError = error{
 } || Allocator.Error || odb_mod.Error || object_walk.Error || rev_parse.Error || refs_mod.ReadError ||
     object.ParseError || Io.Writer.Error || fs.LockError || fs.CommitError || repo_mod.Error;
 
-pub const Target = struct { dir: Io.Dir, path: []const u8 };
+/// Where `create` writes a bundle: `path` under `dir`, a directory the
+/// caller keeps open.
+pub const Target = struct { dir: aegis.own.Unowned(Io.Dir), path: []const u8 };
 
 /// Write the bundle `request` asks for to `target.path` in `target.dir`, through
 /// `<path>.lock` as git writes it.
 pub fn create(gpa: Allocator, io: Io, repo: *Repository, target: Target, request: CreateRequest) Self.CreateError!void {
-    const dir = target.dir;
+    const dir = target.dir.get();
     const path = target.path;
     var buffer: [64 * 1024]u8 = undefined;
     var lock = try fs.LockFile.open(gpa, io, dir, .{ .sub_path = path, .buffer = &buffer }, .{ .sync = .none });
@@ -519,7 +522,7 @@ pub fn write(gpa: Allocator, io: Io, w: *Io.Writer, repo: *Repository, request: 
     const version = request.version orelse min;
     if (@backingInt(version) < @backingInt(min)) return error.VersionTooLow;
     // A v2 header cannot say its format or filter: `read` takes SHA-1 and none.
-    assert(version == .v3 or (kind == .sha1 and filter_text == null));
+    assert.invariant(version == .v3 or (kind == .sha1 and filter_text == null), "a version under v3 is refused above when the format is not SHA-1 or a filter is given");
 
     // The revisions, as the pending list git's revision parser makes.
     const Pending = struct { oid: Oid, name: []const u8, negative: bool, commit: ?Oid };
@@ -718,13 +721,13 @@ test "fuzz: any bytes are a bundle header or a named error" {
 
 fn fuzzHeader(_: void, case: *shakedown.Case) anyerror!void {
     var buf: [512]u8 = undefined;
-    const input = buf[0..shakedown.gen.intRange(case.source, usize, 0, buf.len)];
-    case.source.bytes(input);
+    const sent = buf[0..shakedown.gen.intRange(case.source, usize, 0, buf.len)];
+    case.source.bytes(sent);
     for ([_][]const u8{ "", v2_signature, v3_signature }) |prefix| {
         var joined: [600]u8 = undefined;
         @memcpy(joined[0..prefix.len], prefix);
-        @memcpy(joined[prefix.len..][0..input.len], input);
-        var r: Io.Reader = .fixed(joined[0 .. prefix.len + input.len]);
+        @memcpy(joined[prefix.len..][0..sent.len], sent);
+        var r: Io.Reader = .fixed(joined[0 .. prefix.len + sent.len]);
         var h = Header.read(std.testing.allocator, &r) catch |err| switch (err) {
             error.NotABundle, error.MalformedBundleHeader, error.UnknownBundleCapability, error.InvalidFilter => continue,
             else => |e| return e,

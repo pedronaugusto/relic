@@ -28,7 +28,8 @@ const keep_mod = @import("../odb/keep.zig");
 const odb_mod = @import("../odb/odb.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
-const assert = std.debug.assert;
+const aegis = @import("aegis");
+const assert = aegis.assert;
 
 const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
@@ -760,8 +761,7 @@ const Brought = struct {
             came.keep = null;
             var hex: [hash.max_hex_len]u8 = undefined;
             var name_buf: [96]u8 = undefined;
-            // unreachable: the longest hex name is 64 digits, 69 bytes with `pack-`
-            const base = std.mem.print(&name_buf, "pack-{s}", .{name.hex(&hex)}) catch unreachable;
+            const base = std.mem.print(&name_buf, "pack-{s}", .{name.hex(&hex)}) catch assert.never("the longest hex name is 64 digits, 69 bytes with pack-");
             repo.objectDatabase().unpackPack(io, base) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.Canceled => return error.Canceled,
@@ -824,7 +824,7 @@ fn bringObjects(
     // whether it is connected is asked without reading it again.
     var links: index_pack.Links = .init(gpa);
     defer links.deinit();
-    var fetched = try session.fetch(gpa, io, .{ .db = repo.objectDatabase(), .pack_dir = pack_dir, .request = .{
+    var fetched = try session.fetch(gpa, io, .{ .db = repo.objectDatabase(), .pack_dir = .of(pack_dir), .request = .{
         .wants = wants.oids,
         .want_names = wants.names,
         .tips = tips.ours,
@@ -871,7 +871,7 @@ fn bringObjects(
     // Everything below the fetched refs is here: what came in the pack is
     // walked into, what was here before is taken to be whole.
     try checkConnected(arena, gpa, io, repo, .{
-        .pack_dir = pack_dir,
+        .pack_dir = .of(pack_dir),
         .pack = fetched.pack,
         .links = &links,
         .passes = .{ b.map, backfill },
@@ -1094,7 +1094,7 @@ const BoundaryChange = struct {
         advertised: []const Oid,
         deepened: bool,
     ) Error!void {
-        assert(!b.moved);
+        assert.invariant(!b.moved, "a fetch takes the server's boundary once");
         if (!deepened) try info.shallow.appendSlice(gpa, advertised);
         if (info.shallow.items.len == 0 and info.unshallow.items.len == 0) return;
         if (!deepened) {
@@ -1140,7 +1140,7 @@ fn followTags(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, sessi
     try findNonLocalTags(arena, gpa, io, repo, f.remote_refs, f.local, &backfill, f.map);
     const missing_tags = try wantsInOrder(arena, io, repo, f.remote_refs, backfill.items, false);
     if (missing_tags.oids.len == 0) return backfill.items;
-    const fetched = try session.fetch(gpa, io, .{ .db = repo.objectDatabase(), .pack_dir = pack_dir, .request = .{
+    const fetched = try session.fetch(gpa, io, .{ .db = repo.objectDatabase(), .pack_dir = .of(pack_dir), .request = .{
         .wants = missing_tags.oids,
         .want_names = missing_tags.names,
         .tips = f.tips.ours,
@@ -1611,7 +1611,7 @@ fn takeFetchedValues(session: *const transport.Session, entries: []MapEntry) voi
 
 /// What `checkConnected` walks.
 const Received = struct {
-    pack_dir: Io.Dir,
+    pack_dir: aegis.own.Unowned(Io.Dir),
     /// The pack that came, if one did.
     pack: ?Oid,
     links: *const index_pack.Links,
@@ -1638,8 +1638,8 @@ fn checkConnected(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, r
     if (r.pack) |name| {
         var hex: [hash.max_hex_len]u8 = undefined;
         var idx_buf: [96]u8 = undefined;
-        const idx_name = std.mem.print(&idx_buf, "pack-{s}.idx", .{name.hex(&hex)}) catch unreachable; // unreachable: the longest hex name is 64 digits, 73 bytes with the words around it
-        fresh = try pack.Index.open(gpa, io, r.pack_dir, idx_name, .{ .kind = repo.objectFormat(), .max_bytes = 1 << 30 });
+        const idx_name = std.mem.print(&idx_buf, "pack-{s}.idx", .{name.hex(&hex)}) catch assert.never("the longest hex name is 64 digits, 73 bytes with the words around it");
+        fresh = try pack.Index.open(gpa, io, r.pack_dir.get(), idx_name, .{ .kind = repo.objectFormat(), .max_bytes = 1 << 30 });
     }
     if (fresh) |*index| {
         object_walk.checkReceived(gpa, io, repo.objectDatabase(), all_tips.items, .{ .fresh = index, .links = r.links, .missing_out = r.missing, .promisor = r.promisor }) catch |err| switch (err) {
@@ -1730,7 +1730,7 @@ fn planUpdates(
                 const dst = entry.dst orelse continue;
                 // `fetchMap` keeps only destinations under `refs/` with a
                 // well-formed name.
-                assert(validLocal(dst));
+                assert.invariant(validLocal(dst), "fetchMap keeps only well-formed destinations under refs/");
                 const decision = try decide(gpa, io, repo, entry.*, dst, options.force, local);
                 try updates.append(arena, .{
                     .remote_ref = entry.name,
@@ -2115,7 +2115,7 @@ fn wantsInOrder(arena: Allocator, io: Io, repo: *Repository, advertised: []const
         try wants.append(arena, entry.oid);
         try want_names.append(arena, entry.name);
     }
-    assert(wants.items.len == want_names.items.len);
+    assert.invariant(wants.items.len == want_names.items.len, "each want is appended with its name");
     return .{ .oids = wants.items, .names = want_names.items };
 }
 
@@ -2296,13 +2296,13 @@ fn setRemoteHead(
     const name = remote.name.?;
     const head_name = remoteHeadBranch(remote_refs) orelse return;
     const mirror = repo.isBare() and remote.mirror;
-    var head_buf: [512]u8 = undefined;
-    var target_buf: [512]u8 = undefined;
-    const local_head = if (mirror) "HEAD" else std.mem.print(&head_buf, "refs/remotes/{s}/HEAD", .{name}) catch return;
-    const target = (if (mirror)
-        std.mem.print(&target_buf, "refs/heads/{s}", .{head_name})
+    const local_head = if (mirror) "HEAD" else try gpa.print("refs/remotes/{s}/HEAD", .{name});
+    defer if (!mirror) gpa.free(local_head);
+    const target = try (if (mirror)
+        gpa.print("refs/heads/{s}", .{head_name})
     else
-        std.mem.print(&target_buf, "refs/remotes/{s}/{s}", .{ name, head_name })) catch return;
+        gpa.print("refs/remotes/{s}/{s}", .{ name, head_name }));
+    defer gpa.free(target);
     if (!mirror) {
         const resolved = try repo.refStore().resolve(gpa, io, target) orelse return;
         gpa.free(resolved.name);
@@ -2331,10 +2331,11 @@ fn setRemoteHead(
     var hex: [hash.max_hex_len]u8 = undefined;
     switch (was) {
         .symbolic => |old| {
-            var prefix_buf: [512]u8 = undefined;
-            const prefix = std.mem.print(&prefix_buf, "refs/remotes/{s}/", .{name}) catch return;
+            const prefix = "refs/remotes/";
             if (!std.mem.startsWith(u8, old, prefix)) return;
-            const old_head = old[prefix.len..];
+            const rest = old[prefix.len..];
+            if (!std.mem.startsWith(u8, rest, name) or rest.len <= name.len or rest[name.len] != '/') return;
+            const old_head = rest[name.len + 1 ..];
             if (std.mem.eql(u8, old_head, head_name)) return;
             try warning.note(options.warnings, .{ .remote_head_differs = .{ .remote = name, .head = head_name, .local = old_head } });
         },

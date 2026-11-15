@@ -162,6 +162,13 @@
       "reason": "the history walks' input seam: a bisect's state files and a mailmap, each held to a limit named there; the rest of the layer parses the bytes it hands back"
     },
     {
+      "file": "src/transport/input.zig",
+      "rules": [
+        "A009"
+      ],
+      "reason": "the transport's input seam: the files the push, the fetch and their serving read whole (a bundle list, a test's records), each held to a limit named there, and the readers over what a hook or pack-objects writes and over a bundle, a downloaded pack or a served repository file, which pkt-line, the bundle header and the pack indexer parse; nothing else in the transport reads a file or a pipe"
+    },
+    {
       "file": "src/walk/input.zig",
       "rules": [
         "A009"

@@ -23,7 +23,7 @@ const decimal = @import("../text.zig").decimal;
 const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
-const assert = std.debug.assert;
+const assert = aegis.assert;
 
 const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
@@ -36,6 +36,7 @@ const filter_spec = @import("../wire.zig").filter_spec;
 const ignore = @import("../patterns.zig").ignore;
 const rev_walk = @import("../walk/walk.zig");
 const local = @import("local.zig");
+const input = @import("input.zig");
 const in_process = @import("in_process.zig");
 const connection = @import("../wire.zig").connection;
 const promisors = @import("../wire.zig").promisors;
@@ -1456,7 +1457,7 @@ const Negotiation = struct {
             };
         }
         var read_buffer: [pkt_line.max_data]u8 = undefined;
-        var pack = running.child.stdoutFile().?.readerStreaming(s.io, &read_buffer);
+        var pack = input.pipe(running.child.stdoutFile().?, s.io, &read_buffer);
         const packed_end: aegis.io.ReadEnd = .fromFile(&pack);
         if (n.uri_protocols.len != 0) {
             // What it prints before the pack names the packs it left out,
@@ -1565,11 +1566,38 @@ const Paced = struct {
     line: aegis.BlockingGuarded(Line),
     interface: Io.Writer,
 
-    const Line = struct { out: *Io.Writer, last: Io.Timestamp };
+    const Line = struct {
+        out: *Io.Writer,
+        last: Io.Timestamp,
+        /// A write to the client failed (the pack's own, a keepalive's or
+        /// the hook's progress beside it): the client stopped taking what
+        /// is written, and every write after fails as that one did.
+        failed: bool = false,
+
+        /// `bytes` to the client, now, or the write that failed kept for
+        /// the writes after it.
+        fn write(line: *Line, io: Io, bytes: []const u8) Io.Writer.Error!void {
+            if (line.failed) return error.WriteFailed;
+            errdefer line.failed = true;
+            try line.out.writeAll(bytes);
+            try line.out.flush();
+            line.last = Io.Clock.awake.now(io);
+        }
+
+        /// `write`, for a task beside the pack: false once the client
+        /// stopped taking what is written.
+        fn wrote(line: *Line, io: Io, bytes: []const u8) bool {
+            line.write(io, bytes) catch return false;
+            return true;
+        }
+    };
+
+    /// A span of the awake clock, to the nanosecond, as `Io.Duration` holds it.
+    const Nanoseconds = aegis.units.Duration(.nanosecond, i96);
 
     /// `buffer` holds two of the longest packets.
     fn init(io: Io, out: *Io.Writer, band: Band, buffer: []u8) Paced {
-        assert(buffer.len >= 2 * pkt_line.max_line);
+        assert.invariant(buffer.len >= 2 * pkt_line.max_line, "the caller's buffer holds two of the longest packets");
         return .{
             .io = io,
             .band = band,
@@ -1631,10 +1659,7 @@ const Paced = struct {
     fn send(p: *Paced, packets: []const u8) Io.Writer.Error!void {
         var guard = p.line.acquireUncancelable(p.io);
         defer guard.deinit(p.io);
-        const line = guard.value();
-        try line.out.writeAll(packets);
-        try line.out.flush();
-        line.last = Io.Clock.awake.now(p.io);
+        try guard.value().write(p.io, packets);
     }
 
     /// `bytes` on `channel` of the side band, now.
@@ -1642,6 +1667,8 @@ const Paced = struct {
         var guard = p.line.acquireUncancelable(p.io);
         defer guard.deinit(p.io);
         const line = guard.value();
+        if (line.failed) return error.WriteFailed;
+        errdefer line.failed = true;
         try side_band.send(line.out, p.band, channel, bytes);
         try line.out.flush();
         line.last = Io.Clock.awake.now(p.io);
@@ -1651,15 +1678,15 @@ const Paced = struct {
     /// channel one, `0005\x01` -- whenever the client has heard nothing
     /// for `secs` seconds, as git's `create_pack_file` sends it.
     fn keepAlive(p: *Paced, period: Io.Duration) void {
+        const due = Nanoseconds.fromIoDuration(period, .exact);
         var wait = period;
-        while (true) {
-            p.io.sleep(wait, .awake) catch return;
+        while (p.pause(wait)) {
             var guard = p.line.acquireUncancelable(p.io);
             defer guard.deinit(p.io);
             const line = guard.value();
             const now = Io.Clock.awake.now(p.io);
-            const quiet = line.last.durationTo(now);
-            if (quiet.nanoseconds < period.nanoseconds) {
+            const quiet = Nanoseconds.fromIoDuration(line.last.durationTo(now), .exact);
+            if (quiet.compare(due) == .lt) {
                 wait = now.durationTo(line.last.addDuration(period));
                 continue;
             }
@@ -1667,10 +1694,15 @@ const Paced = struct {
             // A packet is written whole, whatever asks this task to stop.
             const protection = p.io.swapCancelProtection(.blocked);
             defer _ = p.io.swapCancelProtection(protection);
-            line.out.writeAll("0005\x01") catch return;
-            line.out.flush() catch return;
-            line.last = now;
+            if (!line.wrote(p.io, "0005\x01")) return;
         }
+    }
+
+    /// Waits `wait`: false once the end of the pack cancels the
+    /// keepalive's task, which is how that task is stopped.
+    fn pause(p: *Paced, wait: Io.Duration) bool {
+        p.io.sleep(wait, .awake) catch return false;
+        return true;
     }
 
     /// What a task beside a hook's pack does: what the hook says, on
@@ -1678,13 +1710,21 @@ const Paced = struct {
     fn relayProgress(p: *Paced, file: Io.File) void {
         defer file.close(p.io);
         var said: [128]u8 = undefined;
-        while (true) {
-            // A read may give no bytes short of the end (std allows "including
-            // 0"): only EndOfStream, or a failure, ends the relay.
-            const n = file.readStreaming(p.io, &.{&said}) catch return;
+        // A read may give no bytes short of the end (std allows "including
+        // 0"): only the end, a failure or a cancel ends the relay.
+        while (input.said(file, p.io, &said)) |n| {
             if (n == 0) continue;
-            p.sendBand(2, said[0..n]) catch return;
+            if (!p.relayed(said[0..n])) return;
         }
+    }
+
+    /// `bytes`, the hook's progress, on channel two for a task beside the
+    /// pack: false once they cannot reach the client. A client that stopped
+    /// taking what is written is kept in the line, where the pack's next
+    /// write finds it.
+    fn relayed(p: *Paced, bytes: []const u8) bool {
+        p.sendBand(2, bytes) catch return false;
+        return true;
     }
 
     /// git's `fail` in `create_pack_file`: the client told on channel
@@ -1777,17 +1817,22 @@ test "fuzz: whatever a client sends is answered or refused, in v2 and v0" {
 
 fn fuzzServe(remote: *local.Remote, case: *shakedown.Case) anyerror!void {
     var scratch: [1024]u8 = undefined;
-    const input = scratch[0..shakedown.gen.intRange(case.source, usize, 0, scratch.len)];
-    case.source.bytes(input);
+    const request = scratch[0..shakedown.gen.intRange(case.source, usize, 0, scratch.len)];
+    case.source.bytes(request);
     for ([_]protocol.Version{ .v2, .v0 }) |version| {
         var server: Server = try .init(std.testing.allocator, std.testing.io, remote, version, .{ .stateless = true, .allow_filter = true });
-        var fixed: Io.Reader = .fixed(input);
+        var fixed: Io.Reader = .fixed(request);
         var buffer: [pkt_line.max_line]u8 = undefined;
         var limited = fixed.limited(.unlimited, &buffer);
         var out: Io.Writer.Allocating = .init(std.testing.allocator);
         defer out.deinit();
-        // glint-ignore: Z026 -- refusing a malformed request is the expected outcome; only a crash or a leak fails the fuzzer
-        server.serveRequest(&out.writer, &limited.interface) catch {};
+        server.serveRequest(&out.writer, &limited.interface) catch |err| switch (err) {
+            // No refusal: memory and a cancel are the run's, not the request's.
+            error.OutOfMemory, error.Canceled => return err,
+            // Any other error refuses the malformed request, the expected
+            // outcome: only a crash, a leak or the two above fail the fuzzer.
+            else => {},
+        };
     }
 }
 

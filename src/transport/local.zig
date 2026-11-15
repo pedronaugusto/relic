@@ -11,6 +11,7 @@
 
 const ErrorNamespace = @This();
 const std = @import("std");
+const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -190,7 +191,7 @@ pub const Remote = struct {
     /// copy. `into` is refreshed to read the new pack.
     /// `pack` `null` takes the source repository's settings, as the upload-pack
     /// git runs there builds the pack.
-    pub const CopyOptions = struct { pack_dir: Io.Dir, haves: []const Oid = &.{}, include_tags: bool = false, pack: ?odb_mod.PackOptions = null };
+    pub const CopyOptions = struct { pack_dir: aegis.own.Unowned(Io.Dir), haves: []const Oid = &.{}, include_tags: bool = false, pack: ?odb_mod.PackOptions = null };
     pub fn copyObjects(
         r: *Remote,
         io: Io,
@@ -201,7 +202,7 @@ pub const Remote = struct {
         // git's upload-pack and pack-objects run with replace refs off.
         const followed = r.repo.objectDatabase().pauseReplacements();
         defer r.repo.objectDatabase().resumeReplacements(followed);
-        const pack_dir = with.pack_dir;
+        const pack_dir = with.pack_dir.get();
         const haves = with.haves;
         const include_tags = with.include_tags;
         const options = with.pack orelse r.repo.objectDatabase().packOptions();

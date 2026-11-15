@@ -70,6 +70,7 @@ const checkout = @import("../checkout/checkout.zig");
 const three_way = @import("../merge/three_way.zig");
 const signing = @import("../object/signing.zig");
 const local = @import("local.zig");
+const input = @import("input.zig");
 const in_process = @import("in_process.zig");
 const alternate_refs = @import("alternate_refs.zig");
 
@@ -242,6 +243,16 @@ const Channel = struct {
     /// from the pack's end on, as git's muxers send them once index-pack
     /// has read it.
     keepalive: bool = false,
+    /// A write to the client failed (the push's own, a keepalive's or a
+    /// hook's words relayed beside it): the client stopped taking what is
+    /// written, and every write after fails as that one did.
+    failed: bool = false,
+
+    /// The write that failed, kept for the writes after it.
+    fn fail(channel: *Channel) error{WriteFailed} {
+        channel.failed = true;
+        return error.WriteFailed;
+    }
 };
 
 /// The capabilities the client asked for.
@@ -517,15 +528,7 @@ pub const Server = struct {
         // A setting that is no boolean leaves it unrun, where git dies.
         const auto = if (s.settings.auto_gc) maintenance.autoMaintenance(&s.remote.repo) catch null else null;
         if (auto) |a| if (!a.detach) try s.autoMaintain();
-        if (s.settings.update_server_info) {
-            // As git's: what it comes to is not the push's to answer for.
-            server_info.updateServerInfo(s.gpa, s.io, &s.remote.repo) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                error.Canceled => return error.Canceled,
-                // git ignores what update_server_info returns after a push
-                else => {},
-            };
-        }
+        if (s.settings.update_server_info) try s.updateServerInfo();
         if (keeper) |*task| {
             task.cancel(s.io);
             keeper = null;
@@ -535,6 +538,18 @@ pub const Server = struct {
         // git detaches it and the client hears the end of the push at
         // once; here it runs once the client has heard all of it.
         if (auto) |a| if (a.detach) try s.autoMaintain();
+    }
+
+    /// `receive.updateServerInfo`: the dumb transports' files rewritten,
+    /// as git's: what it comes to is not the push's to answer for, short
+    /// of memory or a cancel.
+    fn updateServerInfo(s: *Server) Self.Error!void {
+        server_info.updateServerInfo(s.gpa, s.io, &s.remote.repo) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.Canceled => return error.Canceled,
+            // git ignores what update_server_info returns after a push
+            else => {},
+        };
     }
 
     /// `maintenance run --auto --quiet`, whose failures are not the
@@ -579,15 +594,15 @@ pub const Server = struct {
     /// `receive.keepAlive` seconds, as git's `copy_to_sideband` sends it.
     fn keepAlive(s: *Server) void {
         const period: Io.Duration = s.settings.keepalive.toIoDuration();
+        const due = s.settings.keepalive.convert(.nanosecond, i96, .exact);
         var wait = period;
-        while (true) {
-            s.io.sleep(wait, .awake) catch return;
+        while (s.pause(wait)) {
             var guard = s.channel.acquireUncancelable(s.io);
             defer guard.deinit(s.io);
             const channel = guard.value();
             const now = Io.Clock.awake.now(s.io);
-            const quiet = channel.last.durationTo(now);
-            if (!channel.keepalive or quiet.nanoseconds < period.nanoseconds) {
+            const quiet = Nanoseconds.fromIoDuration(channel.last.durationTo(now), .exact);
+            if (!channel.keepalive or quiet.compare(due) == .lt) {
                 wait = if (channel.keepalive) now.durationTo(channel.last.addDuration(period)) else period;
                 continue;
             }
@@ -596,10 +611,27 @@ pub const Server = struct {
             const protection = s.io.swapCancelProtection(.blocked);
             defer _ = s.io.swapCancelProtection(protection);
             const out = channel.out orelse return;
-            out.writeAll("0005\x01") catch return;
-            out.flush() catch return;
+            if (channel.failed) return;
+            out.writeAll("0005\x01") catch {
+                channel.failed = true;
+                return;
+            };
+            out.flush() catch {
+                channel.failed = true;
+                return;
+            };
             channel.last = now;
         }
+    }
+
+    /// A span of the awake clock, to the nanosecond, as `Io.Duration` holds it.
+    const Nanoseconds = aegis.units.Duration(.nanosecond, i96);
+
+    /// Waits `wait`: false once the end of the push cancels the keepalive's
+    /// task, which is how that task is stopped.
+    fn pause(s: *Server, wait: Io.Duration) bool {
+        s.io.sleep(wait, .awake) catch return false;
+        return true;
     }
 
     /// What goes to the client: the report on channel one, a message on
@@ -612,13 +644,14 @@ pub const Server = struct {
         defer guard.deinit(s.io);
         const channel = guard.value();
         const out = channel.out orelse return;
+        if (channel.failed) return error.WriteFailed;
         switch (what) {
-            .raw => out.writeAll(bytes) catch return error.WriteFailed,
+            .raw => out.writeAll(bytes) catch return channel.fail(),
             .report, .message => if (channel.band != .none) {
-                side_band.send(out, channel.band, if (what == .report) 1 else 2, bytes) catch return error.WriteFailed;
-            } else out.writeAll(bytes) catch return error.WriteFailed,
+                side_band.send(out, channel.band, if (what == .report) 1 else 2, bytes) catch return channel.fail();
+            } else out.writeAll(bytes) catch return channel.fail(),
         }
-        out.flush() catch return error.WriteFailed;
+        out.flush() catch return channel.fail();
         channel.last = Io.Clock.awake.now(s.io);
     }
 
@@ -760,8 +793,7 @@ pub const Server = struct {
         if (received.result.name) |name| {
             var hex: [hash.max_hex_len]u8 = undefined;
             var idx_buf: [96]u8 = undefined;
-            // unreachable: the longest hex name is 64 digits, 73 bytes with the words around it
-            const idx_name = std.mem.print(&idx_buf, "pack-{s}.idx", .{name.hex(&hex)}) catch unreachable;
+            const idx_name = std.mem.print(&idx_buf, "pack-{s}.idx", .{name.hex(&hex)}) catch aegis.assert.never("the longest hex name is 64 digits, 73 bytes with the words around it");
             received.index = try pack.Index.open(s.gpa, s.io, pack_dir, idx_name, .{ .kind = s.kind(), .max_bytes = 1 << 30 });
         }
         return received;
@@ -789,8 +821,7 @@ pub const Server = struct {
         keeps.clearRetainingCapacity();
         var hex: [hash.max_hex_len]u8 = undefined;
         var name_buf: [96]u8 = undefined;
-        // unreachable: the longest hex name is 64 digits, 69 bytes with `pack-`
-        const base = std.mem.print(&name_buf, "pack-{s}", .{name.hex(&hex)}) catch unreachable;
+        const base = std.mem.print(&name_buf, "pack-{s}", .{name.hex(&hex)}) catch aegis.assert.never("the longest hex name is 64 digits, 69 bytes with pack-");
         s.db().unpackPack(s.io, base) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Canceled => return error.Canceled,
@@ -1136,7 +1167,7 @@ pub const Server = struct {
         var errmsg: std.ArrayList(u8) = .empty;
         const in_buffer = try arena.alloc(u8, pkt_line.max_line);
         var out_buffer: [4096]u8 = undefined;
-        var reader = running.child.stdoutFile().?.readerStreaming(s.io, in_buffer);
+        var reader = input.pipe(running.child.stdoutFile().?, s.io, in_buffer);
         var writer = running.child.stdinFile().?.writerStreaming(s.io, &out_buffer);
         const heard: aegis.io.ReadEnd = .fromFile(&reader);
         const told: aegis.io.WriteEnd = .fromFile(&writer);
@@ -1170,10 +1201,18 @@ pub const Server = struct {
     fn relayStderr(s: *Server, file: Io.File) void {
         defer file.close(s.io);
         var chunk: [1024]u8 = undefined;
-        while (true) {
-            const n = file.readStreaming(s.io, &.{&chunk}) catch return;
-            s.message(chunk[0..n]) catch return;
+        while (input.said(file, s.io, &chunk)) |n| {
+            if (!s.relayed(chunk[0..n])) return;
         }
+    }
+
+    /// `text`, a hook's words, to the client for a task beside the push:
+    /// false once they cannot reach it. A client that stopped taking what
+    /// is written is kept in the channel, where the push's next write
+    /// finds it; a cancel stops the task, as it is meant to.
+    fn relayed(s: *Server, text: []const u8) bool {
+        s.message(text) catch return false;
+        return true;
     }
 
     /// The conversation with `proc-receive`: the version and what each
@@ -1620,16 +1659,16 @@ pub const Server = struct {
         var arena_state: std.heap.ArenaAllocator = .init(s.gpa);
         defer arena_state.deinit();
         const arena = arena_state.allocator();
-        var input: std.ArrayList(u8) = .empty;
+        var shown: std.ArrayList(u8) = .empty;
         for (commands) |cmd| {
             if (skip_broken and (!cmd.standing() or cmd.did_not_exist)) continue;
             // A proc-receive hook's updates in place of the command's own.
             for (cmd.reports.items) |r| {
-                try input.print(arena, "{f} {f} {s}\n", .{ r.old orelse cmd.old, r.new orelse cmd.new, r.name orelse cmd.name });
+                try shown.print(arena, "{f} {f} {s}\n", .{ r.old orelse cmd.old, r.new orelse cmd.new, r.name orelse cmd.name });
             }
-            if (cmd.reports.items.len == 0) try input.print(arena, "{f} {f} {s}\n", .{ cmd.old, cmd.new, cmd.name });
+            if (cmd.reports.items.len == 0) try shown.print(arena, "{f} {f} {s}\n", .{ cmd.old, cmd.new, cmd.name });
         }
-        if (input.items.len == 0) return true;
+        if (shown.items.len == 0) return true;
         var set: std.ArrayList(program.Var) = .empty;
         for (push_options, 0..) |option, i| try set.append(arena, .{ .name = try arena.print("GIT_PUSH_OPTION_{d}", .{i}), .value = option });
         try set.append(arena, .{ .name = "GIT_PUSH_OPTION_COUNT", .value = try arena.print("{d}", .{push_options.len}) });
@@ -1637,7 +1676,7 @@ pub const Server = struct {
             for (try held.environment(arena, s.options.inherited_alternates)) |v| try set.append(arena, .{ .name = v.name, .value = v.value });
         }
         try set.appendSlice(arena, try s.certificateVars(request_arena));
-        const ran = try runner.run(s.io, event, .{ .input = input.items, .set = set.items });
+        const ran = try runner.run(s.io, event, .{ .input = shown.items, .set = set.items });
         try s.sendHookOutput();
         return ran.succeeded();
     }
@@ -1816,10 +1855,22 @@ pub const Server = struct {
         try s.rpLine("warning: " ++ fmt, args);
     }
 
+    /// git's `report_message`: the line cut to its 4096-byte buffer, the
+    /// newline kept after the cut.
     fn rpLine(s: *Server, comptime fmt: []const u8, args: anytype) Self.Error!void {
-        var buffer: [1024]u8 = undefined;
-        const text = std.mem.print(&buffer, fmt ++ "\n", args) catch return;
-        try s.message(text);
+        var buffer: [4096]u8 = undefined;
+        var line: Io.Writer = .fixed(buffer[0 .. buffer.len - 1]);
+        const said = printCut(&line, fmt, args);
+        buffer[said.len] = '\n';
+        try s.message(buffer[0 .. said.len + 1]);
+    }
+
+    /// `fmt` with `args` into `w`'s fixed buffer, cut where it is full, as
+    /// C's `vsnprintf` cuts it: the text that went in.
+    fn printCut(w: *Io.Writer, comptime fmt: []const u8, args: anytype) []u8 {
+        // A fixed writer fails only when it is full, having filled it.
+        w.print(fmt, args) catch return w.buffered();
+        return w.buffered();
     }
 
     // ------------------------------------------------------------------
@@ -1876,7 +1927,11 @@ fn shallowRoots(arena: Allocator, io: Io, index: *const pack.Index, repo: *repo_
         };
         defer repo.objectDatabase().allocator().free(found.bytes);
         if (found.type != .commit) continue;
-        var commit = object.Commit.parse(arena, repo.objectFormat(), found.bytes) catch continue;
+        var commit = object.Commit.parse(arena, repo.objectFormat(), found.bytes) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            // A commit that does not parse names no parents to walk to.
+            else => continue,
+        };
         defer commit.deinit();
         for (commit.parents) |p| try stack.append(arena, p);
     }
@@ -2086,8 +2141,7 @@ pub fn checkHooks(io: Io, repo: *repo_mod.Repository) local.Error!void {
         }
         if (builtin.target.os.tag != .windows) continue;
         var name_buf: [64]u8 = undefined;
-        // unreachable: the longest hook name above, reference-transaction, is 21 bytes, 25 with .exe
-        const executable = std.mem.print(&name_buf, "{s}.exe", .{name}) catch unreachable;
+        const executable = std.mem.print(&name_buf, "{s}.exe", .{name}) catch aegis.assert.never("the longest hook name, reference-transaction, is 21 bytes, 25 with .exe");
         const stat = dir.statFile(io, executable, .{}) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             else => continue,
@@ -2238,17 +2292,22 @@ test "fuzz: whatever a client sends is answered or refused" {
 
 fn fuzzServe(remote: *local.Remote, case: *shakedown.Case) anyerror!void {
     var scratch: [1024]u8 = undefined;
-    const input = scratch[0..shakedown.gen.intRange(case.source, usize, 0, scratch.len)];
-    case.source.bytes(input);
+    const request = scratch[0..shakedown.gen.intRange(case.source, usize, 0, scratch.len)];
+    case.source.bytes(request);
     var server: Server = try .init(std.testing.allocator, std.testing.io, remote, .v0, .{ .stateless = true, .who = .{ .name = "t", .email = "t@example.com", .when_secs = 0, .offset_minutes = 0 } });
     defer server.deinit();
-    var fixed: Io.Reader = .fixed(input);
+    var fixed: Io.Reader = .fixed(request);
     var buffer: [pkt_line.max_line]u8 = undefined;
     var limited = fixed.limited(.unlimited, &buffer);
     var out: Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
-    // glint-ignore: Z026 -- refusing a malformed request is the expected outcome; only a crash or a leak fails the fuzzer
-    server.serveRequest(&out.writer, &limited.interface) catch {};
+    server.serveRequest(&out.writer, &limited.interface) catch |err| switch (err) {
+        // No refusal: memory and a cancel are the run's, not the request's.
+        error.OutOfMemory, error.Canceled => return err,
+        // Any other error refuses the malformed request, the expected
+        // outcome: only a crash, a leak or the two above fail the fuzzer.
+        else => {},
+    };
 }
 
 const testgit = @import("../testing/git.zig");

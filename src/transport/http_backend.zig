@@ -35,6 +35,7 @@ const pkt_line = @import("../codec.zig").pkt_line;
 const protocol = @import("../wire.zig").protocol;
 const percent = @import("../text.zig").percent;
 const local = @import("local.zig");
+const input = @import("input.zig");
 const config_mod = @import("../config/config.zig");
 const date = @import("../text.zig").date;
 const upload_pack = @import("upload_pack.zig");
@@ -234,7 +235,7 @@ pub const Backend = struct {
         try response.setLength(stat.size);
         const w = try response.writer(io);
         var buffer: [16 * 1024]u8 = undefined;
-        var reader = opened.reader(io, &buffer);
+        var reader = input.stored(opened, io, &buffer);
         _ = try reader.interface.streamRemaining(w);
         try response.end(io);
     }

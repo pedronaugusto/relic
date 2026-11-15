@@ -2734,8 +2734,8 @@ test "a clone with --recurse-submodules makes each submodule from the default te
             .recurse_submodules = &.{},
             .submodule_jobs = try std.fmt.parseInt(u32, jobs, 10),
             .programs = .{ .environ = &env },
-            .template = template,
-            .submodule_template = template,
+            .template = .of(template),
+            .submodule_template = .of(template),
             .hooks = .{ .output = .ignore },
         });
         repo.deinit(io);

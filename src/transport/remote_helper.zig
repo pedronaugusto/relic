@@ -29,6 +29,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 const std = @import("std");
+const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -252,8 +253,7 @@ pub const Helper = struct {
         if (h.caps.option) {
             _ = try h.option("progress", if (options.progress) "true" else "false", .raw);
             var buf: [4]u8 = undefined;
-            // unreachable: a u8 is at most three digits
-            _ = try h.option("verbosity", std.mem.print(&buf, "{d}", .{options.verbosity}) catch unreachable, .raw);
+            _ = try h.option("verbosity", std.mem.print(&buf, "{d}", .{options.verbosity}) catch aegis.assert.never("a u8 is at most three digits"), .raw);
         }
         return h;
     }
@@ -444,8 +444,7 @@ pub const Helper = struct {
             }
         };
         var buf: [64]u8 = undefined;
-        // unreachable: the longer service name, git-receive-pack, makes 25 bytes
-        try h.send(std.mem.print(&buf, "connect {s}\n", .{service.name()}) catch unreachable);
+        try h.send(std.mem.print(&buf, "connect {s}\n", .{service.name()}) catch aegis.assert.never("the longer service name, git-receive-pack, makes 25 bytes"));
         const answer = try h.readLine();
         if (answer.len == 0) return true;
         if (std.mem.eql(u8, answer, "fallback")) return false;
@@ -548,9 +547,8 @@ pub const Helper = struct {
         if (options.filter) |spec| try h.requireOption("filter", spec, .quoted);
         if (options.deepen) |d| {
             var buf: [24]u8 = undefined;
-            // unreachable: a u32 depth is at most ten digits and an i64 time at most 20 with its sign
-            if (d.depth) |depth| try h.requireOption("depth", std.mem.print(&buf, "{d}", .{depth}) catch unreachable, .quoted);
-            if (d.since) |since| try h.requireOption("deepen-since", std.mem.print(&buf, "{d}", .{since}) catch unreachable, .quoted); // unreachable: as above
+            if (d.depth) |depth| try h.requireOption("depth", std.mem.print(&buf, "{d}", .{depth}) catch aegis.assert.never("a u32 depth is at most ten digits"), .quoted);
+            if (d.since) |since| try h.requireOption("deepen-since", std.mem.print(&buf, "{d}", .{since}) catch aegis.assert.never("an i64 time is at most 20 characters with its sign"), .quoted);
             for (d.not) |n| try h.requireOption("deepen-not", n, .quoted);
             if (d.relative) try h.requireOption("deepen-relative", "true", .raw);
         }

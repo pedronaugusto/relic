@@ -28,7 +28,7 @@ const httpsettings_mod = @import("../wire.zig").http_settings;
 const io_mod = @import("../testing/io.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
-const assert = std.debug.assert;
+const assert = aegis.assert;
 const builtin = @import("builtin");
 
 const hash = @import("../hash/hash.zig");
@@ -210,13 +210,13 @@ pub const Options = struct {
     /// the transport's settings from it apply, under `config` as the new
     /// repository's own do. A template git does not copy from
     /// (`Repository.templateUsable`) is not read.
-    template: ?Io.Dir = null,
+    template: ?aegis.own.Unowned(Io.Dir) = null,
     /// The template each submodule's repository is made from, with
     /// `recurse_submodules`: `SubmoduleTransport.Options.template`, the
     /// default one git's submodule clones take, which the caller resolves.
     /// Not `template`, which is `--template`'s and the superproject's alone:
     /// git hands it to none of them.
-    submodule_template: ?Io.Dir = null,
+    submodule_template: ?aegis.own.Unowned(Io.Dir) = null,
     /// The new repository's hooks, run as a `hooks.Runner` made for it with
     /// `programs` and these options runs them, the template's among them:
     /// `post-checkout` after the checkout, with the null name, `HEAD` and
@@ -446,7 +446,7 @@ fn userConfiguration(gpa: Allocator, io: Io, options: Options) Error!?config_mod
     if (options.config != null) return null;
     const user = options.user_config;
     const local: ?config_mod.Sources.Path = if (options.template) |template|
-        (if (try Repository.templateUsable(gpa, io, template)) .{ .dir = .of(template), .sub_path = "config" } else null)
+        (if (try Repository.templateUsable(gpa, io, template.get())) .{ .dir = template, .sub_path = "config" } else null)
     else
         null;
     const has_config = local != null or user.system != null or user.xdg != null or user.global != null or user.command.len != 0 or user.pairs.len != 0;
@@ -470,6 +470,13 @@ fn isEmpty(io: Io, dir: Io.Dir) Self.Error!bool {
     return try it.next(io) == null;
 }
 
+/// The shallow history `--depth`, `--shallow-since` and `--shallow-exclude`
+/// ask for; null for the whole of it.
+fn deepenAsked(options: Options) ?fetch_pack.Deepen {
+    if (options.depth == null and options.shallow_since == null and options.shallow_exclude.len == 0) return null;
+    return .{ .depth = options.depth, .since = if (options.shallow_since) |t| gitdate.seconds(t) else null, .not = options.shallow_exclude };
+}
+
 /// Clone `url` into `dir`, which must be empty, and return the new
 /// repository, open.
 pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, asked: Options) Self.Error!Repository {
@@ -480,11 +487,8 @@ pub fn clone(gpa: Allocator, io: Io, url: []const u8, dir: Io.Dir, asked: Option
     const settings: ?*const config_mod.Config = asked.config orelse if (user_settings) |*c| c else null;
     const options = try withSettings(settings, asked);
 
-    if (options.bundle_uri != null and (options.depth != null or options.shallow_since != null or options.shallow_exclude.len != 0)) return error.BundleUriShallow;
-    var deepen: ?fetch_pack.Deepen = if (options.depth != null or options.shallow_since != null or options.shallow_exclude.len != 0)
-        .{ .depth = options.depth, .since = if (options.shallow_since) |t| gitdate.seconds(t) else null, .not = options.shallow_exclude }
-    else
-        null;
+    var deepen = deepenAsked(options);
+    if (options.bundle_uri != null and deepen != null) return error.BundleUriShallow;
     const single_branch = options.single_branch orelse (deepen != null);
     if (!remote_mod.validName(options.origin.?)) return error.InvalidRemoteName;
     if (!try isEmpty(io, dir)) return error.DestinationNotEmpty;
@@ -705,7 +709,7 @@ fn receiveObjects(
         try wants.append(arena, oid);
         try want_names.append(arena, name);
     }
-    var fetched = try session.fetch(gpa, io, .{ .db = repo.objectDatabase(), .pack_dir = pack_dir, .request = .{
+    var fetched = try session.fetch(gpa, io, .{ .db = repo.objectDatabase(), .pack_dir = .of(pack_dir), .request = .{
         .wants = wants.items,
         .want_names = want_names.items,
         .tips = tips.items,
@@ -934,8 +938,8 @@ const Chosen = struct {
 
     /// Take the values a remote helper's import learned.
     fn takeFetchedValues(c: *Chosen, session: *const transport.Session) void {
-        assert(c.wants.items.len == c.want_names.items.len);
-        assert(c.first_refs.items.len == c.first_sources.items.len);
+        assert.invariant(c.wants.items.len == c.want_names.items.len, "each want is appended with its name");
+        assert.invariant(c.first_refs.items.len == c.first_sources.items.len, "each first ref is appended with its source");
         for (c.want_names.items, c.wants.items) |name, *oid| if (session.fetchedValue(name)) |value| {
             oid.* = value;
         };
@@ -1014,7 +1018,7 @@ fn checkCloned(gpa: Allocator, io: Io, repo: *Repository, pack_dir: Io.Dir, pack
     if (pack_name) |name| {
         var hex: [hash.max_hex_len]u8 = undefined;
         var idx_buf: [96]u8 = undefined;
-        const idx_name = std.mem.print(&idx_buf, "pack-{s}.idx", .{name.hex(&hex)}) catch unreachable; // unreachable: the longest hex name is 64 digits, 73 bytes with the words around it
+        const idx_name = std.mem.print(&idx_buf, "pack-{s}.idx", .{name.hex(&hex)}) catch assert.never("the longest hex name is 64 digits, 73 bytes with the words around it");
         fresh = try pack.Index.open(gpa, io, pack_dir, idx_name, .{ .kind = repo.objectFormat(), .max_bytes = 1 << 30 });
     }
     const connected = if (fresh) |*index|
@@ -1207,7 +1211,7 @@ fn initRepository(gpa: Allocator, io: Io, dir: Io.Dir, options: Options, object_
         .object_format = object_format,
         .ref_format = options.ref_format,
         .default_branch = initial,
-        .template = if (options.template) |t| .of(t) else null,
+        .template = options.template,
         .bare = options.bare or options.separate_git_dir,
         .odb = options.odb,
         .system_config = user.system,
@@ -1310,7 +1314,7 @@ pub const SubmoduleOptions = struct {
     /// `Options.template`: the default one git's submodule clones take, from
     /// `GIT_TEMPLATE_DIR`, `init.templateDir` (`repo.templateDir` reads it)
     /// or git's installed one, which the caller resolves and opens.
-    template: ?Io.Dir = null,
+    template: ?aegis.own.Unowned(Io.Dir) = null,
 };
 
 /// Where a submodule's repository and its missing commits come from: relic's
@@ -1445,10 +1449,12 @@ pub const SubmoduleTransport = struct {
             if (request.within) |w| own.reference = reference.forSubmodule(arena, io, w.superproject, w.name, own.warnings) catch |err| break :made err;
             break :made clone(gpa, io, request.url, request.git_dir.get(), own);
         };
-        // glint-ignore: Z026 -- a clone that failed has nothing to free; its error is returned below
-        defer if (made) |*repo| repo.deinit(io) else |_| {};
-        try t.settle(io, &apart, if (made) |_| .clone else |_| .neither);
-        const repo = if (made) |*r| r else |err| return err;
+        const repo = if (made) |*r| r else |err| {
+            try t.settle(io, &apart, .neither);
+            return err;
+        };
+        defer repo.deinit(io);
+        try t.settle(io, &apart, .clone);
         const w = request.within orelse return;
         var edits: std.ArrayList(Repository.ConfigEdit) = .empty;
         for ([_][]const u8{ "submodule.alternateLocation", "submodule.alternateErrorStrategy" }) |name| {
@@ -1496,10 +1502,12 @@ pub const SubmoduleTransport = struct {
             .depth = o.depth,
             .from_user = false,
         });
-        // glint-ignore: Z026 -- a fetch that failed has nothing to free; its error is returned below
-        defer if (made) |*outcome| outcome.deinit() else |_| {};
-        try t.settle(io, &apart, if (made) |_| .fetch else |_| .neither);
-        _ = try made;
+        const outcome = if (made) |*fetched| fetched else |err| {
+            try t.settle(io, &apart, .neither);
+            return err;
+        };
+        defer outcome.deinit();
+        try t.settle(io, &apart, .fetch);
     }
 };
 
@@ -1984,7 +1992,7 @@ test "a clone copies its template and reads the template's configuration, as git
 
         var template = try root.dir.openDir(io, case.template, .{ .iterate = true });
         defer template.close(io);
-        var repo = try clone(gpa, io, case.url, by_relic.dir.borrow().*, .{ .who = test_who, .bare = case.bare, .template = template });
+        var repo = try clone(gpa, io, case.url, by_relic.dir.borrow().*, .{ .who = test_who, .bare = case.bare, .template = .of(template) });
         repo.deinit(io);
         try expectSameClone(gpa, io, &env, by_git.dir.borrow().*, by_relic.dir.borrow().*, case.bare);
         const remotes = try git(gpa, io, &env, by_relic.dir.borrow().*, &.{"remote"});
@@ -2072,7 +2080,7 @@ test "a clone runs post-checkout from its template after the checkout, as git cl
         const cloned = clone(gpa, io, source_path, by_relic.dir.borrow().*, .{
             .who = test_who,
             .bare = case.bare,
-            .template = template,
+            .template = .of(template),
             .programs = .{ .environ = &env },
             .hooks = if (case.hooks) .{ .output = .ignore } else null,
             .hook_failure = &failure,

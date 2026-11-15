@@ -31,6 +31,7 @@
 
 const std = @import("std");
 const aegis = @import("aegis");
+const input = @import("../input.zig");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -265,7 +266,7 @@ const Run = struct {
     /// `fetch_bundle_list_in_config_format`.
     fn followList(run: *Run, b: *Bundle, depth: usize, global: *List) Error!bool {
         const objects = run.repo.objectDatabase().objectsDirectory();
-        const text = aegis.own.readFile(run.io, objects, b.file.?, run.arena, aegis.units.Bytes(u64).fromRaw(1 << 30)) catch |err| switch (err) {
+        const text = input.file(run.io, objects, b.file.?, run.arena, .bundle_list) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             error.OutOfMemory => return error.OutOfMemory,
             else => return false,
@@ -286,7 +287,7 @@ const Run = struct {
     /// Whether `file`, read from `uri`, is a bundle list.
     fn isList(run: *Run, uri: []const u8, file: []const u8) Error!bool {
         const objects = run.repo.objectDatabase().objectsDirectory();
-        const text = aegis.own.readFile(run.io, objects, file, run.arena, aegis.units.Bytes(u64).fromRaw(1 << 30)) catch |err| switch (err) {
+        const text = input.file(run.io, objects, file, run.arena, .bundle_list) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             error.OutOfMemory => return error.OutOfMemory,
             else => return false,
@@ -388,7 +389,7 @@ const Run = struct {
         }
         if (cur >= 0) return false;
         var buf: [20]u8 = undefined;
-        const value = std.mem.print(&buf, "{d}", .{new_max}) catch unreachable; // a u64 is at most twenty digits
+        const value = std.mem.print(&buf, "{d}", .{new_max}) catch aegis.assert.never("a u64 is at most twenty digits");
         _ = run.repo.writeConfig(run.io, .local, &.{.{ .set = .{ .name = "fetch.bundleCreationToken", .value = value } }}, .{}) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             error.OutOfMemory => return error.OutOfMemory,

@@ -27,11 +27,12 @@ const Self = @This();
 
 const std = @import("std");
 const aegis = @import("aegis");
+const input = @import("input.zig");
 const gitdate = @import("../text.zig").date;
 const httpsettings_mod = @import("../wire.zig").http_settings;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
-const assert = std.debug.assert;
+const assert = aegis.assert;
 
 const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
@@ -175,11 +176,11 @@ pub const BeforeSend = struct {
     vtable: *const VTable,
 
     pub const VTable = struct {
-        run: *const fn (prepare: *BeforeSend, gpa: Allocator, io: Io, repo: *Repository, input: BeforeSendInput) BeforeSendError!void,
+        run: *const fn (prepare: *BeforeSend, gpa: Allocator, io: Io, repo: *Repository, before: BeforeSendInput) BeforeSendError!void,
     };
 
-    pub fn run(prepare: *BeforeSend, gpa: Allocator, io: Io, repo: *Repository, input: BeforeSendInput) BeforeSendError!void {
-        return prepare.vtable.run(prepare, gpa, io, repo, input);
+    pub fn run(prepare: *BeforeSend, gpa: Allocator, io: Io, repo: *Repository, before: BeforeSendInput) BeforeSendError!void {
+        return prepare.vtable.run(prepare, gpa, io, repo, before);
     }
 };
 pub const BeforeSendInput = struct {
@@ -501,7 +502,7 @@ fn pushTo(
 
     // Judge each before anything is sent.
     const results = try judgeAll(arena, gpa, io, repo, remote, url, updates, &remote_refs, options);
-    assert(results.len == updates.len);
+    assert.invariant(results.len == updates.len, "judgeAll gives one result per update");
 
     var commands: std.ArrayList(send_pack.Command) = .empty;
     // What a remote helper is told beside: the local ref and the `+`.
@@ -983,10 +984,10 @@ fn send(
     results: []RefResult,
     outcome: *Outcome,
 ) Error!void {
-    assert(request.commands.len != 0);
+    assert.invariant(request.commands.len != 0, "a push with no command sends nothing to a helper");
     // A helper is told each command's source and `+` by position.
-    assert(request.sources.len == request.commands.len);
-    assert(request.force.len == request.commands.len);
+    assert.invariant(request.sources.len == request.commands.len, "a source is given with each command");
+    assert.invariant(request.force.len == request.commands.len, "a force flag is given with each command");
     var include: std.ArrayList(Oid) = .empty;
     for (request.commands) |c| {
         if (!c.new.isZero()) try include.append(arena, c.new);
@@ -2079,7 +2080,7 @@ fn signedTwins(twins: *PushTwins, io: Io, server: ?*testremote.HttpServer, seed:
     made.deinit(gpa);
     const public_path = try gpa.print("{s}.pub", .{key});
     defer gpa.free(public_path);
-    const public = try aegis.own.readFile(io, Io.Dir.cwd(), public_path, gpa, aegis.units.Bytes(u64).fromRaw(4096));
+    const public = try input.file(io, Io.Dir.cwd(), public_path, gpa, .test_record);
     defer gpa.free(public);
     const allowed = try gpa.print("signer@example.com namespaces=\"git\" {s}", .{public});
     defer gpa.free(allowed);
@@ -2128,7 +2129,7 @@ fn expectSameHookLogs(twins: *PushTwins, io: Io) !void {
     for ([_][]const u8{ "remote-git.git", "remote-relic.git" }, 0..) |name, i| {
         var dir = try twins.root.dir.openDir(io, name, .{});
         defer dir.close(io);
-        logs[i] = try aegis.own.readFile(io, dir, "hook.log", twins.gpa, aegis.units.Bytes(u64).fromRaw(std.math.maxInt(u64)));
+        logs[i] = try input.file(io, dir, "hook.log", twins.gpa, .test_record);
     }
     defer for (logs) |l| twins.gpa.free(l);
     try testing.expectEqualStrings(logs[0], logs[1]);

@@ -102,8 +102,21 @@ const Pipe = struct {
     fn discard(p: *Pipe) void {
         var sink: [4096]u8 = undefined;
         while (true) {
-            _ = p.queue.get(p.io, &sink, 1) catch return;
+            _ = p.queue.get(p.io, &sink, 1) catch |err| switch (err) {
+                error.Closed => return,
+                error.Canceled => {
+                    p.canceled = true;
+                    return;
+                },
+            };
         }
+    }
+
+    /// Whether what is buffered reached the pipe: false where the reader
+    /// let go of it first (the pipe closed, or the write canceled).
+    fn flushed(p: *Pipe) bool {
+        p.writer.flush() catch return false;
+        return true;
     }
 };
 
@@ -133,8 +146,11 @@ pub fn InProcess(comptime Server: type, comptime told: fn (ServerError(Server)) 
         const Exchange = struct {
             request: Pipe,
             response: Pipe,
-            task: ?Io.Future(Failure!void) = null,
-            /// What the server's task ended with, once it is awaited.
+            task: ?Io.Future(void) = null,
+            /// What the server's task ended with, kept by the task itself:
+            /// read once the task is awaited, by whoever asks how the
+            /// request went (`finish`, `failure`). A request let go
+            /// (`release`) is asked nothing.
             outcome: ?(Failure!void) = null,
             /// Where no second task runs: the request held whole.
             whole: ?Whole = null,
@@ -197,30 +213,28 @@ pub fn InProcess(comptime Server: type, comptime told: fn (ServerError(Server)) 
             x.request.init(c.io);
             x.response.init(c.io);
             if (canRunBeside(c.io)) {
-                // glint-ignore: Z026 -- with no task to run beside it, the exchange is served whole below
-                if (c.io.concurrent(serve, .{ c, x })) |task| {
-                    x.task = task;
-                    return &x.request.writer;
-                } else |_| {}
+                // With no task to run beside it, the exchange is served whole below.
+                x.task = c.io.concurrent(serve, .{ c, x }) catch |err| switch (err) {
+                    error.ConcurrencyUnavailable => null,
+                };
+                if (x.task != null) return &x.request.writer;
             }
             x.whole = .{ .request = .init(c.gpa), .response = .init(c.gpa) };
             return &x.whole.?.request.writer;
         }
 
-        /// What the server's task does: the request served, its answer
-        /// ended, and whatever is left of the request taken.
-        fn serve(c: *Self, x: *Exchange) Failure!void {
+        /// What the server's task does: the request served, its outcome
+        /// kept, its answer ended, and whatever is left of the request
+        /// taken. A client that let go of the answer (its connection
+        /// released, or the task canceled, both of which close the pipes)
+        /// has its answer as far as it read and leaves nothing to end.
+        fn serve(c: *Self, x: *Exchange) void {
             const served = c.server.serveRequest(&x.response.writer, &x.request.reader);
-            if (served) |_| {
-                x.response.writer.flush() catch {}; // glint-ignore: Z026 -- a client that stopped reading has its answer as far as it read; the request's own outcome is the one returned
-            } else |err| if (!told(err)) {
-                x.response.failed = true;
-            } else {
-                x.response.writer.flush() catch {}; // glint-ignore: Z026 -- as above
-            }
+            x.outcome = served;
+            if (served) |_| {} else |err| if (!told(err)) x.response.failed = true;
+            if (!x.response.failed and !x.response.flushed()) return;
             x.response.close();
             x.request.discard();
-            return served;
         }
 
         fn response(context: *anyopaque, conn: *Connection) connection.Error!*Io.Reader {
@@ -259,7 +273,7 @@ pub fn InProcess(comptime Server: type, comptime told: fn (ServerError(Server)) 
                 // The client may stop before the end; the server is not
                 // left waiting for a request that will not come.
                 x.request.close();
-                x.outcome = task.await(c.io);
+                task.await(c.io);
                 x.task = null;
             }
             return x.outcome;
@@ -269,8 +283,7 @@ pub fn InProcess(comptime Server: type, comptime told: fn (ServerError(Server)) 
             if (x.task) |*task| {
                 x.request.close();
                 x.response.close();
-                // glint-ignore: Z026 -- a connection let go does not answer for the request it abandoned
-                task.cancel(c.io) catch {};
+                task.cancel(c.io);
             }
             if (x.whole) |*whole| {
                 whole.request.deinit();
