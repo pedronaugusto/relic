@@ -2,6 +2,7 @@
 //! This module is package plumbing, reached by no public name.
 const fs = @import("../fs/fs.zig");
 const std = @import("std");
+const aegis = @import("aegis");
 const Io = std.Io;
 const hash = @import("../hash/hash.zig");
 const refs = @import("value.zig");
@@ -13,8 +14,8 @@ const policy = @import("reftable/stack/policy.zig");
 pub const State = struct {
     gpa: std.mem.Allocator,
     /// Lent by the store's caller, which closes them after the store.
-    git_dir: Io.Dir,
-    common_dir: Io.Dir,
+    git_dir: aegis.own.Unowned(Io.Dir),
+    common_dir: aegis.own.Unowned(Io.Dir),
     kind: hash.Kind,
     format: refs.Format,
     options: policy.Options,
@@ -34,14 +35,17 @@ pub const State = struct {
     symlink_refs: bool = false,
 };
 
+/// A lock's wait as git's configuration counts it.
+const Milliseconds = aegis.units.Duration(.millisecond, u32);
+
 /// How a store's locks behave, as the configuration says: how long a
 /// writer waits for a held one -- `core.packedRefsTimeout` for
 /// `packed-refs`, a second unless set; `core.filesRefLockTimeout` for a
 /// loose ref, a tenth of one -- and whether each names its holder in a
 /// `~pid.lock` beside it, `core.lockfilePid`.
 pub const Locks = struct {
-    packed_refs: fs.OnContention = .{ .wait = .fromMilliseconds(1000) },
-    loose: fs.OnContention = .{ .wait = .fromMilliseconds(100) },
+    packed_refs: fs.OnContention = .{ .wait = Milliseconds.fromRaw(1000).toIoDuration() },
+    loose: fs.OnContention = .{ .wait = Milliseconds.fromRaw(100).toIoDuration() },
     pid_file: bool = false,
 };
 
@@ -59,7 +63,7 @@ pub fn create(gpa: std.mem.Allocator, kind: hash.Kind, format: refs.Format, opti
         c.* = .init(gpa);
         break :blk c;
     } else null;
-    data.* = .{ .gpa = gpa, .git_dir = git_dir, .common_dir = common_dir, .kind = kind, .format = format, .options = options, .cache = cache, .packed_refs = packed_refs };
+    data.* = .{ .gpa = gpa, .git_dir = .of(git_dir), .common_dir = .of(common_dir), .kind = kind, .format = format, .options = options, .cache = cache, .packed_refs = packed_refs };
     return data;
 }
 

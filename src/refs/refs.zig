@@ -36,6 +36,7 @@ const testgit = @import("../testing/git.zig");
 const Oid = hash.Oid;
 const Kind = hash.Kind;
 const state_mod = @import("state.zig");
+const input = @import("input.zig");
 /// How a store's locks behave: see `state.Locks`.
 pub const Locks = state_mod.Locks;
 const packed_cache = @import("packed.zig");
@@ -184,10 +185,10 @@ pub const Store = struct {
     /// The directories `init` was lent, lent on: their owner is the caller
     /// of `init`.
     pub fn gitDir(store: *const Store) Io.Dir {
-        return store.state.git_dir;
+        return store.state.git_dir.get();
     }
     pub fn commonDir(store: *const Store) Io.Dir {
-        return store.state.common_dir;
+        return store.state.common_dir.get();
     }
 
     pub fn objectFormat(store: *const Store) Kind {
@@ -363,7 +364,7 @@ pub const Store = struct {
         // git's `files_read_raw_ref`: a symbolic link naming a ref is that
         // symbolic ref, as `core.preferSymlinkRefs` writes one; one that
         // names anything else is followed.
-        if (builtin.target.os.tag != .wasi) if (dir.readLink(io, path, &buffer)) |len| {
+        if (builtin.target.os.tag != .wasi) if (input.link(io, dir, path, &buffer)) |len| {
             const target = buffer[0..len];
             if (std.mem.startsWith(u8, target, "refs/") and names.checkFormat(target, .{})) return .{ .symbolic = try gpa.dupe(u8, target) };
         } else |err| switch (err) {
@@ -371,7 +372,7 @@ pub const Store = struct {
             error.Canceled => return error.Canceled,
             else => {},
         };
-        const bytes = dir.readFile(io, path, &buffer) catch |err| switch (err) {
+        const bytes = input.into(io, dir, path, &buffer) catch |err| switch (err) {
             error.FileNotFound, error.NotDir, error.IsDir => return null,
             else => |e| return e,
         };
@@ -1508,9 +1509,9 @@ pub const RootRefs = struct {
         var broken: std.ArrayList(Broken) = .empty;
         var it = store.gitDir().iterate();
         while (try it.next(io)) |entry| {
-            if (entry.kind != .file or !names.isRootRef(entry.name)) continue;
+            if (entry.kind != .file) continue;
+            const ref = names.rootRef(entry.name) orelse continue;
             const name = try arena.dupe(u8, entry.name);
-            const ref = names.checked(name, .ref) catch continue;
             const target = (store.readLoose(arena, io, ref) catch |err| switch (err) {
                 error.MalformedRef => {
                     try broken.append(arena, .{ .name = name, .why = .bad_content });
@@ -1668,14 +1669,15 @@ pub fn removeOnDisk(gpa: Allocator, io: Io, store: *Store) RemoveError!void {
             defer roots.deinit();
             try dir.deleteTree(io, "refs");
             try dir.deleteTree(io, "logs");
-            for (roots.entries) |entry| try deleteIfPresent(io, dir, names.checked(entry.name, .ref) catch continue);
-            for (roots.broken) |entry| try deleteIfPresent(io, dir, names.checked(entry.name, .ref) catch continue);
-            try deleteIfPresent(io, dir, comptime names.checked("packed-refs", .ref) catch unreachable);
+            // Every name `list` gives is a root ref's, found as one.
+            for (roots.entries) |entry| try deleteIfPresent(io, dir, names.rootRef(entry.name) orelse continue);
+            for (roots.broken) |entry| try deleteIfPresent(io, dir, names.rootRef(entry.name) orelse continue);
+            try deleteIfPresent(io, dir, names.literal("packed-refs", .ref));
         },
         .reftable => {
             try dir.deleteTree(io, "reftable");
             try deleteIfPresent(io, dir, names.head);
-            try deleteIfPresent(io, dir, comptime names.checked("refs/heads", .ref) catch unreachable);
+            try deleteIfPresent(io, dir, names.literal("refs/heads", .ref));
             dir.deleteDir(io, "refs") catch |err| switch (err) {
                 error.FileNotFound => {},
                 else => |e| return e,
@@ -1918,7 +1920,7 @@ pub const Transaction = struct {
     /// On any failure every lock taken so far is given up and the
     /// repository is exactly as it was.
     pub fn prepare(tx: *Transaction, io: Io) TransactionError!void {
-        std.debug.assert(!tx.prepared);
+        aegis.assert.invariant(!tx.prepared, "a transaction is prepared once");
         errdefer tx.abort(io);
 
         if (tx.hooks != null) {
@@ -2298,7 +2300,7 @@ pub const Transaction = struct {
     /// `refs/<kind>/` and `logs/refs/<kind>/` go too.
     pub fn commit(tx: *Transaction, io: Io, log: ?LogMessage) TransactionError!void {
         if (!tx.prepared) try tx.prepare(io);
-        std.debug.assert(!tx.finished);
+        aegis.assert.invariant(!tx.finished, "a finished transaction is not committed again");
 
         if (tx.store.refFormat() == .reftable) {
             try stack_engine.commit(io, tx, log);
@@ -3559,7 +3561,11 @@ fn listTree(gpa: Allocator, io: Io, top: Io.Dir) ![]u8 {
         paths.deinit(gpa);
     }
     for ([_][]const u8{ ".git/refs", ".git/logs" }) |root| {
-        var dir = top.openDir(io, root, .{ .iterate = true }) catch continue;
+        var dir = top.openDir(io, root, .{ .iterate = true }) catch |err| switch (err) {
+            // A store that has no logs yet lists nothing under them.
+            error.FileNotFound => continue,
+            else => |e| return e,
+        };
         defer dir.close(io);
         var walker = try dir.walk(gpa);
         defer walker.deinit();
@@ -3591,7 +3597,12 @@ fn fuzzPacked(_: void, case: *shakedown.Case) anyerror!void {
     const n = shakedown.gen.intRange(case.source, usize, 0, scratch.len);
     case.source.bytes(scratch[0..n]);
     const bytes = try gpa.dupe(u8, scratch[0..n]);
-    var listing = Store.parsePacked(gpa, .sha1, bytes) catch return;
+    var listing = Store.parsePacked(gpa, .sha1, bytes) catch |err| switch (err) {
+        // A listing or a named error is what any bytes are; memory running
+        // out is neither.
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return,
+    };
     defer listing.deinit();
     _ = listing.find("refs/heads/main");
 }
@@ -3690,7 +3701,7 @@ fn refFilesSnapshot(gpa: Allocator, io: Io, dir: Io.Dir) !std.array_hash_map.Str
         const path = try gpa.dupe(u8, entry.path);
         errdefer gpa.free(path);
         std.mem.replaceScalar(u8, path, '\\', '/');
-        const bytes = try aegis.own.readFile(io, entry.dir, entry.basename, gpa, aegis.units.Bytes(u64).fromRaw(std.math.maxInt(u64)));
+        const bytes = try input.whole(io, entry.dir, entry.basename, gpa, .store_file);
         errdefer gpa.free(bytes);
         try out.put(gpa, path, bytes);
     }

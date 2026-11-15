@@ -25,12 +25,10 @@ const hash = @import("../hash/hash.zig");
 const names = @import("../names.zig").ref;
 const ctype = @import("../text.zig").ctype;
 const ReadError = @import("value.zig").ReadError;
+const input = @import("input.zig");
 
 const Oid = hash.Oid;
 const Kind = hash.Kind;
-
-/// The largest `packed-refs` read.
-const max_bytes = 1 << 28;
 
 /// One line of `packed-refs`.
 pub const Entry = struct {
@@ -164,14 +162,7 @@ fn readSeen(gpa: Allocator, io: Io, dir: Io.Dir, kind: Kind, seen: *Validity) Re
     defer file.close(io);
     const st = file.stat(io) catch |err| return statError(err);
     seen.* = Validity.from(st);
-    var reader = file.reader(io, &.{});
-    // The length is the stat's: std's reader would stat the file again for
-    // it and keep a cancel that lands there in its `size_err`, unread.
-    reader.size = st.size;
-    const bytes = reader.interface.allocRemaining(gpa, .limited(max_bytes)) catch |err| switch (err) {
-        error.ReadFailed => return reader.err.?,
-        error.OutOfMemory, error.StreamTooLong => |e| return e,
-    };
+    const bytes = try input.opened(io, file, st.size, gpa, .packed_refs);
     return parse(gpa, kind, bytes);
 }
 
@@ -182,16 +173,19 @@ fn statError(err: Io.File.StatError) ReadError {
     };
 }
 
+/// A file's time as a stat gives it: the real clock, to the nanosecond.
+const FileTime = aegis.units.Instant(.real, .nanosecond, i96);
+
 /// What a stat of `packed-refs` says: enough to tell that it was replaced.
 const Validity = struct {
     present: bool,
     inode: Io.File.INode = 0,
     size: u64 = 0,
-    mtime: Io.Timestamp = Io.Timestamp.fromNanoseconds(0),
-    ctime: Io.Timestamp = Io.Timestamp.fromNanoseconds(0),
+    mtime: FileTime = .fromRaw(0),
+    ctime: FileTime = .fromRaw(0),
 
     fn from(st: Io.File.Stat) Validity {
-        return .{ .present = true, .inode = st.inode, .size = st.size, .mtime = st.mtime, .ctime = st.ctime };
+        return .{ .present = true, .inode = st.inode, .size = st.size, .mtime = .fromTimestamp(st.mtime, .exact), .ctime = .fromTimestamp(st.ctime, .exact) };
     }
 
     fn of(io: Io, dir: Io.Dir) ReadError!Validity {
@@ -206,7 +200,7 @@ const Validity = struct {
     fn eql(a: Validity, b: Validity) bool {
         if (a.present != b.present) return false;
         if (!a.present) return true;
-        return a.inode == b.inode and a.size == b.size and a.mtime.nanoseconds == b.mtime.nanoseconds and a.ctime.nanoseconds == b.ctime.nanoseconds;
+        return a.inode == b.inode and a.size == b.size and a.mtime.eql(b.mtime) and a.ctime.eql(b.ctime);
     }
 };
 

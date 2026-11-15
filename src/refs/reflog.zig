@@ -249,7 +249,7 @@ pub fn read(gpa: Allocator, io: Io, git_dir: Io.Dir, ref: []const u8, kind: hash
     var lines: Lines = .{ .bytes = bytes };
     while (lines.next()) |line| {
         // A line git cannot parse is one it skips, and the log's other entries stand.
-        const entry = parseLine(line, kind) catch {
+        const entry = parseLine(line, kind) orelse {
             skipped +|= 1;
             continue;
         };
@@ -305,8 +305,7 @@ pub fn expire(
     var counting: Lines = .{ .bytes = bytes };
     while (counting.next()) |line| {
         // A line git cannot parse is one it skips, and the log's other entries stand.
-        _ = parseLine(line, kind) catch continue;
-        count += 1;
+        if (parseLine(line, kind) != null) count += 1;
     }
 
     const hex_len = kind.hexLen();
@@ -316,7 +315,7 @@ pub fn expire(
     var lines: Lines = .{ .bytes = bytes };
     while (lines.next()) |line| {
         // A line git cannot parse is one it skips, and the log's other entries stand.
-        var entry = parseLine(line, kind) catch continue;
+        var entry = parseLine(line, kind) orelse continue;
         seen += 1;
         // git's `expire_reflog_ent` asks about a rewritten entry with the
         // old value it will have: the last kept one's new value.
@@ -391,26 +390,26 @@ const Lines = struct {
 /// ±hhmm`, the time a nonzero `strtoumax`, the zone's sign and four digits
 /// read by `strtol`, then the message after one tab, or straight after the
 /// zone where no tab follows it. Anything else is a line git skips.
-fn parseLine(line: []const u8, kind: hash.Kind) ReadError!Entry {
+fn parseLine(line: []const u8, kind: hash.Kind) ?Entry {
     const hex_len = kind.hexLen();
-    if (line.len < hex_len * 2 + 2) return error.MalformedReflogEntry;
-    const old = Oid.parse(kind, line[0..hex_len]) catch return error.MalformedReflogEntry;
-    if (line[hex_len] != ' ') return error.MalformedReflogEntry;
-    const new = Oid.parse(kind, line[hex_len + 1 ..][0..hex_len]) catch return error.MalformedReflogEntry;
-    if (line[hex_len * 2 + 1] != ' ') return error.MalformedReflogEntry;
+    if (line.len < hex_len * 2 + 2) return null;
+    const old = Oid.parse(kind, line[0..hex_len]) catch return null;
+    if (line[hex_len] != ' ') return null;
+    const new = Oid.parse(kind, line[hex_len + 1 ..][0..hex_len]) catch return null;
+    if (line[hex_len * 2 + 1] != ' ') return null;
     const rest = line[hex_len * 2 + 2 ..];
-    const email_end = std.mem.findScalar(u8, rest, '>') orelse return error.MalformedReflogEntry;
-    if (email_end + 1 >= rest.len or rest[email_end + 1] != ' ') return error.MalformedReflogEntry;
+    const email_end = std.mem.findScalar(u8, rest, '>') orelse return null;
+    if (email_end + 1 >= rest.len or rest[email_end + 1] != ' ') return null;
     const after = rest[email_end + 2 ..];
     const time = decimal.strtoul(after, 10, 64);
-    if (time.value == 0) return error.MalformedReflogEntry;
+    if (time.value == 0) return null;
     const message = after[time.end..];
-    if (message.len < 6 or message[0] != ' ' or (message[1] != '+' and message[1] != '-')) return error.MalformedReflogEntry;
-    for (message[2..6]) |c| if (!std.ascii.isDigit(c)) return error.MalformedReflogEntry;
+    if (message.len < 6 or message[0] != ' ' or (message[1] != '+' and message[1] != '-')) return null;
+    for (message[2..6]) |c| if (!std.ascii.isDigit(c)) return null;
     const hhmm = decimal.strtol(message[1..], 10, 64).value;
     const minutes = @divTrunc(hhmm, 100) * 60 + @rem(hhmm, 100);
     const text = if (message.len > 6 and message[6] == '\t') message[7..] else message[6..];
-    var who = object.Signature.parse(rest[0 .. email_end + 1]) catch return error.MalformedReflogEntry;
+    var who = object.Signature.parse(rest[0 .. email_end + 1]) catch return null;
     who.when_secs = std.math.cast(i64, time.value) orelse std.math.maxInt(i64);
     who.offset_minutes = std.math.cast(i16, minutes) orelse 0;
     return .{ .old = old, .new = new, .who = who, .message = text };
@@ -523,7 +522,7 @@ fn fuzzLog(_: void, case: *shakedown.Case) anyerror!void {
     var lines = std.mem.splitScalar(u8, input, '\n');
     while (lines.next()) |line| {
         if (line.len == 0) continue;
-        _ = parseLine(line, .sha1) catch continue;
+        _ = parseLine(line, .sha1);
     }
     _ = gpa;
 }

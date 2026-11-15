@@ -18,7 +18,7 @@ pub const Options = struct {
     geometric_factor: u8 = 2,
     /// `reftable.lockTimeout`: how long to wait for `tables.list.lock`, with
     /// git's backoff. git waits 100 milliseconds unless told otherwise.
-    lock: fs.OnContention = .{ .wait = .fromMilliseconds(100) },
+    lock: fs.OnContention = .{ .wait = aegis.units.Duration(.millisecond, u32).fromRaw(100).toIoDuration() },
     /// `core.lockfilePid`: each lock names its holder in a `~pid.lock`
     /// beside it.
     pid_file: bool = false,

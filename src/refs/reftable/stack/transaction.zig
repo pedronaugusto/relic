@@ -6,6 +6,7 @@ const hash = @import("../../../hash/hash.zig");
 const Oid = hash.Oid;
 const Kind = hash.Kind;
 const fs = @import("../../../fs/fs.zig");
+const input = @import("../../input.zig");
 const reftable = @import("../table.zig");
 const reflog = @import("../../reflog.zig");
 const crud = @import("../../../object/crud.zig");
@@ -20,7 +21,7 @@ const mergedRefs = cache.internal.mergedRefs;
 const allLogs = cache.internal.allLogs;
 const lessThanRef = cache.internal.lessThanRef;
 const logOrder = cache.internal.logOrder;
-const checkTableName = cache.internal.checkTableName;
+const foundTableName = cache.internal.foundTableName;
 const tableName = cache.internal.tableName;
 const Stacks = cache.internal.Stacks;
 const loadIn = cache.internal.loadIn;
@@ -362,7 +363,9 @@ pub const Pending = struct {
     /// Both stacks, read under the locks, for lookups.
     stacks: Stacks,
 
-    const Locked = struct {
+    /// One stack's lock: its directory, `tables.list.lock`, and what is
+    /// written through it.
+    pub const Locked = struct {
         dir: fs.OwnedDir,
         lock: fs.LockFile,
         buffer: []u8,
@@ -558,7 +561,7 @@ pub fn appendLog(
         .tz_offset = zoneFromMinutes(who.offset_minutes),
         .message = try logMessage(arena_instance.allocator(), try reflog.normalizeMessage(arena_instance.allocator(), message), store.reftableOptions().write.block_size),
     } } };
-    const bytes = try reftable.write(gpa, store.objectFormat(), .{ .min_update_index = update_index, .max_update_index = update_index, .refs = &.{}, .logs = &.{record} }, store.reftableOptions().write);
+    const bytes = try reftable.write(gpa, store.objectFormat(), .{ .updates = .one(update_index), .refs = &.{}, .logs = &.{record} }, store.reftableOptions().write);
     defer gpa.free(bytes);
     try install(gpa, io, &locked, &stack, bytes, update_index, update_index);
     try compactAfter(gpa, io, parent, store);
@@ -637,7 +640,7 @@ pub fn copyRef(gpa: Allocator, io: Io, store: anytype, inputs: CopyInputs, log: 
     std.mem.sort(reftable.RefRecord, records.items, {}, lessThanRef);
     std.mem.sort(reftable.LogRecord, logs.items, {}, logOrder);
 
-    const bytes = try reftable.write(gpa, kind, .{ .min_update_index = deletion_index, .max_update_index = creation_index, .refs = records.items, .logs = logs.items }, store.reftableOptions().write);
+    const bytes = try reftable.write(gpa, kind, .{ .updates = .{ .min = deletion_index, .max = creation_index }, .refs = records.items, .logs = logs.items }, store.reftableOptions().write);
     defer gpa.free(bytes);
     try install(gpa, io, &locked, &stack, bytes, deletion_index, creation_index);
     try compactAfter(gpa, io, parent, store);
@@ -711,7 +714,7 @@ pub fn expireLog(
         }
     };
 
-    const bytes = try reftable.write(gpa, store.objectFormat(), .{ .min_update_index = update_index, .max_update_index = update_index, .refs = ref_records[0..ref_count], .logs = logs.items }, store.reftableOptions().write);
+    const bytes = try reftable.write(gpa, store.objectFormat(), .{ .updates = .one(update_index), .refs = ref_records[0..ref_count], .logs = logs.items }, store.reftableOptions().write);
     defer gpa.free(bytes);
     try install(gpa, io, &locked, &stack, bytes, update_index, update_index);
     try compactAfter(gpa, io, parent, store);
@@ -730,7 +733,7 @@ pub fn createLog(gpa: Allocator, io: Io, store: anytype, name: []const u8) refs.
     if ((try stack.logsFor(gpa, name, .{ .arena = arena_instance.allocator() })).len != 0) return;
     const update_index = try stack.nextUpdateIndex();
     const logs = [_]reftable.LogRecord{marker(store.objectFormat(), name, update_index)};
-    const bytes = try reftable.write(gpa, store.objectFormat(), .{ .min_update_index = update_index, .max_update_index = update_index, .refs = &.{}, .logs = &logs }, store.reftableOptions().write);
+    const bytes = try reftable.write(gpa, store.objectFormat(), .{ .updates = .one(update_index), .refs = &.{}, .logs = &logs }, store.reftableOptions().write);
     defer gpa.free(bytes);
     try install(gpa, io, &locked, &stack, bytes, update_index, update_index);
     try compactAfter(gpa, io, parent, store);
@@ -754,7 +757,7 @@ pub fn deleteLog(gpa: Allocator, io: Io, store: anytype, name: []const u8) refs.
     const logs = try arena.alloc(reftable.LogRecord, records.len);
     for (records, logs) |r, *out| out.* = .{ .name = name, .update_index = r.update_index, .value = .deletion };
     std.mem.sort(reftable.LogRecord, logs, {}, logOrder);
-    const bytes = try reftable.write(gpa, store.objectFormat(), .{ .min_update_index = update_index, .max_update_index = update_index, .refs = &.{}, .logs = logs }, store.reftableOptions().write);
+    const bytes = try reftable.write(gpa, store.objectFormat(), .{ .updates = .one(update_index), .refs = &.{}, .logs = logs }, store.reftableOptions().write);
     defer gpa.free(bytes);
     try install(gpa, io, &locked, &stack, bytes, update_index, update_index);
     try compactAfter(gpa, io, parent, store);
@@ -926,7 +929,7 @@ fn addTable(
     std.mem.sort(reftable.RefRecord, records.items, {}, lessThanRef);
     std.mem.sort(reftable.LogRecord, logs.items, {}, logOrder);
 
-    const bytes = try reftable.write(gpa, store.objectFormat(), .{ .min_update_index = update_index, .max_update_index = update_index, .refs = records.items, .logs = logs.items }, store.reftableOptions().write);
+    const bytes = try reftable.write(gpa, store.objectFormat(), .{ .updates = .one(update_index), .refs = records.items, .logs = logs.items }, store.reftableOptions().write);
     defer gpa.free(bytes);
     try install(gpa, io, locked, stack, bytes, update_index, update_index);
 }
@@ -1043,9 +1046,9 @@ pub fn compactIn(gpa: Allocator, io: Io, parent: Io.Dir, inputs: CompactInputs, 
     var new_name: ?[]const u8 = null;
     var name_buf: [64]u8 = undefined;
     if (merged_refs.len != 0 or merged_logs.len != 0) {
-        const min = tables[0].min_update_index;
-        const max = tables[tables.len - 1].max_update_index;
-        const bytes = try reftable.write(gpa, kind, .{ .min_update_index = min, .max_update_index = max, .refs = merged_refs, .logs = merged_logs }, options.write);
+        const min = tables[0].updates.min;
+        const max = tables[tables.len - 1].updates.max;
+        const bytes = try reftable.write(gpa, kind, .{ .updates = .{ .min = min, .max = max }, .refs = merged_refs, .logs = merged_logs }, options.write);
         defer gpa.free(bytes);
         const name = tableName(io, &name_buf, min, max).bytes;
         try writeTable(gpa, io, dir, name, bytes, options.shared, options.fsync.sync(.reference));
@@ -1133,7 +1136,7 @@ fn clean(gpa: Allocator, io: Io, parent: Io.Dir, kind: Kind, options: Options) r
     var iterator = dir.iterate();
     while (try iterator.next(io)) |entry| {
         if (entry.kind != .file) continue;
-        const table = (checkTableName(entry.name) catch continue).bytes;
+        const table = (foundTableName(entry.name) orelse continue).bytes;
         const listed = for (stack.names) |name| {
             if (std.mem.eql(u8, name, table)) break true;
         } else false;
@@ -1147,7 +1150,7 @@ fn clean(gpa: Allocator, io: Io, parent: Io.Dir, kind: Kind, options: Options) r
             else => continue,
         };
         defer file.close(io);
-        const got = file.readPositionalAll(io, &header, 0) catch |err| switch (err) {
+        const got = input.table(io, .of(file), &header, 0) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             else => continue,
         };
@@ -1275,7 +1278,7 @@ pub fn writeInitial(gpa: Allocator, io: Io, store: anytype, refs_in: anytype) re
             .{ .direct = ref.oid } };
     }
     if (records.len == 0) return;
-    const bytes = try reftable.write(gpa, store.objectFormat(), .{ .min_update_index = update_index, .max_update_index = update_index, .refs = records, .logs = &.{} }, store.reftableOptions().write);
+    const bytes = try reftable.write(gpa, store.objectFormat(), .{ .updates = .one(update_index), .refs = records, .logs = &.{} }, store.reftableOptions().write);
     defer gpa.free(bytes);
     try install(gpa, io, &locked, &stack, bytes, update_index, update_index);
     if (!store.reftableOptions().auto_compact) return;

@@ -188,7 +188,7 @@ pub const Stack = struct {
     /// stack. The next addition takes the one after it.
     pub fn maxUpdateIndex(s: *const Stack) u64 {
         var max: u64 = 0;
-        for (s.tables) |t| max = @max(max, t.max_update_index);
+        for (s.tables) |t| max = @max(max, t.updates.max);
         return max;
     }
 
@@ -344,7 +344,8 @@ const UntrustedName = aegis.input.Untrusted([]const u8);
 
 /// A name with a table's shape (`isTableName`): a file in the reftable
 /// directory and nothing past it. `checkTableName` makes one of a name
-/// read; `tableName` one it forms, which has git's shape.
+/// read, `foundTableName` one of a file found in the directory, and
+/// `tableName` one it forms, which has git's shape.
 pub const TableName = struct { bytes: []const u8 };
 
 fn parseTableName(_: void, raw: []const u8) error{MalformedTablesList}!TableName {
@@ -355,6 +356,13 @@ fn parseTableName(_: void, raw: []const u8) error{MalformedTablesList}!TableName
 /// `raw` as a table's name, or `MalformedTablesList`.
 fn checkTableName(raw: []const u8) error{MalformedTablesList}!TableName {
     return UntrustedName.init(raw).parse({}, parseTableName);
+}
+
+/// A file the reftable directory holds as a table's name, or `null` for
+/// one with another name, which is no table (`tables.list`, a lock).
+fn foundTableName(raw: []const u8) ?TableName {
+    if (!isTableName(raw)) return null;
+    return .{ .bytes = raw };
 }
 
 /// Whether `name` has the shape of a table's name:
@@ -375,7 +383,9 @@ fn tableName(io: Io, buf: *[64]u8, min: u64, max: u64) TableName {
         min,
         max,
         std.mem.readInt(u32, &random, .little),
-    }) catch unreachable; // two u64 of at most sixteen hex digits, a u32 of eight and fourteen bytes fit 64
+    }) catch |err| switch (err) {
+        error.NoSpaceLeft => aegis.assert.never("two u64 of at most sixteen hex digits, a u32 of eight and fourteen bytes fit 64"),
+    };
     // Hex digits, dashes and `.ref`: no slash, and no leading dot.
     return .{ .bytes = printed };
 }
@@ -462,6 +472,9 @@ pub const Cache = struct {
     }
 };
 
+/// A file's time as a stat gives it: the real clock, to the nanosecond.
+const FileTime = aegis.units.Instant(.real, .nanosecond, i96);
+
 /// What a stat of `tables.list` says: enough to tell that it was replaced.
 /// A list is only ever replaced by a rename, so the file's identity changes
 /// with every write; its size and time are checked as well, as git's are.
@@ -469,7 +482,7 @@ const Validity = struct {
     present: bool,
     inode: Io.File.INode = 0,
     size: u64 = 0,
-    mtime: Io.Timestamp = Io.Timestamp.fromNanoseconds(0),
+    mtime: FileTime = .fromRaw(0),
 
     fn of(io: Io, parent: Io.Dir) Error!Validity {
         const st = parent.statFile(io, "reftable/tables.list", .{}) catch |err| switch (err) {
@@ -477,13 +490,13 @@ const Validity = struct {
             error.Canceled => return error.Canceled,
             else => return error.ReftableMissing,
         };
-        return .{ .present = true, .inode = st.inode, .size = st.size, .mtime = st.mtime };
+        return .{ .present = true, .inode = st.inode, .size = st.size, .mtime = .fromTimestamp(st.mtime, .exact) };
     }
 
     fn same(seen: ?Validity, now: ?Validity) bool {
         const a = seen orelse return false;
         const b = now orelse return false;
-        return a.present == b.present and a.inode == b.inode and a.size == b.size and a.mtime.nanoseconds == b.mtime.nanoseconds;
+        return a.present == b.present and a.inode == b.inode and a.size == b.size and a.mtime.eql(b.mtime);
     }
 };
 
@@ -550,6 +563,7 @@ pub const internal = struct {
     pub const newerFirst = Self.newerFirst;
     pub const logOrder = Self.logOrder;
     pub const checkTableName = Self.checkTableName;
+    pub const foundTableName = Self.foundTableName;
     pub const tableName = Self.tableName;
     pub const Validity = Self.Validity;
     pub const Stacks = Self.Stacks;

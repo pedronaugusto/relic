@@ -33,6 +33,7 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const hash = @import("../../hash/hash.zig");
+const input = @import("../input.zig");
 const codec = @import("../../codec.zig");
 const varint = codec.varint;
 
@@ -65,7 +66,7 @@ const restart_width = 3;
 const deflate_widest = 1032;
 /// The most one block's read takes: its 24-bit length, and what deflate can
 /// add to a stream of that length (a deflated log block's).
-const max_block_read: usize = std.math.maxInt(u24) + std.math.maxInt(u24) / 256 + 64;
+const max_block_read: usize = input.max_table_read;
 
 /// The header's length: version 1 has no hash identifier, version 2 does.
 pub fn headerSize(version: u8) usize {
@@ -164,7 +165,7 @@ pub const Source = union(enum) {
     bytes: []const u8,
     /// An open file, read a block at a time with positional reads, kept
     /// open by the caller. Nothing is read that a lookup does not reach.
-    file: struct { file: Io.File, io: Io },
+    file: struct { file: aegis.own.Unowned(Io.File), io: Io },
 };
 
 /// A parsed table: its header and footer, and where to read the rest.
@@ -173,9 +174,8 @@ pub const Table = struct {
     kind: Kind,
     version: u8,
     block_size: u32,
-    min_update_index: u64,
-    // the two bounds of one range of update indices, of one kind
-    max_update_index: u64,
+    /// The update indices the table's records lie in.
+    updates: UpdateRange,
     /// Where the footer begins; no block reaches past it.
     size: usize,
     ref_index_offset: u64,
@@ -205,11 +205,12 @@ pub const Table = struct {
     /// keeps open for as long as the table is used. Blocks are read as a
     /// lookup reaches them.
     pub fn open(io: Io, file: Io.File, kind: Kind) Self.Error!Table {
+        const held: aegis.own.Unowned(Io.File) = .of(file);
         const total = try file.length(io);
         const len: usize = std.math.cast(usize, total) orelse return error.NotAReftable;
         var head_buf: [29]u8 = undefined;
         const head = head_buf[0..@min(len, head_buf.len)];
-        if (try file.readPositionalAll(io, head, 0) != head.len) return error.NotAReftable;
+        if (try input.table(io, held, head, 0) != head.len) return error.NotAReftable;
         if (head.len < 5 or !std.mem.eql(u8, head[0..4], magic)) return error.NotAReftable;
         const version = head[4];
         if (version != 1 and version != 2) return error.UnsupportedReftableVersion;
@@ -217,8 +218,8 @@ pub const Table = struct {
         if (len < headerSize(version) + footer_len) return error.NotAReftable;
         var footer_buf: [72]u8 = undefined;
         const footer = footer_buf[0..footer_len];
-        if (try file.readPositionalAll(io, footer, len - footer_len) != footer_len) return error.NotAReftable;
-        return fromParts(.{ .file = .{ .file = file, .io = io } }, head, footer, len, kind);
+        if (try input.table(io, held, footer, len - footer_len) != footer_len) return error.NotAReftable;
+        return fromParts(.{ .file = .{ .file = held, .io = io } }, head, footer, len, kind);
     }
 
     /// The table from its first bytes -- the header and the byte after it,
@@ -268,8 +269,7 @@ pub const Table = struct {
             .kind = kind,
             .version = version,
             .block_size = block_size,
-            .min_update_index = min_index,
-            .max_update_index = max_index,
+            .updates = .{ .min = min_index, .max = max_index },
             .size = size,
             .ref_index_offset = ref_index,
             .obj_offset = obj_offset,
@@ -374,7 +374,7 @@ pub const Table = struct {
         if (n > max_block_read) return error.CorruptBlock;
         const buf = try gpa.alloc(u8, n);
         errdefer gpa.free(buf);
-        if (try f.file.readPositionalAll(f.io, buf, off) != n) return error.CorruptBlock;
+        if (try input.table(f.io, f.file, buf, off) != n) return error.CorruptBlock;
         return buf;
     }
 
@@ -517,8 +517,9 @@ pub const Table = struct {
 };
 
 /// One block, its bytes from its own start: the file's for a ref, object
-/// or index block, inflated and owned for a log block.
-const Block = struct {
+/// or index block, inflated and owned for a log block. An `Iterator` holds
+/// the one it is in.
+pub const Block = struct {
     typ: u8,
     header_off: usize,
     data: []const u8,
@@ -708,14 +709,14 @@ pub const Iterator = struct {
 
     /// The next ref. Only for an iterator over refs.
     pub fn nextRef(it: *Iterator) Self.Error!?RefRecord {
-        std.debug.assert(it.typ == .ref);
+        aegis.assert.invariant(it.typ == .ref, "nextRef is asked of an iterator over refs");
         const raw = (try it.nextKey()) orelse return null;
         return try decodeRef(it.table, &it.records, raw);
     }
 
     /// The next log entry. Only for an iterator over logs.
     pub fn nextLog(it: *Iterator) Self.Error!?LogRecord {
-        std.debug.assert(it.typ == .log);
+        aegis.assert.invariant(it.typ == .log, "nextLog is asked of an iterator over logs");
         const raw = (try it.nextKey()) orelse return null;
         return try decodeLog(it.table, &it.records, raw);
     }
@@ -753,7 +754,7 @@ fn takeString(r: *Io.Reader) Error![]const u8 {
 
 fn takeRefValue(t: *const Table, r: *Io.Reader, raw: Raw) Error!struct { value: RefValue, update_index: u64 } {
     const delta = varint.takeOffset(r) catch return error.CorruptRecord;
-    const update_index = std.math.add(u64, t.min_update_index, delta) catch return error.CorruptRecord;
+    const update_index = std.math.add(u64, t.updates.min, delta) catch return error.CorruptRecord;
     const value: RefValue = switch (raw.extra) {
         0 => .deletion,
         1 => .{ .direct = try takeOid(t, r) },
@@ -843,12 +844,24 @@ pub const WriteOptions = struct {
     index_objects: bool = true,
 };
 
-// the two bounds of one range of update indices, of one kind
-pub const WriteInputs = struct { min_update_index: u64, max_update_index: u64, refs: []const RefRecord, logs: []const LogRecord };
+/// The update indices a table covers, both ends included: a ref record's
+/// lies between them, a log record's at or below `max`.
+pub const UpdateRange = struct {
+    min: u64,
+    max: u64,
+
+    /// The range of one update index, which a transaction's table covers.
+    pub fn one(index: u64) UpdateRange {
+        return .{ .min = index, .max = index };
+    }
+};
+
+/// What `write` lays out: the records, and the update indices they lie in.
+pub const WriteInputs = struct { updates: UpdateRange, refs: []const RefRecord, logs: []const LogRecord };
 
 /// Write one table holding `inputs.refs`, sorted by name, and `inputs.logs`, sorted by
 /// name and then newest first. Every ref's update index must lie in
-/// `[min_update_index, max_update_index]` and no log's above the latter.
+/// `inputs.updates` and no log's above its `max`.
 /// The result is the caller's.
 ///
 /// A log update's message is written as given; git's writer ends each with
@@ -859,18 +872,17 @@ pub fn write(
     inputs: WriteInputs,
     options: WriteOptions,
 ) Self.Error![]u8 {
-    const min_update_index = inputs.min_update_index;
-    const max_update_index = inputs.max_update_index;
+    const updates = inputs.updates;
     const refs = inputs.refs;
     const logs = inputs.logs;
     if (options.block_size < 64 or options.block_size >= (1 << 24)) return error.RecordTooLarge;
-    var w: Writer = try .init(gpa, kind, options, min_update_index, max_update_index);
+    var w: Writer = try .init(gpa, kind, options, updates);
     defer w.deinit();
 
     for (refs, 0..) |ref, i| {
         if (i > 0 and std.mem.order(u8, refs[i - 1].name, ref.name) != .lt) return error.UnsortedRecords;
         if (ref.name.len == 0) return error.UnsortedRecords;
-        if (ref.update_index < min_update_index or ref.update_index > max_update_index) return error.UpdateIndexOutOfRange;
+        if (ref.update_index < updates.min or ref.update_index > updates.max) return error.UpdateIndexOutOfRange;
         try w.addRef(ref);
     }
     for (logs, 0..) |log, i| {
@@ -879,7 +891,7 @@ pub fn write(
             const by_name = std.mem.order(u8, logs[i - 1].name, log.name);
             if (by_name == .gt or (by_name == .eq and logs[i - 1].update_index <= log.update_index)) return error.UnsortedRecords;
         }
-        if (log.update_index > max_update_index) return error.UpdateIndexOutOfRange;
+        if (log.update_index > updates.max) return error.UpdateIndexOutOfRange;
         try w.addLog(log);
     }
     return w.close();
@@ -908,8 +920,7 @@ const Writer = struct {
     kind: Kind,
     options: WriteOptions,
     version: u8,
-    min_update_index: u64,
-    max_update_index: u64,
+    updates: UpdateRange,
     out: std.ArrayList(u8) = .empty,
     /// The offset the next block starts at, counting padding not yet
     /// written.
@@ -939,7 +950,7 @@ const Writer = struct {
         last_key: std.ArrayList(u8) = .empty,
     };
 
-    fn init(gpa: Allocator, kind: Kind, options: WriteOptions, min: u64, max: u64) Allocator.Error!Writer {
+    fn init(gpa: Allocator, kind: Kind, options: WriteOptions, updates: UpdateRange) Allocator.Error!Writer {
         const block = try gpa.alloc(u8, options.block_size);
         @memset(block, 0);
         return .{
@@ -947,8 +958,7 @@ const Writer = struct {
             .kind = kind,
             .options = options,
             .version = versionFor(kind),
-            .min_update_index = min,
-            .max_update_index = max,
+            .updates = updates,
             .block = block,
         };
     }
@@ -984,8 +994,8 @@ const Writer = struct {
         @memcpy(buf[0..4], magic);
         buf[4] = w.version;
         std.mem.writeInt(u24, buf[5..8], @intCast(w.options.block_size), .big);
-        std.mem.writeInt(u64, buf[8..16], w.min_update_index, .big);
-        std.mem.writeInt(u64, buf[16..24], w.max_update_index, .big);
+        std.mem.writeInt(u64, buf[8..16], w.updates.min, .big);
+        std.mem.writeInt(u64, buf[16..24], w.updates.max, .big);
         if (w.version == 2) {
             std.mem.writeInt(u32, buf[24..28], if (w.kind == .sha1) format_id_sha1 else format_id_sha256, .big);
         }
@@ -1049,7 +1059,9 @@ const Writer = struct {
         var state = try warp.Compressor.init(w.gpa, .{ .level = 9, .max_input = .fromRaw(o.next - skip) });
         defer state.deinit();
         const output = compressed.writer.writableSliceGreedy(warp.Compressor.bound(o.next - skip, .{})) catch return error.OutOfMemory;
-        const n = state.compress(w.block[skip..o.next], output, .{}) catch unreachable; // `output` was sized by `Compressor.bound(o.next - skip, .{})`, which holds the complete stream
+        const n = state.compress(w.block[skip..o.next], output, .{}) catch |err| switch (err) {
+            error.OutputTooSmall => aegis.assert.never("`output` was sized by `Compressor.bound(o.next - skip, .{})`, which holds the complete stream"),
+        };
         compressed.writer.advance(n);
         const bytes = compressed.written();
         // A log block is not bounded by the block size once deflated, and
@@ -1164,7 +1176,7 @@ const Writer = struct {
         var value: std.ArrayList(u8) = .empty;
         defer value.deinit(w.gpa);
         var buf: [16]u8 = undefined;
-        const delta = aegis.int.Checked(u64).init(ref.update_index).sub(w.min_update_index) catch return error.UpdateIndexOutOfRange;
+        const delta = aegis.int.Checked(u64).init(ref.update_index).sub(w.updates.min) catch return error.UpdateIndexOutOfRange;
         try value.appendSlice(w.gpa, varint.writeOffset(&buf, delta.raw()));
         const extra: u8 = switch (ref.value) {
             .deletion => 0,
@@ -1290,10 +1302,10 @@ const Writer = struct {
         at += 4;
         // The footer `open` reads back from the end: the header again, five
         // offsets and the CRC, its length fixed by the version.
-        std.debug.assert(at == footerSize(w.version));
+        aegis.assert.invariant(at == footerSize(w.version), "the footer written is the length its version gives");
         try w.paddedWrite(footer[0..at], 0);
-        std.debug.assert(w.out.items.len >= headerSize(w.version) + footerSize(w.version));
-        aegis.assert.invariant(std.mem.eql(u8, w.out.items[0..4], magic), "std.mem.eql(u8, w.out.items[0..4], magic)");
+        aegis.assert.invariant(w.out.items.len >= headerSize(w.version) + footerSize(w.version), "a table holds at least its header and its footer");
+        aegis.assert.invariant(std.mem.eql(u8, w.out.items[0..4], magic), "a table begins with its magic");
         return w.out.toOwnedSlice(w.gpa);
     }
 };
@@ -1330,8 +1342,7 @@ const testgit = @import("../../testing/git.zig");
 fn oidOf(byte: u8) Oid {
     var raw: [20]u8 = @splat(byte);
     raw[19] = byte +% 1;
-    // unreachable: twenty bytes are a SHA-1 name
-    return Oid.fromRaw(.sha1, &raw) catch unreachable;
+    return Oid.fromCut(.sha1, &raw);
 }
 
 test "a table written is a table read, record for record" {
@@ -1379,7 +1390,7 @@ test "a table written is a table read, record for record" {
             .message = "branch: Created from HEAD\n",
         } } },
     };
-    const bytes = try write(gpa, .sha1, .{ .min_update_index = 3, .max_update_index = 7, .refs = refs.items, .logs = &logs }, .{});
+    const bytes = try write(gpa, .sha1, .{ .updates = .{ .min = 3, .max = 7 }, .refs = refs.items, .logs = &logs }, .{});
     defer gpa.free(bytes);
 
     const table = try Table.parse(bytes, .sha1);
@@ -1442,7 +1453,7 @@ test "a table read from its file a block at a time reads what its bytes read" {
         .tz_offset = 0,
         .message = "m\n",
     } } }};
-    const bytes = try write(gpa, .sha1, .{ .min_update_index = 1, .max_update_index = 1, .refs = &refs, .logs = &logs }, .{ .block_size = 512 });
+    const bytes = try write(gpa, .sha1, .{ .updates = .one(1), .refs = &refs, .logs = &logs }, .{ .block_size = 512 });
     defer gpa.free(bytes);
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1471,7 +1482,7 @@ test "a table read from its file a block at a time reads what its bytes read" {
 
 test "an empty table is a header and a footer" {
     const gpa = std.testing.allocator;
-    const bytes = try write(gpa, .sha1, .{ .min_update_index = 1, .max_update_index = 1, .refs = &.{}, .logs = &.{} }, .{});
+    const bytes = try write(gpa, .sha1, .{ .updates = .one(1), .refs = &.{}, .logs = &.{} }, .{});
     defer gpa.free(bytes);
     try std.testing.expectEqual(headerSize(1) + footerSize(1), bytes.len);
     const table = try Table.parse(bytes, .sha1);
@@ -1480,7 +1491,7 @@ test "an empty table is a header and a footer" {
     defer it.deinit();
     try std.testing.expect(try it.nextRef() == null);
 
-    const wide = try write(gpa, .sha256, .{ .min_update_index = 1, .max_update_index = 1, .refs = &.{}, .logs = &.{} }, .{});
+    const wide = try write(gpa, .sha256, .{ .updates = .one(1), .refs = &.{}, .logs = &.{} }, .{});
     defer gpa.free(wide);
     try std.testing.expectEqual(headerSize(2) + footerSize(2), wide.len);
     _ = try Table.parse(wide, .sha256);
@@ -1489,11 +1500,11 @@ test "an empty table is a header and a footer" {
 
 test "records out of order are refused" {
     const gpa = std.testing.allocator;
-    try std.testing.expectError(error.UnsortedRecords, write(gpa, .sha1, .{ .min_update_index = 1, .max_update_index = 1, .refs = &.{
+    try std.testing.expectError(error.UnsortedRecords, write(gpa, .sha1, .{ .updates = .one(1), .refs = &.{
         .{ .name = "refs/heads/b", .update_index = 1, .value = .deletion },
         .{ .name = "refs/heads/a", .update_index = 1, .value = .deletion },
     }, .logs = &.{} }, .{}));
-    try std.testing.expectError(error.UpdateIndexOutOfRange, write(gpa, .sha1, .{ .min_update_index = 2, .max_update_index = 2, .refs = &.{
+    try std.testing.expectError(error.UpdateIndexOutOfRange, write(gpa, .sha1, .{ .updates = .one(2), .refs = &.{
         .{ .name = "refs/heads/a", .update_index = 1, .value = .deletion },
     }, .logs = &.{} }, .{}));
 }
@@ -1510,7 +1521,7 @@ test "a log block claiming more than its bytes inflate to is refused before its 
         .tz_offset = 0,
         .message = "m\n",
     } } }};
-    const bytes = try write(gpa, .sha1, .{ .min_update_index = 1, .max_update_index = 1, .refs = &.{}, .logs = &logs }, .{});
+    const bytes = try write(gpa, .sha1, .{ .updates = .one(1), .refs = &.{}, .logs = &logs }, .{});
     defer gpa.free(bytes);
     // The only block is the log block, just after the header; its length
     // claims the most 24 bits hold.
@@ -1532,7 +1543,7 @@ test "a log block claiming more than its bytes inflate to is refused before its 
 
 test "a damaged footer is a named error" {
     const gpa = std.testing.allocator;
-    const bytes = try write(gpa, .sha1, .{ .min_update_index = 1, .max_update_index = 1, .refs = &.{
+    const bytes = try write(gpa, .sha1, .{ .updates = .one(1), .refs = &.{
         .{ .name = "HEAD", .update_index = 1, .value = .{ .symbolic = "refs/heads/main" } },
     }, .logs = &.{} }, .{});
     defer gpa.free(bytes);
@@ -1578,16 +1589,16 @@ fn fuzzBase(gpa: Allocator) ![]u8 {
         } } },
         .{ .name = "HEAD", .update_index = 2, .value = .deletion },
     };
-    return write(gpa, .sha1, .{ .min_update_index = 1, .max_update_index = 3, .refs = &refs, .logs = &logs }, .{ .block_size = 256, .restart_interval = 4 });
+    return write(gpa, .sha1, .{ .updates = .{ .min = 1, .max = 3 }, .refs = &refs, .logs = &logs }, .{ .block_size = 256, .restart_interval = 4 });
 }
 
 fn fuzzTable(base: []const u8, case: *shakedown.Case) anyerror!void {
     var buf: [4096]u8 = undefined;
-    const input = buf[0..shakedown.gen.intRange(case.source, usize, 0, buf.len)];
-    case.source.bytes(input);
+    const given = buf[0..shakedown.gen.intRange(case.source, usize, 0, buf.len)];
+    case.source.bytes(given);
 
     // The input taken as a table, which is mostly refused at the door.
-    try readEverything(input);
+    try readEverything(given);
 
     // And a valid table with the input's bytes laid over it as damage --
     // pairs of a position and a value -- which reaches every block and
@@ -1597,37 +1608,53 @@ fn fuzzTable(base: []const u8, case: *shakedown.Case) anyerror!void {
     const bytes = damaged[0..base.len];
     @memcpy(bytes, base);
     var i: usize = 0;
-    while (i + 2 < input.len) : (i += 3) {
-        const at = std.mem.readInt(u16, input[i..][0..2], .little) % bytes.len;
-        bytes[at] ^= input[i + 2];
+    while (i + 2 < given.len) : (i += 3) {
+        const at = std.mem.readInt(u16, given[i..][0..2], .little) % bytes.len;
+        bytes[at] ^= given[i + 2];
     }
     try readEverything(bytes);
+}
+
+/// A fuzzed table's refusal: a named error about its bytes is the outcome
+/// the fuzzer expects, and running out of memory is not one, so it fails
+/// the target. A table in memory reads no file, so no file error reaches it.
+fn refused(err: Error) Allocator.Error!void {
+    switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => {},
+    }
 }
 
 fn readEverything(bytes: []const u8) !void {
     const gpa = std.testing.allocator;
     for ([_]Kind{ .sha1, .sha256 }) |kind| {
-        const table = Table.parse(bytes, kind) catch continue;
-        // glint-ignore: Z026 -- refusing a malformed input is the expected outcome; only a crash or a leak fails the fuzzer
-        table.verify(gpa) catch {};
+        const table = Table.parse(bytes, kind) catch |err| {
+            try refused(err);
+            continue;
+        };
+        table.verify(gpa) catch |err| try refused(err);
         inline for (.{ BlockType.ref, BlockType.log }) |typ| {
-            // glint-ignore: Z026 -- a fuzzed table may iterate or not; the target asks only that neither crashes
             if (table.iterate(gpa, typ)) |it_value| {
                 var it = it_value;
                 defer it.deinit();
                 var steps: usize = 0;
                 while (steps < 10_000) : (steps += 1) {
-                    const next = (if (typ == .ref) (it.nextRef() catch break) else (it.nextLog() catch break));
+                    const next = (if (typ == .ref) it.nextRef() else it.nextLog()) catch |err| {
+                        try refused(err);
+                        break;
+                    };
                     if (next == null) break;
                 }
-            } else |_| {}
+            } else |err| try refused(err);
             for ([_][]const u8{ "", "HEAD", "refs/heads/b030", "zzz" }) |key| {
-                // glint-ignore: Z026 -- a fuzzed table may seek or not; the target asks only that neither crashes
                 if (table.seek(gpa, typ, key)) |it_value| {
                     var it = it_value;
                     defer it.deinit();
-                    _ = (if (typ == .ref) (it.nextRef() catch null) else (it.nextLog() catch null));
-                } else |_| {}
+                    _ = (if (typ == .ref) it.nextRef() else it.nextLog()) catch |err| {
+                        try refused(err);
+                        continue;
+                    };
+                } else |err| try refused(err);
             }
         }
     }
@@ -1762,7 +1789,7 @@ test "a table git wrote is read record for record, and written back byte for byt
 
     // Written again from the same records, the table is git's table up to
     // the logs, and the logs inflate to git's.
-    const ours = try write(gpa, .sha1, .{ .min_update_index = table.min_update_index, .max_update_index = table.max_update_index, .refs = refs.items, .logs = logs.items }, .{});
+    const ours = try write(gpa, .sha1, .{ .updates = table.updates, .refs = refs.items, .logs = logs.items }, .{});
     defer gpa.free(ours);
     const mine = try Table.parse(ours, .sha1);
     try std.testing.expectEqual(table.log_offset, mine.log_offset);
@@ -1793,8 +1820,8 @@ fn expectSameLogBlocks(gpa: Allocator, a: *const Table, b: *const Table) !void {
     try std.testing.expect(blocks > 1);
 }
 
-/// Run git with `input` on its standard input.
-fn runWithInput(io: Io, repo: *testgit.Repo, args: []const []const u8, input: []const u8) !void {
+/// Run git with `fed` on its standard input.
+fn runWithInput(io: Io, repo: *testgit.Repo, args: []const []const u8, fed: []const u8) !void {
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(repo.gpa);
     try argv.append(repo.gpa, testgit.program());
@@ -1811,7 +1838,7 @@ fn runWithInput(io: Io, repo: *testgit.Repo, args: []const []const u8, input: []
     {
         var buf: [4096]u8 = undefined;
         var w = child.stdin.?.writer(io, &buf);
-        try w.interface.writeAll(input);
+        try w.interface.writeAll(fed);
         try w.interface.flush();
         child.stdin.?.close(io);
         child.stdin = null;

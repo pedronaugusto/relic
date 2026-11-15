@@ -67,7 +67,8 @@ pub const Untrusted = aegis.input.Untrusted([]const u8);
 
 /// A ref name `parse` let through: a path that stays inside the directory
 /// it is looked up under, as every file a ref store reaches must. Only
-/// `parse` makes one.
+/// `parse` makes one, and `literal` and `rootRef`, which take only what
+/// `parse` would let through.
 pub const Checked = struct {
     bytes: []const u8,
 };
@@ -88,12 +89,31 @@ pub const ParseError = error{InvalidRefName};
 /// cannot leave its directory: both refuse an empty, `.` or `..`
 /// component, and a `\` where it separates.
 pub fn parse(use: Use, raw: []const u8) ParseError!Checked {
-    const ok = switch (use) {
+    if (!passes(use, raw)) return error.InvalidRefName;
+    return .{ .bytes = raw };
+}
+
+fn passes(use: Use, raw: []const u8) bool {
+    return switch (use) {
         .ref => checkFormat(raw, .{ .allow_onelevel = true }),
         .file => isSafe(raw),
     };
-    if (!ok) return error.InvalidRefName;
+}
+
+/// A name written in the source, held to `use`'s rule as it compiles: one
+/// the rule refuses does not compile.
+pub fn literal(comptime raw: []const u8, comptime use: Use) Checked {
+    comptime if (!passes(use, raw)) @compileError("'" ++ raw ++ "' is refused as a ref name");
     return .{ .bytes = raw };
+}
+
+/// `name` as a checked ref name when it is a root ref (`isRootRef`), or
+/// `null`. A root ref's spelling, capitals, `-` and `_`, is a name of one
+/// level `checkFormat` takes, so the root refs found on the disk need no
+/// other check.
+pub fn rootRef(name: []const u8) ?Checked {
+    if (!isRootRef(name)) return null;
+    return .{ .bytes = name };
 }
 
 /// `raw` through `parse`, as an `Untrusted` name.
@@ -102,7 +122,7 @@ pub fn checked(raw: []const u8, use: Use) ParseError!Checked {
 }
 
 /// `HEAD`, checked.
-pub const head: Checked = checked("HEAD", .ref) catch unreachable;
+pub const head: Checked = literal("HEAD", .ref);
 
 /// git's `refname_is_safe`: whether `name` names a file inside the ref
 /// directories, which is all a deletion asks of a name. Under `refs/`
