@@ -85,8 +85,9 @@ pub const Index = struct {
     pack_count: u32,
     /// The pack names, NUL-terminated, in the order positions name them.
     pack_names: []const u8,
-    /// How many names begin with a byte up to each byte.
-    fanout_table: *const [256][4]u8,
+    /// How many names begin with a byte up to each byte: 256 big-endian
+    /// 4-byte counts.
+    fanout_table: *const [1024]u8,
     /// One name per object, in name order.
     oids: Rows,
     /// One row per object: its pack's position and its 4-byte offset.
@@ -103,14 +104,20 @@ pub const Index = struct {
     /// it is an accelerator, the database reads the same without it, and a
     /// writer replaces it. A refusal to read the file is still an error.
     pub fn openUsable(gpa: Allocator, io: Io, pack_dir: Io.Dir, kind: hash.Kind) Self.Error!?Index {
-        return open(gpa, io, pack_dir, kind) catch |err| switch (err) {
+        return open(gpa, io, pack_dir, kind) catch |err| if (refuses(err)) null else err;
+    }
+
+    /// Whether `err` says the bytes are no multi-pack index this release
+    /// reads, rather than that they could not be read.
+    fn refuses(err: ErrorNamespace.Error) bool {
+        return switch (err) {
             error.NotAMultiPackIndex,
             error.UnsupportedMidxVersion,
             error.ObjectFormatMismatch,
             error.CorruptMultiPackIndex,
             error.ChainUnsupported,
-            => null,
-            else => |e| e,
+            => true,
+            else => false,
         };
     }
 
@@ -146,8 +153,8 @@ pub const Index = struct {
         const raw_len = kind.rawLen();
         const fanout_chunk = format.get(bytes, 12, chunk_count, "OIDF") orelse return error.CorruptMultiPackIndex;
         if (fanout_chunk.len != 1024) return error.CorruptMultiPackIndex;
-        const fanout_table = std.mem.bytesAsValue([256][4]u8, fanout_chunk[0..1024]);
-        const count = std.mem.readInt(u32, &fanout_table[255], .big);
+        const fanout_table = fanout_chunk[0..1024];
+        const count = std.mem.readInt(u32, fanout_table[1020..1024], .big);
         const oids = Rows.exactly(format.get(bytes, 12, chunk_count, "OIDL") orelse return error.CorruptMultiPackIndex, count, raw_len) orelse return error.CorruptMultiPackIndex;
         const offsets = Rows.exactly(format.get(bytes, 12, chunk_count, "OOFF") orelse return error.CorruptMultiPackIndex, count, 8) orelse return error.CorruptMultiPackIndex;
         const large: ?Rows = if (format.get(bytes, 12, chunk_count, "LOFF")) |chunk| .whole(chunk, 8) else null;
@@ -197,7 +204,7 @@ pub const Index = struct {
                 if (count > 0 and (try index.nameAt(count - 1)).order(try index.nameAt(count)) != .lt) return error.CorruptMultiPackIndex;
                 _ = try index.locate(count);
             }
-            if (std.mem.readInt(u32, &index.fanout_table[bucket], .big) != count) return error.CorruptMultiPackIndex;
+            if (std.mem.readInt(u32, index.fanout_table[bucket * 4 ..][0..4], .big) != count) return error.CorruptMultiPackIndex;
         }
         var names = index.packNames();
         while (names.next()) |_| {}
@@ -258,7 +265,7 @@ pub const Index = struct {
 
     /// How many names begin with a byte up to `bucket`.
     fn fanout(index: *const Index, bucket: u8) u32 {
-        return std.mem.readInt(u32, &index.fanout_table[bucket], .big);
+        return std.mem.readInt(u32, index.fanout_table[@as(usize, bucket) * 4 ..][0..4], .big);
     }
 
     /// Where `oid` lives, or `null`.
@@ -300,10 +307,11 @@ fn fuzzMidx(_: void, case: *shakedown.Case) anyerror!void {
     const n = shakedown.gen.intRange(case.source, usize, 0, scratch.len);
     case.source.bytes(scratch[0..n]);
     const bytes = try gpa.dupe(u8, scratch[0..n]);
-    var index = Index.parse(gpa, .sha1, bytes) catch return;
+    // Bytes that are no index are refused by name.
+    var index = Index.parse(gpa, .sha1, bytes) catch |err| return std.testing.expect(Index.refuses(err));
     defer index.deinit();
-    // glint-ignore: Z026 -- refusing a malformed input is the expected outcome; only a crash or a leak fails the fuzzer
-    _ = index.find(Oid.zero(.sha1)) catch {};
+    // An index that parsed refuses a row past its tables by name.
+    if (index.find(Oid.zero(.sha1))) |_| {} else |err| try std.testing.expectEqual(error.CorruptMultiPackIndex, err);
     _ = index.packName(0);
 }
 
@@ -456,11 +464,11 @@ pub fn encode(gpa: Allocator, kind: hash.Kind, packs: []const WritePack, options
     // What `parse` and `nameAt` index by position: the names rising, one
     // fixed-width name and one pack-and-offset pair per object, and the
     // pack names padded to four bytes.
-    std.debug.assert(total == entries.items.len);
-    if (entries.items.len > 1) for (1..entries.items.len) |i| aegis.assert.invariant(entries.items[i - 1].oid.order(entries.items[i].oid) == .lt, "entries.items[i - 1].oid.order(entries.items[i].oid) == .lt");
-    std.debug.assert(buffers[0].bytes.items.len % 4 == 0);
-    std.debug.assert(buffers[2].bytes.items.len == entries.items.len * kind.rawLen());
-    std.debug.assert(buffers[3].bytes.items.len == entries.items.len * 8);
+    aegis.assert.invariant(total == entries.items.len, "the fanout's last row counts every entry");
+    if (entries.items.len > 1) for (1..entries.items.len) |i| aegis.assert.invariant(entries.items[i - 1].oid.order(entries.items[i].oid) == .lt, "the names rise, each once");
+    aegis.assert.invariant(buffers[0].bytes.items.len % 4 == 0, "the pack names are padded to four bytes");
+    aegis.assert.invariant(buffers[2].bytes.items.len == entries.items.len * kind.rawLen(), "one name per object");
+    aegis.assert.invariant(buffers[3].bytes.items.len == entries.items.len * 8, "one pack and offset per object");
     if (options.reverse_index) {
         const reverse = try arena.alloc(u32, entries.items.len);
         for (reverse, 0..) |*n, i| n.* = @intCast(i);

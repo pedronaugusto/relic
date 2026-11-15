@@ -76,8 +76,9 @@ pub const Graph = struct {
     bytes: []const u8,
     /// How many commits it and its base graphs hold.
     count: u32,
-    /// How many names begin with a byte up to each byte.
-    fanout_table: *const [256][4]u8,
+    /// How many names begin with a byte up to each byte: 256 big-endian
+    /// 4-byte counts.
+    fanout_table: *const [1024]u8,
     /// One name per commit, in name order.
     names: Rows,
     /// One row per commit: its tree, two parents and packed time.
@@ -104,14 +105,20 @@ pub const Graph = struct {
     /// same without it, and a writer replaces it. A refusal to read the
     /// file is still an error.
     pub fn openUsable(gpa: Allocator, io: Io, objects_dir: Io.Dir, kind: hash.Kind) Self.Error!?Graph {
-        return open(gpa, io, objects_dir, kind) catch |err| switch (err) {
+        return open(gpa, io, objects_dir, kind) catch |err| if (refuses(err)) null else err;
+    }
+
+    /// Whether `err` says the bytes are no graph this release reads, rather
+    /// than that they could not be read.
+    fn refuses(err: ErrorNamespace.Error) bool {
+        return switch (err) {
             error.NotACommitGraph,
             error.UnsupportedGraphVersion,
             error.ObjectFormatMismatch,
             error.CorruptCommitGraph,
             error.SplitGraphUnsupported,
-            => null,
-            else => |e| e,
+            => true,
+            else => false,
         };
     }
 
@@ -190,8 +197,8 @@ pub const Graph = struct {
         const raw_len = kind.rawLen();
         const fanout_chunk = format.get(bytes, 8, chunk_count, "OIDF") orelse return error.CorruptCommitGraph;
         if (fanout_chunk.len != 1024) return error.CorruptCommitGraph;
-        const fanout_table = std.mem.bytesAsValue([256][4]u8, fanout_chunk[0..1024]);
-        const count = std.mem.readInt(u32, &fanout_table[255], .big);
+        const fanout_table = fanout_chunk[0..1024];
+        const count = std.mem.readInt(u32, fanout_table[1020..1024], .big);
         const names = Rows.exactly(format.get(bytes, 8, chunk_count, "OIDL") orelse return error.CorruptCommitGraph, count, raw_len) orelse return error.CorruptCommitGraph;
         const data = Rows.exactly(format.get(bytes, 8, chunk_count, "CDAT") orelse return error.CorruptCommitGraph, count, raw_len + 16) orelse return error.CorruptCommitGraph;
         const generation: ?Rows = if (format.get(bytes, 8, chunk_count, "GDA2")) |chunk|
@@ -201,7 +208,8 @@ pub const Graph = struct {
 
         var names_seen: u32 = 0;
         var previous_name: ?[]const u8 = null;
-        for (fanout_table, 0..) |*row, bucket| {
+        for (0..256) |bucket| {
+            const row = fanout_table[bucket * 4 ..][0..4];
             while (names.at(names_seen)) |name| : (names_seen += 1) {
                 if (previous_name) |previous| {
                     if (std.mem.order(u8, previous, name) != .lt) return error.CorruptCommitGraph;
@@ -324,7 +332,7 @@ pub const Graph = struct {
 
     /// How many of its names begin with a byte up to `bucket`.
     fn fanout(graph: *const Graph, bucket: u8) u32 {
-        return std.mem.readInt(u32, &graph.fanout_table[bucket], .big);
+        return std.mem.readInt(u32, graph.fanout_table[@as(usize, bucket) * 4 ..][0..4], .big);
     }
 
     /// The commit at `position`.
@@ -471,14 +479,14 @@ fn fuzzGraph(_: void, case: *shakedown.Case) anyerror!void {
     const n = shakedown.gen.intRange(case.source, usize, 0, scratch.len);
     case.source.bytes(scratch[0..n]);
     const bytes = try gpa.dupe(u8, scratch[0..n]);
-    var graph = Graph.parse(gpa, .sha1, bytes) catch return;
+    // Bytes that are no graph are refused by name.
+    var graph = Graph.parse(gpa, .sha1, bytes) catch |err| return std.testing.expect(Graph.refuses(err));
     defer graph.deinit();
     var i: u32 = 0;
     while (i < @min(graph.count, 64)) : (i += 1) {
-        // glint-ignore: Z026 -- refusing a malformed input is the expected outcome; only a crash or a leak fails the fuzzer
-        _ = graph.commitAt(i) catch {};
-        const parents = graph.parentsOf(gpa, i) catch continue;
-        gpa.free(parents);
+        // A graph that parsed refuses a row past its tables by name.
+        if (graph.commitAt(i)) |_| {} else |err| try std.testing.expectEqual(error.CorruptCommitGraph, err);
+        if (graph.parentsOf(gpa, i)) |parents| gpa.free(parents) else |err| try std.testing.expect(Graph.refuses(err));
     }
 }
 
@@ -606,11 +614,11 @@ pub fn encode(gpa: Allocator, kind: hash.Kind, commits: []const WriteCommit, opt
     // The fixed-width chunks `parse` indexes by position: a name, and a
     // tree with two parents and a date, per commit; a generation and a
     // Bloom filter end each when present.
-    std.debug.assert(total == commits.len);
-    std.debug.assert(buffers[1].bytes.items.len == commits.len * kind.rawLen());
-    std.debug.assert(buffers[2].bytes.items.len == commits.len * (kind.rawLen() + 16));
-    std.debug.assert(!options.generations or buffers[3].bytes.items.len == commits.len * 4);
-    std.debug.assert(options.changed_paths == null or buffers[6].bytes.items.len == commits.len * 4);
+    aegis.assert.invariant(total == commits.len, "the fanout's last row counts every commit");
+    aegis.assert.invariant(buffers[1].bytes.items.len == commits.len * kind.rawLen(), "one name per commit");
+    aegis.assert.invariant(buffers[2].bytes.items.len == commits.len * (kind.rawLen() + 16), "one tree, two parents and a date per commit");
+    aegis.assert.invariant(!options.generations or buffers[3].bytes.items.len == commits.len * 4, "one generation per commit, when written");
+    aegis.assert.invariant(options.changed_paths == null or buffers[6].bytes.items.len == commits.len * 4, "one filter end per commit, when written");
     for (options.bases) |base| {
         if (base.kind != kind) return error.InvalidGraphInput;
         try buffers[8].add(base.raw());
