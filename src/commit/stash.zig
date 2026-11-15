@@ -30,8 +30,8 @@ const Self = @This();
 
 const std = @import("std");
 const aegis = @import("aegis");
+const seam = @import("input.zig");
 const Allocator = std.mem.Allocator;
-const assert = std.debug.assert;
 const Io = std.Io;
 
 const hash = @import("../hash/hash.zig");
@@ -294,7 +294,8 @@ const Ctx = struct {
     io: Io,
     gpa: Allocator,
     arena: Allocator,
-    wt: Io.Dir,
+    /// The working tree, the repository's to close.
+    wt: aegis.own.Unowned(Io.Dir),
     ignore_rules: ignore.Rules,
     attrs: attributes.Attrs,
     rules: worktree.Rules,
@@ -322,7 +323,7 @@ const Ctx = struct {
             .io = io,
             .gpa = repo.allocator(),
             .arena = arena,
-            .wt = wt,
+            .wt = .of(wt),
             .ignore_rules = try repo.loadIgnore(io),
             .attrs = undefined,
             .rules = try repo.worktreeRules(),
@@ -381,7 +382,7 @@ const Ctx = struct {
     fn side(ctx: *Ctx, raw_path: []const u8, entry: ?*const index_mod.Entry, write: bool) Error!?merge.Side {
         const checked = try worktree.readable(raw_path, ctx.rules.protect);
         const path = checked.bytes;
-        const found = (try fs.statAt(ctx.io, ctx.wt, path)) orelse return null;
+        const found = (try fs.statAt(ctx.io, ctx.wt.get(), path)) orelse return null;
         if (found.kind == .directory) return null;
         const indexed_mode: ?object.Mode = if (entry) |e| e.mode else null;
         const mode: object.Mode = if (found.kind == .sym_link)
@@ -404,25 +405,24 @@ const Ctx = struct {
         const a = scratch.allocator();
         var applied: ?attributes.Attributes = null;
         if (mode != .symlink) {
-            try ctx.attrs.enter(ctx.io, ctx.wt, path);
+            try ctx.attrs.enter(ctx.io, ctx.wt.get(), path);
             applied = try ctx.attrs.lookup(a, path, .file);
         }
         // Past the threshold with nothing to convert it, read in pieces.
         const conversion: ?worktree.Conversion = if (applied) |each| .{ .session = &ctx.conv, .path = path, .applied = each } else null;
         if (try worktree.streamsIn(ctx.rules.big_file_bytes, found, conversion)) {
-            if (!write) return .{ .mode = mode, .oid = try worktree.hashFile(ctx.io, ctx.wt, ctx.repo.objectFormat(), checked) };
+            if (!write) return .{ .mode = mode, .oid = try worktree.hashFile(ctx.io, ctx.wt.get(), ctx.repo.objectFormat(), checked) };
             const db = ctx.repo.objectDatabase();
             const filling = ctx.streamed orelse blk: {
                 ctx.streamed = try db.beginPack(ctx.io, worktree.streamedPackOptions(db));
                 break :blk ctx.streamed.?;
             };
-            return .{ .mode = mode, .oid = try worktree.writeFileInto(ctx.io, ctx.wt, db, filling, checked) };
+            return .{ .mode = mode, .oid = try worktree.writeFileInto(ctx.io, ctx.wt.get(), db, filling, checked) };
         }
         const raw = if (found.kind == .sym_link) blk: {
-            var buf: [4096]u8 = undefined;
-            const len = try ctx.wt.readLink(ctx.io, path, &buf);
-            break :blk try a.dupe(u8, buf[0..len]);
-        } else try fs.readFileSized(a, ctx.io, ctx.wt, path, .{ .size = found.size, .max_bytes = 1 << 31 });
+            var buf: [Io.Dir.max_path_bytes]u8 = undefined;
+            break :blk try a.dupe(u8, try seam.linkTarget(ctx.io, ctx.wt.get(), path, &buf));
+        } else try fs.readFileSized(a, ctx.io, ctx.wt.get(), path, .{ .size = found.size, .max_bytes = 1 << 31 });
         const content = if (applied) |each|
             (try ctx.conv.toGit(a, .{ .path = path, .bytes = raw, .applied = each }, .{ .storing = if (write) .store else .hash_only })).bytes
         else
@@ -588,7 +588,7 @@ fn save(io: Io, repo: *Repository, options: PushOptions, saving: Saving) Self.Er
         if (!sameSide(entrySide(entry), in_head)) changed = true;
         // A directory where a file was is not something a tree can record
         // in its place, and git leaves the entry as the index has it.
-        if (try fs.statAt(io, ctx.wt, path)) |found| {
+        if (try fs.statAt(io, ctx.wt.get(), path)) |found| {
             if (found.kind == .directory) {
                 if (entry != null) changed = true;
                 continue;
@@ -698,7 +698,7 @@ fn workTree(ctx: *Ctx, updates: []const Update) Error!Oid {
 }
 
 fn collectUntracked(ctx: *Ctx, options: PushOptions, out: *std.ArrayList([]const u8)) Error!void {
-    var status = try worktree.status(ctx.gpa, ctx.io, ctx.wt, .{ .index = &ctx.locked.index, .db = ctx.repo.objectDatabase() }, .{
+    var status = try worktree.status(ctx.gpa, ctx.io, ctx.wt.get(), .{ .index = &ctx.locked.index, .db = ctx.repo.objectDatabase() }, .{
         .rules = ctx.rules,
         .programs = ctx.programs,
         .untracked = .all,
@@ -707,11 +707,11 @@ fn collectUntracked(ctx: *Ctx, options: PushOptions, out: *std.ArrayList([]const
     defer status.deinit();
     for (status.entries) |e| {
         if (e.unstaged != .untracked and e.unstaged != .ignored) continue;
-        const found = (try fs.statAt(ctx.io, ctx.wt, e.path)) orelse continue;
+        const found = (try fs.statAt(ctx.io, ctx.wt.get(), e.path)) orelse continue;
         if (found.kind == .directory) {
             // A directory reported whole: an ignored one, whose files `--all`
             // takes one by one, or one holding a repository of its own.
-            if (ctx.wt.access(ctx.io, try ctx.arena.print("{s}/.git", .{e.path}), .{})) |_| {
+            if (ctx.wt.get().access(ctx.io, try ctx.arena.print("{s}/.git", .{e.path}), .{})) |_| {
                 if (options.refusal) |r| r.set(e.path);
                 return error.NestedRepository;
             } else |err| switch (err) {
@@ -728,7 +728,7 @@ fn collectUntracked(ctx: *Ctx, options: PushOptions, out: *std.ArrayList([]const
 
 fn walkFiles(ctx: *Ctx, dir_path: []const u8, specs: []const []const u8, out: *std.ArrayList([]const u8), depth: u32) Error!void {
     if (depth > 64) return;
-    var dir = try ctx.wt.openDir(ctx.io, dir_path, .{ .iterate = true });
+    var dir = try ctx.wt.get().openDir(ctx.io, dir_path, .{ .iterate = true });
     defer dir.close(ctx.io);
     var it: fs.Names = .init(dir, ctx.repo.settings().precompose_unicode);
     while (try it.next(ctx.io)) |item| {
@@ -766,15 +766,15 @@ fn resetAfterPush(
 
     if (options.paths.len == 0) {
         for (untracked) |path| {
-            fs.deleteFile(io, ctx.wt, path) catch |err| switch (err) {
+            fs.deleteFile(io, ctx.wt.get(), path) catch |err| switch (err) {
                 error.FileNotFound => {},
                 else => |e| return e,
             };
-            if (std.Io.Dir.path.dirnamePosix(path)) |parent| try removeEmptyDirectories(io, ctx.wt, parent);
+            if (std.Io.Dir.path.dirnamePosix(path)) |parent| try removeEmptyDirectories(io, ctx.wt.get(), parent);
         }
-        _ = try worktree.checkout(ctx.gpa, io, ctx.wt, .{ .index = &ctx.locked.index, .db = db, .tree = head_tree }, checkout_options);
+        _ = try worktree.checkout(ctx.gpa, io, ctx.wt.get(), .{ .index = &ctx.locked.index, .db = db, .tree = head_tree }, checkout_options);
         if (options.keep_index and !isEmptyTree(ctx.repo.objectFormat(), index_tree)) {
-            _ = try worktree.checkout(ctx.gpa, io, ctx.wt, .{ .index = &ctx.locked.index, .db = db, .tree = index_tree }, checkout_options);
+            _ = try worktree.checkout(ctx.gpa, io, ctx.wt.get(), .{ .index = &ctx.locked.index, .db = db, .tree = index_tree }, checkout_options);
         }
         return;
     }
@@ -793,7 +793,7 @@ fn resetAfterPush(
         if (sameSide(entrySide(entry), want) and sameSide(on_disk, want)) continue;
         try writes.append(ctx.arena, .{ .path = path, .blob = if (want) |w| .{ .mode = w.mode, .oid = w.oid } else null });
     }
-    _ = try worktree.writePaths(ctx.gpa, io, ctx.wt, .{ .index = &ctx.locked.index, .db = db, .writes = writes.items }, checkout_options);
+    _ = try worktree.writePaths(ctx.gpa, io, ctx.wt.get(), .{ .index = &ctx.locked.index, .db = db, .writes = writes.items }, checkout_options);
 
     if (options.keep_index and !isEmptyTree(ctx.repo.objectFormat(), index_tree)) {
         var index_map = try worktree.flatten(ctx.arena, io, db, index_tree);
@@ -807,7 +807,7 @@ fn resetAfterPush(
             if (sameSide(entrySide(ctx.stage0(path)), want)) continue;
             try writes.append(ctx.arena, .{ .path = path, .blob = if (want) |w| .{ .mode = w.mode, .oid = w.oid } else null });
         }
-        _ = try worktree.writePaths(ctx.gpa, io, ctx.wt, .{ .index = &ctx.locked.index, .db = db, .writes = writes.items }, checkout_options);
+        _ = try worktree.writePaths(ctx.gpa, io, ctx.wt.get(), .{ .index = &ctx.locked.index, .db = db, .writes = writes.items }, checkout_options);
     }
 }
 
@@ -940,10 +940,10 @@ pub fn applyEntry(io: Io, repo: *Repository, stash: Stash, options: ApplyOptions
     }
 
     var untracked_writes: std.ArrayList(worktree.PathWrite) = .empty;
-    if (stash.untracked_tree) |tree| try untrackedWrites(arena, io, ctx.wt, db, tree, options.refusal, &untracked_writes);
+    if (stash.untracked_tree) |tree| try untrackedWrites(arena, io, ctx.wt.get(), db, tree, options.refusal, &untracked_writes);
 
     const checkout_options = ctx.checkoutOptions();
-    _ = try worktree.writePaths(gpa, io, ctx.wt, .{ .index = &ctx.locked.index, .db = db, .writes = writes.items }, checkout_options);
+    _ = try worktree.writePaths(gpa, io, ctx.wt.get(), .{ .index = &ctx.locked.index, .db = db, .writes = writes.items }, checkout_options);
     // git's `merge_switch_to_result`: the index is `unpack_trees`' result,
     // which remembers no resolutions, and `AUTO_MERGE` names the tree the
     // merge wrote, conflicts and all.
@@ -974,7 +974,7 @@ pub fn applyEntry(io: Io, repo: *Repository, stash: Stash, options: ApplyOptions
         try unstageUnlessNew(&ctx, &current_map);
     }
 
-    _ = try worktree.writePaths(gpa, io, ctx.wt, .{ .index = &ctx.locked.index, .db = db, .writes = untracked_writes.items }, checkout_options);
+    _ = try worktree.writePaths(gpa, io, ctx.wt.get(), .{ .index = &ctx.locked.index, .db = db, .writes = untracked_writes.items }, checkout_options);
     try ctx.locked.commit(io);
 
     return .{
@@ -1101,7 +1101,7 @@ fn patchApplies(gpa: Allocator, io: Io, db: *odb_mod.Odb, base: Oid, current: Oi
 /// with changes of its own, or anything untracked.
 fn checkWritable(ctx: *Ctx, path: []const u8, refusal: ?*Refusal) Error!void {
     const entry = ctx.stage0(path);
-    const found = try fs.statAt(ctx.io, ctx.wt, path);
+    const found = try fs.statAt(ctx.io, ctx.wt.get(), path);
     if (entry) |e| {
         if (found) |f| if (f.kind == .directory) {
             if (refusal) |r| r.set(path);
@@ -1115,7 +1115,7 @@ fn checkWritable(ctx: *Ctx, path: []const u8, refusal: ?*Refusal) Error!void {
     }
     const f = found orelse return;
     if (f.kind == .directory) {
-        var dir = ctx.wt.openDir(ctx.io, path, .{ .iterate = true }) catch |err| switch (err) {
+        var dir = ctx.wt.get().openDir(ctx.io, path, .{ .iterate = true }) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             else => return,
         };

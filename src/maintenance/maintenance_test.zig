@@ -713,3 +713,8 @@ test "a commit graph or MIDX that does not read is replaced by the writers, and 
     try repo.exec(io, &.{ "commit-graph", "verify" });
     try repo.exec(io, &.{ "multi-pack-index", "verify" });
 }
+
+// The layer's input seam, whose tests nothing else reaches.
+test {
+    _ = @import("input.zig");
+}

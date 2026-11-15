@@ -12,6 +12,7 @@
 
 const Self = @This();
 const std = @import("std");
+const seam = @import("input.zig");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const hash = @import("../hash/hash.zig");
@@ -467,8 +468,8 @@ fn holderOf(io: Io, repo: *Repository, clock: date.Context) Self.Error!?Holder {
         else => |e| return e,
     };
     if (date.instant(stat.mtime).saturatingDurationTo(date.instant(clock.now)).compare(date.spanHours(12)) == .gt) return null;
-    var buf: [fs.max_host_name + 32]u8 = undefined;
-    const text = dir.readFile(io, "gc.pid", &buf) catch |err| switch (err) {
+    var buf: seam.PidBuffer = undefined;
+    const text = seam.pidFile(io, dir, "gc.pid", &buf) catch |err| switch (err) {
         error.FileNotFound => return null,
         else => |e| return e,
     };

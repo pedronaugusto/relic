@@ -32,7 +32,7 @@ const filter = @import("../checkout/filter.zig");
 const program = @import("../process.zig").program;
 
 const std = @import("std");
-const aegis = @import("aegis");
+const seam = @import("input.zig");
 const ctype = @import("../text.zig").ctype;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -223,7 +223,7 @@ pub fn commit(io: Io, repo: *Repository, request: Request, options: Options) Sel
         if (options.verify) _ = try runner.commitMsg(io, env, message_path);
     }
 
-    const edited = try aegis.own.readFile(io, repo.gitDirectory(), "COMMIT_EDITMSG", arena, aegis.units.Bytes(u64).fromRaw(1 << 30));
+    const edited = try seam.file(io, repo.gitDirectory(), "COMMIT_EDITMSG", arena, .message);
     const cleaned = try clean(arena, edited, cleanup, comment);
     try validateMessage(arena, cleaned, cleanup, comment, options);
 
@@ -311,7 +311,7 @@ fn prepareMessage(arena: Allocator, io: Io, repo: *Repository, input: []const u8
 pub fn template(gpa: Allocator, io: Io, repo: *Repository) config_mod.PathSettingError!?[]u8 {
     const path = (try repo.configuration().getPath(gpa, io, repo.topDirectory(), "commit.template")) orelse return null;
     defer gpa.free(path);
-    const text = aegis.own.readFile(io, repo.topDirectory(), path, gpa, aegis.units.Bytes(u64).fromRaw(1 << 30)) catch |err| switch (err) {
+    const text = seam.file(io, repo.topDirectory(), path, gpa, .message) catch |err| switch (err) {
         error.Canceled => return error.Canceled,
         else => return null,
     };

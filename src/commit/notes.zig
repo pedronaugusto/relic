@@ -28,9 +28,9 @@ const Self = @This();
 
 const std = @import("std");
 const aegis = @import("aegis");
+const seam = @import("input.zig");
 const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
-const assert = std.debug.assert;
 const Io = std.Io;
 
 const hash = @import("../hash/hash.zig");
@@ -1741,8 +1741,11 @@ pub fn mergeCommit(gpa: Allocator, io: Io, repo: *Repository, who: object.Signat
     defer dir.close(io);
     var it = dir.iterate();
     while (try it.next(io)) |e| {
-        const obj = Oid.parse(kind, e.name) catch continue;
-        const bytes = try aegis.own.readFile(io, dir, e.name, gpa, aegis.units.Bytes(u64).fromRaw(std.math.maxInt(u64)));
+        // git's `notes_merge_commit` skips an entry whose name is no object's.
+        var raw: [hash.max_raw_len]u8 = undefined;
+        if (!hexToBytes(raw[0..kind.rawLen()], e.name)) continue;
+        const obj = Oid.fromCut(kind, raw[0..kind.rawLen()]);
+        const bytes = try seam.file(io, dir, e.name, gpa, .note);
         defer gpa.free(bytes);
         const blob = try repo.objectDatabase().write(io, .blob, bytes);
         try t.add(io, obj, blob, null);

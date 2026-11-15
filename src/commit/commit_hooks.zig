@@ -17,6 +17,7 @@ const Self = @This();
 
 const std = @import("std");
 const aegis = @import("aegis");
+const seam = @import("input.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -96,7 +97,7 @@ pub const Hooks = struct {
         const message_path = try h.path(arena, "COMMIT_EDITMSG");
         _ = try runner.prepareCommitMsg(io, e, message_path, .{ .source = source, .commit = null });
         if (h.verify) _ = try runner.commitMsg(io, e, message_path);
-        return aegis.own.readFile(io, repo.gitDirectory(), "COMMIT_EDITMSG", arena, aegis.units.Bytes(u64).fromRaw(1 << 30));
+        return seam.file(io, repo.gitDirectory(), "COMMIT_EDITMSG", arena, .message);
     }
 
     /// `post-commit`, once the branch has moved. It cannot undo anything.

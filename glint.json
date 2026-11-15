@@ -1,6 +1,13 @@
 {
   "seams": [
     {
+      "file": "src/commit/input.zig",
+      "rules": [
+        "A009"
+      ],
+      "reason": "the commit layer's input seam: the message files (COMMIT_EDITMSG, commit.template), the notes a notes merge leaves to resolve and the targets of the working tree's symbolic links, each held to a limit named there; everything else in commits, notes and stashes parses the bytes it hands back"
+    },
+    {
       "file": "src/config/passwd.zig",
       "rules": [
         "P007"
@@ -34,6 +41,13 @@
         "A009"
       ],
       "reason": "relic_lfs's input seam: an object in a store (this repository's, a remote's, a reference directory's, a custom transfer agent's file), a working-tree file a filter cleans and a partial download kept for a resume are read here, a read into a buffer held to the buffer, a whole file to the limit named there, and a stream to the buffer it is read through; everything else in relic_lfs decodes or hashes the bytes it hands back"
+    },
+    {
+      "file": "src/maintenance/input.zig",
+      "rules": [
+        "A009"
+      ],
+      "reason": "the maintenance layer's input seam: a gc lock's gc.pid, a rebase's state lines and the server info files, each held to a limit named there; everything else in gc, repack and the server info parses the bytes it hands back"
     },
     {
       "file": "src/object/input.zig",

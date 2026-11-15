@@ -6,6 +6,7 @@
 
 const Self = @This();
 const std = @import("std");
+const seam = @import("input.zig");
 const aegis = @import("aegis");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
@@ -112,7 +113,7 @@ fn infoPacks(arena: Allocator, io: Io, db: *odb_mod.Odb, out: *Io.Writer) Self.E
     std.mem.sort([]const u8, present.items, {}, lessString);
 
     var ordered: std.ArrayList([]const u8) = .empty;
-    const old: []const u8 = aegis.own.readFile(io, db.objectsDirectory(), "info/packs", arena, aegis.units.Bytes(u64).fromRaw(1 << 24)) catch |err| switch (err) {
+    const old: []const u8 = seam.file(io, db.objectsDirectory(), "info/packs", arena, .pack_list) catch |err| switch (err) {
         error.FileNotFound, error.NotDir => "",
         else => |e| return e,
     };
@@ -156,9 +157,8 @@ fn lessString(_: void, a: []const u8, b: []const u8) bool {
 /// something else.
 fn update(arena: Allocator, io: Io, dir: Io.Dir, sub_dir: []const u8, name: []const u8, bytes: []const u8, shared: fs.Shared) Self.Error!void {
     var path_buf: [64]u8 = undefined;
-    // unreachable: both names are this file's own, a few bytes each
-    const path = std.mem.print(&path_buf, "{s}/{s}", .{ sub_dir, name }) catch unreachable;
-    if (aegis.own.readFile(io, dir, path, arena, aegis.units.Bytes(u64).fromRaw(bytes.len + 1))) |old| {
+    const path = std.mem.print(&path_buf, "{s}/{s}", .{ sub_dir, name }) catch aegis.assert.never("both names are this file's own, a few bytes each");
+    if (seam.file(io, dir, path, arena, .{ .compared = bytes.len })) |old| {
         if (std.mem.eql(u8, old, bytes)) return;
     } else |err| switch (err) {
         error.FileNotFound, error.NotDir, error.StreamTooLong => {},

@@ -7,6 +7,7 @@
 const Self = @This();
 const std = @import("std");
 const aegis = @import("aegis");
+const seam = @import("input.zig");
 const date = @import("../text.zig").date;
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
@@ -159,7 +160,7 @@ pub fn collectStarts(gpa: Allocator, arena: Allocator, io: Io, repo: *Repository
             try git_dirs.append(arena, dir);
         }
         for (git_dirs.items) |dir| for ([_][]const u8{ "rebase-apply/autostash", "rebase-apply/orig-head", "rebase-merge/autostash", "rebase-merge/orig-head" }) |file| {
-            const text = aegis.own.readFile(io, dir, file, arena, aegis.units.Bytes(u64).fromRaw(4096)) catch |err| switch (err) {
+            const text = seam.file(io, dir, file, arena, .state_line) catch |err| switch (err) {
                 error.FileNotFound, error.NotDir => continue,
                 else => |e| return e,
             };
