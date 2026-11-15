@@ -586,8 +586,7 @@ fn json(io: Io, response: *Response, status: std.http.Status, bytes: []const u8)
 fn message(io: Io, response: *Response, status: std.http.Status, text: []const u8) Response.Error!void {
     var buf: [256]u8 = undefined;
     var w: Io.Writer = .fixed(&buf);
-    // unreachable: every message is a constant far shorter than the buffer
-    std.json.Stringify.value(.{ .message = text }, .{}, &w) catch unreachable;
+    std.json.Stringify.value(.{ .message = text }, .{}, &w) catch aegis.assert.never("every message is a constant far shorter than the buffer");
     return json(io, response, status, w.buffered());
 }
 

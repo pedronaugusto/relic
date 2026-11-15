@@ -15,6 +15,13 @@
       "reason": "the file layer's platform calls std.Io does not give it: the process umask, the effective user, the process id, Windows' CreateHardLinkW, a file's owner checked against the user's token, and NtCreateFile for a handle to a file's attributes alone"
     },
     {
+      "file": "src/lfs/input.zig",
+      "rules": [
+        "A009"
+      ],
+      "reason": "relic_lfs's input seam: an object in a store (this repository's, a remote's, a reference directory's, a custom transfer agent's file), a working-tree file a filter cleans and a partial download kept for a resume are read here, a read into a buffer held to the buffer, a whole file to the limit named there, and a stream to the buffer it is read through; everything else in relic_lfs decodes or hashes the bytes it hands back"
+    },
+    {
       "file": "src/odb/index_pack/input.zig",
       "rules": [
         "A009"

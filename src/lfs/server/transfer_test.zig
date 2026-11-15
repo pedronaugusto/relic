@@ -27,7 +27,7 @@ test "a connection is served whole: an object up, checked and down, a lock taken
     try tmp.dir.createDirPath(io, "objects");
     var objects = try tmp.dir.openDir(io, "objects", .{});
     defer objects.close(io);
-    var directory: server.Directory = .{ .dir = objects };
+    var directory: server.Directory = .{ .dir = .of(objects) };
     const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(root);
 
@@ -133,7 +133,7 @@ test "a cancel that stops a read of an object coming up is its reader's to say, 
     try tmp.dir.createDirPath(io, "objects");
     var objects = try tmp.dir.openDir(io, "objects", .{});
     defer objects.close(io);
-    var directory: server.Directory = .{ .dir = objects };
+    var directory: server.Directory = .{ .dir = .of(objects) };
     const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(root);
 
@@ -206,7 +206,7 @@ test "a cancel that stops a write of an object going down is its writer's to say
     try tmp.dir.createDirPath(io, "objects");
     var objects = try tmp.dir.openDir(io, "objects", .{});
     defer objects.close(io);
-    var directory: server.Directory = .{ .dir = objects };
+    var directory: server.Directory = .{ .dir = .of(objects) };
     const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(root);
 

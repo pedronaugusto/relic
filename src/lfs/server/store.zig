@@ -13,6 +13,7 @@ const decimal = core.text.decimal;
 const date = core.text.date;
 const fs = core.fs.engine;
 const lfs = @import("../lfs.zig");
+const lfs_input = @import("../input.zig");
 const lfsapi = @import("../api.zig");
 
 /// What a request asks to do.
@@ -64,8 +65,8 @@ pub const Store = struct {
 /// them and is kept only when its SHA-256 and length are the ones it was
 /// sent for.
 pub const Directory = struct {
-    /// Borrowed.
-    dir: Io.Dir,
+    /// The directory, which its owner keeps and closes.
+    dir: aegis.own.Unowned(Io.Dir),
     /// The permissions the directories and objects are made with.
     shared: fs.Shared = .umask,
 
@@ -81,7 +82,7 @@ pub const Directory = struct {
         const d: *Directory = @ptrCast(@alignCast(context)); // the context is the Directory `store` was made from
         var buf: [lfs.Store.max_path]u8 = undefined;
         const path = d.of(repository).objectPath(&buf, oid) catch return null;
-        const stat = d.dir.statFile(io, path, .{}) catch |err| switch (err) {
+        const stat = d.dir.get().statFile(io, path, .{}) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             error.FileNotFound, error.NotDir => return null,
             else => return error.LfsStoreFailed,
@@ -98,7 +99,7 @@ pub const Directory = struct {
         defer owned.deinit(io);
         const file = owned.borrow().*;
         var buf: [64 * 1024]u8 = undefined;
-        var r = file.reader(io, &buf);
+        var r = lfs_input.stream(io, file, &buf);
         const object_end: aegis.io.ReadEnd = .fromFile(&r);
         _ = object_end.reader().streamRemaining(w) catch |err| switch (err) {
             error.ReadFailed => return switch (object_end.settle(error.ReadFailed)) {

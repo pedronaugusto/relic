@@ -58,8 +58,7 @@ pub const Netrc = struct {
         errdefer n.strings.deinit(gpa);
         errdefer n.arena.deinit();
         const a = n.arena.allocator();
-        // unreachable: the owner was made with the text's length.
-        n.strings.resizeWithinCapacity(text.len) catch unreachable;
+        n.strings.resizeWithinCapacity(text.len) catch aegis.assert.never("the owner was made with the text's length");
         var fixed: std.heap.FixedBufferAllocator = .init(n.strings.exposeMut());
         const s = fixed.allocator();
         var machines: std.ArrayList(Machine) = .empty;

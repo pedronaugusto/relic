@@ -580,7 +580,7 @@ test "LFS SSH pagination ends or explicitly refuses a repeated cursor" {
                     result.deinit();
                 }
             }
-            const store: lfs_mod.Store = .{ .base = repo.commonDirectory(), .root = "lfs" };
+            const store: lfs_mod.Store = .{ .base = .of(repo.commonDirectory()), .root = "lfs" };
             var cached = try lfslocks.Table.cached(testing.allocator, testing.io, &store, "refs/heads/main");
             defer cached.deinit();
             try testing.expectEqual(i < 4, cached.find("a.bin") != null);

@@ -28,6 +28,7 @@ const Self = @This();
 
 const std = @import("std");
 const shakedown = @import("shakedown");
+const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -223,8 +224,7 @@ fn writeLock(s: *std.json.Stringify, l: Lock) WriteLockError!void {
     var at: Io.Writer = .fixed(&buf);
     l.locked_at.format(&at) catch |err| return switch (err) {
         error.UnwritableTime => error.UnwritableTime,
-        // unreachable: the longest time Go writes is 35 bytes.
-        error.WriteFailed => unreachable,
+        error.WriteFailed => aegis.assert.never("the longest time Go writes is 35 bytes"),
     };
     try s.write(at.buffered());
     try s.endObject();
@@ -544,7 +544,9 @@ fn gaveBack(arena: Allocator, io: Io, server: *lfsapi.Server, repo: *Repository,
     var cache = try Cache.load(arena, io, server, ref);
     try cache.remove(arena, id);
     try cache.save(arena, io, server, ref);
-    const path = asked orelse if (checkPath(released.path)) released.path else |_| return;
+    // A path the server answered with that is no plain path inside the
+    // working tree names no file here.
+    const path = asked orelse (if (checkPath(released.path)) released.path else |_| null) orelse return;
     if (repo.workDirectory()) |wt| {
         const environ = if (server.client.options.programs) |programs| programs.environ else null;
         if (readOnlyWanted(&server.settings, environ)) {
@@ -933,21 +935,31 @@ pub const Cache = struct {
         var c: Cache = .{};
         const dir = try dirPath(a, store, ref);
         const remote_path = try a.print("{s}/remote", .{dir});
-        if (try fs.readFileAlloc(a, io, store.base, remote_path, 64 << 20)) |bytes| {
-            // glint-ignore: Z026 -- a cached page that does not parse is no cache: the locks are asked for again
-            if (parseListPage(a, .init(bytes))) |page| {
+        if (try fs.readFileAlloc(a, io, store.base.get(), remote_path, 64 << 20)) |bytes| {
+            const parsed: ?ListPage = parseListPage(a, .init(bytes)) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                // A cached page that does not parse is no cache: the
+                // locks are asked for again.
+                error.MalformedResponse => null,
+            };
+            if (parsed) |page| {
                 c.remote = page.locks;
                 c.have_remote = true;
-            } else |_| {}
+            }
         }
         const verifiable_path = try a.print("{s}/verifiable", .{dir});
-        if (try fs.readFileAlloc(a, io, store.base, verifiable_path, 64 << 20)) |bytes| {
-            // glint-ignore: Z026 -- a cached page that does not parse is no cache: the locks are asked for again
-            if (parseVerifyPage(a, .init(bytes))) |page| {
+        if (try fs.readFileAlloc(a, io, store.base.get(), verifiable_path, 64 << 20)) |bytes| {
+            const parsed: ?VerifyPage = parseVerifyPage(a, .init(bytes)) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                // A cached page that does not parse is no cache: the
+                // locks are asked for again.
+                error.MalformedResponse => null,
+            };
+            if (parsed) |page| {
                 c.ours = page.ours;
                 c.theirs = page.theirs;
                 c.have_verifiable = true;
-            } else |_| {}
+            }
         }
         return c;
     }
@@ -981,8 +993,8 @@ pub const Cache = struct {
     fn save(c: *const Cache, a: Allocator, io: Io, server: *lfsapi.Server, ref: ?[]const u8) Error!void {
         const store = server.store();
         const dir_path = try dirPath(a, store, ref);
-        try store.base.createDirPath(io, dir_path);
-        var dir = try store.base.openDir(io, dir_path, .{});
+        try store.base.get().createDirPath(io, dir_path);
+        var dir = try store.base.get().openDir(io, dir_path, .{});
         defer dir.close(io);
         if (c.have_remote) {
             var out: Io.Writer.Allocating = .init(a);
@@ -1077,16 +1089,18 @@ pub const Lockables = struct {
     pub const Error = ErrorNamespace.Error;
 
     attrs: attributes.Attrs,
-    work_dir: ?Io.Dir,
+    /// The repository's working tree, which the repository keeps and
+    /// closes.
+    work_dir: ?aegis.own.Unowned(Io.Dir),
 
     /// Load them for `repo`.
     pub fn load(io: Io, repo: *Repository) Self.Error!Lockables {
-        return .{ .attrs = try repo.loadAttrs(io), .work_dir = repo.workDirectory() };
+        return .{ .attrs = try repo.loadAttrs(io), .work_dir = if (repo.workDirectory()) |wt| .of(wt) else null };
     }
 
     /// Whether `path` has the `lockable` attribute.
     pub fn isLockable(l: *Lockables, scratch: Allocator, io: Io, path: []const u8) Self.Error!bool {
-        if (l.work_dir) |wt| try l.attrs.enter(io, wt, path);
+        if (l.work_dir) |wt| try l.attrs.enter(io, wt.get(), path);
         const found = try l.attrs.lookup(scratch, path, .file);
         return found.isSet("lockable");
     }
@@ -1142,7 +1156,7 @@ pub fn fixWriteFlags(gpa: Allocator, io: Io, repo: *Repository, fix: Fix) Self.E
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    var store_settings = try lfs.Lfs.load(gpa, &settings, .{ .common_dir = repo.commonDirectory(), .shared = repo.sharedPermissions() });
+    var store_settings = try lfs.Lfs.load(gpa, &settings, .{ .common_dir = .of(repo.commonDirectory()), .shared = repo.sharedPermissions() });
     defer store_settings.deinit();
     const ref = try refFor(arena, io, repo, fix.request);
     const cache = try Cache.read(arena, io, &store_settings.store, ref);

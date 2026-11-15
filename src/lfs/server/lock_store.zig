@@ -46,7 +46,7 @@ pub const Table = struct {
         try git_dir.createDirPath(io, dir_name);
         t.* = .{ .io = io, .file = undefined, .buffer = undefined, .list = &.{} };
         t.file = try fs.LockFile.open(gpa, io, git_dir, .{ .sub_path = name, .buffer = &t.buffer }, .{
-            .on_contention = .{ .wait = .fromSeconds(10) },
+            .on_contention = .{ .wait = aegis.units.Duration(.second, u32).fromRaw(10).toIoDuration() },
             .sync = .per_file,
         });
         errdefer t.file.deinit(io);

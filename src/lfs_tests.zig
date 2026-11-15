@@ -36,6 +36,7 @@ test {
         // the plumbing the module keeps to itself
         _ = @import("lfs/time_text.zig");
         _ = @import("lfs/mime_sniff.zig");
+        _ = @import("lfs/input.zig");
         _ = @import("lfs/settings.zig");
         _ = @import("lfs/clone.zig");
         _ = @import("lfs/filter.zig");

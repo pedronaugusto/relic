@@ -128,8 +128,7 @@ pub const GoTime = struct {
         var w: Io.Writer = .fixed(&buffer);
         t.format(&w) catch |err| return switch (err) {
             error.UnwritableTime => error.UnwritableTime,
-            // unreachable: the longest time Go writes is 35 bytes.
-            error.WriteFailed => unreachable,
+            error.WriteFailed => aegis.assert.never("the longest time Go writes is 35 bytes"),
         };
         try access.write(@as([]const u8, w.buffered()));
     }
@@ -252,8 +251,13 @@ fn fuzzTimes(_: void, case: *shakedown.Case) anyerror!void {
     if (GoTime.parse(scratch[0..len])) |t| {
         var buf: [64]u8 = undefined;
         var w: Io.Writer = .fixed(&buf);
-        // glint-ignore: Z026 -- an offset Go refuses to write is an answer, not a crash
-        if (t.format(&w)) |_| {} else |_| {}
+        t.format(&w) catch |err| switch (err) {
+            // An offset or a year Go refuses to write is an answer, not a crash.
+            error.UnwritableTime => {},
+            // The longest RFC 3339 text is 35 bytes: a buffer of 64 that
+            // does not hold one is a failure of the test.
+            error.WriteFailed => return err,
+        };
     }
     _ = parseHttpDate(scratch[0..len]);
 }

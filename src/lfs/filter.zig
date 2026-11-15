@@ -5,13 +5,13 @@ const aegis = @import("aegis");
 const shakedown_mod = @import("shakedown");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
-const assert = std.debug.assert;
 const core = @import("relic_core");
 const config = core.config;
 const native = core.checkout.native;
 const filter = core.checkout.filter;
 const repo = core.repo;
 const lfs = @import("lfs.zig");
+const lfs_input = @import("input.zig");
 const lfs_settings = @import("settings.zig");
 const testing = std.testing;
 pub const Error = native.Error || repo.Repository.LoadFiltersError;
@@ -52,7 +52,7 @@ fn loadDriver(p: *const native.Provider, gpa: Allocator, _: Io, configuration: *
         .gpa = gpa,
         .fetch = with.fetch,
         .lfs = try lfs.Lfs.load(gpa, &lfs_config, .{
-            .common_dir = options.common_dir,
+            .common_dir = .of(options.common_dir),
             .shared = options.shared,
             .skip_smudge = options.skip_smudge or with.skip_smudge or (isGitLfs(commands) and skipsSmudge(commands)),
         }),
@@ -75,7 +75,7 @@ const Backend = struct {
     }
     fn retarget(context: *anyopaque, dir: Io.Dir) void {
         const b: *Backend = @ptrCast(@alignCast(context)); // the driver context is the Backend its loader created
-        b.lfs.store = .{ .base = dir, .root = "lfs" };
+        b.lfs.store = .{ .base = .of(dir), .root = "lfs" };
     }
     fn releaseContext(_: Io, context: *anyopaque) void {
         const b: *Backend = @ptrCast(@alignCast(context)); // the driver context is the Backend its loader created
@@ -132,8 +132,8 @@ const Session = struct {
     /// A file already a pointer is stored as it is, which is git-lfs's rule:
     /// cleaning twice changes nothing.
     fn lfsClean(s: *Session, a: Allocator, io: Io, bytes: []const u8, storing: native.Storing) native.Error![]const u8 {
-        // glint-ignore: Z026 -- bytes that are no pointer are content, cleaned below
-        if (lfs.Pointer.decode(bytes)) |_| return bytes else |_| {}
+        // Bytes that are no pointer are content, cleaned below.
+        if (lfs.Pointer.recognize(bytes) != null) return bytes;
         const l = &s.backend.lfs;
         if (l.extensions) return error.NativeFilterExtensionUnsupported;
         var source: Io.Reader = .fixed(bytes);
@@ -142,8 +142,7 @@ const Session = struct {
                 error.LfsObjectMismatch => return error.NativeFilterObjectMismatch,
                 else => |e| return e,
             },
-            // unreachable: a fixed reader over bytes in memory does not fail to read
-            .hash_only => lfs.hashOnly(&source) catch unreachable,
+            .hash_only => lfs.hashOnly(&source) catch aegis.assert.never("a fixed reader over bytes in memory does not fail to read"),
         };
         return encodePointer(a, &pointer);
     }
@@ -154,15 +153,15 @@ const Session = struct {
         const file = try s.options.wt.openFile(io, path, .{});
         defer file.close(io);
         var head: [lfs.pointer_size_cutoff]u8 = undefined;
-        const n = try file.readPositionalAll(io, &head, 0);
-        // glint-ignore: Z026 -- a head that is no pointer is content, cleaned below
-        if (lfs.Pointer.decode(head[0..n])) |_| {
+        const n = try lfs_input.at(io, file, &head, 0);
+        // A head that is no pointer is content, cleaned below.
+        if (lfs.Pointer.recognize(head[0..n]) != null) {
             if (n < head.len) return a.dupe(u8, head[0..n]);
-            return aegis.own.readFile(io, s.options.wt, path, a, aegis.units.Bytes(u64).fromRaw(1 << 31));
-        } else |_| {}
+            return lfs_input.file(io, s.options.wt, path, a, .pointer_file);
+        }
 
         var buf: [64 * 1024]u8 = undefined;
-        var reader = file.reader(io, &buf);
+        var reader = lfs_input.stream(io, file, &buf);
         const pointer = switch (storing) {
             .store => l.store.install(io, &reader.interface, null) catch |err| switch (err) {
                 error.ReadFailed => return reader.err.?,
@@ -176,8 +175,7 @@ const Session = struct {
 
     fn encodePointer(a: Allocator, pointer: *const lfs.Pointer) Allocator.Error![]const u8 {
         var buf: [lfs.Pointer.max_encoded_len]u8 = undefined;
-        // a pointer clean makes carries no extensions, and its version, oid and size lines always fit
-        return a.dupe(u8, pointer.encodeBuf(&buf) catch unreachable);
+        return a.dupe(u8, pointer.encodeBuf(&buf) catch aegis.assert.never("a pointer clean makes carries no extensions, and its version, oid and size lines always fit"));
     }
 
     /// Content that is not a pointer is passed through, and a pointer to
@@ -226,7 +224,7 @@ const Session = struct {
                 else => |e| return e,
             };
         }
-        assert(s.next_deferred <= s.deferred.items.len);
+        aegis.assert.invariant(s.next_deferred <= s.deferred.items.len, "the next deferred file is at most one past the last");
         if (s.next_deferred == s.deferred.items.len) return null;
         const d = s.deferred.items[s.next_deferred];
         s.next_deferred += 1;
@@ -298,7 +296,7 @@ test "git-lfs's own commands are recognised and a person's own are not" {
 /// Borrow the settings of a collection loaded by this provider.
 pub fn settings(drivers: *const filter.Drivers) *const lfs.Settings {
     const driver = drivers.native_driver.?;
-    assert(driver.vtable == &Backend.vtable);
+    aegis.assert.invariant(driver.vtable == &Backend.vtable, "the native driver of a collection this provider loaded is a Backend");
     const b: *const Backend = @ptrCast(@alignCast(driver.context)); // the driver was checked against Backend.vtable, so its context is a Backend
     return &b.lfs.settings;
 }
@@ -326,7 +324,7 @@ test "native LFS selection owns settings, preserves custom commands and hash-onl
     const pointer_bytes = try session.clean(gpa, io, .{ .bytes = "large content", .storing = .hash_only });
     defer gpa.free(pointer_bytes);
     const pointer = try lfs.Pointer.decode(pointer_bytes);
-    const store: lfs.Store = .{ .base = tmp.dir, .root = "lfs" };
+    const store: lfs.Store = .{ .base = .of(tmp.dir), .root = "lfs" };
     try testing.expect(!try store.contains(io, &pointer));
     const installed_bytes = try session.clean(gpa, io, .{ .bytes = "large content" });
     defer gpa.free(installed_bytes);

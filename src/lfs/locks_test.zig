@@ -205,7 +205,7 @@ test "the lock cache is where git-lfs keeps it and what git-lfs writes, read bot
     gpa.free(listed);
     var theirs_repo = try repo_mod.Repository.open(gpa, io, pair.theirs, .{});
     defer theirs_repo.deinit(io);
-    const store: lfs.Store = .{ .base = theirs_repo.commonDirectory(), .root = "lfs" };
+    const store: lfs.Store = .{ .base = .of(theirs_repo.commonDirectory()), .root = "lfs" };
     var table = try lfslocks.Table.cached(gpa, io, &store, "refs/heads/main");
     defer table.deinit();
     try testing.expectEqualStrings("ada", table.find("x.bin").?.owner.?);
@@ -480,7 +480,7 @@ test "LFS HTTP pagination ends or fails without publishing partial caches" {
                     try testing.expect(result.locks.len != 0);
                 }
             }
-            const store: lfs.Store = .{ .base = repo.commonDirectory(), .root = "lfs" };
+            const store: lfs.Store = .{ .base = .of(repo.commonDirectory()), .root = "lfs" };
             var cached = try lfslocks.Table.cached(fx.gpa, fx.io, &store, "refs/heads/main");
             defer cached.deinit();
             try testing.expectEqual(i < 4, cached.find("a.bin") != null);

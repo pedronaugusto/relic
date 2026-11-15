@@ -248,7 +248,7 @@ test "git-lfs pushes, clones, pulls and locks against relic's LFS server" {
     defer gpa.free(bob_helper);
     var store_dir = try w.tmp.dir.openDir(io, "store", .{});
     defer store_dir.close(io);
-    var directory: server.Directory = .{ .dir = store_dir };
+    var directory: server.Directory = .{ .dir = .of(store_dir) };
     try w.serve(directory.store());
     const tmp = &w.tmp;
     const root = w.root;

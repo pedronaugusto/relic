@@ -155,6 +155,7 @@ const remote_mod = core.wire.remote;
 const repo_mod = core.repo;
 const odb_mod = core.odb;
 const lfs = @import("lfs.zig");
+const lfs_input = @import("input.zig");
 const settings_mod = @import("settings.zig");
 const Settings = settings_mod.Settings;
 const UrlParts = settings_mod.UrlParts;
@@ -179,7 +180,6 @@ const shakedown = @import("shakedown");
 pub const http_enabled = @import("relic_options").http;
 
 const Config = config_mod.Config;
-const assert = std.debug.assert;
 
 /// What a request is for. The API has one endpoint for each, and git-lfs's
 /// `lfs.pushurl` and `lfspushurl` apply to `upload` alone.
@@ -608,12 +608,13 @@ pub const SshAuth = struct {
 /// one that is not zero wins over `at`, and neither (`at` Go's zero time) is
 /// no expiry.
 pub fn expiresWithin(now_at: Io.Timestamp, in_s: i64, at: time_text.GoTime, margin_s: i64) bool {
-    // Go's time.Duration: int64 nanoseconds, wrapping as Go wraps them.
-    const in_ns = in_s *% std.time.ns_per_s;
-    // Go's nanoseconds, compared as git-lfs compares them
-    if (in_ns != 0) return in_ns < margin_s * std.time.ns_per_s;
-    if (at.isZero()) return false;
     const margin = aegis.units.Duration(.second, i64).fromRaw(margin_s).convert(.nanosecond, i128, .exact);
+    // Go's time.Duration: int64 nanoseconds, wrapping as Go wraps them,
+    // which is the exact product cut to its low 64 bits.
+    const in_ns: i64 = @truncate(aegis.units.Duration(.second, i64).fromRaw(in_s).convert(.nanosecond, i128, .exact).raw());
+    // Go's nanoseconds, compared as git-lfs compares them
+    if (in_ns != 0) return in_ns < margin.raw();
+    if (at.isZero()) return false;
     return at.instant().compare(time_text.GoTime.Instant.fromTimestamp(now_at, .exact).saturatingAdd(margin)) == .lt;
 }
 
@@ -1098,7 +1099,7 @@ pub const Client = struct {
             for (guard.value().learned.items) |l| {
                 // Only git-lfs's own settings are learned: nothing a server
                 // says reaches the repository's format or its other policy.
-                assert(std.mem.startsWith(u8, l.key, "lfs."));
+                aegis.assert.invariant(std.mem.startsWith(u8, l.key, "lfs."), "only git-lfs's own settings are learned");
                 if (repo.configuration().get(l.key)) |existing| {
                     if (std.mem.eql(u8, existing, l.value)) continue;
                 }
@@ -1110,17 +1111,17 @@ pub const Client = struct {
 
     /// Describe a request that failed for want of a credential, or that the
     /// server forbade, in the caller's `auth_failure`. `cred` is the
-    /// helpers' credential it was made with, when it was.
-    fn describeRefusal(c: *Client, reason: auth_mod.Failure.Reason, status: u16, url: []const u8, said: []const u8, cred: ?*Cred) void {
+    /// helpers' credential it was made with, when it was. Memory that
+    /// runs out describing it is the caller's error, not a description cut
+    /// short.
+    fn describeRefusal(c: *Client, reason: auth_mod.Failure.Reason, status: u16, url: []const u8, said: []const u8, cred: ?*Cred) Allocator.Error!void {
         const described = c.options.auth_failure orelse return;
         const scheme: url_mod.Scheme = if (url_mod.Url.parse(url)) |u| u.scheme else |_| .https;
-        described.begin(c.gpa, reason, scheme, url) catch return;
+        try described.begin(c.gpa, reason, scheme, url);
         described.status = status;
-        // glint-ignore: Z026 -- the description is a courtesy to the caller; the refusal is reported whether or not it is complete
-        described.setServerMessage(said) catch {};
+        try described.setServerMessage(said);
         described.prompt_available = c.options.prompt != null;
-        // glint-ignore: Z026 -- as above
-        if (cred) |cr| cr.session.describeFailure(described, c.options.prompt != null) catch {};
+        if (cred) |cr| try cr.session.describeFailure(described, c.options.prompt != null);
     }
 
     /// The endpoint for `operation`, found once.
@@ -1615,7 +1616,7 @@ pub const Client = struct {
             const skip = gitLfsBool(try c.settings.urlGet(scratch, "credential", cred_url, "skipwwwauth"), false);
             try cr.session.setChallenges(if (skip) &.{} else refusal.challenges);
             const filled = cr.session.fill(io, c.credentialOptions()) catch |err| {
-                c.describeRefusal(switch (err) {
+                try c.describeRefusal(switch (err) {
                     error.CredentialHelperQuit => .helper_quit,
                     error.ProgramsNotGranted => .programs_not_granted,
                     else => if (refusal.attempts > 0) .refused else .no_credential,
@@ -1625,7 +1626,7 @@ pub const Client = struct {
                 return err;
             };
             if (!filled) {
-                c.describeRefusal(.declined, 401, url, refusal.said, cr);
+                try c.describeRefusal(.declined, 401, url, refusal.said, cr);
                 return c.fail("no credential for {s}", io, .{stripQuery(cred_url)}, error.AuthenticationFailed);
             }
         }
@@ -1673,7 +1674,7 @@ pub const Client = struct {
             // A header the server itself handed over — an action's, or
             // git-lfs-authenticate's — that it no longer takes.
             dropSshAuth(shared, operation);
-            c.describeRefusal(.refused, 401, url, refusal.said, null);
+            try c.describeRefusal(.refused, 401, url, refusal.said, null);
             return c.fail("HTTP 401 from {s}", io, .{stripQuery(url)}, error.AuthenticationFailed);
         }
         if (attempt.access == .none) {
@@ -1683,7 +1684,7 @@ pub const Client = struct {
         }
         refusal.attempts += 1;
         if (refusal.attempts >= 3) {
-            c.describeRefusal(.refused, 401, url, refusal.said, attempt.cred);
+            try c.describeRefusal(.refused, 401, url, refusal.said, attempt.cred);
             return c.fail("HTTP 401 from {s}", io, .{stripQuery(url)}, error.AuthenticationFailed);
         }
     }
@@ -1761,7 +1762,7 @@ pub const Client = struct {
                 }) catch |err| return c.clientFailed(io, &ex.state().diagnostics, err, request_url);
                 defer outgoing.deinit(io);
                 var chunk: [64 * 1024]u8 = undefined;
-                var fr = file.reader(io, &.{});
+                var fr = lfs_input.stream(io, file, &.{});
                 const object_end: aegis.io.ReadEnd = .fromFile(&fr);
                 var left = o.pointer.size;
                 while (left > 0) {
@@ -1835,8 +1836,7 @@ pub const Client = struct {
             error.ClientCertificateSchemeUnsupported => c.fail("no signature scheme the server takes: {s}", io, .{where}, error.ClientCertificateSchemeUnsupported),
             error.InvalidUrl, error.UnsupportedScheme => c.fail("malformed URL {s}", io, .{where}, error.MalformedUrl),
             error.InvalidHeader => c.fail("a header no request can carry: {s}", io, .{where}, error.InvalidHttpHeader),
-            // unreachable: a whole body is bytes, an object's is written as it comes, `finish` runs once, the proxy is fixed, no redirect, retry, credential or hook is uplink's, and no named pipe or extended CONNECT is asked for
-            error.InvalidBody, error.BodyReadFailed, error.ExchangeOver, error.InvalidProxy, error.BodyNotReplayable, error.TooManyRedirects, error.InsecureRedirect, error.InvalidRedirect, error.CredentialsUnavailable, error.PrepareFailed, error.NamedPipeUnsupported, error.ExtendedConnectUnsupported => unreachable,
+            error.InvalidBody, error.BodyReadFailed, error.ExchangeOver, error.InvalidProxy, error.BodyNotReplayable, error.TooManyRedirects, error.InsecureRedirect, error.InvalidRedirect, error.CredentialsUnavailable, error.PrepareFailed, error.NamedPipeUnsupported, error.ExtendedConnectUnsupported => aegis.assert.never("a whole body is bytes, an object's is written as it comes, `finish` runs once, the proxy is fixed, no redirect, retry, credential or hook is uplink's, and no named pipe or extended CONNECT is asked for"),
         };
     }
 
@@ -1851,7 +1851,7 @@ pub const Client = struct {
         defer owned.deinit(io);
         const file = owned.borrow().*;
         var head: [mime_sniff.sniff_len]u8 = undefined;
-        const n = file.readPositionalAll(io, &head, 0) catch |err| return if (err == error.Canceled) error.Canceled else c.fail("upload: reading the object", io, .{}, error.ConnectionFailed);
+        const n = lfs_input.at(io, file, &head, 0) catch |err| return if (err == error.Canceled) error.Canceled else c.fail("upload: reading the object", io, .{}, error.ConnectionFailed);
         return mime_sniff.contentType(head[0..n]);
     }
 
@@ -2153,7 +2153,7 @@ pub const Client = struct {
         if (status == .forbidden) {
             var guard = c.shared.acquireUncancelable(io);
             defer guard.deinit(io);
-            c.describeRefusal(.forbidden, 403, ex.url, said, null);
+            try c.describeRefusal(.forbidden, 403, ex.url, said, null);
         }
         return if (status == .unauthorized or status == .forbidden) error.AuthenticationFailed else error.HttpStatus;
     }
@@ -2493,7 +2493,7 @@ pub const Server = struct {
         errdefer if (s.fetch_head) |f| gpa.free(f);
         s.download_ref = try downloadRef(gpa, io, repo, &s.settings);
         errdefer gpa.free(s.download_ref);
-        s.lfs = try lfs.Lfs.load(gpa, &s.settings, .{ .common_dir = repo.commonDirectory(), .shared = repo.sharedPermissions() });
+        s.lfs = try lfs.Lfs.load(gpa, &s.settings, .{ .common_dir = .of(repo.commonDirectory()), .shared = repo.sharedPermissions() });
         errdefer s.lfs.deinit();
         s.alternates = try repo.objectDatabase().listAlternates(gpa, io);
         errdefer s.alternates.deinit();
@@ -2648,8 +2648,7 @@ fn basicHeader(gpa: Allocator, user: []const u8, password: []const u8) Allocator
     const plain_len = user.len + 1 + password.len;
     var plain = try aegis.SecretBytes.init(gpa, plain_len);
     defer plain.deinit(gpa);
-    // unreachable: the owner was made with exactly this capacity.
-    plain.resizeWithinCapacity(plain_len) catch unreachable;
+    plain.resizeWithinCapacity(plain_len) catch aegis.assert.never("the owner was made with exactly this capacity");
     const bytes = plain.exposeMut();
     @memcpy(bytes[0..user.len], user);
     bytes[user.len] = ':';
@@ -2657,8 +2656,7 @@ fn basicHeader(gpa: Allocator, user: []const u8, password: []const u8) Allocator
     const encoder = std.base64.standard.Encoder;
     const out_len = "Basic ".len + encoder.calcSize(plain_len);
     var out = try aegis.SecretBytes.init(gpa, out_len);
-    // unreachable: the owner was made with exactly this capacity.
-    out.resizeWithinCapacity(out_len) catch unreachable;
+    out.resizeWithinCapacity(out_len) catch aegis.assert.never("the owner was made with exactly this capacity");
     @memcpy(out.exposeMut()[0.."Basic ".len], "Basic ");
     _ = encoder.encode(out.exposeMut()["Basic ".len..], bytes);
     return out;
@@ -2667,8 +2665,7 @@ fn basicHeader(gpa: Allocator, user: []const u8, password: []const u8) Allocator
 /// `bytes` in an owner of its own that wipes them.
 fn secretCopy(gpa: Allocator, bytes: []const u8) Allocator.Error!aegis.SecretBytes {
     var out = try aegis.SecretBytes.init(gpa, bytes.len);
-    // unreachable: a new allocation of the bytes' length, apart from them.
-    out.replace(bytes) catch unreachable;
+    out.replace(bytes) catch aegis.assert.never("a new allocation of the bytes' length, apart from them");
     return out;
 }
 

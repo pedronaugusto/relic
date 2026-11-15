@@ -44,7 +44,6 @@ const shakedown = @import("shakedown");
 const repeat = shakedown.corpus.repeat;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
-const assert = std.debug.assert;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
 const config_mod = core.config;
@@ -110,6 +109,14 @@ pub const Pointer = struct {
     /// The extensions, lowest priority first.
     pub fn exts(p: *const Pointer) []const Extension {
         return p.extensions[0..p.extension_count];
+    }
+
+    /// The pointer `bytes` are, or null where they are content: `decode`
+    /// for a caller that asks only whether a blob or a file is an LFS
+    /// pointer, not which rule it breaks (git-lfs's scanners and filters
+    /// pass content over either way).
+    pub fn recognize(bytes: []const u8) ?Pointer {
+        return decode(bytes) catch null;
     }
 
     /// Read `bytes` as git-lfs reads them: the first 1024, trimmed. No
@@ -290,7 +297,8 @@ fn spaceEndingAt(bytes: []const u8) usize {
     var len: usize = 2;
     while (len <= 3 and len <= bytes.len) : (len += 1) {
         const seq = bytes[bytes.len - len ..];
-        const want = std.unicode.utf8ByteSequenceLength(seq[0]) catch continue;
+        // A byte that begins no sequence begins none of either length.
+        const want = std.unicode.utf8ByteSequenceLength(seq[0]) catch 0;
         if (want != len) continue;
         const cp = codepoint(seq) orelse return 0;
         return if (isUnicodeSpace(cp)) len else 0;
@@ -325,8 +333,8 @@ fn isUnicodeSpace(cp: u21) bool {
 /// under `lfs.storage`.
 pub const Store = struct {
     /// What a relative `root` is resolved from: the repository's common
-    /// directory. Borrowed.
-    base: Io.Dir,
+    /// directory, which its owner (the repository) keeps and closes.
+    base: aegis.own.Unowned(Io.Dir),
     /// `lfs`, or `lfs.storage`, `/`-separated. An absolute path stands on
     /// its own.
     root: []const u8,
@@ -352,7 +360,7 @@ pub const Store = struct {
     pub fn open(store: *const Store, io: Io, pointer: *const Pointer) OpenError!?fs.OwnedFile {
         var buf: [max_path]u8 = undefined;
         const path = try store.objectPath(&buf, &pointer.oid);
-        const file = store.base.openFile(io, path, .{}) catch |err| switch (err) {
+        const file = store.base.get().openFile(io, path, .{}) catch |err| switch (err) {
             error.FileNotFound, error.NotDir => return null,
             else => |e| return e,
         };
@@ -396,16 +404,16 @@ pub const Store = struct {
     pub fn install(store: *const Store, io: Io, source: *Io.Reader, expected: ?*const Pointer) InstallError!Pointer {
         var tmp_dir_buf: [max_path]u8 = undefined;
         const tmp_dir = std.mem.print(&tmp_dir_buf, "{s}/tmp", .{store.root}) catch return error.NameTooLong;
-        try fs.makeDirs(io, store.base, tmp_dir, store.shared);
+        try fs.makeDirs(io, store.base.get(), tmp_dir, store.shared);
         var name_buf: [64]u8 = undefined;
         const name = fs.tempName(io, &name_buf, "relic-");
         var tmp_buf: [max_path]u8 = undefined;
         const tmp_path = std.mem.print(&tmp_buf, "{s}/{s}", .{ tmp_dir, name }) catch return error.NameTooLong;
 
-        const file = try store.base.createFile(io, tmp_path, .{ .exclusive = true });
+        const file = try store.base.get().createFile(io, tmp_path, .{ .exclusive = true });
         var installed = false;
         // The install's error is the one to report; a temporary left in the store is what git-lfs prune removes.
-        defer if (!installed) fs.removeLeftover(io, store.base, tmp_path);
+        defer if (!installed) fs.removeLeftover(io, store.base.get(), tmp_path);
 
         var pointer: Pointer = undefined;
         {
@@ -425,9 +433,9 @@ pub const Store = struct {
         var object_buf: [max_path]u8 = undefined;
         const object_path = try store.objectPath(&object_buf, &pointer.oid);
         if (try store.contains(io, &pointer)) return pointer;
-        try fs.makeDirs(io, store.base, std.Io.Dir.path.dirnamePosix(object_path).?, store.shared);
-        try fs.adjustShared(io, store.base, tmp_path, store.shared);
-        try fs.rename(io, store.base, tmp_path, object_path);
+        try fs.makeDirs(io, store.base.get(), std.Io.Dir.path.dirnamePosix(object_path).?, store.shared);
+        try fs.adjustShared(io, store.base.get(), tmp_path, store.shared);
+        try fs.rename(io, store.base.get(), tmp_path, object_path);
         installed = true;
         return pointer;
     }
@@ -437,7 +445,7 @@ pub const Store = struct {
 pub fn hashOnly(source: *Io.Reader) Io.Reader.ShortError!Pointer {
     return copyHashing(source, null) catch |err| switch (err) {
         error.ReadFailed => error.ReadFailed,
-        error.WriteFailed => unreachable,
+        error.WriteFailed => aegis.assert.never("with no sink there is nothing to write to"),
     };
 }
 
@@ -597,7 +605,9 @@ pub const Lfs = struct {
 
     /// How `load` behaves.
     pub const Options = struct {
-        common_dir: Io.Dir,
+        /// The repository's common directory, which the repository keeps
+        /// and closes.
+        common_dir: aegis.own.Unowned(Io.Dir),
         /// The repository's `core.sharedRepository`
         /// (`Repository.sharedPermissions`), which the store's directories
         /// and objects are made with.
@@ -681,7 +691,7 @@ test "settings that outgrow the arena's first block are all freed with it" {
     defer config.deinit();
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var lfs = try Lfs.load(gpa, &.{ .gpa = gpa, .config = &config }, .{ .common_dir = tmp.dir, .shared = .umask });
+    var lfs = try Lfs.load(gpa, &.{ .gpa = gpa, .config = &config }, .{ .common_dir = .of(tmp.dir), .shared = .umask });
     defer lfs.deinit();
     try std.testing.expectEqual(@as(usize, 3001), lfs.settings.fetch_include.len);
     try std.testing.expectEqual(@as(usize, 3001), lfs.settings.fetch_exclude.len);
@@ -775,7 +785,7 @@ test "the store names an object by its SHA-256 and gives it back at the right si
     const io = testing.io;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    const store: Store = .{ .base = tmp.dir, .root = "lfs" };
+    const store: Store = .{ .base = .of(tmp.dir), .root = "lfs" };
 
     var source: Io.Reader = .fixed("hello\n");
     const p = try store.install(io, &source, null);
@@ -856,7 +866,7 @@ test "settings come from the configuration first and .lfsconfig second" {
     defer config.deinit();
     var settings: settings_mod.Settings = try .parse(gpa, &config, "[lfs]\n\tfetchinclude = a, b/c ,\n\tfetchexclude = x\n\tstorage = ignored\n\turl = https://lfs.example/\n");
     defer settings.deinit();
-    var l = try Lfs.load(gpa, &settings, .{ .common_dir = tmp.dir, .shared = .umask });
+    var l = try Lfs.load(gpa, &settings, .{ .common_dir = .of(tmp.dir), .shared = .umask });
     defer l.deinit();
     try testing.expectEqual(@as(usize, 2), l.settings.fetch_include.len);
     try testing.expectEqualStrings("b/c", l.settings.fetch_include[1].text);
@@ -874,7 +884,7 @@ test "a setting written with no value is not there, as git-lfs reads it: .lfscon
     defer config.deinit();
     var settings: settings_mod.Settings = try .parse(gpa, &config, "[lfs]\n\turl = https://lfs.example/\n");
     defer settings.deinit();
-    var l = try Lfs.load(gpa, &settings, .{ .common_dir = tmp.dir, .shared = .umask });
+    var l = try Lfs.load(gpa, &settings, .{ .common_dir = .of(tmp.dir), .shared = .umask });
     defer l.deinit();
     try testing.expectEqualStrings("https://lfs.example/", l.settings.url.?);
     try testing.expectEqual(@as(usize, 1), l.settings.fetch_include.len);
@@ -889,8 +899,10 @@ fn fuzzPointer(_: void, case: *shakedown.Case) anyerror!void {
     var scratch: [1400]u8 = undefined;
     const n = shakedown.gen.intRange(case.source, usize, 0, scratch.len);
     case.source.bytes(scratch[0..n]);
-    const p = Pointer.decode(scratch[0..n]) catch |err| switch (err) {
-        error.NotAPointer, error.BadPointer => return,
+    // Bytes refused are refused with one of the named errors, and are no
+    // pointer to encode.
+    const p = Pointer.decode(scratch[0..n]) catch |err| return switch (err) {
+        error.NotAPointer, error.BadPointer => {},
     };
     var buf: [Pointer.max_encoded_len]u8 = undefined;
     const encoded = try p.encodeBuf(&buf);

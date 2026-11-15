@@ -242,7 +242,7 @@ fn pointersIn(a: Allocator, io: Io, db: *odb_mod.Odb, pushed: []const odb_mod.Pa
         if (header.type != .blob or header.size >= lfs.pointer_size_cutoff or header.size == 0) continue;
         const found = try db.read(io, e.oid);
         defer db.allocator().free(found.bytes);
-        const pointer = lfs.Pointer.decode(found.bytes) catch continue;
+        const pointer = lfs.Pointer.recognize(found.bytes) orelse continue;
         if (pointer.size == 0 or pointer.extension_count != 0) continue;
         try out.append(a, .of(pointer, try a.dupe(u8, e.hint)));
     }

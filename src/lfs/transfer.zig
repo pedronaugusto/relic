@@ -56,7 +56,6 @@ const shakedown = @import("shakedown");
 const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
-const assert = std.debug.assert;
 const http = std.http;
 
 const hash = core.hash;
@@ -66,6 +65,7 @@ const index_mod = core.index;
 const repo_mod = core.repo;
 const fs = core.fs.engine;
 const lfs = @import("lfs.zig");
+const lfs_input = @import("input.zig");
 const lfsapi = @import("api.zig");
 const lfs_settings = @import("settings.zig");
 const object_walk = core.walk.object.walk;
@@ -233,9 +233,10 @@ const Limits = struct {
     /// when it gave one, else the backoff. `null` when the server asks for
     /// longer than `lfs.transfer.maxRetryTime`, and the transfer fails, as
     /// git-lfs fails it.
-    fn retryDelay(l: Limits, attempt: u32, after: ?Io.Duration) ?Io.Duration {
-        const wait = after orelse return l.backoff(attempt).toIoDuration();
-        if (wait.nanoseconds > l.max_retry_time.toIoDuration().nanoseconds) return null;
+    fn retryDelay(l: Limits, attempt: u32, after: ?Io.Duration) ?Nanos {
+        const asked = after orelse return l.backoff(attempt).convert(.nanosecond, i96, .exact);
+        const wait: Nanos = .fromIoDuration(asked, .exact);
+        if (wait.compare(l.max_retry_time.convert(.nanosecond, i96, .exact)) == .gt) return null;
         return wait;
     }
 
@@ -251,6 +252,8 @@ const Limits = struct {
 
     const Seconds = aegis.units.Duration(.second, u32);
     const Millis = aegis.units.Duration(.millisecond, u64);
+    /// std's nanoseconds, which hold every wait above exactly.
+    const Nanos = aegis.units.Duration(.nanosecond, i96);
 };
 
 //=====================================================================
@@ -593,8 +596,9 @@ const Run = struct {
     /// or straight to the caller's `Progress` when this is the calling task.
     fn say(r: *Run, event: Event) void {
         if (r.events) |q| {
-            // glint-ignore: Z026 -- a closed queue means the calling task has stopped listening; there is no one left to tell
-            q.putOneUncancelable(r.io(), event) catch {};
+            q.putOneUncancelable(r.io(), event) catch |err| switch (err) {
+                error.Closed => aegis.assert.never("runJobs makes the queue and closes it nowhere"),
+            };
             return;
         }
         r.hear(event);
@@ -632,7 +636,7 @@ fn referenceDirs(arena: Allocator, io: Io, store: *const lfs.Store, alternates: 
             try arena.print("{s}/lfs/objects", .{parent})
         else
             try arena.print("objects/{s}/lfs/objects", .{parent});
-        const stat = store.base.statFile(io, dir, .{}) catch |err| switch (err) {
+        const stat = store.base.get().statFile(io, dir, .{}) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             else => continue,
         };
@@ -652,23 +656,26 @@ fn fromReference(io: Io, store: *const lfs.Store, references: []const []const u8
     const object_path = try store.objectPath(&object_buf, &pointer.oid);
     for (references) |dir| {
         var ref_buf: [lfs.Store.max_path]u8 = undefined;
-        const ref_path = std.mem.print(&ref_buf, "{s}/{s}/{s}/{s}", .{ dir, pointer.oid[0..2], pointer.oid[2..4], &pointer.oid }) catch continue;
-        const stat = store.base.statFile(io, ref_path, .{}) catch |err| switch (err) {
+        // A path past the system's longest is one no reference directory
+        // holds an object at, as a stat of it would answer.
+        const printed: ?[]const u8 = std.mem.print(&ref_buf, "{s}/{s}/{s}/{s}", .{ dir, pointer.oid[0..2], pointer.oid[2..4], &pointer.oid }) catch null;
+        const ref_path = printed orelse continue;
+        const stat = store.base.get().statFile(io, ref_path, .{}) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             else => continue,
         };
         if (stat.kind != .file or stat.size != pointer.size) continue;
-        try store.base.createDirPath(io, std.Io.Dir.path.dirnamePosix(object_path).?);
-        if (fs.hardLink(io, store.base, ref_path, object_path)) {
+        try store.base.get().createDirPath(io, std.Io.Dir.path.dirnamePosix(object_path).?);
+        if (fs.hardLink(io, store.base.get(), ref_path, object_path)) {
             return true;
         } else |err| if (err == error.Canceled) return error.Canceled;
-        const file = store.base.openFile(io, ref_path, .{}) catch |err| switch (err) {
+        const file = store.base.get().openFile(io, ref_path, .{}) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             else => continue,
         };
         defer file.close(io);
         var buf: [64 * 1024]u8 = undefined;
-        var reader = file.reader(io, &buf);
+        var reader = lfs_input.stream(io, file, &buf);
         _ = store.install(io, &reader.interface, pointer) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             else => continue,
@@ -706,7 +713,7 @@ pub fn sweepTmp(gpa: Allocator, io: Io, store: *const lfs.Store, now_at: Io.Time
     const now = date.instant(now_at);
     var path_buf: [lfs.Store.max_path]u8 = undefined;
     const tmp_path = std.mem.print(&path_buf, "{s}/tmp", .{store.root}) catch return error.NameTooLong;
-    var tmp = store.base.openDir(io, tmp_path, .{ .iterate = true }) catch |err| switch (err) {
+    var tmp = store.base.get().openDir(io, tmp_path, .{ .iterate = true }) catch |err| switch (err) {
         error.FileNotFound, error.NotDir => return,
         else => |e| return e,
     };
@@ -719,15 +726,19 @@ pub fn sweepTmp(gpa: Allocator, io: Io, store: *const lfs.Store, now_at: Io.Time
         const name = entry.basename;
         if (name.len > 65 and name[64] == '-') {
             var object_buf: [lfs.Store.max_path]u8 = undefined;
-            // glint-ignore: Z026 -- a name that is no object's leaves the entry to the steps below
-            if (store.objectPath(&object_buf, name[0..64])) |object_path| {
-                if (store.base.statFile(io, object_path, .{})) |st| {
+            const object_path = store.objectPath(&object_buf, name[0..64]) catch |err| switch (err) {
+                // No object is stored under a path too long to name, so
+                // none has finished: the entry is left to the steps below.
+                error.NameTooLong => null,
+            };
+            if (object_path) |path| {
+                if (store.base.get().statFile(io, path, .{})) |st| {
                     if (st.kind != .directory) {
                         try tmp.deleteFile(io, entry.path);
                         continue;
                     }
                 } else |err| if (err == error.Canceled) return error.Canceled;
-            } else |_| {}
+            }
         }
         if (std.Io.Dir.path.dirname(entry.path)) |parent| {
             const dir_stat = tmp.statFile(io, parent, .{}) catch |err| switch (err) {
@@ -829,7 +840,7 @@ fn runTransfers(io: Io, server: *lfsapi.Server, operation: lfsapi.Operation, obj
     }
     if (jobs.items.len == 0) return outcome;
     // Each job settles one pending object's result, once.
-    assert(jobs.items.len <= pending.items.len);
+    aegis.assert.invariant(jobs.items.len <= pending.items.len, "each job settles one pending object's result, once");
     state.jobs = try jobs.toOwnedSlice(arena);
     state.total_objects = state.jobs.len;
     for (state.jobs) |j| state.total_bytes += j.result.size;
@@ -1016,7 +1027,7 @@ fn startAgents(state: *Run, adapter: custom.Adapter) Error!void {
     }
     state.agents = agents;
     state.limits.concurrency = count;
-    const base = try server.store().base.realPathFileAlloc(state.io(), ".", server.gpa);
+    const base = try server.store().base.get().realPathFileAlloc(state.io(), ".", server.gpa);
     defer server.gpa.free(base);
     state.store_base = try arena.dupe(u8, base);
 }
@@ -1084,7 +1095,7 @@ fn attemptCustom(state: *Run, worker: usize, r: *Result, action: ?Action, verify
                 fs.removeLeftover(io, Io.Dir.cwd(), full);
             }
             var buf: [64 * 1024]u8 = undefined;
-            var fr = file.reader(io, &buf);
+            var fr = lfs_input.stream(io, file, &buf);
             const pointer: lfs.Pointer = .{ .oid = r.oid, .size = r.size };
             _ = store.install(io, &fr.interface, &pointer) catch |err| switch (err) {
                 error.LfsObjectMismatch => return .{ .fail = "the custom transfer's file is not the object" },
@@ -1115,9 +1126,12 @@ fn runJobs(state: *Run) Error!void {
     var group: Io.Group = .init;
     var spawned: usize = 0;
     while (spawned < workers) : (spawned += 1) {
-        group.concurrent(io, workerTask, .{ state, spawned }) catch |err| switch (err) {
-            error.ConcurrencyUnavailable => break,
+        // An `Io` with no room for another task runs the jobs on the
+        // workers it has, or on the calling task when it has none.
+        const started = if (group.concurrent(io, workerTask, .{ state, spawned })) true else |err| switch (err) {
+            error.ConcurrencyUnavailable => false,
         };
+        if (!started) break;
     }
     if (spawned == 0) {
         state.events = null;
@@ -1130,8 +1144,7 @@ fn runJobs(state: *Run) Error!void {
             group.cancel(io);
             return switch (err) {
                 error.Canceled => error.Canceled,
-                // The queue is never closed.
-                error.Closed => unreachable,
+                error.Closed => aegis.assert.never("the queue is never closed"),
             };
         };
         switch (event) {
@@ -1253,7 +1266,7 @@ fn runJob(state: *Run, job: *Job, worker: usize) Error!void {
                     r.message = why.message;
                     return;
                 };
-                if (delay.nanoseconds != 0) try state.io().sleep(delay, .awake);
+                if (delay.raw() != 0) try state.io().sleep(delay.toIoDuration(), .awake);
                 // A fresh batch for the object, as git-lfs retries it: the
                 // action may have expired, or pointed somewhere that failed.
                 const again = batchRequest(state.io(), state.server, state.operation, &.{.{ .oid = r.oid, .size = r.size, .name = r.name }}, state.options.ref, state.limits, null) catch |err| switch (err) {
@@ -1354,29 +1367,34 @@ fn attemptDownload(state: *Run, r: *Result, action: Action, authenticated: bool)
     // download that breaks off leaves `<oid>.part` there for the next
     // attempt — this operation's or a later one's — to go on from.
     const incomplete = try scratch.print("{s}/incomplete", .{store.root});
-    try store.base.createDirPath(io, incomplete);
+    try store.base.get().createDirPath(io, incomplete);
     const part_path = try scratch.print("{s}/{s}.part", .{ incomplete, &r.oid });
     var name_buf: [64]u8 = undefined;
     const temp_path = try scratch.print("{s}/{s}", .{ incomplete, fs.tempName(io, &name_buf, "dl-") });
     var resumed = true;
-    fs.rename(io, store.base, part_path, temp_path) catch |err| switch (err) {
+    fs.rename(io, store.base.get(), part_path, temp_path) catch |err| switch (err) {
         error.FileNotFound => resumed = false,
         else => |e| return e,
     };
     var partial: Partial = .{ .file = .init(if (resumed)
-        try store.base.openFile(io, temp_path, .{ .mode = .read_write })
+        try store.base.get().openFile(io, temp_path, .{ .mode = .read_write })
     else
-        try store.base.createFile(io, temp_path, .{ .exclusive = true, .read = true })) };
+        try store.base.get().createFile(io, temp_path, .{ .exclusive = true, .read = true })) };
     var installed = false;
     defer {
         partial.file.deinit(io);
         if (!installed) {
             if (partial.keep) {
-                // glint-ignore: Z026 -- keeping the partial for a resume is best effort; the download's own error is the one to report
-                fs.rename(io, store.base, temp_path, part_path) catch {};
+                // A partial that cannot be kept for a resume goes as an
+                // unkept one does; the download's own error is the one to
+                // report, and a cancel is put back for the task.
+                fs.rename(io, store.base.get(), temp_path, part_path) catch |err| {
+                    if (err == error.Canceled) io.recancel();
+                    fs.removeLeftover(io, store.base.get(), temp_path);
+                };
             } else {
                 // The download's error is the one to report; a temporary left in the store is what git-lfs prune removes.
-                fs.removeLeftover(io, store.base, temp_path);
+                fs.removeLeftover(io, store.base.get(), temp_path);
             }
         }
     }
@@ -1401,7 +1419,7 @@ fn attemptDownload(state: *Run, r: *Result, action: Action, authenticated: bool)
     var digest: [32]u8 = undefined;
     partial.sha.final(&digest);
     var hex: [64]u8 = undefined;
-    _ = std.mem.print(&hex, "{x}", .{&digest}) catch unreachable; // unreachable: a SHA-256 digest is 32 bytes, 64 hex digits
+    _ = std.mem.print(&hex, "{x}", .{&digest}) catch aegis.assert.never("a SHA-256 digest is 32 bytes, 64 hex digits");
     if (!std.mem.eql(u8, &hex, &r.oid)) {
         // A partial file that was not the start of this object: it is
         // thrown away, and the next attempt starts from nothing.
@@ -1413,8 +1431,8 @@ fn attemptDownload(state: *Run, r: *Result, action: Action, authenticated: bool)
     const pointer: lfs.Pointer = .{ .oid = r.oid, .size = r.size };
     const object_path = try store.objectPath(&object_buf, &pointer.oid);
     if (try store.contains(io, &pointer)) return .ok;
-    try store.base.createDirPath(io, std.Io.Dir.path.dirnamePosix(object_path).?);
-    try fs.rename(io, store.base, temp_path, object_path);
+    try store.base.get().createDirPath(io, std.Io.Dir.path.dirnamePosix(object_path).?);
+    try fs.rename(io, store.base.get(), temp_path, object_path);
     installed = true;
     return .ok;
 }
@@ -1444,10 +1462,10 @@ const Partial = struct {
     /// over the whole object whichever attempt brought each byte. More than
     /// a partial object can be starts again.
     fn hashResumed(p: *Partial, io: Io, size: u64) Error!void {
-        assert(p.from == 0);
+        aegis.assert.invariant(p.from == 0, "a resumed partial is hashed from its start");
         var buf: [64 * 1024]u8 = undefined;
         while (true) {
-            const n = try p.file.borrow().*.readPositionalAll(io, &buf, p.from);
+            const n = try lfs_input.at(io, p.file.borrow().*, &buf, p.from);
             if (n == 0) break;
             p.sha.update(buf[0..n]);
             p.from += n;
@@ -1496,7 +1514,7 @@ const Partial = struct {
                         broken = true;
                         break;
                     },
-                    error.WriteFailed => unreachable, // unreachable: the limit is the room the writer has
+                    error.WriteFailed => aegis.assert.never("the limit is the room the writer has"),
                 };
             }
             if (at + n > size) return .{ .fail = "the server sent more than the object's size" };
@@ -1588,7 +1606,7 @@ fn requestFrom(state: *Run, scratch: Allocator, partial: *Partial, req: Download
         if (status == .partial_content) {
             const content_range = sent.header("content-range") orelse "";
             var want_buf: [32]u8 = undefined;
-            const want = std.mem.print(&want_buf, "bytes {d}-", .{partial.from}) catch unreachable; // unreachable: a u64 is at most 20 digits, 27 bytes with the words around it
+            const want = std.mem.print(&want_buf, "bytes {d}-", .{partial.from}) catch aegis.assert.never("a u64 is at most 20 digits, 27 bytes with the words around it");
             if (!std.mem.startsWith(u8, content_range, want)) {
                 sent.deinit(io);
                 try partial.restart(io);
@@ -1776,7 +1794,7 @@ fn batchRequest(
                 try server.client.noteStatus(io, ex, "batch");
                 return error.LfsBatchFailed;
             };
-            if (delay.nanoseconds != 0) try io.sleep(delay, .awake);
+            if (delay.raw() != 0) try io.sleep(delay.toIoDuration(), .awake);
             continue;
         }
         if (status != .ok) {
@@ -1839,8 +1857,7 @@ pub fn parseSshBatch(a: Allocator, lines: lfsssh.Lines) ParseSshBatchError!Batch
         }
     }.less);
     var out: std.ArrayList(BatchObject) = .empty;
-    const Entry = @typeInfo(@FieldType(ActionSet, "items")).pointer.child;
-    var actions: std.ArrayList(Entry) = .empty;
+    var actions: std.ArrayList(strand.core.Pair([]const u8, ?Action)) = .empty;
     for (sorted) |line| {
         var fields: std.ArrayList([]const u8) = .empty;
         var it = std.mem.splitScalar(u8, line, ' ');
@@ -1972,7 +1989,7 @@ fn attemptUploadSsh(state: *Run, t: *lfsssh.Transfer, worker: usize, r: *Result,
     {
         conn.beginData(io, put, args) catch |err| return sshRetry(state, err);
         var chunk: [32 * 1024]u8 = undefined;
-        var fr = file.reader(io, &.{});
+        var fr = lfs_input.stream(io, file, &.{});
         const object_end: aegis.io.ReadEnd = .fromFile(&fr);
         var left = r.size;
         while (left > 0) {
@@ -2088,7 +2105,7 @@ fn copyLocal(
     var remote = Repository.open(gpa, io, dir, .{ .discover = false }) catch return error.LfsLocalRemoteUnreadable;
     defer remote.deinit(io);
     var remote_lfs = lfs.Lfs.load(gpa, &.{ .gpa = gpa, .config = remote.configuration() }, .{
-        .common_dir = remote.commonDirectory(),
+        .common_dir = .of(remote.commonDirectory()),
         .shared = remote.sharedPermissions(),
     }) catch return error.LfsLocalRemoteUnreadable;
     defer remote_lfs.deinit();
@@ -2121,7 +2138,7 @@ fn copyLocal(
         defer owned.deinit(io);
         const file = owned.borrow().*;
         var buf: [64 * 1024]u8 = undefined;
-        var fr = file.reader(io, &buf);
+        var fr = lfs_input.stream(io, file, &buf);
         _ = to.install(io, &fr.interface, &pointer) catch |err| switch (err) {
             error.LfsObjectMismatch => {
                 r.status = .failed;
@@ -2431,7 +2448,7 @@ fn addPointer(arena: Allocator, io: Io, repo: *Repository, oid: Oid, size: u64, 
     if (size >= lfs.pointer_size_cutoff or size == 0) return;
     const found = try repo.objectDatabase().read(io, oid);
     defer repo.objectDatabase().allocator().free(found.bytes);
-    const pointer = lfs.Pointer.decode(found.bytes) catch return;
+    const pointer = lfs.Pointer.recognize(found.bytes) orelse return;
     if (pointer.size == 0 or pointer.extension_count != 0) return;
     const key = try arena.dupe(u8, &pointer.oid);
     const gop = try seen.getOrPut(arena, key);
@@ -2445,12 +2462,10 @@ const Resolved = struct { oid: Oid, ref: ?[]const u8 };
 /// by git's rules, or an object name.
 fn resolve(arena: Allocator, io: Io, repo: *Repository, name: []const u8) FetchError!Resolved {
     if (try repo.refStore().resolveShort(arena, io, name)) |found| return .{ .oid = found.oid, .ref = found.name };
-    if (name.len == repo.objectFormat().hexLen()) {
-        // glint-ignore: Z026 -- text that is no full object id is no object here: the name resolves no further
-        if (Oid.parse(repo.objectFormat(), name)) |oid| {
-            if (try repo.objectDatabase().exists(io, oid)) return .{ .oid = oid, .ref = null };
-        } else |_| {}
-    }
+    // Text that is no full object id is no object here: the name resolves
+    // no further.
+    const oid = Oid.parse(repo.objectFormat(), name) catch return error.RefNotFound;
+    if (try repo.objectDatabase().exists(io, oid)) return .{ .oid = oid, .ref = null };
     return error.RefNotFound;
 }
 
@@ -2500,11 +2515,17 @@ pub fn checkoutPointers(gpa: Allocator, io: Io, repo: *Repository, store: *const
     for (index.entries.items) |*entry| {
         if (entry.stage != 0 or entry.skip_worktree) continue;
         if (entry.mode != .file and entry.mode != .exec) continue;
-        const header = repo.objectDatabase().readHeader(io, entry.oid) catch continue;
+        const header = repo.objectDatabase().readHeader(io, entry.oid) catch |err| switch (err) {
+            // An entry whose blob is not here (a partial clone's, its
+            // promisor unable to give it) is no pointer to check out, as
+            // git-lfs passes over a blob cat-file calls missing.
+            error.ObjectNotFound, error.PromisorFetchFailed => null,
+            else => |e| return e,
+        } orelse continue;
         if (header.size >= lfs.pointer_size_cutoff or header.size == 0) continue;
         const found = try repo.objectDatabase().read(io, entry.oid);
         defer repo.objectDatabase().allocator().free(found.bytes);
-        const pointer = lfs.Pointer.decode(found.bytes) catch continue;
+        const pointer = lfs.Pointer.recognize(found.bytes) orelse continue;
         if (pointer.size == 0 or pointer.extension_count != 0) continue;
         // Only a file that is still exactly its pointer is replaced.
         const disk = (try fs.statAt(io, wt, entry.path)) orelse continue;
@@ -2517,7 +2538,7 @@ pub fn checkoutPointers(gpa: Allocator, io: Io, repo: *Repository, store: *const
         defer gpa.free(on_disk);
         if (!std.mem.eql(u8, on_disk, found.bytes)) {
             var canonical_buf: [lfs.Pointer.max_encoded_len]u8 = undefined;
-            const canonical = pointer.encodeBuf(&canonical_buf) catch continue;
+            const canonical = pointer.encodeBuf(&canonical_buf) catch aegis.assert.never("a pointer decode made fits its encoding");
             if (!std.mem.eql(u8, on_disk, canonical)) continue;
         }
         var owned = (try store.open(io, &pointer)) orelse {
@@ -2552,7 +2573,7 @@ fn replaceWith(io: Io, wt: Io.Dir, path: []const u8, source: Io.File, executable
         var write_buf: [64 * 1024]u8 = undefined;
         var fw = out.writer(io, &write_buf);
         var read_buf: [64 * 1024]u8 = undefined;
-        var fr = source.reader(io, &read_buf);
+        var fr = lfs_input.stream(io, source, &read_buf);
         _ = fr.interface.streamRemaining(&fw.interface) catch |err| switch (err) {
             error.ReadFailed => return fr.err.?,
             error.WriteFailed => return fw.err.?,
@@ -2580,7 +2601,7 @@ pub fn pushObjects(io: Io, server: *lfsapi.Server, db: *odb_mod.Odb, pushed: []c
         if (header.type != .blob or header.size >= lfs.pointer_size_cutoff or header.size == 0) continue;
         const found = try db.read(io, e.oid);
         defer db.allocator().free(found.bytes);
-        const pointer = lfs.Pointer.decode(found.bytes) catch continue;
+        const pointer = lfs.Pointer.recognize(found.bytes) orelse continue;
         if (pointer.size == 0 or pointer.extension_count != 0) continue;
         try objects.append(arena, .of(pointer, e.hint));
     }
@@ -2623,13 +2644,13 @@ test "a batch request is written as git-lfs writes one" {
 
 test "a Retry-After longer than lfs.transfer.maxRetryTime fails the retry, however long it is" {
     const l: Limits = .{ .batch_size = 100, .max_retries = 8, .max_retry_delay = .fromRaw(10), .max_retry_time = .fromRaw(300), .max_verifies = 3, .concurrency = 8, .allow_incomplete_push = false };
-    try testing.expectEqual(@as(i64, 250), l.retryDelay(1, null).?.toMilliseconds());
-    try testing.expectEqual(@as(i64, 300), l.retryDelay(1, lfsapi.parseRetryAfter("300", null)).?.toSeconds());
-    try testing.expectEqual(@as(?Io.Duration, null), l.retryDelay(1, lfsapi.parseRetryAfter("301", null)));
+    try testing.expect(l.retryDelay(1, null).?.eql(Limits.Millis.fromRaw(250).convert(.nanosecond, i96, .exact)));
+    try testing.expect(l.retryDelay(1, lfsapi.parseRetryAfter("300", null)).?.eql(Limits.Seconds.fromRaw(300).convert(.nanosecond, i96, .exact)));
+    try testing.expectEqual(@as(?Limits.Nanos, null), l.retryDelay(1, lfsapi.parseRetryAfter("301", null)));
     // Past a u32 of seconds is still a wait, and fails rather than retrying
     // on the backoff.
-    try testing.expectEqual(@as(?Io.Duration, null), l.retryDelay(1, lfsapi.parseRetryAfter("4294967296", null)));
-    try testing.expectEqual(@as(?Io.Duration, null), l.retryDelay(1, lfsapi.parseRetryAfter("18446744073709551615", null)));
+    try testing.expectEqual(@as(?Limits.Nanos, null), l.retryDelay(1, lfsapi.parseRetryAfter("4294967296", null)));
+    try testing.expectEqual(@as(?Limits.Nanos, null), l.retryDelay(1, lfsapi.parseRetryAfter("18446744073709551615", null)));
 }
 
 test "the backoff is git-lfs's: a quarter second, doubling, capped" {

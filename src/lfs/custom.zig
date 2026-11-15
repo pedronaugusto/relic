@@ -114,7 +114,7 @@ pub fn configured(arena: Allocator, config: *const config_mod.Config) Configured
             }
         }.get;
         const path = try value(arena, config, &key_buf, name, "path") orelse continue;
-        const concurrent_key = std.mem.print(&key_buf, "lfs.customtransfer.{s}.concurrent", .{name}) catch continue;
+        const concurrent_key = try arena.print("lfs.customtransfer.{s}.concurrent", .{name});
         // tq's custom adapters read it through git-lfs's config.Bool.
         const concurrent = lfs_settings.configBool(lfs_settings.configValue(config, concurrent_key) orelse "", true);
         try out.append(arena, .{
