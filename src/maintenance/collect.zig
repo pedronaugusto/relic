@@ -213,8 +213,8 @@ pub fn collect(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self
         if (s.aggressive_depth > 0) plan.pack.?.depth = std.math.cast(u32, s.aggressive_depth) orelse std.math.maxInt(u32);
         if (s.aggressive_window > 0) plan.pack.?.window = std.math.cast(u32, s.aggressive_window) orelse std.math.maxInt(u32);
     }
-    try repackFilter(arena, io, repo, options, &plan);
-    defer if (options.filter == null) if (plan.filter_to) |to| to.dir.close(io);
+    const filter_dir = try repackFilter(arena, io, repo, options, &plan);
+    defer if (filter_dir) |opened| opened.close(io);
     const detach = options.detach orelse (options.auto and s.detach_auto);
     if (options.auto) {
         if (!try needToGc(arena, io, repo, &s, &plan)) return .{ .outcome = .not_needed };
@@ -290,22 +290,26 @@ pub fn foreground(gpa: Allocator, io: Io, repo: *Repository, clock: date.Context
 
 /// `gc.repackFilter` and `gc.repackFilterTo` on `plan`, as
 /// `add_repack_all_option` passes them, unless the caller gave a filter.
-fn repackFilter(arena: Allocator, io: Io, repo: *Repository, options: Options, plan: *repack_mod.Options) Self.Error!void {
+/// The directory it opens for `gc.repackFilterTo`, if any, is the caller's
+/// to close once the repack is done.
+fn repackFilter(arena: Allocator, io: Io, repo: *Repository, options: Options, plan: *repack_mod.Options) Self.Error!?Io.Dir {
     if (options.filter) |f| {
         plan.filter = f;
-        return;
+        return null;
     }
     const config = repo.configuration();
-    const text = config.get("gc.repackfilter") orelse return;
-    if (text.len == 0) return;
+    const text = config.get("gc.repackfilter") orelse return null;
+    if (text.len == 0) return null;
     const spec = try filter_spec.parse(arena, text);
     var lookup: NamedBlob = .{ .arena = arena, .io = io, .repo = repo };
     plan.filter = try filter_spec.toWalk(arena, spec, &lookup);
-    const to = config.get("gc.repackfilterto") orelse return;
-    if (to.len == 0) return;
+    const to = config.get("gc.repackfilterto") orelse return null;
+    if (to.len == 0) return null;
     // A path and the start of the packs' names, as pack-objects takes it.
     const dir_name = std.Io.Dir.path.dirname(to) orelse ".";
-    plan.filter_to = .{ .dir = try Io.Dir.cwd().openDir(io, dir_name, .{}), .prefix = std.Io.Dir.path.basename(to) };
+    const opened = try Io.Dir.cwd().openDir(io, dir_name, .{});
+    plan.filter_to = .{ .dir = .of(opened), .prefix = std.Io.Dir.path.basename(to) };
+    return opened;
 }
 
 /// A `sparse:oid=` blob by its full object name: what maintenance, below

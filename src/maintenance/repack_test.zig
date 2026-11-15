@@ -872,7 +872,7 @@ test "repack --cruft -d --expire-to writes what goes into a cruft pack of its ow
     defer expired.close(io);
     var pack_options = native.objectDatabase().packOptions();
     pack_options.threads = 1;
-    const report = try repack_mod.repack(gpa, io, &native, .{ .mode = .cruft, .delete = true, .cruft_expiration = .fromRaw(now - 14 * day), .expire_to = .{ .dir = expired }, .pack = pack_options });
+    const report = try repack_mod.repack(gpa, io, &native, .{ .mode = .cruft, .delete = true, .cruft_expiration = .fromRaw(now - 14 * day), .expire_to = .{ .dir = .of(expired) }, .pack = pack_options });
     try std.testing.expectEqual(@as(u32, 1), report.expired_written);
     const expected_expired = try expiredPacks(&theirs, "expired");
     defer gpa.free(expected_expired);
@@ -925,7 +925,7 @@ test "repack --filter puts what the filter leaves out into a pack of its own, as
         defer filtered.close(io);
         var pack_options = native.objectDatabase().packOptions();
         pack_options.threads = 1;
-        const report = try repack_mod.repack(gpa, io, &native, .{ .mode = .all, .delete = true, .filter = .blob_none, .filter_to = if (elsewhere) .{ .dir = filtered } else null, .pack = pack_options });
+        const report = try repack_mod.repack(gpa, io, &native, .{ .mode = .all, .delete = true, .filter = .blob_none, .filter_to = if (elsewhere) .{ .dir = .of(filtered) } else null, .pack = pack_options });
         try std.testing.expectEqual(@as(u32, 1), report.filtered_written);
         const expected = try state(&theirs);
         defer gpa.free(expected);

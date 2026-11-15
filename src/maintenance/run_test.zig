@@ -374,10 +374,10 @@ test "maintenance register and unregister write what git's write" {
     try theirs.exec(io, &.{ "maintenance", "register", "--config-file", global_path });
     var native = try repo_mod.Repository.open(gpa, io, ours.dir, .{});
     defer native.deinit(io);
-    try run_mod.register(gpa, io, &native, .{ .dir = ours.dir, .sub_path = "global" });
+    try run_mod.register(gpa, io, &native, .{ .dir = .of(ours.dir), .sub_path = "global" });
     // A file outside the configuration is not read for the check, so git
     // lists the repository again.
-    try run_mod.register(gpa, io, &native, .{ .dir = ours.dir, .sub_path = "global" });
+    try run_mod.register(gpa, io, &native, .{ .dir = .of(ours.dir), .sub_path = "global" });
     for ([_][]const u8{ "maintenance.auto", "maintenance.strategy" }) |key| {
         const expected = try theirs.line(io, &.{ "config", "--local", key });
         defer gpa.free(expected);
@@ -397,14 +397,14 @@ test "maintenance register and unregister write what git's write" {
     try std.testing.expectEqualStrings(expected, ours_file);
 
     try theirs.exec(io, &.{ "maintenance", "unregister", "--config-file", global_path });
-    try run_mod.unregister(gpa, io, &native, .{ .dir = ours.dir, .sub_path = "global" });
+    try run_mod.unregister(gpa, io, &native, .{ .dir = .of(ours.dir), .sub_path = "global" });
     const theirs_after = try theirs.readFile(io, "global");
     defer gpa.free(theirs_after);
     const ours_after = try ours.readFile(io, "global");
     defer gpa.free(ours_after);
     try std.testing.expectEqualStrings(theirs_after, ours_after);
-    try std.testing.expectError(error.NotRegistered, run_mod.unregister(gpa, io, &native, .{ .dir = ours.dir, .sub_path = "global" }));
-    try run_mod.unregister(gpa, io, &native, .{ .dir = ours.dir, .sub_path = "global", .force = true });
+    try std.testing.expectError(error.NotRegistered, run_mod.unregister(gpa, io, &native, .{ .dir = .of(ours.dir), .sub_path = "global" }));
+    try run_mod.unregister(gpa, io, &native, .{ .dir = .of(ours.dir), .sub_path = "global", .force = true });
 }
 
 test "the prefetch task fetches each remote into refs/prefetch/ as git's" {

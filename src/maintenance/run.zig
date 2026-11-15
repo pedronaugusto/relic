@@ -563,7 +563,8 @@ fn geometricRepack(gpa: Allocator, io: Io, repo: *Repository, options: RunOption
 /// The file `register` and `unregister` write `maintenance.repo` in: git's
 /// global file (`user_config.Locations.globalFile`), or `--config-file`.
 pub const RegisterOptions = struct {
-    dir: Io.Dir,
+    /// Where `sub_path` is, the caller's to close.
+    dir: aegis.own.Unowned(Io.Dir),
     sub_path: []const u8,
     /// `unregister --force`: a repository that is not registered is no
     /// failure.
@@ -591,7 +592,7 @@ pub fn register(gpa: Allocator, io: Io, repo: *Repository, options: RegisterOpti
     if (!repo.configuration().has("maintenance.strategy")) try edits.append(gpa, .{ .set = .{ .name = "maintenance.strategy", .value = "incremental" } });
     _ = try repo.writeConfig(io, .local, edits.items, .{});
     if (listed(repo.configuration(), path)) return;
-    _ = try config_write.editFile(gpa, io, options.dir, options.sub_path, .global, .{}, &.{.{ .add = .{ .name = "maintenance.repo", .value = path } }});
+    _ = try config_write.editFile(gpa, io, options.dir.get(), options.sub_path, .global, .{}, &.{.{ .add = .{ .name = "maintenance.repo", .value = path } }});
     _ = try repo.refreshConfig(io, .{});
 }
 
@@ -601,7 +602,7 @@ pub fn register(gpa: Allocator, io: Io, repo: *Repository, options: RegisterOpti
 pub fn unregister(gpa: Allocator, io: Io, repo: *Repository, options: RegisterOptions) Self.RegisterError!void {
     var path_buf: [Io.Dir.max_path_bytes]u8 = undefined;
     const path = try maintenancePath(io, repo, &path_buf);
-    const text = (try fs.readFileAlloc(gpa, io, options.dir, options.sub_path, 1 << 24)) orelse "";
+    const text = (try fs.readFileAlloc(gpa, io, options.dir.get(), options.sub_path, 1 << 24)) orelse "";
     defer if (text.len != 0) gpa.free(text);
     var file = try config_mod.Config.parseText(gpa, text, .global);
     defer file.deinit();
@@ -609,7 +610,7 @@ pub fn unregister(gpa: Allocator, io: Io, repo: *Repository, options: RegisterOp
         if (options.force) return;
         return error.NotRegistered;
     }
-    _ = try config_write.editFile(gpa, io, options.dir, options.sub_path, .global, .{}, &.{.{ .unset = .{ .name = "maintenance.repo", .value = path } }});
+    _ = try config_write.editFile(gpa, io, options.dir.get(), options.sub_path, .global, .{}, &.{.{ .unset = .{ .name = "maintenance.repo", .value = path } }});
     _ = try repo.refreshConfig(io, .{});
 }
 

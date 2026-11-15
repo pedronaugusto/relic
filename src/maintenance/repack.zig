@@ -10,6 +10,7 @@
 
 const Self = @This();
 const std = @import("std");
+const aegis = @import("aegis");
 const date = @import("../text.zig").date;
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
@@ -69,7 +70,7 @@ pub const Options = struct {
     /// to go -- every object of the packs taken away and every loose one
     /// that no new pack holds -- written first into a cruft pack of its
     /// own in `dir`, named `<prefix>-<name>.pack`, as git's `--expire-to=<dir>/<prefix>`.
-    expire_to: ?struct { dir: Io.Dir, prefix: []const u8 = "pack" } = null,
+    expire_to: ?struct { dir: aegis.own.Unowned(Io.Dir), prefix: []const u8 = "pack" } = null,
     /// `--max-cruft-size`: the largest cruft pack written; `null` takes
     /// `max_pack_bytes`.
     max_cruft_bytes: ?u64 = null,
@@ -112,7 +113,7 @@ pub const Options = struct {
     filter: object_walk.Filter = .none,
     /// `--filter-to`: that pack in `dir`, named `<prefix>-<name>.pack`, in
     /// place of beside the others.
-    filter_to: ?struct { dir: Io.Dir, prefix: []const u8 = "pack" } = null,
+    filter_to: ?struct { dir: aegis.own.Unowned(Io.Dir), prefix: []const u8 = "pack" } = null,
     /// `--drop-filtered`, git 2.56's, with `-a` or `-A` and a `blob_limit`
     /// `filter`: the promisor blobs that filter leaves out
     /// (`dropCandidates`, refused as it refuses) are dropped where they
@@ -303,7 +304,7 @@ pub fn repack(gpa: Allocator, io: Io, repo: *Repository, asked: Options) Self.Er
         .main_options = pack_options,
         .pack_kept = options.pack_kept_objects orelse try lastBool(config, &.{"repack.packkeptobjects"}) orelse (bitmaps == true and !options.write_midx),
         .max_pack = if (options.max_pack_bytes orelse try sizeSetting(config, "pack.packsizelimit")) |limit| @max(limit, 1 << 20) else null,
-        .pack_dir = pack_dir,
+        .pack_dir = .of(pack_dir),
         .existing = try collectExisting(gpa, arena, io, db, options.keep_packs),
         .drop = &drop,
     };
@@ -349,7 +350,7 @@ pub fn repack(gpa: Allocator, io: Io, repo: *Repository, asked: Options) Self.Er
             var to_options = cruft_options;
             to_options.prefix = to.prefix;
             var elsewhere: std.ArrayList([]const u8) = .empty;
-            run.report.expired_written = try writeCruft(gpa, arena, io, repo, &run.existing, fresh.items, &elsewhere, expired_options, to_options, limit, to.dir);
+            run.report.expired_written = try writeCruft(gpa, arena, io, repo, &run.existing, fresh.items, &elsewhere, expired_options, to_options, limit, to.dir.get());
         };
     }
     if (options.filter != .none) try run.writeFiltered();
@@ -374,7 +375,8 @@ const Run = struct {
     main_options: odb_mod.PackOptions,
     pack_kept: bool,
     max_pack: ?u64,
-    pack_dir: Io.Dir,
+    /// The object database's pack directory, which `repack` opens and closes.
+    pack_dir: aegis.own.Unowned(Io.Dir),
     existing: Existing,
     report: Report = .{},
     /// The packs written of what is not cruft, by base name.
@@ -411,7 +413,7 @@ const Run = struct {
             }
         }
         if (entries.items.len == 0) return;
-        const written = try run.db.writePack(run.io, run.pack_dir, entries.items, run.pack_options);
+        const written = try run.db.writePack(run.io, run.pack_dir.get(), entries.items, run.pack_options);
         try run.db.writePromisor(run.io, written.name, "", .replace);
         try run.fresh.append(run.arena, try baseName(run.arena, written.name));
         run.report.packs_written += 1;
@@ -431,7 +433,7 @@ const Run = struct {
         // `--keep-pack`'s packs, which `--pack-kept-objects` does not reach.
         var keep_pack_objects: Oid.Set = .empty;
         defer keep_pack_objects.deinit(gpa);
-        for (run.existing.kept.items) |name| if (!(try hasKeepFile(run.io, run.pack_dir, name))) try addPackObjects(gpa, db, name, &keep_pack_objects);
+        for (run.existing.kept.items) |name| if (!(try hasKeepFile(run.io, run.pack_dir.get(), name))) try addPackObjects(gpa, db, name, &keep_pack_objects);
         for (collected.entries) |entry| {
             if (run.promised.contains(entry.oid)) continue;
             if (keep_pack_objects.contains(entry.oid) or (!run.pack_kept and run.kept_objects.contains(entry.oid))) {
@@ -454,7 +456,7 @@ const Run = struct {
             }
         }
         if (entries.items.len == 0) return null;
-        const reports = try writeLimited(db, run.io, run.pack_dir, entries.items, run.main_options, run.max_pack);
+        const reports = try writeLimited(db, run.io, run.pack_dir.get(), entries.items, run.main_options, run.max_pack);
         defer db.allocator().free(reports);
         for (reports) |written| try run.fresh.append(run.arena, try baseName(run.arena, written.name));
         run.report.packs_written += @intCast(reports.len);
@@ -490,8 +492,8 @@ const Run = struct {
         var options = run.pack_options;
         const dir = if (run.options.filter_to) |to| blk: {
             options.prefix = to.prefix;
-            break :blk to.dir;
-        } else run.pack_dir;
+            break :blk to.dir.get();
+        } else run.pack_dir.get();
         const reports = try writeLimited(db, run.io, dir, entries.items, options, run.max_pack);
         defer db.allocator().free(reports);
         // Beside the others, they are packs this repack keeps.
@@ -530,7 +532,7 @@ const Run = struct {
         if (g.promisor_split != 0) {
             const entries = try run.rollUp(g.promisor, g.promisor_split, false);
             if (entries.len != 0) {
-                const reports = try writeLimited(run.db, run.io, run.pack_dir, entries, run.pack_options, run.max_pack);
+                const reports = try writeLimited(run.db, run.io, run.pack_dir.get(), entries, run.pack_options, run.max_pack);
                 defer run.db.allocator().free(reports);
                 for (reports) |written| {
                     try run.db.writePromisor(run.io, written.name, "", .replace);
@@ -541,7 +543,7 @@ const Run = struct {
         }
         const entries = try run.rollUp(g.packs, g.split, true);
         if (entries.len == 0) return null;
-        const reports = try writeLimited(run.db, run.io, run.pack_dir, entries, run.main_options, run.max_pack);
+        const reports = try writeLimited(run.db, run.io, run.pack_dir.get(), entries, run.main_options, run.max_pack);
         defer run.db.allocator().free(reports);
         for (reports) |written| try run.fresh.append(run.arena, try baseName(run.arena, written.name));
         run.report.packs_written += @intCast(reports.len);
@@ -559,7 +561,7 @@ const Run = struct {
         defer skip.deinit(gpa);
         for (packs[split..]) |p| try addPackObjects(gpa, db, p.name, &skip);
         for (run.existing.kept.items) |name| {
-            const keep_file = try hasKeepFile(run.io, run.pack_dir, name);
+            const keep_file = try hasKeepFile(run.io, run.pack_dir.get(), name);
             if ((keep_file and !run.pack_kept) or (!keep_file and main)) try addPackObjects(gpa, db, name, &skip);
         }
         var entries: std.ArrayList(odb_mod.PackEntry) = .empty;
@@ -640,8 +642,10 @@ const Run = struct {
         // `remove_redundant_bitmaps`.
         for (include.items) |name| {
             var name_buf: [Io.Dir.max_name_bytes]u8 = undefined;
-            const file = std.mem.print(&name_buf, "{s}.bitmap", .{name}) catch continue;
-            run.pack_dir.deleteFile(run.io, file) catch |err| switch (err) {
+            // A pack named too long for its bitmap's name to be a file's has none.
+            if (name.len + ".bitmap".len > name_buf.len) continue;
+            const file = std.mem.print(&name_buf, "{s}.bitmap", .{name}) catch aegis.assert.never("the name and its extension fit, as checked above");
+            run.pack_dir.get().deleteFile(run.io, file) catch |err| switch (err) {
                 error.FileNotFound => {},
                 else => |e| return e,
             };

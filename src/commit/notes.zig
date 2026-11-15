@@ -128,18 +128,24 @@ pub fn expandRef(gpa: Allocator, ref: []const u8) Allocator.Error![]u8 {
 // ---------------------------------------------------------------------------
 // The notes tree in memory: git's `notes.c`.
 
-const Leaf = struct {
+/// A note or a subtree in the tree: git's `struct leaf_node`. Part of the
+/// layout of a `Notes`, which holds its tree; read and changed only here.
+pub const Leaf = struct {
     /// The object's name for a note. For a subtree, the prefix its path
     /// spells, zero-padded, with the prefix's length in the last byte.
     key: [hash.max_raw_len]u8,
     val: Oid,
 };
 
-const IntNode = struct {
+/// A level of the tree, sixteen ways on the next digit of the name: git's
+/// `struct int_node`. A `Notes` holds its root.
+pub const IntNode = struct {
     a: [16]Ptr = @splat(.empty),
 };
 
-const Ptr = union(enum) {
+/// What one way of an `IntNode` holds: nothing, a deeper level, a note or a
+/// subtree not yet read.
+pub const Ptr = union(enum) {
     empty,
     internal: *IntNode,
     note: *Leaf,
@@ -175,7 +181,9 @@ pub const Notes = struct {
     /// Where `writeTree` has got to in the non-notes, while it writes.
     writing: ?Writing = null,
 
-    const Writing = struct { next_non_note: usize = 0 };
+    /// Where `writeTree` has got to, while it writes: the first non-note it
+    /// has not yet written.
+    pub const Writing = struct { next_non_note: usize = 0 };
 
     fn rawLen(t: *const Notes) usize {
         return t.repo.objectFormat().rawLen();
