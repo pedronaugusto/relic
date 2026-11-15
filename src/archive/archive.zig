@@ -31,7 +31,7 @@ const std = @import("std");
 const aegis = @import("aegis");
 const warp = @import("warp");
 const Allocator = std.mem.Allocator;
-const assert = std.debug.assert;
+const assert = aegis.assert;
 const Io = std.Io;
 
 const hash = @import("../hash/hash.zig");
@@ -150,8 +150,8 @@ fn isBuiltinFilter(name: []const u8) bool {
 /// A filter git registers: one with a command, configured or built in.
 fn appendFilter(gpa: Allocator, config: *const config_mod.Config, name: []const u8, out: *std.ArrayList(Named)) (Allocator.Error || config_mod.ValueError)!void {
     if (filterCommand(config, name) == null) return;
-    var key_buf: [256]u8 = undefined;
-    const key = std.mem.print(&key_buf, "tar.{s}.remote", .{name}) catch return;
+    const key = try gpa.print("tar.{s}.remote", .{name});
+    defer gpa.free(key);
     try out.append(gpa, .{ .name = name, .format = .{ .filtered = name }, .remote = try config.getBool(key, isBuiltinFilter(name)) });
 }
 
@@ -249,8 +249,8 @@ const Tar = struct {
             @memset(t.block[t.offset..][0 .. record_size - tail], 0);
             t.offset += record_size - tail;
         }
-        assert(t.offset % record_size == 0);
-        assert(t.offset <= block_size);
+        assert.invariant(t.offset % record_size == 0, "a record ends on a record");
+        assert.invariant(t.offset <= block_size, "a record ends within the block");
         try t.writeIfNeeded();
     }
 
@@ -295,14 +295,14 @@ const Header = extern struct {
 };
 
 comptime {
-    assert(@sizeOf(Header) == 500);
+    if (@sizeOf(Header) != 500) @compileError("a tar header is 500 bytes");
     // A header is one record, padded; records fill a block exactly, so a
     // block written whole ends on a record.
-    assert(@sizeOf(Header) <= record_size);
-    assert(block_size % record_size == 0);
+    if (@sizeOf(Header) > record_size) @compileError("a tar header fits one record");
+    if (block_size % record_size != 0) @compileError("records fill a block exactly");
     // `prepareHeader` sums the checksum field as spaces by these offsets.
-    assert(@offsetOf(Header, "chksum") == 148);
-    assert(@sizeOf(@FieldType(Header, "chksum")) == 8);
+    if (@offsetOf(Header, "chksum") != 148) @compileError("the checksum field is at 148");
+    if (@sizeOf(@FieldType(Header, "chksum")) != 8) @compileError("the checksum field is 8 bytes");
 }
 
 fn octal(field: []u8, value: u64) void {
@@ -477,7 +477,7 @@ fn deflateRaw(gpa: Allocator, data: []const u8, level: ?u4) Allocator.Error![]u8
     const frame: warp.Compressor.Frame = .{ .container = .raw };
     const out = try gpa.alloc(u8, warp.Compressor.bound(data.len, frame));
     errdefer gpa.free(out);
-    const n = compress.compress(data, out, frame) catch unreachable; // unreachable: bound reserves the complete stream
+    const n = compress.compress(data, out, frame) catch aegis.assert.never("`out` is warp's bound for the stream, which a complete stream never passes");
     return gpa.realloc(out, n);
 }
 
@@ -598,7 +598,7 @@ fn zipEntry(z: *Zip, path: []const u8, mode: u32, body: Body) Error!void {
     try z.le(&header, 2, path.len);
     try z.le(&header, 2, extra.len + if (zip64) @as(usize, 20) else 0);
     // The local header is fixed at thirty bytes before its name and extra.
-    assert(header.items.len == 30);
+    assert.invariant(header.items.len == 30, "a local header is thirty bytes before its name");
     if (zip64) {
         try z.le(&header, 2, 0x0001);
         try z.le(&header, 2, 16);
@@ -762,7 +762,7 @@ fn zipDirectoryEntry(z: *Zip, e: DirEntry) Error!void {
     }
     // A central directory record is forty-six bytes, then the name and the
     // extra fields; the trailer counts the directory by these.
-    assert(z.dir.items.len - dir_start == 46 + e.path.len + dir_extra_len);
+    assert.invariant(z.dir.items.len - dir_start == 46 + e.path.len + dir_extra_len, "a central directory record is forty-six bytes, its name and its extra fields");
     z.entries += 1;
 }
 
@@ -779,7 +779,7 @@ fn zipTrailer(z: *Zip, commit: ?Oid) Error!void {
     const comment: []const u8 = if (commit) |c| c.hex(&hex) else "";
     try z.le(&t, 2, comment.len);
     // The end record is twenty-two bytes, the comment after it.
-    assert(t.items.len == 22);
+    assert.invariant(t.items.len == 22, "the end record is twenty-two bytes before its comment");
     try z.w.writeAll(z.dir.items);
     // A count or an offset the end record cannot hold: git's
     // `write_zip64_trailer`, the zip64 end record and its locator before it.
@@ -800,7 +800,7 @@ fn zipTrailer(z: *Zip, commit: ?Oid) Error!void {
         try z.le(&t64, 8, z.offset + z.dir.items.len);
         try z.le(&t64, 4, 1);
         // Fifty-six bytes of record, twenty of locator.
-        assert(t64.items.len == 76);
+        assert.invariant(t64.items.len == 76, "the zip64 end record and its locator are seventy-six bytes");
         try z.w.writeAll(t64.items);
     }
     try z.w.writeAll(t.items);
