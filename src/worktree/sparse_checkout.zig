@@ -21,7 +21,7 @@ const Self = @This();
 
 const std = @import("std");
 const aegis = @import("aegis");
-const assert = std.debug.assert;
+const assert = aegis.assert;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -506,10 +506,10 @@ fn normalizeDirectory(arena: Allocator, raw: []const u8) Error!?[]const u8 {
     const joined = try std.mem.join(arena, "/", parts.items);
     // A cone directory as `renderCone` writes it between slashes: no empty
     // component, and no slash at either end.
-    assert(joined.len != 0);
-    assert(joined[0] != '/');
-    assert(joined[joined.len - 1] != '/');
-    assert(std.mem.find(u8, joined, "//") == null);
+    assert.invariant(joined.len != 0, "a cone directory has a component");
+    assert.invariant(joined[0] != '/', "a cone directory does not begin with a slash");
+    assert.invariant(joined[joined.len - 1] != '/', "a cone directory does not end with a slash");
+    assert.invariant(std.mem.find(u8, joined, "//") == null, "a cone directory has no empty component");
     return joined;
 }
 
@@ -671,9 +671,9 @@ const Twin = struct {
     fn expectSame(t: *Twin, io: Io) !void {
         const gpa = t.ours.gpa;
         for ([_][]const u8{ ".git/info/sparse-checkout", ".git/config.worktree", ".git/config" }) |path| {
-            const a = try readOptional(gpa, io, t.theirs.dir, path);
+            const a = try t.theirs.readOptional(io, path);
             defer if (a) |bytes| gpa.free(bytes);
-            const b = try readOptional(gpa, io, t.ours.dir, path);
+            const b = try t.ours.readOptional(io, path);
             defer if (b) |bytes| gpa.free(bytes);
             expectOptional(a, b) catch |err| {
                 std.log.err("{s} differs", .{path});
@@ -713,13 +713,6 @@ const Twin = struct {
         try std.testing.expectEqualStrings(a, b);
     }
 };
-
-fn readOptional(gpa: Allocator, io: Io, dir: Io.Dir, path: []const u8) !?[]u8 {
-    return aegis.own.readFile(io, dir, path, gpa, aegis.units.Bytes(u64).fromRaw(1 << 20)) catch |err| switch (err) {
-        error.FileNotFound => null,
-        else => |e| return e,
-    };
-}
 
 fn expectOptional(a: ?[]const u8, b: ?[]const u8) !void {
     if (a == null or b == null) return std.testing.expectEqual(a == null, b == null);
@@ -1053,9 +1046,9 @@ test "a linked worktree gets its own patterns and its own configuration" {
         ".git/worktrees/linked/info/sparse-checkout",
         ".git/info/sparse-checkout",
     }) |path| {
-        const a = try readOptional(gpa, io, twin.theirs.dir, path);
+        const a = try twin.theirs.readOptional(io, path);
         defer if (a) |bytes| gpa.free(bytes);
-        const b = try readOptional(gpa, io, twin.ours.dir, path);
+        const b = try twin.ours.readOptional(io, path);
         defer if (b) |bytes| gpa.free(bytes);
         expectOptional(a, b) catch |err| {
             std.log.err("{s} differs", .{path});
@@ -1092,9 +1085,9 @@ test "a bare repository's core.bare moves where git moves it" {
         _ = try set(io, &repo, &.{}, .{ .cone = true });
     }
     for ([_][]const u8{ "config", "config.worktree", "worktrees/linked/config.worktree" }) |path| {
-        const a = try readOptional(gpa, io, twin.theirs.dir, path);
+        const a = try twin.theirs.readOptional(io, path);
         defer if (a) |bytes| gpa.free(bytes);
-        const b = try readOptional(gpa, io, twin.ours.dir, path);
+        const b = try twin.ours.readOptional(io, path);
         defer if (b) |bytes| gpa.free(bytes);
         expectOptional(a, b) catch |err| {
             std.log.err("{s} differs", .{path});

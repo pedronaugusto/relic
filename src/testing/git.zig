@@ -276,6 +276,14 @@ pub const Repo = struct {
     pub fn readFile(r: *Repo, io: Io, path: []const u8) ![]u8 {
         return r.dir.readFileAlloc(io, path, r.gpa, .limited(64 << 20));
     }
+
+    /// `readFile`, or `null` for a file that is not there.
+    pub fn readOptional(r: *Repo, io: Io, path: []const u8) !?[]u8 {
+        return r.readFile(io, path) catch |err| switch (err) {
+            error.FileNotFound => null,
+            else => |e| return e,
+        };
+    }
 };
 
 /// `default_settings` without `core.autocrlf=false`, for a test that sets
