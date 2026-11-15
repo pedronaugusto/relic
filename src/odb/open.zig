@@ -21,7 +21,7 @@ pub fn empty(comptime Odb: type, gpa: Allocator, io: Io, kind: hash.Kind, option
 /// held with it.
 pub fn register(io: Io, db: anytype, dir: *fs.OwnedDir, writable: bool) odb.Error!void {
     errdefer dir.deinit(io);
-    const data = storage.get(db.state);
+    const data = db.state;
     const gpa = data.gpa;
     const real_path = try realPath(gpa, io, dir.borrow().*);
     errdefer gpa.free(real_path);
@@ -60,7 +60,7 @@ pub fn openOwn(comptime Odb: type, gpa: Allocator, io: Io, git_dir: Io.Dir, kind
     var objects = fs.OwnedDir.init(try git_dir.openDir(io, "objects", .{ .iterate = true }));
     try register(io, &db, &objects, true);
     try db.refresh(io);
-    if (options.probe_timestamp_resolution) db.timestamp_resolution = try fs.probeTimestampResolution(io, storage.get(db.state).sources.items[0].directory());
+    if (options.probe_timestamp_resolution) db.timestamp_resolution = try fs.probeTimestampResolution(io, db.state.sources.items[0].directory());
     return db;
 }
 

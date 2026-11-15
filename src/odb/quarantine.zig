@@ -16,6 +16,7 @@
 
 const ErrorNamespace = @This();
 const std = @import("std");
+const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -37,7 +38,7 @@ pub const Quarantine = struct {
     /// Reads the quarantine, then the repository; writes the quarantine.
     db: Odb,
     /// The repository's `objects`, borrowed.
-    objects: Io.Dir,
+    objects: aegis.own.Unowned(Io.Dir),
     /// The quarantine directory's name under `objects`.
     name_buf: [64]u8,
     name_len: usize,
@@ -67,7 +68,7 @@ pub const Quarantine = struct {
     /// Make the directory beside `main`'s objects and open a database on it.
     pub fn begin(gpa: Allocator, io: Io, main: *Odb, purpose: Purpose) ErrorNamespace.Error!Quarantine {
         const objects = main.objectsDirectory();
-        var q: Quarantine = .{ .gpa = gpa, .db = undefined, .objects = objects, .name_buf = undefined, .name_len = 0, .path = &.{}, .objects_path = &.{}, .shared = main.sharedPermissions() };
+        var q: Quarantine = .{ .gpa = gpa, .db = undefined, .objects = .of(objects), .name_buf = undefined, .name_len = 0, .path = &.{}, .objects_path = &.{}, .shared = main.sharedPermissions() };
         const dir_name = fs.tempName(io, &q.name_buf, purpose.prefix());
         q.name_len = dir_name.len;
         try objects.createDir(io, dir_name, .default_dir);
@@ -120,7 +121,7 @@ pub const Quarantine = struct {
     /// the caller lets it go, so nothing prunes it before a ref names it.
     /// The quarantine is gone afterwards; `main` reads what it held.
     pub fn migrate(q: *Quarantine, io: Io, main: *Odb, keeps: *std.ArrayList(keep.Token)) ErrorNamespace.Error!void {
-        var dir = try q.objects.openDir(io, q.name(), .{ .iterate = true });
+        var dir = try q.objects.get().openDir(io, q.name(), .{ .iterate = true });
         defer dir.close(io);
         var it = dir.iterate();
         while (try it.next(io)) |entry| {
@@ -169,8 +170,8 @@ pub const Quarantine = struct {
     fn moveLoose(q: *Quarantine, io: Io, dir: Io.Dir, fanout: []const u8) ErrorNamespace.Error!void {
         var from = try dir.openDir(io, fanout, .{ .iterate = true });
         defer from.close(io);
-        try fs.makeDirs(io, q.objects, fanout, q.shared);
-        var to = try q.objects.openDir(io, fanout, .{});
+        try fs.makeDirs(io, q.objects.get(), fanout, q.shared);
+        var to = try q.objects.get().openDir(io, fanout, .{});
         defer to.close(io);
         var it = from.iterate();
         while (try it.next(io)) |entry| {
@@ -187,7 +188,7 @@ pub const Quarantine = struct {
         // What is left of a refused push is removed on a best-effort basis,
         // as git's tmp_objdir_destroy removes it; a cancel that lands in it
         // is put back for the caller's next cancelation point.
-        q.objects.deleteTree(io, q.name()) catch |err| if (err == error.Canceled) io.recancel();
+        q.objects.get().deleteTree(io, q.name()) catch |err| if (err == error.Canceled) io.recancel();
     }
 
     /// Release everything; a quarantine not migrated is discarded.

@@ -9,6 +9,7 @@ const Allocator = std.mem.Allocator;
 const hash = @import("../hash/hash.zig");
 const fs = @import("../fs/fs.zig");
 const warning = @import("../report.zig").warning;
+const store_input = @import("store_input.zig");
 
 pub const Error = fs.LockError || fs.CommitError || Io.Dir.OpenError || aegis.own.ReadFileError || Io.Dir.DeleteFileError || Allocator.Error;
 
@@ -40,9 +41,9 @@ pub const Token = struct {
         fn release(l: *const Listing, io: Io, dir: Io.Dir) ErrorNamespace.Error!void {
             const name = l.fileName();
             var buffer: [4096]u8 = undefined;
-            var lock = try fs.LockFile.open(l.gpa, io, dir, .{ .sub_path = name, .buffer = &buffer }, .{ .sync = .none, .on_contention = .{ .wait = .fromMilliseconds(1000) } });
+            var lock = try fs.LockFile.open(l.gpa, io, dir, .{ .sub_path = name, .buffer = &buffer }, .{ .sync = .none, .on_contention = .{ .wait = lock_wait } });
             defer lock.deinit(io);
-            const previous = try aegis.own.readFile(io, dir, name, l.gpa, aegis.units.Bytes(u64).fromRaw(1 << 20));
+            const previous = try store_input.file(io, dir, name, l.gpa, .keep_marker);
             defer l.gpa.free(previous);
             if (!std.mem.startsWith(u8, previous, header)) return;
             var lines = std.mem.splitScalar(u8, previous[header.len..], '\n');
@@ -62,6 +63,8 @@ pub const Token = struct {
 
     const header = "relic keep tokens v1\n";
     const affixes = "pack-.keep";
+    /// How long a token waits for another holder of the marker's lock.
+    const lock_wait = aegis.units.Duration(.millisecond, u32).literal("1000ms").toIoDuration();
 
     /// The directory handle is owned by this token, independent of the
     /// receiver's handle. Acquiring precedes publication of the pack index.
@@ -72,15 +75,14 @@ pub const Token = struct {
         errdefer dir.close(io);
         var listing: Listing = .{ .gpa = gpa, .name = undefined, .kind = oid.kind, .id = undefined };
         var hex: [hash.max_hex_len]u8 = undefined;
-        // unreachable: the buffer holds the maximum hex name and the fixed pack/keep affixes.
-        const name = std.mem.print(&listing.name, "pack-{s}.keep", .{oid.hex(&hex)}) catch unreachable;
+        const name = std.mem.print(&listing.name, "pack-{s}.keep", .{oid.hex(&hex)}) catch aegis.assert.never("the buffer holds the longest hex name and the pack-/.keep affixes");
         var random: [12]u8 = undefined;
         io.random(&random);
         listing.id = std.fmt.bytesToHex(random, .lower);
         var buffer: [4096]u8 = undefined;
-        var lock = try fs.LockFile.open(gpa, io, dir, .{ .sub_path = name, .buffer = &buffer }, .{ .sync = .none, .on_contention = .{ .wait = .fromMilliseconds(1000) } });
+        var lock = try fs.LockFile.open(gpa, io, dir, .{ .sub_path = name, .buffer = &buffer }, .{ .sync = .none, .on_contention = .{ .wait = lock_wait } });
         defer lock.deinit(io);
-        const previous = aegis.own.readFile(io, dir, name, gpa, aegis.units.Bytes(u64).fromRaw(1 << 20)) catch |err| switch (err) {
+        const previous = store_input.file(io, dir, name, gpa, .keep_marker) catch |err| switch (err) {
             error.FileNotFound => try gpa.dupe(u8, header),
             else => return err,
         };
@@ -114,8 +116,11 @@ pub const Token = struct {
         const protection = io.swapCancelProtection(.blocked);
         defer _ = io.swapCancelProtection(protection);
         defer t.dir.deinit(io);
-        // glint-ignore: Z026 -- on unwind the operation's own error is the one returned; a marker left keeps the objects protected
-        if (t.listing) |*listing| listing.release(io, t.dir.borrow().*) catch {};
+        // On unwind the operation's own error is the one returned, so a
+        // release that fails is git's `unlink_or_warn`: a warning, and the
+        // marker left on disk still protects the objects.
+        if (t.listing) |*listing| listing.release(io, t.dir.borrow().*) catch |err|
+            std.log.warn("unable to release '{s}': {t}", .{ listing.fileName(), err });
     }
 };
 

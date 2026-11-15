@@ -16,7 +16,7 @@ const fs = @import("../fs/fs.zig");
 pub const Error = odb.Error;
 const Stats = odb.Stats;
 
-pub const State = opaque {};
+/// The database's state, one allocation the `Odb` points at.
 pub const Data = struct {
     gpa: Allocator,
     kind: Kind,
@@ -39,17 +39,13 @@ pub const Data = struct {
     unsynced_objects_dir: bool = false,
 };
 
-pub fn get(state: *State) *Data {
-    return @ptrCast(@alignCast(state)); // create allocates each State as aligned Data.
-}
-
-pub fn create(gpa: Allocator, kind: Kind, options: odb.Options) Allocator.Error!*State {
+pub fn create(gpa: Allocator, kind: Kind, options: odb.Options) Allocator.Error!*Data {
     const data = try gpa.create(Data);
     errdefer gpa.destroy(data);
     var cache = try pack.Cache.init(gpa, options.delta_cache_bytes.raw());
     errdefer cache.deinit();
     data.* = .{ .gpa = gpa, .kind = kind, .options = options, .cache = cache };
-    return @ptrCast(data); // the opaque owner retains the allocated Data pointer.
+    return data;
 }
 
 /// The pack and the name it was opened under have one owner. Registration

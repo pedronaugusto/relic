@@ -305,6 +305,11 @@ fn fuzzOne(_: void, case: *shakedown.Case) anyerror!void {
     const drawn = scratch[0..shakedown.gen.intRange(case.source, usize, 0, scratch.len)];
     case.source.bytes(drawn);
     const bytes = try std.testing.allocator.dupe(u8, drawn);
-    var parsed = Index.parse(std.testing.allocator, .sha1, bytes, Oid.zero(.sha1), 1024) catch return;
+    var parsed = Index.parse(std.testing.allocator, .sha1, bytes, Oid.zero(.sha1), 1024) catch |err| switch (err) {
+        // Memory is no answer about the bytes: the case fails on it.
+        error.OutOfMemory => return err,
+        // Every other error names what is wrong with them.
+        else => return,
+    };
     parsed.deinit();
 }

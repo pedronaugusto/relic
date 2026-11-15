@@ -19,6 +19,7 @@ const Io = std.Io;
 const hash = @import("../hash/hash.zig");
 const fs = @import("../fs/fs.zig");
 const entry_mod = @import("pack/entry.zig");
+const store_input = @import("store_input.zig");
 
 const Oid = hash.Oid;
 
@@ -39,7 +40,7 @@ pub const ReadError = Allocator.Error || aegis.own.ReadFileError || error{
 /// checksum: so does this.
 pub fn read(gpa: Allocator, io: Io, dir: Io.Dir, sub_path: []const u8, count: u32) Self.ReadError![]u32 {
     const max = header_len + @as(usize, count) * 4 + 2 * hash.max_raw_len;
-    const bytes = aegis.own.readFile(io, dir, sub_path, gpa, aegis.units.Bytes(u64).fromRaw(max + 1)) catch |err| switch (err) {
+    const bytes = store_input.file(io, dir, sub_path, gpa, .{ .mtimes = .fromRaw(max + 1) }) catch |err| switch (err) {
         error.StreamTooLong => return error.InvalidMtimes,
         else => |e| return e,
     };

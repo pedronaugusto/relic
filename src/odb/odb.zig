@@ -10,6 +10,7 @@ const opening = @import("open.zig");
 const reachability = @import("bitmap/reachability.zig");
 const midx = @import("midx.zig");
 const mtimes = @import("mtimes.zig");
+const store_input = @import("store_input.zig");
 // The modules relic's API puts under this one, as `relic.odb.<name>`.
 const pack = @import("pack.zig");
 const delta = @import("../codec.zig").delta;
@@ -160,7 +161,7 @@ pub const Odb = struct {
     pub const Error = ErrorNamespace.Error;
 
     /// Private: the format and storage state; never reassigned piecemeal.
-    state: *storage.State,
+    state: *storage.Data,
     /// How lookups resolved. Read it; nothing in the package does.
     stats: Stats = .{},
     /// How fine a modification time this repository's filesystem records,
@@ -317,7 +318,7 @@ pub const Odb = struct {
     }
 
     fn backendData(db: *const Odb) *storage.Data {
-        return storage.get(db.state);
+        return db.state;
     }
 
     /// Whether an object of `size` bytes is past `Options.max_object_bytes`.
@@ -801,10 +802,7 @@ pub const Odb = struct {
 
     fn loosePath(odb: *const Odb, oid: Oid, buf: *[hash.max_hex_len + 2]u8) []const u8 {
         _ = odb;
-        var hex: [hash.max_hex_len]u8 = undefined;
-        const text = oid.hex(&hex);
-        // unreachable: a hex name and its slash fit max_hex_len + 2 bytes
-        return std.mem.print(buf, "{s}/{s}", .{ text[0..2], text[2..] }) catch unreachable;
+        return looseName(oid, buf);
     }
 
     /// An object's type and bytes. The bytes are the caller's.
@@ -900,7 +898,9 @@ pub const Odb = struct {
 
         const stream_buffer_bytes = 64 * 1024;
 
-        const Backing = union(enum) {
+        /// Where the bytes come from; the stream's own, read through
+        /// `reader()`.
+        pub const Backing = union(enum) {
             /// Held whole: the empty tree, or a delta resolved.
             memory: struct { bytes: []u8, reader: Io.Reader },
             loose: struct { file: fs.OwnedFile, inflating: LooseInflate, input: [loose_input_bytes]u8, window: [inflate_window_bytes]u8 },
@@ -1115,7 +1115,7 @@ pub const Odb = struct {
                             e.fixed = .fixed(pack.mappedFrom(mem, entry.data_at) orelse return error.TruncatedPack);
                             break :blk &e.fixed;
                         } else blk: {
-                            e.file_reader = p.file.borrow().*.reader(io, &e.input);
+                            e.file_reader = store_input.objectFile(io, p.file.borrow().*, &e.input);
                             e.file_reader.seekTo(entry.data_at) catch |x| return switch (x) {
                                 error.EndOfStream => error.TruncatedPack,
                                 error.ReadFailed => e.file_reader.err orelse error.ReadFailed,
@@ -1250,7 +1250,7 @@ pub const Odb = struct {
         /// Begin inflating `file`, read ahead into `input`, with `window`
         /// (`inflate_window_bytes`) the inflater's.
         fn start(l: *LooseInflate, io: Io, file: Io.File, input: []u8, window: []u8) ErrorNamespace.Error!void {
-            l.file_reader = file.reader(io, input);
+            l.file_reader = store_input.objectFile(io, file, input);
             l.inflate = warp.Inflate.Reader.init(&l.file_reader.interface, window, .{}) catch aegis.assert.never("zlib's default window, and the buffer holds it and a read");
             const r = &l.inflate.interface;
             const head = r.peekDelimiterInclusive(0) catch |err| return switch (err) {
@@ -1466,7 +1466,7 @@ pub const Odb = struct {
         if (want == .header) {
             // The zlib header, the first block's and the object's own fit a
             // kilobyte whatever the object's size.
-            var header_reader = file.reader(io, input_buffer[0..1024]);
+            var header_reader = store_input.objectFile(io, file, input_buffer[0..1024]);
             return .{ .header = try looseHeader(&header_reader) };
         }
         var window: [inflate_window_bytes]u8 = undefined;
@@ -1559,11 +1559,7 @@ pub const Odb = struct {
                 var it = d.iterate();
                 while (try it.next(io)) |entry| {
                     if (entry.kind == .directory) continue;
-                    if (entry.name.len != odb.backendData().kind.hexLen() - 2) continue;
-                    var full: [hash.max_hex_len]u8 = undefined;
-                    @memcpy(full[0..2], prefix[0..2]);
-                    @memcpy(full[2..][0..entry.name.len], entry.name);
-                    const oid = Oid.parse(odb.backendData().kind, full[0 .. 2 + entry.name.len]) catch continue;
+                    const oid = looseFileOid(odb.backendData().kind, prefix[0..2], entry.name) orelse continue;
                     if (!oid.startsWithHex(prefix)) continue;
                     if (found) |f| {
                         if (!f.eql(oid)) return error.AmbiguousPrefix;
@@ -1714,8 +1710,7 @@ pub const Odb = struct {
         var name_buf: [hash.max_hex_len + 32]u8 = undefined;
         const temp = tempObjectName(io, &name_buf, text[0..2]);
         var final_buf: [hash.max_hex_len + 2]u8 = undefined;
-        // unreachable: a hex name and its slash fit max_hex_len + 2 bytes
-        const final = std.mem.print(&final_buf, "{s}/{s}", .{ text[0..2], text[2..] }) catch unreachable;
+        const final = looseName(oid, &final_buf);
 
         const shared = odb.backendData().options.shared;
         var fan_out_made = false;
@@ -1752,8 +1747,7 @@ pub const Odb = struct {
         compress.reset(.nothing);
         var writer = warp.Deflate.Writer.init(compress, &file_writer.interface, state.input) catch aegis.assert.never("the 4 KiB stage is the writer's least");
         var header_buf: [64]u8 = undefined;
-        // unreachable: a type name is at most six bytes and a usize at most twenty digits
-        const header = std.mem.print(&header_buf, "{s} {d}\x00", .{ t.name(), bytes.len }) catch unreachable;
+        const header = std.mem.print(&header_buf, "{s} {d}\x00", .{ t.name(), bytes.len }) catch aegis.assert.never("a type name is at most six bytes and a usize at most twenty digits");
         // A writer says only that it failed; the file's writer keeps why.
         writeDeflated(&writer, &file_writer, header, bytes) catch return file_writer.err orelse error.WriteFailed;
         // Batch and per-file both flush the object's own descriptor; the
@@ -1838,8 +1832,7 @@ pub const Odb = struct {
     pub fn writePromisor(db: *const Odb, io: Io, name: Oid, contents: []const u8, existing: PromisorExisting) WritePromisorError!void {
         var hex: [hash.max_hex_len]u8 = undefined;
         var name_buf: [96]u8 = undefined;
-        // unreachable: the longest hex name is 64 digits, 78 bytes with the words around it
-        const file_name = std.mem.print(&name_buf, "pack-{s}.promisor", .{name.hex(&hex)}) catch unreachable;
+        const file_name = std.mem.print(&name_buf, "pack-{s}.promisor", .{name.hex(&hex)}) catch aegis.assert.never("the longest hex name is 64 digits, 78 bytes with the words around it");
         var opened_dir = try db.openPackDirectory(io);
         defer opened_dir.deinit(io);
         const dir = opened_dir.borrow().*;
@@ -1863,8 +1856,7 @@ pub const Odb = struct {
     fn tempObjectName(io: Io, buf: *[hash.max_hex_len + 32]u8, fan_out: *const [2]u8) []const u8 {
         var raw: [12]u8 = undefined;
         io.random(&raw);
-        // unreachable: two digits, nine bytes and twenty-four hex digits fit
-        return std.mem.print(buf, "{s}/tmp_obj_{x}", .{ fan_out, &raw }) catch unreachable;
+        return std.mem.print(buf, "{s}/tmp_obj_{x}", .{ fan_out, &raw }) catch aegis.assert.never("two digits, nine bytes and twenty-four hex digits fit");
     }
 
     /// The deflate state, allocated on the first object this database writes.
@@ -1936,7 +1928,7 @@ pub const Odb = struct {
             const out_buffer = try odb.backendData().gpa.alloc(u8, 16 * 1024);
             break :begun .{
                 .odb = odb,
-                .dir = source.directory(),
+                .dir = .of(source.directory()),
                 .temp = undefined,
                 .temp_len = temp.len,
                 .file = fs.OwnedFile.init(file),
@@ -1989,11 +1981,7 @@ pub const Odb = struct {
                 var it = sub.iterate();
                 while (try it.next(io)) |file_entry| {
                     if (file_entry.kind == .directory) continue;
-                    if (file_entry.name.len != odb.backendData().kind.hexLen() - 2) continue;
-                    var full: [hash.max_hex_len]u8 = undefined;
-                    @memcpy(full[0..2], entry.name);
-                    @memcpy(full[2..][0..file_entry.name.len], file_entry.name);
-                    const oid = Oid.parse(odb.backendData().kind, full[0 .. 2 + file_entry.name.len]) catch continue;
+                    const oid = looseFileOid(odb.backendData().kind, entry.name, file_entry.name) orelse continue;
                     const header = ((try odb.readLooseFor(io, oid, .header)) orelse continue).header;
                     if (header.size > odb.backendData().options.packing.big_file_bytes) {
                         // Past the threshold: named as it is read.
@@ -2283,11 +2271,7 @@ pub const Odb = struct {
                 const sub = opened_sub.borrow().*;
                 var it = sub.iterate();
                 while (try it.next(io)) |file_entry| {
-                    if (file_entry.name.len != odb.backendData().kind.hexLen() - 2) continue;
-                    var full: [hash.max_hex_len]u8 = undefined;
-                    @memcpy(full[0..2], entry.name);
-                    @memcpy(full[2..][0..file_entry.name.len], file_entry.name);
-                    const oid = Oid.parse(odb.backendData().kind, full[0 .. 2 + file_entry.name.len]) catch continue;
+                    const oid = looseFileOid(odb.backendData().kind, entry.name, file_entry.name) orelse continue;
                     try set.put(odb.backendData().gpa, oid, {});
                 }
             }
@@ -2348,7 +2332,7 @@ pub const Odb = struct {
         defer loose.deinit(io);
         while (try loose.next(io)) |found| {
             const oid = found.oid orelse continue;
-            const stat = found.dir.statFile(io, found.name, .{}) catch |err| switch (err) {
+            const stat = found.dir.get().statFile(io, found.name, .{}) catch |err| switch (err) {
                 error.FileNotFound => continue,
                 else => |e| return e,
             };
@@ -2360,14 +2344,14 @@ pub const Odb = struct {
             const index = &named.pack.index;
             // A pack with an `.mtimes` beside it is a cruft pack, as git
             // reads it, and each of its objects has its own time.
-            const mtimes_name = std.mem.print(&name_buf, "{s}.mtimes", .{named.name}) catch continue;
+            const mtimes_name = companionName(&name_buf, named.name, ".mtimes") orelse continue;
             const times: ?[]u32 = mtimes.read(gpa, io, lent_pack, mtimes_name, index.count) catch |err| switch (err) {
                 error.FileNotFound => null,
                 else => |e| return e,
             };
             defer if (times) |t| gpa.free(t);
             const pack_time = if (times != null) 0 else blk: {
-                const file = std.mem.print(&name_buf, "{s}.pack", .{named.name}) catch continue;
+                const file = companionName(&name_buf, named.name, ".pack") orelse continue;
                 const stat = lent_pack.statFile(io, file, .{}) catch |err| switch (err) {
                     error.FileNotFound => continue,
                     else => |e| return e,
@@ -2425,11 +2409,11 @@ pub const Odb = struct {
             while (try loose.next(io)) |found| {
                 if (found.oid) |oid| {
                     if (options.keep.contains(oid)) continue;
-                    if (!try notAfter(io, found.dir, found.name, options.expire)) continue;
+                    if (!try notAfter(io, found.dir.get(), found.name, options.expire)) continue;
                     report.pruned += 1;
-                    if (!options.dry_run) try deleteIfThere(io, found.dir, found.name);
+                    if (!options.dry_run) try deleteIfThere(io, found.dir.get(), found.name);
                 } else if (std.mem.startsWith(u8, found.name, "tmp_obj_")) {
-                    report.temporary_removed += try pruneTemporary(io, found.dir, found.name, options);
+                    report.temporary_removed += try pruneTemporary(io, found.dir.get(), found.name, options);
                 }
             }
         }
@@ -2454,7 +2438,7 @@ pub const Odb = struct {
             for (odb.backendData().sources.items) |source| {
                 if ((try source.findPack(oid, &odb.stats)) == null) continue;
                 removed += 1;
-                if (!dry_run) try deleteIfThere(io, found.dir, found.name);
+                if (!dry_run) try deleteIfThere(io, found.dir.get(), found.name);
                 break;
             }
         }
@@ -2528,7 +2512,7 @@ pub const Odb = struct {
         name_buf: [Io.Dir.max_name_bytes]u8 = undefined,
 
         /// A name, and its directory lent until the next `next`.
-        const Found = struct { dir: Io.Dir, name: []const u8, oid: ?Oid };
+        const Found = struct { dir: aegis.own.Unowned(Io.Dir), name: []const u8, oid: ?Oid };
 
         fn next(l: *LooseNames, io: Io) ErrorNamespace.Error!?Found {
             while (true) {
@@ -2536,7 +2520,7 @@ pub const Odb = struct {
                     if (try it.next(io)) |entry| {
                         @memcpy(l.name_buf[0..entry.name.len], entry.name);
                         const name = l.name_buf[0..entry.name.len];
-                        return .{ .dir = l.dir.?.borrow().*, .name = name, .oid = l.parse(name) };
+                        return .{ .dir = .of(l.dir.?.borrow().*), .name = name, .oid = l.parse(name) };
                     }
                     l.dir.?.deinit(io);
                     l.dir = null;
@@ -2577,12 +2561,7 @@ pub const Odb = struct {
         }
 
         fn parse(l: *const LooseNames, name: []const u8) ?Oid {
-            const kind = l.odb.backendData().kind;
-            if (name.len != kind.hexLen() - 2) return null;
-            var full: [hash.max_hex_len]u8 = undefined;
-            @memcpy(full[0..2], &l.hex);
-            @memcpy(full[2..][0..name.len], name);
-            return Oid.parse(kind, full[0 .. 2 + name.len]) catch null;
+            return looseFileOid(l.odb.backendData().kind, &l.hex, name);
         }
 
         fn deinit(l: *LooseNames, io: Io) void {
@@ -2686,9 +2665,7 @@ pub const Odb = struct {
         const source = odb.writableSource();
         var fanouts = data.unsynced_fanouts.iterator(.{});
         while (fanouts.next()) |byte| {
-            var name: [2]u8 = undefined;
-            // unreachable: a byte is two hex digits
-            _ = std.mem.print(&name, "{x:0>2}", .{byte}) catch unreachable;
+            const name = std.fmt.hex(aegis.int.narrow(u8, byte) orelse aegis.assert.never("the set holds the 256 fan-outs, each named by a byte"));
             const sub = try source.directory().openDir(io, &name, .{ .iterate = true });
             defer sub.close(io);
             try fs.syncDir(io, sub);
@@ -2758,7 +2735,7 @@ pub const Odb = struct {
         // What is copied or kept is the object of its name.
         const followed = odb.pauseReplacements();
         defer odb.resumeReplacements(followed);
-        std.debug.assert(!options.pack.keep);
+        aegis.assert.invariant(!options.pack.keep, "writePacks writes several packs, and a keep marker is one pack's");
         const gpa = odb.backendData().gpa;
         var reports: std.ArrayList(pack.WriteReport) = .empty;
         errdefer reports.deinit(gpa);
@@ -2789,8 +2766,7 @@ pub const Odb = struct {
         var name_buf: [hash.max_hex_len + 16]u8 = undefined;
         // The index first, so no reader finds a pack whose file is gone.
         for ([_][]const u8{ ".idx", ".mtimes", ".rev", ".pack" }) |extension| {
-            // unreachable: a hex name is at most max_hex_len digits, the rest twelve bytes
-            const name = std.mem.print(&name_buf, "pack-{s}{s}", .{ report.name.hex(&hex), extension }) catch unreachable;
+            const name = std.mem.print(&name_buf, "pack-{s}{s}", .{ report.name.hex(&hex), extension }) catch aegis.assert.never("a hex name is at most max_hex_len digits, the rest twelve bytes");
             try deleteIfThere(io, pack_dir, name);
         }
         const half = entries.len / 2;
@@ -2964,7 +2940,13 @@ pub const Odb = struct {
                 // An object past the threshold is written streamed, so no
                 // body of one is held here either.
                 const big = std.math.cast(usize, options.big_file_bytes.raw()) orelse std.math.maxInt(usize);
-                const available = @min(options.loose_cache_bytes.raw() -| cached_bytes, big);
+                // What the budget leaves once the bodies held are counted:
+                // nothing once they reach it.
+                const left = options.loose_cache_bytes.sub(.fromRaw(cached_bytes)) catch |err| switch (err) {
+                    error.Underflow => aegis.units.Bytes(usize).fromRaw(0),
+                    error.Overflow => aegis.assert.never("an unsigned size less another goes below zero, never past the top"),
+                };
+                const available = @min(left.raw(), big);
                 const found = try odb.readHeaderForPack(io, entry.oid, available);
                 if (found.bytes) |bytes| cached_bytes += bytes.len;
                 ordered[i] = .{
@@ -3033,11 +3015,16 @@ pub const Odb = struct {
             const crc = at.crc orelse continue;
             const entry = try at.pack.entryHeaderAt(io, at.offset);
             const order = try orderOf(gpa, &orders, at.pack);
+            const end = order.endOf(at.pack, at.offset);
+            // An entry that does not end, or whose data does not start,
+            // past its own start is no entry to copy: it is written from
+            // its object.
+            if (end < at.offset or entry.data_at < at.offset) continue;
             const stored: Stored = .{
                 .pack = at.pack,
                 .entry_at = at.offset,
-                .len = std.math.cast(usize, std.math.sub(u64, order.endOf(at.pack, at.offset), at.offset) catch continue) orelse continue,
-                .data_from = std.math.cast(u8, std.math.sub(u64, entry.data_at, at.offset) catch continue) orelse continue,
+                .len = std.math.cast(usize, end - at.offset) orelse continue,
+                .data_from = std.math.cast(u8, entry.data_at - at.offset) orelse continue,
                 .size = entry.size,
                 .crc = crc,
             };
@@ -3328,11 +3315,7 @@ pub const Odb = struct {
             const sub = opened_sub.borrow().*;
             var it = sub.iterate();
             while (try it.next(io)) |file| {
-                if (file.name.len != odb.backendData().kind.hexLen() - 2) continue;
-                var full: [hash.max_hex_len]u8 = undefined;
-                @memcpy(full[0..2], entry.name);
-                @memcpy(full[2..][0..file.name.len], file.name);
-                const oid = Oid.parse(odb.backendData().kind, full[0 .. 2 + file.name.len]) catch continue;
+                const oid = looseFileOid(odb.backendData().kind, entry.name, file.name) orelse continue;
                 if (skip.contains(oid)) continue;
                 try entries.append(odb.backendData().gpa, .{ .oid = oid });
             }
@@ -3552,7 +3535,7 @@ pub const Odb = struct {
             const pack_dir = source.packDirectory() orelse continue;
             for (source.packs.items, 0..) |named, position| {
                 var name_buf: [Io.Dir.max_name_bytes]u8 = undefined;
-                const file = std.mem.print(&name_buf, "{s}.pack", .{named.name}) catch continue;
+                const file = companionName(&name_buf, named.name, ".pack") orelse continue;
                 const stat = pack_dir.statFile(io, file, .{}) catch |err| switch (err) {
                     error.FileNotFound => continue,
                     else => |e| return e,
@@ -3718,8 +3701,7 @@ pub const Odb = struct {
             try odb.writePromisor(io, written.name, "", .replace);
             try odb.refresh(io);
             var hex: [hash.max_hex_len]u8 = undefined;
-            // unreachable: a hex name is at most max_hex_len digits, the prefix five bytes
-            try keep_too.append(gpa, std.mem.print(&promisor_base_buf, "pack-{s}", .{written.name.hex(&hex)}) catch unreachable);
+            try keep_too.append(gpa, std.mem.print(&promisor_base_buf, "pack-{s}", .{written.name.hex(&hex)}) catch aegis.assert.never("a hex name is at most max_hex_len digits, the prefix five bytes"));
         }
         return odb.packCollected(io, collected.entries, options, options.remove_packs, keep_too.items);
     }
@@ -3788,8 +3770,7 @@ pub const Odb = struct {
         var report: RepackReport = .{ .written = written };
         var hex: [hash.max_hex_len]u8 = undefined;
         var base_buf: [hash.max_hex_len + 8]u8 = undefined;
-        // unreachable: a hex name is at most max_hex_len digits, the prefix five bytes
-        const base = std.mem.print(&base_buf, "pack-{s}", .{written.name.hex(&hex)}) catch unreachable;
+        const base = std.mem.print(&base_buf, "pack-{s}", .{written.name.hex(&hex)}) catch aegis.assert.never("a hex name is at most max_hex_len digits, the prefix five bytes");
         const opened = odb.findPackByName(base) orelse return report;
 
         if (options.remove_loose) {
@@ -3816,7 +3797,7 @@ pub const Odb = struct {
             const Remove = struct {
                 const Self = @This();
                 odb: *const Odb,
-                dir: Io.Dir,
+                dir: aegis.own.Unowned(Io.Dir),
                 doomed: []const Oid,
                 removed: *Removed,
                 fn work(task_io: Io, c: Self, _: usize, i: usize) ErrorNamespace.Error!void {
@@ -3824,7 +3805,7 @@ pub const Odb = struct {
                     const path = c.odb.loosePath(c.doomed[i], &path_buf);
                     // A file not removed stays loose, which is no harm; a
                     // cancel is not that.
-                    c.dir.deleteFile(task_io, path) catch |err| switch (err) {
+                    c.dir.get().deleteFile(task_io, path) catch |err| switch (err) {
                         error.Canceled => return error.Canceled,
                         else => return,
                     };
@@ -3833,7 +3814,7 @@ pub const Odb = struct {
             };
             try runTasks(Remove, Remove.work, io, readTaskCount(taskCount(options.pack.threads)), failures, .{
                 .odb = odb,
-                .dir = source.directory(),
+                .dir = .of(source.directory()),
                 .doomed = doomed.items,
                 .removed = &removed,
             });
@@ -4147,7 +4128,7 @@ pub const ObjectStream = struct {
 
     odb: *Odb,
     /// The objects directory, lent by the database.
-    dir: Io.Dir,
+    dir: aegis.own.Unowned(Io.Dir),
     temp: [128]u8,
     temp_len: usize,
     /// The temporary file, open until the object is finished or abandoned.
@@ -4203,7 +4184,7 @@ pub const ObjectStream = struct {
 
     /// Feed bytes, hashing as they go.
     pub fn write(s: *ObjectStream, bytes: []const u8) ErrorNamespace.Error!void {
-        std.debug.assert(!s.finished);
+        aegis.assert.invariant(!s.finished, "a finished or aborted stream takes no more bytes");
         if (bytes.len > s.remaining) return error.CorruptLooseObject;
         s.hasher.update(bytes);
         s.remaining -= bytes.len;
@@ -4213,7 +4194,7 @@ pub const ObjectStream = struct {
 
     /// Close the object and put it in the database. Returns its name.
     pub fn finish(s: *ObjectStream, io: Io) ErrorNamespace.Error!Oid {
-        std.debug.assert(!s.finished);
+        aegis.assert.invariant(!s.finished, "a stream is finished once, and never after it is aborted");
         if (s.remaining != 0) return error.CorruptLooseObject;
         s.compressed_writer.finish() catch return s.file_writer.err orelse error.WriteFailed;
         s.file_writer.interface.flush() catch return s.file_writer.err orelse error.WriteFailed;
@@ -4224,32 +4205,31 @@ pub const ObjectStream = struct {
         const oid = s.hasher.final();
         if (s.hasher.collisionAttack()) return error.CollisionAttack;
         if (s.expected) |want| if (!want.eql(oid)) {
-            fs.removeLeftover(io, s.dir, s.temp[0..s.temp_len]);
+            fs.removeLeftover(io, s.dir.get(), s.temp[0..s.temp_len]);
             return error.ObjectNameMismatch;
         };
         var hex: [hash.max_hex_len]u8 = undefined;
         const text = oid.hex(&hex);
         var fan_out_made = false;
-        if (s.dir.createDir(io, text[0..2], .default_dir)) |_| {
+        if (s.dir.get().createDir(io, text[0..2], .default_dir)) |_| {
             fan_out_made = true;
-            try fs.adjustShared(io, s.dir, text[0..2], s.odb.backendData().options.shared);
+            try fs.adjustShared(io, s.dir.get(), text[0..2], s.odb.backendData().options.shared);
         } else |err| switch (err) {
             error.PathAlreadyExists => {},
             else => |e| return e,
         }
         var final_buf: [hash.max_hex_len + 2]u8 = undefined;
-        // unreachable: a hex name and its slash fit max_hex_len + 2 bytes
-        const final_path = std.mem.print(&final_buf, "{s}/{s}", .{ text[0..2], text[2..] }) catch unreachable;
+        const final_path = looseName(oid, &final_buf);
         const temp = s.temp[0..s.temp_len];
         // The time before the name, as `writeLoose` sets it.
-        if (s.time) |seconds| fs.setTimestamps(io, s.dir, temp, .{ .modify_timestamp = .{ .new = date.timestamp(seconds) } }) catch |err| {
+        if (s.time) |seconds| fs.setTimestamps(io, s.dir.get(), temp, .{ .modify_timestamp = .{ .new = date.timestamp(seconds) } }) catch |err| {
             // The error is the one to report; a temporary object left behind is what `git gc` prunes.
-            fs.removeLeftover(io, s.dir, temp);
+            fs.removeLeftover(io, s.dir.get(), temp);
             return err;
         };
-        finalizeLoose(io, s.dir, temp, final_path, s.odb.backendData().options.create_object) catch |err| {
+        finalizeLoose(io, s.dir.get(), temp, final_path, s.odb.backendData().options.create_object) catch |err| {
             // The error is the one to report; a temporary object left behind is what `git gc` prunes.
-            fs.removeLeftover(io, s.dir, temp);
+            fs.removeLeftover(io, s.dir.get(), temp);
             return err;
         };
         s.finished = true;
@@ -4263,7 +4243,7 @@ pub const ObjectStream = struct {
             if (s.file) |*file| file.deinit(io);
             s.file = null;
             // Abandoning cannot fail; a temporary object left behind is what `git gc` prunes.
-            fs.removeLeftover(io, s.dir, s.temp[0..s.temp_len]);
+            fs.removeLeftover(io, s.dir.get(), s.temp[0..s.temp_len]);
             s.finished = true;
         }
         s.compress.deinit();
@@ -4988,8 +4968,10 @@ const Build = struct {
     /// the budget, and always one. Each is charged its body, the slack a
     /// packed one is inflated with, and its deflated entry's room.
     fn plan(b: *Build, batch: *PackBatch, start: usize) void {
-        // a third of the batch budget, rounded down; aegis Bytes has no division
-        const share = b.options.batch_bytes.raw() / 3;
+        // a third of the batch budget, rounded down
+        const share = (b.options.batch_bytes.divTrunc(3) catch |err| switch (err) {
+            error.DivisionByZero, error.Overflow => aegis.assert.never("a third of an unsigned size is a size"),
+        }).raw();
         var end = start;
         var charged: usize = 0;
         while (end < b.ordered.len) {
@@ -5197,11 +5179,11 @@ const Build = struct {
             fn deflate(c: Self, worker: usize, p: *Pending) Error!void {
                 if (p.stored.len != 0) return;
                 var out: Io.Writer = .fixed(p.room);
-                c.deflaters[worker].deflate(&out, p.payload(), c.compression) catch |err| switch (err) {
-                    // No room: deflated again when it is written.
-                    error.WriteFailed => return,
+                // An entry with no room is left `null`: deflated again when
+                // it is written.
+                p.deflated = if (c.deflaters[worker].deflate(&out, p.payload(), c.compression)) |_| out.end else |err| switch (err) {
+                    error.WriteFailed => null,
                 };
-                p.deflated = out.end;
             }
 
             fn read(c: Self, task_io: Io, worker: usize, oid: Oid, p: *Pending) Error!void {
@@ -5517,7 +5499,7 @@ fn moveDeltasAfterBases(gpa: Allocator, ordered: []Ordered, reuse: *Reuse) Alloc
         order[filled] = pos;
         filled += 1;
     };
-    std.debug.assert(filled == n);
+    aegis.assert.invariant(filled == n, "every entry is placed once: by its own turn, or after the base it waits on");
     const moved_items = try gpa.alloc(Ordered, n);
     defer gpa.free(moved_items);
     const moved_reused = try gpa.alloc(?Reused, n);
@@ -6303,7 +6285,7 @@ test "loose inflate preserves allocation resource failures" {
             var data_copy = original.backendData().*;
             data_copy.gpa = allocator;
             var copy = original.*;
-            copy.state = @ptrCast(&data_copy);
+            copy.state = &data_copy;
             const found = try copy.readLooseFile(std.testing.io, input);
             defer allocator.free(found.bytes);
             try std.testing.expectEqual(object.Type.blob, found.type);
@@ -6693,6 +6675,40 @@ test "a batch of loose objects is made durable by one flush of each directory th
     try std.testing.expectEqual(@as(u32, 0), seam.count(.sync_dir));
 }
 
+/// The file name `base` and `extension` make, written into `buf`, or `null`
+/// where it is longer than a directory entry holds, so that no file has it.
+fn companionName(buf: *[Io.Dir.max_name_bytes]u8, base: []const u8, extension: []const u8) ?[]const u8 {
+    if (base.len > buf.len or extension.len > buf.len - base.len) return null;
+    @memcpy(buf[0..base.len], base);
+    @memcpy(buf[base.len..][0..extension.len], extension);
+    return buf[0 .. base.len + extension.len];
+}
+
+/// The object a loose file names, from its fan-out directory's two digits
+/// and its own name; `null` for a file whose name is no object's of `kind`,
+/// which git passes over too.
+fn looseFileOid(kind: Kind, fan_out: []const u8, name: []const u8) ?Oid {
+    if (fan_out.len != 2 or name.len != kind.hexLen() - 2) return null;
+    var full: [hash.max_hex_len]u8 = undefined;
+    @memcpy(full[0..2], fan_out);
+    @memcpy(full[2..][0..name.len], name);
+    return Oid.parse(kind, full[0 .. 2 + name.len]) catch |err| switch (err) {
+        error.InvalidCharacter => null,
+        error.InvalidLength => aegis.assert.never("the two digits and the name are the format's length, as checked above"),
+    };
+}
+
+/// The loose object `oid`'s path under `objects`, `xx/` and the rest of its
+/// hex name, written into `buf`, which holds the longest.
+fn looseName(oid: Oid, buf: *[hash.max_hex_len + 2]u8) []const u8 {
+    var hex: [hash.max_hex_len]u8 = undefined;
+    const text = oid.hex(&hex);
+    buf[0..2].* = text[0..2].*;
+    buf[2] = '/';
+    @memcpy(buf[3..][0 .. text.len - 2], text[2..]);
+    return buf[0 .. text.len + 1];
+}
+
 /// The rename of git's `finalize_object_file`: none when `final` is there
 /// already, which is then compared. `temp` goes when the rename fails.
 fn renameUnlessThere(io: Io, dir: Io.Dir, temp: []const u8, final: []const u8) Error!bool {
@@ -6716,8 +6732,8 @@ fn sameObjectFile(io: Io, dir: Io.Dir, a: []const u8, b: []const u8) Error!enum 
     defer second.close(io);
     var buf_a: [4096]u8 = undefined;
     var buf_b: [4096]u8 = undefined;
-    var reader_a = first.reader(io, &.{});
-    var reader_b = second.reader(io, &.{});
+    var reader_a = store_input.objectFile(io, first, &.{});
+    var reader_b = store_input.objectFile(io, second, &.{});
     while (true) {
         // A read's failure is the file reader's to name: a directory in
         // the object's place is `error.IsDir`.

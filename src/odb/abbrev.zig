@@ -8,12 +8,12 @@
 //! names nothing else.
 
 const std = @import("std");
+const aegis = @import("aegis");
 const Io = std.Io;
 
 const hash = @import("../hash/hash.zig");
 const odb_mod = @import("odb.zig");
 const config_mod = @import("../config/config.zig");
-const storage = @import("state.zig");
 
 const Oid = hash.Oid;
 
@@ -26,18 +26,21 @@ pub const fallback = 7;
 /// `auto` or nothing. `false` asks for whole names.
 pub fn defaultLength(config: *const config_mod.Config, db: *const odb_mod.Odb) usize {
     const hex_len = db.objectFormat().hexLen();
-    if (config.get("core.abbrev")) |text| {
-        if (!std.ascii.eqlIgnoreCase(text, "auto")) {
-            // glint-ignore: Z026 -- a value that is no number is read as a boolean below, as git reads core.abbrev
-            if (config_mod.parseInteger(c_int, text)) |n| {
-                if (n < minimum) return minimum;
-                return @min(std.math.cast(usize, n) orelse hex_len, hex_len);
-            } else |_| {}
-            // glint-ignore: Z026 -- a value that is neither a number nor a boolean leaves the default, as below
-            if (config_mod.parseBool(text)) |on| {
-                if (!on) return hex_len;
-            } else |_| {}
-        }
+    const text = config.get("core.abbrev") orelse return automaticLength(db);
+    if (std.ascii.eqlIgnoreCase(text, "auto")) return automaticLength(db);
+    // git reads a boolean first: false asks for whole names, and anything
+    // else is read as a number.
+    const setting = config_mod.parseBoolOrInt(text) catch |err| switch (err) {
+        // A value that is neither a boolean nor a number leaves the default.
+        error.NotAnInteger, error.OutOfRange => return automaticLength(db),
+        error.NotABoolean, error.OutOfMemory => aegis.assert.never("a boolean or a number is read with no allocation, and a value no boolean is read as a number"),
+    };
+    switch (setting) {
+        .boolean => |on| if (!on) return hex_len,
+        .integer => |n| {
+            if (n < minimum) return minimum;
+            return @min(std.math.cast(usize, n) orelse hex_len, hex_len);
+        },
     }
     return automaticLength(db);
 }
@@ -47,7 +50,7 @@ pub fn defaultLength(config: *const config_mod.Config, db: *const odb_mod.Odb) u
 /// bits, rounded up, and never fewer than seven.
 pub fn automaticLength(db: *const odb_mod.Odb) usize {
     var count: u64 = 0;
-    for (storage.get(db.state).sources.items) |source| {
+    for (db.state.sources.items) |source| {
         for (source.packs.items) |p| count += p.pack.index.count;
     }
     // The most significant bit's place, plus one; zero objects is one bit,
