@@ -2651,19 +2651,19 @@ pub const Odb = struct {
                 const slot = try packs.getOrPut(odb.backendData().gpa, hit.at);
                 if (slot.found_existing) continue;
                 const named = source.packs.items[hit.at];
-                try files.append(arena, .{ .dir = source.packDirectory().?, .sub_path = try arena.print("{s}.pack", .{named.name}) });
-                try files.append(arena, .{ .dir = source.packDirectory().?, .sub_path = try arena.print("{s}.idx", .{named.name}) });
+                try files.append(arena, .{ .dir = .of(source.packDirectory().?), .sub_path = try arena.print("{s}.pack", .{named.name}) });
+                try files.append(arena, .{ .dir = .of(source.packDirectory().?), .sub_path = try arena.print("{s}.idx", .{named.name}) });
             } else {
                 var path_buf: [hash.max_hex_len + 2]u8 = undefined;
-                try files.append(arena, .{ .dir = source.directory(), .sub_path = try arena.dupe(u8, odb.loosePath(oid.*, &path_buf)) });
+                try files.append(arena, .{ .dir = .of(source.directory()), .sub_path = try arena.dupe(u8, odb.loosePath(oid.*, &path_buf)) });
                 fanouts[oid.raw()[0]] = true;
             }
         }
         for (fanouts, 0..) |used, byte| if (used) {
-            try directories.append(arena, .{ .dir = source.directory(), .sub_path = try arena.print("{x:0>2}", .{byte}) });
+            try directories.append(arena, .{ .dir = .of(source.directory()), .sub_path = try arena.print("{x:0>2}", .{byte}) });
         };
-        if (packs.count() != 0) try directories.append(arena, .{ .dir = source.directory(), .sub_path = "pack" });
-        try directories.append(arena, .{ .dir = source.directory(), .sub_path = "." });
+        if (packs.count() != 0) try directories.append(arena, .{ .dir = .of(source.directory()), .sub_path = "pack" });
+        try directories.append(arena, .{ .dir = .of(source.directory()), .sub_path = "." });
         try fs.syncAll(odb.backendData().gpa, io, files.items, directories.items);
     }
 

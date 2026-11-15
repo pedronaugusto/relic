@@ -1810,7 +1810,7 @@ pub const Index = struct {
         // `do_write_index` takes it: an entry written in its second is
         // racy for a caller that keeps this index and does not read it
         // again.
-        if (lock.dir.statFile(io, lock.target, .{})) |stat| {
+        if (lock.dir.get().statFile(io, lock.target, .{})) |stat| {
             const s = fs.Stat.fromIo(stat, .{});
             index.racy_cutoff_sec = s.mtime_sec;
             index.racy_cutoff_nsec = s.mtime_nsec;

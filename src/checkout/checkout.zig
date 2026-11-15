@@ -2691,7 +2691,7 @@ fn syncCheckout(arena: Allocator, io: Io, wt: Io.Dir, wanted: *const std.StringH
         const path = entry.key_ptr.*;
         if (entry.value_ptr.mode != .gitlink) {
             const st = (try fs.statAt(io, wt, path)) orelse return error.FileNotFound;
-            if (st.kind == .file) try files.append(arena, .{ .dir = wt, .sub_path = path });
+            if (st.kind == .file) try files.append(arena, .{ .dir = .of(wt), .sub_path = path });
         }
         try addSyncParents(&dirs, path, true);
     }
@@ -2712,7 +2712,7 @@ fn syncCheckout(arena: Allocator, io: Io, wt: Io.Dir, wanted: *const std.StringH
             error.FileNotFound => continue,
             else => |e| return e,
         };
-        try directories.append(arena, .{ .dir = wt, .sub_path = entry.key_ptr.* });
+        try directories.append(arena, .{ .dir = .of(wt), .sub_path = entry.key_ptr.* });
     }
     try fs.syncAll(arena, io, files.items, directories.items);
 }
