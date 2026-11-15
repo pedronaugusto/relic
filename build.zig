@@ -161,11 +161,11 @@ pub fn dev(b: *std.Build, tools: type) void {
     const optimize = b.standardOptimizeOption(.{});
     const preflight = tools.preflight;
     // The option of `build`, passed on to relic.
-    features_option = .{
+    const features: Features = .{
         .http = b.option(bool, "http", http_description) orelse true,
         .lfs = b.option(bool, "lfs", lfs_description) orelse true,
     };
-    const package = relicPackage(b, target, optimize);
+    const package = relicPackage(b, target, optimize, features);
     const p = package.builder;
     const module = package.module("relic");
     const airlock_dependency = p.dependency("airlock", .{ .target = target, .optimize = optimize });
@@ -208,7 +208,7 @@ pub fn dev(b: *std.Build, tools: type) void {
     // stand-in ssh and what it was asked is compared. It is relic_lfs's
     // server, so it is built where that is: with `lfs` and `http`; the
     // tests that run it skip elsewhere.
-    const lfs_transfer_helper: ?*std.Build.Step.Compile = if (features_option.lfs and features_option.http) b.addExecutable(.{
+    const lfs_transfer_helper: ?*std.Build.Step.Compile = if (features.lfs and features.http) b.addExecutable(.{
         .name = "relic-lfs-transfer-helper",
         .root_module = b.createModule(.{
             .root_source_file = p.path("src/testing/lfs/transfer.zig"),
@@ -370,7 +370,7 @@ pub fn dev(b: *std.Build, tools: type) void {
         .target = target,
         .optimize = optimize,
         // The imports of the module a consumer gets, the options among them.
-        .imports = moduleImports(p, target, optimize, featureOptions(p, features_option), features_option, if (features_option.lfs) &lfs_packages else &.{}),
+        .imports = moduleImports(p, target, optimize, featureOptions(p, features), features, if (features.lfs) &lfs_packages else &.{}),
     });
     test_module.addImport("relic_core", test_module);
     test_module.addImport("README.md", p.createModule(.{ .root_source_file = p.path("README.md") }));
@@ -502,7 +502,7 @@ pub fn dev(b: *std.Build, tools: type) void {
         } } else .default,
         .bench = .{
             .programs = &.{ .{ .name = "relic-regressions", .source = "bench/regressions.zig" }, .{ .name = "relic-rows", .source = "bench/rows.zig" } },
-            .imports = preflight.Bench.importsFrom(benchImports),
+            .imports = BenchImports(preflight.Bench.Imports).of(b, features),
             .target = target,
             .optimize = optimize,
         },
@@ -598,24 +598,44 @@ const example_sources = [_][]const u8{
     "examples/usage.zig",
 };
 
-/// `-Dhttp` and `-Dlfs`, as `dev` read them, passed on to relic.
-// aegis: no-danger(A007): the build runner configures on one thread; `dev` sets it before anything reads it, and preflight's bench imports callback takes no value to carry it
-var features_option: Features = .{ .http = true, .lfs = true };
+/// relic as the development build has it: the package, with `-Dhttp` and
+/// `-Dlfs`, as `dev` read them, passed on.
+fn relicPackage(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, features: Features) *std.Build.Dependency {
+    return b.dependency("relic", .{ .target = target, .optimize = optimize, .http = features.http, .lfs = features.lfs });
+}
 
-/// relic as the development build has it: the package, with the option passed on.
-fn relicPackage(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) *std.Build.Dependency {
-    return b.dependency("relic", .{ .target = target, .optimize = optimize, .http = features_option.http, .lfs = features_option.lfs });
+/// preflight's hook for the benchmarks' modules (`Imports` is its
+/// `Bench.Imports`), holding the features `dev` read: preflight makes the
+/// modules for each mode it builds them in, after `dev` has returned.
+fn BenchImports(comptime Imports: type) type {
+    return struct {
+        const Hook = @This();
+        imports: Imports = .{ .make = make },
+        features: Features,
+
+        /// A hook that lives as long as the build.
+        fn of(b: *std.Build, features: Features) *const Imports {
+            const hook = b.allocator.create(Hook) catch @panic("out of memory");
+            hook.* = .{ .features = features };
+            return &hook.imports;
+        }
+
+        fn make(imports: *const Imports, b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) []const std.Build.Module.Import {
+            const hook: *const Hook = @alignCast(@fieldParentPtr("imports", imports));
+            return benchImports(b, target, optimize, hook.features);
+        }
+    };
 }
 
 /// The benchmarks' relic: `src/benchmark.zig`, in the mode the benchmark
 /// builds in, over the `relic` and `relic_lfs` modules and the core beneath
 /// them, as a consumer gets them, and shakedown.
-fn benchImports(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) []const std.Build.Module.Import {
-    const p = relicPackage(b, target, optimize).builder;
-    const core = coreModule(p, target, optimize, features_option);
-    const module = b.createModule(.{ .root_source_file = p.path("src/benchmark.zig"), .target = target, .optimize = optimize, .imports = moduleImports(p, target, optimize, core.options, features_option, &.{}) });
+fn benchImports(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, features: Features) []const std.Build.Module.Import {
+    const p = relicPackage(b, target, optimize, features).builder;
+    const core = coreModule(p, target, optimize, features);
+    const module = b.createModule(.{ .root_source_file = p.path("src/benchmark.zig"), .target = target, .optimize = optimize, .imports = moduleImports(p, target, optimize, core.options, features, &.{}) });
     module.addImport("relic_core", core.module);
-    module.addImport("relic", p.createModule(relicModule(p, target, optimize, core, features_option)));
-    module.addImport("relic_lfs", p.createModule(lfsModule(p, target, optimize, core, features_option)));
+    module.addImport("relic", p.createModule(relicModule(p, target, optimize, core, features)));
+    module.addImport("relic_lfs", p.createModule(lfsModule(p, target, optimize, core, features)));
     return b.allocator.dupe(std.Build.Module.Import, &.{.{ .name = "relic", .module = module }}) catch @panic("out of memory");
 }
