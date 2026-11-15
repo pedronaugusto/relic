@@ -151,7 +151,7 @@ pub fn toTree(
 
     try removeAll(io, wt, remove.items, &current, rules);
     var conv: convert.Session = .open(gpa, io, .{
-        .wt = wt,
+        .wt = .of(wt),
         .kind = db.objectFormat(),
         .core = rules.core,
         .required_filters = rules.required_filters,

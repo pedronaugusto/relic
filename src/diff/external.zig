@@ -187,8 +187,8 @@ fn lends(ext: *const External, a: Allocator, io: Io, s: Side) Self.Error!bool {
     if (entry.assume_valid or entry.skip_worktree) return false;
     // A path no checkout would write is no working-tree file to lend.
     const path = checkout.readable(s.path, t.rules.protect) catch return false;
-    const found = (try fs.statAt(io, t.wt, path.bytes)) orelse return false;
-    if (t.rules.attrs) |attrs| try attrs.enter(io, t.wt, path.bytes);
+    const found = (try fs.statAt(io, t.wt.get(), path.bytes)) orelse return false;
+    if (t.rules.attrs) |attrs| try attrs.enter(io, t.wt.get(), path.bytes);
     return t.matches(a, entry.*, path, found);
 }
 

@@ -1102,7 +1102,7 @@ pub fn archive(gpa: Allocator, io: Io, w: *Io.Writer, inputs: Inputs, options: O
     }
     const rules = try repo.worktreeRules();
     var conv: convert.Session = .open(gpa, io, .{
-        .wt = repo.topDirectory(),
+        .wt = .of(repo.topDirectory()),
         .kind = db.objectFormat(),
         .core = rules.core,
         .required_filters = try repo.requiredFilters(a),

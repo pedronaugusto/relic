@@ -571,7 +571,7 @@ pub fn apply(gpa: Allocator, io: Io, repo: *Repository, text: []const u8, option
         .options = options,
         .rules = rules,
         .conv = .open(gpa, io, .{
-            .wt = wt orelse repo.gitDirectory(),
+            .wt = .of(wt orelse repo.gitDirectory()),
             .kind = repo.objectFormat(),
             .core = rules.core,
             .required_filters = rules.required_filters,

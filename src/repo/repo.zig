@@ -2094,7 +2094,7 @@ pub const Repository = struct {
             text = try repo.lfsconfigText(io);
             with.config_text = text;
         }
-        return filter.Drivers.load(repo.data().gpa, io, repo.configuration(), .{ .common = repo.commonDirectory(), .work = repo.workDirectory(), .shared = repo.data().shared }, with);
+        return filter.Drivers.load(repo.data().gpa, io, repo.configuration(), .{ .common = .of(repo.commonDirectory()), .work = if (repo.workDirectory()) |dir| .of(dir) else null, .shared = repo.data().shared }, with);
     }
 
     /// Errors from `loadFilters`: the drivers', and those of finding
@@ -2242,7 +2242,7 @@ pub const Repository = struct {
                 attrs = try repo.loadAttrs(io);
                 var rules = try repo.worktreeRules();
                 rules.attrs = &attrs.?;
-                check = .{ .gpa = repo.data().gpa, .io = io, .wt = wt, .rules = rules };
+                check = .{ .gpa = repo.data().gpa, .io = io, .wt = .of(wt), .rules = rules };
                 options.racy = check.racy();
             }
             const freshen = try repo.writeSharedIfDue(io, &locked.index, options);

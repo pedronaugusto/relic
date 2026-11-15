@@ -26,7 +26,7 @@ pub const Options = struct {
 pub fn load(gpa: Allocator, io: Io, repository: *repo.Repository, options: Options) Error!filter.Drivers {
     const text = try repository.lfsconfigText(io);
     defer if (text) |bytes| repository.allocator().free(bytes);
-    return filter.Drivers.load(gpa, io, repository.configuration(), .{ .common = repository.commonDirectory(), .work = repository.workDirectory(), .shared = repository.sharedPermissions() }, .{
+    return filter.Drivers.load(gpa, io, repository.configuration(), .{ .common = .of(repository.commonDirectory()), .work = if (repository.workDirectory()) |dir| .of(dir) else null, .shared = repository.sharedPermissions() }, .{
         .native_provider = provider(&options),
         .skip_smudge = options.skip_smudge,
         .config_text = text,
@@ -52,7 +52,7 @@ fn loadDriver(p: *const native.Provider, gpa: Allocator, _: Io, configuration: *
         .gpa = gpa,
         .fetch = with.fetch,
         .lfs = try lfs.Lfs.load(gpa, &lfs_config, .{
-            .common_dir = .of(options.common_dir),
+            .common_dir = options.common_dir,
             .shared = options.shared,
             .skip_smudge = options.skip_smudge or with.skip_smudge or (isGitLfs(commands) and skipsSmudge(commands)),
         }),
@@ -150,14 +150,14 @@ const Session = struct {
     fn lfsCleanFile(s: *Session, a: Allocator, io: Io, path: []const u8, storing: native.Storing) native.Error![]const u8 {
         const l = &s.backend.lfs;
         if (l.extensions) return error.NativeFilterExtensionUnsupported;
-        const file = try s.options.wt.openFile(io, path, .{});
+        const file = try s.options.wt.get().openFile(io, path, .{});
         defer file.close(io);
         var head: [lfs.pointer_size_cutoff]u8 = undefined;
         const n = try lfs_input.at(io, file, &head, 0);
         // A head that is no pointer is content, cleaned below.
         if (lfs.Pointer.recognize(head[0..n]) != null) {
             if (n < head.len) return a.dupe(u8, head[0..n]);
-            return lfs_input.file(io, s.options.wt, path, a, .pointer_file);
+            return lfs_input.file(io, s.options.wt.get(), path, a, .pointer_file);
         }
 
         var buf: [64 * 1024]u8 = undefined;
@@ -308,18 +308,18 @@ test "native LFS selection owns settings, preserves custom commands and hash-onl
     defer tmp.cleanup();
     var cfg = try config.Config.parseText(gpa, "[filter \"lfs\"]\nprocess = git-lfs filter-process\n", .local);
     defer cfg.deinit();
-    var ordinary = try filter.Drivers.load(gpa, io, &cfg, .{ .common = tmp.dir, .work = tmp.dir, .shared = .umask }, .{});
+    var ordinary = try filter.Drivers.load(gpa, io, &cfg, .{ .common = .of(tmp.dir), .work = .of(tmp.dir), .shared = .umask }, .{});
     defer ordinary.deinit(io);
     try testing.expect(ordinary.resolve("lfs") == .program);
     var options: Options = .{};
-    var drivers = try filter.Drivers.load(gpa, io, &cfg, .{ .common = tmp.dir, .work = tmp.dir, .shared = .umask }, .{ .native_provider = provider(&options) });
+    var drivers = try filter.Drivers.load(gpa, io, &cfg, .{ .common = .of(tmp.dir), .work = .of(tmp.dir), .shared = .umask }, .{ .native_provider = provider(&options) });
     defer drivers.deinit(io);
     options.skip_smudge = true;
     try testing.expect(!settings(&drivers).skip_smudge);
     try testing.expect(drivers.resolve("lfs") == .native);
     const implementation = drivers.native_driver.?;
     try testing.expect(!implementation.accepts(.{ .clean = "my-lfs clean %f" }));
-    const session = try implementation.open(gpa, io, .{ .wt = tmp.dir });
+    const session = try implementation.open(gpa, io, .{ .wt = .of(tmp.dir) });
     defer session.deinit(io);
     const pointer_bytes = try session.clean(gpa, io, .{ .bytes = "large content", .storing = .hash_only });
     defer gpa.free(pointer_bytes);
@@ -361,9 +361,9 @@ test "native LFS batches delayed files once and isolates session state" {
     };
     var fetch: Fetch = .{};
     const options: Options = .{ .fetch = &fetch.interface };
-    var drivers = try filter.Drivers.load(gpa, io, &cfg, .{ .common = tmp.dir, .work = tmp.dir, .shared = .umask }, .{ .native_provider = provider(&options) });
+    var drivers = try filter.Drivers.load(gpa, io, &cfg, .{ .common = .of(tmp.dir), .work = .of(tmp.dir), .shared = .umask }, .{ .native_provider = provider(&options) });
     defer drivers.deinit(io);
-    const session = try drivers.native_driver.?.open(gpa, io, .{ .wt = tmp.dir });
+    const session = try drivers.native_driver.?.open(gpa, io, .{ .wt = .of(tmp.dir) });
     defer session.deinit(io);
     var source: Io.Reader = .fixed("payload");
     const pointer = try lfs.hashOnly(&source);
@@ -379,7 +379,7 @@ test "native LFS batches delayed files once and isolates session state" {
     }
     try testing.expect((try session.nextReady(gpa, io)) == null);
     try testing.expectEqual(@as(usize, 1), fetch.calls);
-    const fresh = try drivers.native_driver.?.open(gpa, io, .{ .wt = tmp.dir });
+    const fresh = try drivers.native_driver.?.open(gpa, io, .{ .wt = .of(tmp.dir) });
     defer fresh.deinit(io);
     try testing.expect((try fresh.nextReady(gpa, io)) == null);
     try testing.expectEqual(@as(u32, 0), fresh.fallbacks());
@@ -404,9 +404,9 @@ test "native LFS propagates batched cancellation and releases pending state" {
     };
     var fetch: Fetch = .{};
     const options: Options = .{ .fetch = &fetch.interface };
-    var drivers = try filter.Drivers.load(gpa, io, &cfg, .{ .common = tmp.dir, .work = tmp.dir, .shared = .umask }, .{ .native_provider = provider(&options) });
+    var drivers = try filter.Drivers.load(gpa, io, &cfg, .{ .common = .of(tmp.dir), .work = .of(tmp.dir), .shared = .umask }, .{ .native_provider = provider(&options) });
     defer drivers.deinit(io);
-    const session = try drivers.native_driver.?.open(gpa, io, .{ .wt = tmp.dir });
+    const session = try drivers.native_driver.?.open(gpa, io, .{ .wt = .of(tmp.dir) });
     var source: Io.Reader = .fixed("missing");
     const pointer = try lfs.hashOnly(&source);
     var buffer: [lfs.Pointer.max_encoded_len]u8 = undefined;
@@ -414,7 +414,7 @@ test "native LFS propagates batched cancellation and releases pending state" {
     try testing.expectError(error.Canceled, session.nextReady(gpa, io));
     try testing.expectEqual(@as(usize, 1), fetch.calls);
     session.deinit(io);
-    const fresh = try drivers.native_driver.?.open(gpa, io, .{ .wt = tmp.dir });
+    const fresh = try drivers.native_driver.?.open(gpa, io, .{ .wt = .of(tmp.dir) });
     defer fresh.deinit(io);
     try testing.expect((try fresh.nextReady(gpa, io)) == null);
 }
@@ -432,9 +432,9 @@ test "native LFS allocator failures release driver and pending delivery" {
             };
             var fetcher: lfs.Fetcher = .{ .vtable = &.{ .fetch = fetch.run } };
             const options: Options = .{ .fetch = &fetcher };
-            var drivers = try filter.Drivers.load(gpa, testing.io, configuration, .{ .common = dir, .work = dir, .shared = .umask }, .{ .native_provider = provider(&options) });
+            var drivers = try filter.Drivers.load(gpa, testing.io, configuration, .{ .common = .of(dir), .work = .of(dir), .shared = .umask }, .{ .native_provider = provider(&options) });
             defer drivers.deinit(testing.io);
-            const session = try drivers.native_driver.?.open(gpa, testing.io, .{ .wt = dir });
+            const session = try drivers.native_driver.?.open(gpa, testing.io, .{ .wt = .of(dir) });
             defer session.deinit(testing.io);
             const bytes = try session.clean(gpa, testing.io, .{ .bytes = "unavailable", .storing = .hash_only });
             defer gpa.free(bytes);

@@ -88,7 +88,7 @@ fn ours(gpa: Allocator, io: Io, pair: *history.Pair, cached: bool, out: *Io.Writ
     rules.attrs = &attrs;
     const db = repo.objectDatabase();
     const wt = repo.workDirectory().?;
-    var conv: convert.Session = .open(gpa, io, .{ .wt = wt, .kind = db.objectFormat(), .core = rules.core, .index = &index, .db = db });
+    var conv: convert.Session = .open(gpa, io, .{ .wt = .of(wt), .kind = db.objectFormat(), .core = rules.core, .index = &index, .db = db });
     defer conv.deinit(io);
     const ext: external.External = .{
         .programs = .{ .environ = &pair.env },
@@ -96,7 +96,7 @@ fn ours(gpa: Allocator, io: Io, pair: *history.Pair, cached: bool, out: *Io.Writ
         .worktree = .{
             .dir = .of(wt),
             .conv = &conv,
-            .lends = if (cached) .{ .io = io, .wt = wt, .index = &index, .db = db, .conv = &conv, .rules = rules } else null,
+            .lends = if (cached) .{ .io = io, .wt = .of(wt), .index = &index, .db = db, .conv = &conv, .rules = rules } else null,
         },
     };
     const options = try diff.configured(repo.configuration(), .{});

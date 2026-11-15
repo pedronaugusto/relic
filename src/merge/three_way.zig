@@ -474,7 +474,7 @@ fn carry(
     write_rules.attrs = &write_attrs;
 
     var conv: convert.Session = .open(gpa, io, .{
-        .wt = wt,
+        .wt = .of(wt),
         .kind = db.objectFormat(),
         .core = rules.core,
         .required_filters = rules.required_filters,
@@ -869,7 +869,7 @@ const Machinery = struct {
         // whether a stored version kept its CRLF endings. A filter runs
         // where git runs it, in the working tree or the bare repository.
         m.normalizer = .open(gpa, io, .{
-            .wt = wt orelse repo.gitDirectory(),
+            .wt = .of(wt orelse repo.gitDirectory()),
             .kind = repo.objectFormat(),
             .core = rules.core,
             .required_filters = rules.required_filters,
