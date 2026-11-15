@@ -127,6 +127,13 @@
       "reason": "the kernel's name on FreeBSD (the kern.ostype sysctl), where std has no uname, the one call std's checked layer does not give the repository"
     },
     {
+      "file": "src/walk/input.zig",
+      "rules": [
+        "A009"
+      ],
+      "reason": "the walk layer's input seam: the shallow file's contents enter here, held to the limit named there; shallow.zig parses the bytes it hands back"
+    },
+    {
       "file": "src/wire/input.zig",
       "rules": [
         "A009"

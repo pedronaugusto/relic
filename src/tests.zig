@@ -85,6 +85,7 @@ test {
         _ = @import("odb/quarantine.zig");
         _ = @import("maintenance/server_info.zig");
         _ = @import("walk/walk.zig");
+        _ = @import("walk/input.zig");
         _ = @import("wire/credential/store.zig");
         _ = @import("names/ref.zig");
         _ = @import("refs/refs_test.zig");

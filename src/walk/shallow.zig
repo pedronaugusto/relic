@@ -22,6 +22,7 @@ const Io = std.Io;
 
 const hash = @import("../hash/hash.zig");
 const fs = @import("../fs/fs.zig");
+const input = @import("input.zig");
 
 const Oid = hash.Oid;
 
@@ -46,7 +47,7 @@ pub const Error = error{
 pub fn read(gpa: Allocator, io: Io, common_dir: Io.Dir, kind: hash.Kind) Self.ReadError!Oid.Set {
     var set: Oid.Set = .empty;
     errdefer set.deinit(gpa);
-    const text = aegis.own.readFile(io, common_dir, file_name, gpa, aegis.units.Bytes(u64).fromRaw(1 << 30)) catch |err| switch (err) {
+    const text = input.file(io, common_dir, file_name, gpa, .shallow) catch |err| switch (err) {
         error.FileNotFound => return set,
         else => |e| return e,
     };
