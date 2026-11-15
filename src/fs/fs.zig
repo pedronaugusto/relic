@@ -713,7 +713,9 @@ pub fn isExecutable(p: Io.File.Permissions) bool {
 /// and put back at once, the only way POSIX gives to read it, so a file
 /// another thread creates in that moment is made without it. Windows has
 /// no umask, and git there reads zero.
-pub const processUmask = platform.processUmask;
+pub fn processUmask() u32 {
+    return platform.processUmask();
+}
 
 /// The permissions a blob's mode asks for: 0o777 when executable, 0o666
 /// otherwise, before the process umask — which is what git creates files
@@ -1684,7 +1686,15 @@ pub const ReadSizedError = input.ReadSizedError;
 /// How long a stat said the file is, and the most bytes the read takes.
 pub const ReadSizedOptions = input.ReadSizedOptions;
 /// Read a file a stat has already measured (`input.readFileSized`).
-pub const readFileSized = input.readFileSized;
+pub fn readFileSized(
+    gpa: Allocator,
+    io: Io,
+    dir: Io.Dir,
+    sub_path: []const u8,
+    options: ReadSizedOptions,
+) Self.ReadSizedError![]u8 {
+    return input.readFileSized(gpa, io, dir, sub_path, options);
+}
 /// Read a whole file, or `null` if it is not there (`input.readFileAlloc`).
 pub const readFileAlloc = input.readFileAlloc;
 /// Read a whole file holding a secret into an owner that wipes it, or
