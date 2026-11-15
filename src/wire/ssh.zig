@@ -220,9 +220,9 @@ pub fn explain(gpa: Allocator, io: Io, conn: *Connection, err: anyerror, options
         // A description that runs out of memory is that failure, returned
         // in place of the refusal it could not describe.
         if (failure) |f| {
-            try f.begin(gpa, r.reason, url.scheme, url.raw);
-            try f.setServerMessage(said);
-            if (url.user) |user| f.username = try f.allocator().dupe(u8, user);
+            f.begin(gpa, r.reason, url.scheme, url.raw) catch |e| return e;
+            f.setServerMessage(said) catch |e| return e;
+            if (url.user) |user| f.username = f.allocator().dupe(u8, user) catch |e| return e;
         }
         return r.e;
     }

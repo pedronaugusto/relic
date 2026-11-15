@@ -77,7 +77,10 @@ pub const Connection = struct {
     /// This connection, as `requestEnd`'s end reaches it to ask for the
     /// cause of a failed write: set by `requestEnd` each time it hands one
     /// out, so it is the connection where the end is used.
-    cause_target: ?*Connection = null,
+    cause_target: CauseTarget = .{},
+
+    /// What `requestEnd`'s end holds to find its connection.
+    pub const CauseTarget = struct { connection: ?*Connection = null };
 
     /// What each transport supplies.
     pub const VTable = struct {
@@ -122,15 +125,15 @@ pub const Connection = struct {
     /// as the cause of a failed write.
     pub fn requestEnd(c: *Connection) Self.Error!aegis.io.WriteEnd {
         const writer = try c.request();
-        c.cause_target = c;
+        c.cause_target = .{ .connection = c };
         return .init(writer, &c.cause_target, causeOf);
     }
 
     fn causeOf(context: *const anyopaque) ?anyerror {
         // requestEnd passes its connection's `cause_target`, which it set;
         // `failure` may keep the far side's message in the connection.
-        const target: *const ?*Connection = @ptrCast(@alignCast(context));
-        const c = target.* orelse aegis.assert.never("requestEnd sets the target before it hands its end out");
+        const target: *const CauseTarget = @ptrCast(@alignCast(context));
+        const c = target.connection orelse aegis.assert.never("requestEnd sets the target before it hands its end out");
         return c.failure();
     }
 
@@ -303,7 +306,7 @@ pub const Process = struct {
     /// A warning's place kept in a sink: its index there, and room in the
     /// sink's arena for as much as a tail keeps, so that filling it as the
     /// conversation closes, which returns nothing, cannot fail.
-    const Said = struct {
+    pub const Said = struct {
         sink: *warning.Warnings,
         index: usize,
         room: []u8,
