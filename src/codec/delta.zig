@@ -7,6 +7,7 @@
 
 const ErrorNamespace = @This();
 const std = @import("std");
+const aegis = @import("aegis");
 const shakedown = @import("shakedown");
 const Allocator = std.mem.Allocator;
 
@@ -95,8 +96,10 @@ pub fn applyTo(
     try out.ensureUnusedCapacity(gpa, @min(target, producible(base.len, delta.len - sizes.len)));
 
     var r: std.Io.Reader = .fixed(delta[sizes.len..]);
-    // glint-ignore: Z026 -- takeByte fails only at the end of the delta's bytes, which ends its commands
-    while (r.takeByte()) |op| {
+    // The commands run to the end of the delta's bytes.
+    while (r.bufferedLen() != 0) {
+        const op = r.buffered()[0];
+        r.toss(1);
         if (op == 0) return error.InvalidDeltaCommand;
         // What the target still has room for.
         const room = sizes.target - (out.items.len - start);
@@ -123,7 +126,7 @@ pub fn applyTo(
             if (bytes.len > room) return error.DeltaResultSizeMismatch;
             out.appendSliceAssumeCapacity(bytes);
         }
-    } else |_| {}
+    }
     if (out.items.len - start != sizes.target) return error.DeltaResultSizeMismatch;
 }
 
@@ -322,8 +325,8 @@ fn flushInsert(gpa: Allocator, out: *std.ArrayList(u8), bytes: []const u8) Alloc
 /// out and does not renumber the ones after it, which is the rule that
 /// catches reimplementers of the decoder and the encoder alike.
 fn emitCopy(gpa: Allocator, out: *std.ArrayList(u8), offset: u32, size: u32) Allocator.Error!void {
-    std.debug.assert(size != 0);
-    std.debug.assert(size <= max_copy);
+    aegis.assert.invariant(size != 0, "a copy carries at least one byte");
+    aegis.assert.invariant(size <= max_copy, "a copy carries at most its three size bytes");
     var buf: [8]u8 = undefined;
     var n: usize = 1;
     var cmd: u8 = 0x80;
@@ -347,8 +350,9 @@ fn emitCopy(gpa: Allocator, out: *std.ArrayList(u8), offset: u32, size: u32) All
     try out.appendSlice(gpa, buf[0..n]);
 }
 
-/// The base's sixteen-byte blocks, by hash.
-const Index = struct {
+/// The base's sixteen-byte blocks, by hash. Public as the type of
+/// `Encoder.index`; only `Encoder` builds and reads one.
+pub const Index = struct {
     /// For each hash bucket, the last block that landed in it, or
     /// `sentinel`.
     head: []u32,
@@ -625,7 +629,7 @@ test "a lying delta is a named error" {
 }
 
 test "fuzz: any bytes are a value or a named error" {
-    try shakedown.check(std.testing.allocator, {}, fuzzOne, .{});
+    try shakedown.check(std.testing.allocator, {}, fuzzOne, .{ .reach = &.{"refused"} });
 }
 
 fn fuzzOne(_: void, case: *shakedown.Case) anyerror!void {
@@ -636,7 +640,15 @@ fn fuzzOne(_: void, case: *shakedown.Case) anyerror!void {
     var base_buf: [64]u8 = undefined;
     @memset(&base_buf, 'a');
     for (0..64) |n| {
-        const out = apply(gpa, base_buf[0..n], input) catch continue;
+        // A refusal is a named error of the delta's; running out of memory is
+        // not one, since what is reserved is bounded by the commands.
+        const out = apply(gpa, base_buf[0..n], input) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => {
+                case.reached("refused");
+                continue;
+            },
+        };
         gpa.free(out);
     }
 }

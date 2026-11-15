@@ -18,7 +18,7 @@ const std = @import("std");
 const aegis = @import("aegis");
 const shakedown = @import("shakedown");
 const Io = std.Io;
-const assert = std.debug.assert;
+const assert = aegis.assert;
 
 /// The longest line, its four length digits included.
 pub const max_line: usize = 65520;
@@ -27,7 +27,7 @@ pub const max_data: usize = max_line - 4;
 
 comptime {
     // Four hexadecimal digits say every length a line can have.
-    assert(max_line <= 0xffff);
+    if (max_line > 0xffff) @compileError("four hexadecimal digits cannot say max_line");
 }
 
 pub const Packet = union(enum) {
@@ -57,7 +57,7 @@ pub const ReadError = error{
 /// and asserts. The end of the stream before a whole line is
 /// `error.EndOfStream`.
 pub fn read(r: *Io.Reader) Self.ReadError!Packet {
-    assert(r.buffer.len >= max_line);
+    assert.invariant(r.buffer.len >= max_line, "the reader's buffer holds a whole line, which the data is a view of");
     const head = try r.takeArray(4);
     const len = parseLength(head) orelse return error.BadPacket;
     return switch (len) {
@@ -124,8 +124,8 @@ pub fn responseEnd(w: *Io.Writer) Io.Writer.Error!void {
 fn writeLength(w: *Io.Writer, len: usize) Io.Writer.Error!void {
     // A data line, which `read` takes back: the special lengths below four
     // are written whole by their own functions.
-    assert(len >= 4);
-    assert(len <= max_line);
+    assert.invariant(len >= 4, "a data line's length counts its four digits");
+    assert.invariant(len <= max_line, "a data line is at most max_line");
     const digits = "0123456789abcdef";
     const head = [4]u8{
         digits[(len >> 12) & 0xf],

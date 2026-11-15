@@ -5,6 +5,7 @@
 //! position a corrupt file gives past the end is refused, not read past.
 
 const std = @import("std");
+const aegis = @import("aegis");
 
 pub const Rows = struct {
     /// The table: every row, end to end.
@@ -18,7 +19,7 @@ pub const Rows = struct {
     /// `rows` rows of `width` bytes from `start` in `file`, or `null` where
     /// the file is shorter than that. `width` is not 0.
     pub fn cut(file: []const u8, start: usize, rows: usize, width: usize) ?Rows {
-        std.debug.assert(width != 0);
+        aegis.assert.invariant(width != 0, "a row is at least one byte wide");
         const len = std.math.mul(usize, rows, width) catch return null;
         if (start > file.len or file.len - start < len) return null;
         return .{ .bytes = file[start..][0..len], .width = width };
@@ -28,7 +29,7 @@ pub const Rows = struct {
     /// before them, or `null` where the file is shorter than that: a table a
     /// format puts after records of their own lengths.
     pub fn last(file: []const u8, rows: usize, width: usize) ?struct { rows: Rows, before: []const u8 } {
-        std.debug.assert(width != 0);
+        aegis.assert.invariant(width != 0, "a row is at least one byte wide");
         const len: usize = std.math.mul(usize, rows, width) catch return null;
         if (len > file.len) return null;
         const start = file.len - len;
@@ -45,7 +46,7 @@ pub const Rows = struct {
     /// The whole rows of `width` bytes in `bytes`, any bytes after the last
     /// left out: a chunk git reads as its length over the row's width.
     pub fn whole(bytes: []const u8, width: usize) Rows {
-        std.debug.assert(width != 0);
+        aegis.assert.invariant(width != 0, "a row is at least one byte wide");
         return .{ .bytes = bytes[0 .. bytes.len - bytes.len % width], .width = width };
     }
 
@@ -66,8 +67,8 @@ pub const Rows = struct {
     /// first row from `from` up to `to` that is not before `key`: where `key`
     /// is, or would go. `null` where `from..to` is not a range of the table.
     pub fn lowerBound(rows: Rows, from: usize, to: usize, column: usize, key: []const u8) ?usize {
-        std.debug.assert(column <= rows.width);
-        std.debug.assert(key.len <= rows.width - column);
+        aegis.assert.invariant(column <= rows.width, "the key's column is within a row");
+        aegis.assert.invariant(key.len <= rows.width - column, "the key fits in the row after its column");
         if (from > to or to > rows.count()) return null;
         var lo = from;
         var hi = to;

@@ -143,7 +143,7 @@ test "a literal word yields its set bits" {
 }
 
 test "fuzz: any bytes are a bitmap or a named error" {
-    try shakedown.check(std.testing.allocator, {}, fuzzOne, .{});
+    try shakedown.check(std.testing.allocator, {}, fuzzOne, .{ .reach = &.{"refused"} });
 }
 
 fn fuzzOne(_: void, case: *shakedown.Case) anyerror!void {
@@ -151,7 +151,12 @@ fn fuzzOne(_: void, case: *shakedown.Case) anyerror!void {
     var scratch: [512]u8 = undefined;
     const input = scratch[0..shakedown.gen.intRange(case.source, usize, 0, scratch.len)];
     case.source.bytes(input);
-    var result = read(gpa, input) catch return;
+    // A refusal is a named error of the bitmap's; running out of memory is
+    // not one, since a read reserves at most `1 << 26` bits.
+    var result = read(gpa, input) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return case.reached("refused"),
+    };
     result.bits.deinit();
 }
 
