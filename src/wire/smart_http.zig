@@ -808,14 +808,14 @@ const Http = struct {
         h.cookies_slot = .{ .sink = sink, .path = kept };
     }
 
-    /// Fill the kept warning with `failure`'s name, or give it up when
+    /// Fill the kept warning with `cause`'s name, or give it up when
     /// the jar was written (`null`).
-    fn settleCookieWarning(h: *Http, failure: ?anyerror) void {
+    fn settleCookieWarning(h: *Http, cause: ?anyerror) void {
         const slot = h.cookies_slot orelse return;
         h.cookies_slot = null;
         for (slot.sink.items.items, 0..) |*item, i| switch (item.*) {
             .cookies_not_saved => |*c| if (c.path.ptr == slot.path.ptr) {
-                if (failure) |err| c.reason = @errorName(err) else _ = slot.sink.items.orderedRemove(i);
+                if (cause) |err| c.reason = @errorName(err) else _ = slot.sink.items.orderedRemove(i);
                 return;
             },
             else => {},
