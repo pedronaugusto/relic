@@ -1904,3 +1904,8 @@ test "a raw date is seconds and a zone, the zone no more than fourteen hours unl
     try std.testing.expect(!validRawDate("1700000000 0100", true));
     try std.testing.expect(!validRawDate("1700000000", true));
 }
+
+// The input seam's own tests, reached from here as preflight's test imports ask.
+test {
+    _ = @import("input.zig");
+}

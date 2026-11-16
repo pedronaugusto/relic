@@ -97,3 +97,8 @@ test "a commondir that is there but cannot be read is an error, never a reposito
     try tmp.dir.deleteDir(io, "commondir");
     try std.testing.expect((try openCommon(io, tmp.dir)) == null);
 }
+
+// The input seam's own tests, reached from here as preflight's test imports ask.
+test {
+    _ = @import("input.zig");
+}

@@ -1827,3 +1827,8 @@ fn resetWhenFoundLikeGit(option: []const u8) !void {
         }
     }
 }
+
+// The input seam's own tests, reached from here as preflight's test imports ask.
+test {
+    _ = @import("input.zig");
+}

@@ -1585,3 +1585,8 @@ test "a cancel that lands in one of an event's hooks run at once starts none of 
     }
     return error.TestUnexpectedResult;
 }
+
+// The input seam's own tests, reached from here as preflight's test imports ask.
+test {
+    _ = @import("hooks/input.zig");
+}

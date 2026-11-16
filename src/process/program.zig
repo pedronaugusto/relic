@@ -739,3 +739,8 @@ test "opposite full pipes refuse unavailable concurrency instead of deadlocking"
     try testing.expectEqual(input.len, outcome.stdout.len);
     for (outcome.stdout) |byte| try testing.expectEqual(@as(u8, 'x'), byte);
 }
+
+// The input seam's own tests, reached from here as preflight's test imports ask.
+test {
+    _ = @import("input.zig");
+}
