@@ -41,7 +41,7 @@ const Sent = union(enum) { flush, delim, response_end, data: []const u8 };
 /// `len` as four hex digits, in the case drawn: git writes lower case and
 /// reads either.
 fn hexLength(s: *shakedown.Source, len: usize, out: *[4]u8) void {
-    _ = if (gen.boolean(s)) std.fmt.bufPrint(out, "{x:0>4}", .{len}) catch unreachable else std.fmt.bufPrint(out, "{X:0>4}", .{len}) catch unreachable; // four digits hold every line's length
+    _ = if (gen.boolean(s)) std.mem.print(out, "{x:0>4}", .{len}) catch unreachable else std.mem.print(out, "{X:0>4}", .{len}) catch unreachable; // four digits hold every line's length
 }
 
 fn anyStream(_: void, case: *shakedown.Case) !void {

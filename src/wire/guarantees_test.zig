@@ -17,7 +17,7 @@ const Io = std.Io;
 
 fn line(gpa: std.mem.Allocator, wire: *std.ArrayList(u8), payload: []const u8) !void {
     var head: [4]u8 = undefined;
-    _ = try std.fmt.bufPrint(&head, "{x:0>4}", .{payload.len + 4});
+    _ = try std.mem.print(&head, "{x:0>4}", .{payload.len + 4});
     try wire.appendSlice(gpa, &head);
     try wire.appendSlice(gpa, payload);
 }

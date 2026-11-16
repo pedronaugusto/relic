@@ -68,7 +68,7 @@ fn anyHeader(_: void, case: *shakedown.Case) !void {
     try testing.expectEqual(nul.? + 1, parsed.len);
     try testing.expect(isSpelling(input[0..nul.?]));
     var spelled: [48]u8 = undefined;
-    const want = try std.fmt.bufPrint(&spelled, "{s} {d}\x00", .{ parsed.header.type.name(), parsed.header.size });
+    const want = try std.mem.print(&spelled, "{s} {d}\x00", .{ parsed.header.type.name(), parsed.header.size });
     try testing.expectEqualStrings(want, input[0..parsed.len]);
 }
 
@@ -83,8 +83,8 @@ test "property: a loose header is accepted exactly when it is the one spelling o
 
 /// git's `canon_mode` (cache.h), on the `S_IF*` bits.
 fn canonMode(value: u32) Mode {
-    const S_IFMT = 0o170000;
-    return switch (value & S_IFMT) {
+    const s_ifmt = 0o170000;
+    return switch (value & s_ifmt) {
         0o100000 => if (value & 0o100 != 0) .exec else .file, // S_ISREG: S_IXUSR decides
         0o120000 => .symlink, // S_ISLNK
         0o040000 => .tree, // S_ISDIR
@@ -147,7 +147,7 @@ fn anyIdentLine(_: void, case: *shakedown.Case) !void {
     const minutes = gen.intRange(case.source, i16, -(99 * 60 + 59), 99 * 60 + 59);
     if (dated) {
         const abs = @abs(minutes);
-        const tail = try std.fmt.bufPrint(buffer[len..], "> {d} {c}{d:0>2}{d:0>2}", .{ secs, @as(u8, if (minutes < 0) '-' else '+'), abs / 60, abs % 60 });
+        const tail = try std.mem.print(buffer[len..], "> {d} {c}{d:0>2}{d:0>2}", .{ secs, @as(u8, if (minutes < 0) '-' else '+'), abs / 60, abs % 60 });
         len += tail.len;
     }
     const line = buffer[0..len];

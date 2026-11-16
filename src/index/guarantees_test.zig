@@ -71,6 +71,54 @@ fn less(_: void, a: Written, b: Written) bool {
     return order(a, b) == .lt;
 }
 
+/// One entry as git's `ce_write_entry` writes it in `version`, the path
+/// stripped of what it shares with `previous` in version 4.
+fn writeEntry(gpa: std.mem.Allocator, bytes: *std.ArrayList(u8), e: Written, raw_len: usize, version: u32, previous: []const u8) !void {
+    var word: [4]u8 = undefined;
+    const start = bytes.items.len;
+    // ctime, mtime, dev, ino, mode, uid, gid, size: the mode's word is
+    // the fifth, between the stat's ino and uid.
+    for (e.stat[0..6]) |v| {
+        std.mem.writeInt(u32, &word, v, .big);
+        try bytes.appendSlice(gpa, &word);
+    }
+    std.mem.writeInt(u32, &word, e.raw_mode, .big);
+    try bytes.appendSlice(gpa, &word);
+    for (e.stat[6..9]) |v| {
+        std.mem.writeInt(u32, &word, v, .big);
+        try bytes.appendSlice(gpa, &word);
+    }
+    try bytes.appendSlice(gpa, e.oid[0..raw_len]);
+    const extended = e.skip_worktree or e.intent_to_add;
+    var flags: u16 = @intCast(@min(e.path.len, 0xfff));
+    flags |= @as(u16, e.stage) << 12;
+    if (e.assume_valid) flags |= 0x8000;
+    if (extended) flags |= 0x4000;
+    var half: [2]u8 = undefined;
+    std.mem.writeInt(u16, &half, flags, .big);
+    try bytes.appendSlice(gpa, &half);
+    if (extended) {
+        var extra: u16 = 0;
+        if (e.skip_worktree) extra |= 0x4000;
+        if (e.intent_to_add) extra |= 0x2000;
+        std.mem.writeInt(u16, &half, extra, .big);
+        try bytes.appendSlice(gpa, &half);
+    }
+    if (version == 4) {
+        var common: usize = 0;
+        while (common < previous.len and common < e.path.len and previous[common] == e.path[common]) common += 1;
+        var buffer: [16]u8 = undefined;
+        try bytes.appendSlice(gpa, varint(previous.len - common, &buffer));
+        try bytes.appendSlice(gpa, e.path[common..]);
+        try bytes.append(gpa, 0);
+    } else {
+        try bytes.appendSlice(gpa, e.path);
+        // One to eight NULs, to a multiple of eight.
+        const unpadded = bytes.items.len - start + 1;
+        try bytes.appendNTimes(gpa, 0, 1 + std.mem.alignForward(usize, unpadded, 8) - unpadded);
+    }
+}
+
 fn anyIndex(_: void, case: *shakedown.Case) !void {
     const gpa = testing.allocator;
     const kind = gen.oneOf(case.source, hash.Kind, &[_]hash.Kind{ .sha1, .sha256 });
@@ -120,7 +168,7 @@ fn anyIndex(_: void, case: *shakedown.Case) !void {
         expect_unsorted = true;
     } else if (n >= 1 and n < entries.len and gen.intRange(case.source, u8, 0, 3) == 0) {
         const i = gen.intRange(case.source, usize, 0, n - 1);
-        std.mem.copyBackwards(Written, entries[i + 1 .. n + 1], entries[i..n]);
+        @memmove(entries[i + 1 .. n + 1], entries[i..n]);
         count = n + 1;
         expect_unsorted = true;
     }
@@ -135,48 +183,7 @@ fn anyIndex(_: void, case: *shakedown.Case) !void {
     try bytes.appendSlice(gpa, &word);
     var previous: []const u8 = "";
     for (entries[0..count]) |e| {
-        const start = bytes.items.len;
-        // ctime, mtime, dev, ino, mode, uid, gid, size: the mode's word is
-        // the fifth, between the stat's ino and uid.
-        for (e.stat[0..6]) |v| {
-            std.mem.writeInt(u32, &word, v, .big);
-            try bytes.appendSlice(gpa, &word);
-        }
-        std.mem.writeInt(u32, &word, e.raw_mode, .big);
-        try bytes.appendSlice(gpa, &word);
-        for (e.stat[6..9]) |v| {
-            std.mem.writeInt(u32, &word, v, .big);
-            try bytes.appendSlice(gpa, &word);
-        }
-        try bytes.appendSlice(gpa, e.oid[0..raw_len]);
-        const extended = e.skip_worktree or e.intent_to_add;
-        var flags: u16 = @intCast(@min(e.path.len, 0xfff));
-        flags |= @as(u16, e.stage) << 12;
-        if (e.assume_valid) flags |= 0x8000;
-        if (extended) flags |= 0x4000;
-        var half: [2]u8 = undefined;
-        std.mem.writeInt(u16, &half, flags, .big);
-        try bytes.appendSlice(gpa, &half);
-        if (extended) {
-            var extra: u16 = 0;
-            if (e.skip_worktree) extra |= 0x4000;
-            if (e.intent_to_add) extra |= 0x2000;
-            std.mem.writeInt(u16, &half, extra, .big);
-            try bytes.appendSlice(gpa, &half);
-        }
-        if (version == 4) {
-            var common: usize = 0;
-            while (common < previous.len and common < e.path.len and previous[common] == e.path[common]) common += 1;
-            var buffer: [16]u8 = undefined;
-            try bytes.appendSlice(gpa, varint(previous.len - common, &buffer));
-            try bytes.appendSlice(gpa, e.path[common..]);
-            try bytes.append(gpa, 0);
-        } else {
-            try bytes.appendSlice(gpa, e.path);
-            // One to eight NULs, to a multiple of eight.
-            const unpadded = bytes.items.len - start + 1;
-            try bytes.appendNTimes(gpa, 0, 1 + std.mem.alignForward(usize, unpadded, 8) - unpadded);
-        }
+        try writeEntry(gpa, &bytes, e, raw_len, version, previous);
         previous = e.path;
     }
     var sum: [32]u8 = @splat(0);

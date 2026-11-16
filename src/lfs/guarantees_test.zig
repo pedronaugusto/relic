@@ -162,7 +162,7 @@ fn anyBatch(_: void, case: *shakedown.Case) !void {
             },
             else => {
                 try w.print(",\"{s}\":{{\"download\":{{\"href\":\"https://h/{d}\"}}}}", .{ member, i });
-                if (hrefs[i] == null) hrefs[i] = try std.fmt.allocPrint(arena, "https://h/{d}", .{i});
+                if (hrefs[i] == null) hrefs[i] = try arena.print("https://h/{d}", .{i});
             },
         };
         try w.writeByte('}');
