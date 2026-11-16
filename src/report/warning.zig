@@ -82,6 +82,11 @@ pub const Warning = union(enum) {
     cookie_file_stdin,
     /// `http.saveCookies` without a `http.cookieFile` to save to.
     save_cookies_without_file,
+    /// relic's own: `http.saveCookies` asked for the cookie jar to be
+    /// written back to `path` when the conversation ended, and the write
+    /// failed for `reason`, an error's name. curl, and so git, leaves the
+    /// file as it was and says nothing.
+    cookies_not_saved: struct { path: []const u8, reason: []const u8 },
     /// One of `GIT_HTTP_LOW_SPEED_LIMIT`, `GIT_HTTP_LOW_SPEED_TIME`,
     /// `GIT_HTTP_RETRY_AFTER`, `GIT_HTTP_MAX_RETRIES` and
     /// `GIT_HTTP_MAX_RETRY_TIME` is not a number, and was left out: its name.
@@ -202,6 +207,7 @@ pub const Warning = union(enum) {
             .bundle_uri => |text| text,
             .cookie_file_stdin => "refusing to read cookies from http.cookiefile '-'",
             .save_cookies_without_file => "ignoring http.savecookies for empty http.cookiefile",
+            .cookies_not_saved => |c| arena.print("could not save cookies to '{s}': {s}", .{ c.path, c.reason }),
             .http_env_unparsed => |name| arena.print("failed to parse {s}", .{name}),
             .rate_limited => |wait| arena.print("rate limited, waiting {d} seconds before retry", .{wait.raw()}),
         };
@@ -273,6 +279,7 @@ pub const Warnings = struct {
             .bundle_uri => |t| .{ .bundle_uri = try a.dupe(u8, t) },
             .cookie_file_stdin => .cookie_file_stdin,
             .save_cookies_without_file => .save_cookies_without_file,
+            .cookies_not_saved => |c| .{ .cookies_not_saved = .{ .path = try a.dupe(u8, c.path), .reason = try a.dupe(u8, c.reason) } },
             .http_env_unparsed => |t| .{ .http_env_unparsed = try a.dupe(u8, t) },
             .rate_limited => |n| .{ .rate_limited = n },
         };

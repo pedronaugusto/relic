@@ -453,6 +453,8 @@ fn prepare(gpa: Allocator, io: Io, url: url_mod.Url, service: Service, options: 
     errdefer if (h.proxy_secret) |*p| p.deinit(gpa);
     errdefer h.freeTls();
     errdefer if (h.cookies) |*jar| jar.deinit(io);
+    // A conversation that never starts writes no jar: nothing to warn of.
+    errdefer h.settleCookieWarning(null);
 
     const configured = try h.configure(url);
     // The client points at the authorities and certificates `configure`
@@ -556,6 +558,9 @@ const Http = struct {
     /// writes its jar for git's `http.saveCookies`.
     cookies: if (http_enabled) ?uplink.CookieJar else void = if (http_enabled) null else {},
     cookie_jar_file: ?[]const u8 = null,
+    /// The warning kept for a jar that cannot be written back, reserved
+    /// where the conversation starts, as its end returns nothing.
+    cookies_slot: ?CookieSlot = null,
     /// How a 429 is answered: `http.retryAfter`, `http.maxRetries`,
     /// `http.maxRetryTime`.
     rate_limit: RateLimit = .{},
@@ -743,7 +748,10 @@ const Http = struct {
         };
         if (settings.save_cookies and (file == null or file.?.len == 0)) {
             try warning.note(h.options.warnings, .save_cookies_without_file);
-        } else if (settings.save_cookies) h.cookie_jar_file = file;
+        } else if (settings.save_cookies) {
+            h.cookie_jar_file = file;
+            try h.reserveCookieWarning(file.?);
+        }
         // curl turns its cookie engine on for any name, an empty one too.
         if (file == null) return;
         h.cookies = .init(h.gpa, .{});
@@ -772,15 +780,46 @@ const Http = struct {
     /// The jar written, as curl writes it when its handle is let go, under
     /// cancel protection: a cancel waits for the caller's next cancelation
     /// point, where it would have been lost with the write's error.
+    /// A write that fails fills the warning `reserveCookieWarning` kept,
+    /// and one that succeeds gives it up.
     fn saveCookies(h: *Http, io: Io) void {
         const path = h.cookie_jar_file orelse return;
-        const jar = &(h.cookies orelse return);
+        const jar = &(h.cookies orelse return h.settleCookieWarning(null));
         const protection = io.swapCancelProtection(.blocked);
         defer _ = io.swapCancelProtection(protection);
         var out: Io.Writer.Allocating = .init(h.gpa);
         defer out.deinit();
-        jar.save(io, &out.writer, .{ .session = true }) catch return;
-        fs.atomicWrite(io, Io.Dir.cwd(), path, out.written(), .{ .prefix = ".cookies-" }) catch return;
+        jar.save(io, &out.writer, .{ .session = true }) catch |err| return h.settleCookieWarning(err);
+        fs.atomicWrite(io, Io.Dir.cwd(), path, out.written(), .{ .prefix = ".cookies-" }) catch |err| return h.settleCookieWarning(err);
+        h.settleCookieWarning(null);
+    }
+
+    /// A `cookies_not_saved` warning kept in a sink, known by the sink's
+    /// own copy of its path, which no other entry shares: the entries
+    /// added or given up after it move its index, not its text.
+    const CookieSlot = struct { sink: *warning.Warnings, path: []const u8 };
+
+    /// Keep a `cookies_not_saved` warning for `path` in the caller's sink,
+    /// to be filled or given up when the jar is written back.
+    fn reserveCookieWarning(h: *Http, path: []const u8) Allocator.Error!void {
+        const sink = h.options.warnings orelse return;
+        try sink.add(.{ .cookies_not_saved = .{ .path = path, .reason = "" } });
+        const kept = sink.items.items[sink.items.items.len - 1].cookies_not_saved.path;
+        h.cookies_slot = .{ .sink = sink, .path = kept };
+    }
+
+    /// Fill the kept warning with `failure`'s name, or give it up when
+    /// the jar was written (`null`).
+    fn settleCookieWarning(h: *Http, failure: ?anyerror) void {
+        const slot = h.cookies_slot orelse return;
+        h.cookies_slot = null;
+        for (slot.sink.items.items, 0..) |*item, i| switch (item.*) {
+            .cookies_not_saved => |*c| if (c.path.ptr == slot.path.ptr) {
+                if (failure) |err| c.reason = @errorName(err) else _ = slot.sink.items.orderedRemove(i);
+                return;
+            },
+            else => {},
+        };
     }
 
     /// Read a client certificate and its key, as curl reads them for git.

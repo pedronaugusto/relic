@@ -1153,9 +1153,13 @@ test "http.cookieFile's cookies are sent, its Set-Cookie lines among them, and h
     defer gpa.free(by_git_cookies);
     var repo = try repo_mod.Repository.open(gpa, io, by_relic.dir, .{});
     defer repo.deinit(io);
-    var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &env } });
+    var warnings: warning.Warnings = .init(gpa);
+    defer warnings.deinit();
+    var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &env }, .warnings = &warnings });
     outcome.deinit();
     try expectSameFetch(gpa, io, &by_git, &by_relic);
+    // The jar was written back: the warning kept for a failed write is given up.
+    try testing.expectEqual(@as(usize, 0), warnings.items.items.len);
     const seen = try server.cookiesSeen(gpa);
     defer gpa.free(seen);
     // relic's requests carried the cookies git's did.
@@ -1168,6 +1172,43 @@ test "http.cookieFile's cookies are sent, its Set-Cookie lines among them, and h
     const relic_file = try by_relic.readFile(io, "cookies.txt");
     defer gpa.free(relic_file);
     try testing.expectEqualStrings(try cookieLines(arena, git_file), try cookieLines(arena, relic_file));
+}
+
+test "http.saveCookies to a file that cannot be written leaves it as curl leaves it, and says so in the warnings" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var root = testing.tmpDir(.{ .iterate = true });
+    defer root.cleanup();
+    try servedRepo(gpa, io, &root, 1);
+    const server = try testremote.HttpServer.start(gpa, io, root.dir, .{ .set_cookie = "name=value" });
+    defer server.stop();
+    const url = try server.url(gpa, "repo.git");
+    defer gpa.free(url);
+    var env = try testremote.environ(gpa);
+    defer env.deinit();
+    var by_relic = try testgit.Repo.init(gpa, io, &.{});
+    defer by_relic.deinit();
+    try by_relic.exec(io, &.{ "remote", "add", "origin", url });
+    // A jar in a directory that is not there: curl reads no cookies from
+    // it and writes none back, and git goes on.
+    try by_relic.exec(io, &.{ "config", "http.cookieFile", "absent/cookies.txt" });
+    try by_relic.exec(io, &.{ "config", "http.saveCookies", "true" });
+    var repo = try repo_mod.Repository.open(gpa, io, by_relic.dir, .{});
+    defer repo.deinit(io);
+    var warnings: warning.Warnings = .init(gpa);
+    defer warnings.deinit();
+    var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &env }, .warnings = &warnings });
+    outcome.deinit();
+    var not_saved: usize = 0;
+    for (warnings.items.items) |w| switch (w) {
+        .cookies_not_saved => |c| {
+            not_saved += 1;
+            try testing.expect(std.mem.endsWith(u8, c.path, "absent/cookies.txt"));
+            try testing.expect(c.reason.len != 0);
+        },
+        else => {},
+    };
+    try testing.expectEqual(@as(usize, 1), not_saved);
 }
 
 test "a 429 is answered as git answers it: http.maxRetries requests in all, Retry-After or http.retryAfter, neither past http.maxRetryTime" {
