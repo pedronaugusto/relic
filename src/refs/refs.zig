@@ -30,7 +30,7 @@ const Io = std.Io;
 const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
 const fs = @import("../fs/fs.zig");
-const hooks = @import("../hooks/hooks.zig");
+const hooks = @import("../hooks.zig");
 const testgit = @import("../testing/git.zig");
 
 const Oid = hash.Oid;

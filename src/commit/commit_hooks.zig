@@ -22,7 +22,7 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const object = @import("../object/object.zig");
-const hooks = @import("../hooks/hooks.zig");
+const hooks = @import("../hooks.zig");
 const repo_mod = @import("../repo/repo.zig");
 const fs = @import("../fs/fs.zig");
 const builtin = @import("builtin");

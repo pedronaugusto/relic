@@ -7,7 +7,7 @@ const ErrorNamespace = @This();
 const Self = @This();
 
 // The modules relic's API puts under this one, as `relic.repo.<name>`.
-const hooks = @import("../hooks/hooks.zig");
+const hooks = @import("../hooks.zig");
 const program = @import("../process.zig").program;
 
 const fs = @import("../fs/fs.zig");

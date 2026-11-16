@@ -61,7 +61,7 @@ const three_way = @import("../merge/three_way.zig");
 const branch_mod = @import("../commit/branch.zig");
 const merging = @import("../commit/merging.zig");
 const rebase_mod = @import("../rebase/rebase.zig");
-const hooks_mod = @import("../hooks/hooks.zig");
+const hooks_mod = @import("../hooks.zig");
 const warning = @import("../report.zig").warning;
 
 const Oid = hash.Oid;

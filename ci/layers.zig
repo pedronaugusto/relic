@@ -13,7 +13,7 @@ pub const layers: []const gantry.rules.Layer = &.{
     .{ .name = "config", .patterns = &.{"src/config/**"} },
     .{ .name = "patterns", .patterns = &.{ "src/patterns/**", "src/patterns.zig" } },
     .{ .name = "object", .patterns = &.{"src/object/**"} },
-    .{ .name = "hooks", .patterns = &.{"src/hooks/**"} },
+    .{ .name = "hooks", .patterns = &.{ "src/hooks/**", "src/hooks.zig" } },
     .{ .name = "odb", .patterns = &.{"src/odb/**"} },
     .{ .name = "refs", .patterns = &.{"src/refs/**"} },
     .{ .name = "index", .patterns = &.{"src/index/**"} },

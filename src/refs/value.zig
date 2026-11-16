@@ -10,7 +10,7 @@ const fs = @import("../fs/fs.zig");
 const reftable = @import("reftable/table.zig");
 const reflog = @import("reflog.zig");
 const names = @import("../names.zig").ref;
-const hooks = @import("../hooks/hooks.zig");
+const hooks = @import("../hooks.zig");
 const policy = @import("reftable/stack/policy.zig");
 /// The header `packed-refs` carries, with the space before the newline that
 /// is in git's source and in no document.

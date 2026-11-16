@@ -36,12 +36,12 @@ const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const fs = @import("../fs/fs.zig");
-const hash = @import("../hash/hash.zig");
-const object = @import("../object/object.zig");
-const config_mod = @import("../config/config.zig");
-const program = @import("../process.zig").program;
-const hook_input = @import("input.zig");
+const fs = @import("fs/fs.zig");
+const hash = @import("hash/hash.zig");
+const object = @import("object/object.zig");
+const config_mod = @import("config/config.zig");
+const program = @import("process.zig").program;
+const hook_input = @import("hooks/input.zig");
 
 const Oid = hash.Oid;
 
@@ -1153,7 +1153,7 @@ fn runsOnWindows(io: Io, path: []const u8) Io.Cancelable!bool {
 //=========================================================================
 
 const testing = std.testing;
-const testgit = @import("../testing/git.zig");
+const testgit = @import("testing/git.zig");
 
 /// An environment for a hook: the machine's `PATH`, and a `GIT_DIR` and
 /// `GIT_INDEX_FILE` planted to prove the runner takes them away.
@@ -1512,7 +1512,7 @@ test "a cancel that lands in reading whether a hook is git-lfs's is returned, no
     // Windows has no executable bit; the hook would be found another way.
     if (builtin.target.os.tag == .windows) return error.SkipZigTest;
     const shakedown = @import("shakedown");
-    const testing_io = @import("../testing/io.zig");
+    const testing_io = @import("testing/io.zig");
     const gpa = testing.allocator;
     const io = testing.io;
     var repo = try testgit.Repo.init(gpa, io, &.{});

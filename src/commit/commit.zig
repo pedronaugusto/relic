@@ -44,7 +44,7 @@ const repo_mod = @import("../repo/repo.zig");
 const config_mod = @import("../config/config.zig");
 const worktree = @import("../checkout/checkout.zig");
 const index_mod = @import("../index/index.zig");
-const hooks = @import("../hooks/hooks.zig");
+const hooks = @import("../hooks.zig");
 const fs = @import("../fs/fs.zig");
 
 const Oid = hash.Oid;

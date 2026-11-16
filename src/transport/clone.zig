@@ -66,7 +66,7 @@ const fetch_mod = @import("fetch.zig");
 const reference = @import("clone/reference.zig");
 const alternate_refs = @import("alternate_refs.zig");
 const submodule = @import("../submodule/submodule.zig");
-const hooks_mod = @import("../hooks/hooks.zig");
+const hooks_mod = @import("../hooks.zig");
 const Apart = @import("apart.zig").Apart;
 const aegis = @import("aegis");
 

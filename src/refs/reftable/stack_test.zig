@@ -598,7 +598,7 @@ test "an update goes through HEAD, a deletion takes its log, and the hook hears 
     // What the reference-transaction hook hears is git 2.54's: a
     // "preparing" state, and a symbolic ref's updates among the others.
     try testgit.requireGitVersion(gpa, io, 2, 54);
-    const hooks = @import("../../hooks/hooks.zig");
+    const hooks = @import("../../hooks.zig");
     var environ = try testgit.programEnviron(gpa);
     defer environ.deinit();
     try environ.put("GIT_AUTHOR_DATE", "@1700000000 +0000");
