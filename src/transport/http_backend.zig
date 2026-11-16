@@ -140,7 +140,7 @@ pub const Backend = struct {
         try response.header("Cache-Control", "no-cache, max-age=0, must-revalidate");
         switch (route) {
             .info_refs => {
-                if (!request.method.eql(.GET) and !request.method.eql(.HEAD)) return methodNotAllowed(io, response);
+                if (!request.method.eql(.get) and !request.method.eql(.head)) return methodNotAllowed(io, response);
                 try response.header("Content-Type", try arena.print("application/x-git-{s}-advertisement", .{service.name()}));
                 const w = try response.writer(io);
                 if (version != .v2) {
@@ -150,7 +150,7 @@ pub const Backend = struct {
                 try b.run(io, &remote, service, version, user, request, w, .advertise);
             },
             .upload_pack, .receive_pack => {
-                if (!request.method.eql(.POST)) return methodNotAllowed(io, response);
+                if (!request.method.eql(.post)) return methodNotAllowed(io, response);
                 const expected = try arena.print("application/x-git-{s}-request", .{service.name()});
                 const content_type = request.headers.get("content-type") orelse "";
                 if (!std.mem.eql(u8, content_type, expected)) return plain(io, response, .unsupported_media_type, "Unsupported Media Type");
@@ -165,7 +165,7 @@ pub const Backend = struct {
     /// `get_info_packs`, `get_text_file`, `get_loose_object`,
     /// `get_pack_file` and `get_idx_file`.
     fn serveDumb(b: *Backend, io: Io, arena: Allocator, remote: *local.Remote, dumb: Dumb, file: []const u8, request: *Request, response: *Response) anyerror!void {
-        if (!request.method.eql(.GET) and !request.method.eql(.HEAD)) return methodNotAllowed(io, response);
+        if (!request.method.eql(.get) and !request.method.eql(.head)) return methodNotAllowed(io, response);
         const config = remote.repo.configuration();
         if (!try config.getBool("http.getanyfile", true)) return forbidden(io, response);
         var body: std.ArrayList(u8) = .empty;

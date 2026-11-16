@@ -194,7 +194,7 @@ pub const S3 = struct {
         s.signer.sign(.{ .method = "HEAD", .url = parsed, .payload = uplink.wire.sigv4.empty_payload }, now(io), &signed) catch
             return error.LfsStoreFailed;
         var fields_buffer: [4]std.http.Header = undefined;
-        var response = s.client.send(io, .{ .method = .HEAD, .url = url, .headers = signed.headers(&fields_buffer) }) catch |err| switch (err) {
+        var response = s.client.send(io, .{ .method = .head, .url = url, .headers = signed.headers(&fields_buffer) }) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             else => return error.LfsStoreFailed,
         };

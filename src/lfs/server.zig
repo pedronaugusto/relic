@@ -189,31 +189,31 @@ pub const Backend = struct {
         };
         const method = request.method;
         if (std.mem.eql(u8, rest, "/objects/batch")) {
-            if (!method.eql(.POST)) return methodNotAllowed(io, response);
+            if (!method.eql(.post)) return methodNotAllowed(io, response);
             return call.batch();
         }
         if (std.mem.eql(u8, rest, "/objects/verify")) {
-            if (!method.eql(.POST)) return methodNotAllowed(io, response);
+            if (!method.eql(.post)) return methodNotAllowed(io, response);
             return call.verify();
         }
         if (std.mem.startsWith(u8, rest, "/objects/")) {
             const oid = rest["/objects/".len..];
             if (!isOid(oid)) return message(io, response, .not_found, "Not Found");
-            if (method.eql(.GET)) return call.download(oid[0..64]);
-            if (method.eql(.PUT)) return call.upload(oid[0..64]);
+            if (method.eql(.get)) return call.download(oid[0..64]);
+            if (method.eql(.put)) return call.upload(oid[0..64]);
             return methodNotAllowed(io, response);
         }
         if (std.mem.eql(u8, rest, "/locks")) {
-            if (method.eql(.GET)) return call.listLocks();
-            if (method.eql(.POST)) return call.createLock();
+            if (method.eql(.get)) return call.listLocks();
+            if (method.eql(.post)) return call.createLock();
             return methodNotAllowed(io, response);
         }
         if (std.mem.eql(u8, rest, "/locks/verify")) {
-            if (!method.eql(.POST)) return methodNotAllowed(io, response);
+            if (!method.eql(.post)) return methodNotAllowed(io, response);
             return call.verifyLocks();
         }
         if (std.mem.startsWith(u8, rest, "/locks/") and std.mem.endsWith(u8, rest, "/unlock")) {
-            if (!method.eql(.POST)) return methodNotAllowed(io, response);
+            if (!method.eql(.post)) return methodNotAllowed(io, response);
             const id = rest["/locks/".len .. rest.len - "/unlock".len];
             if (id.len == 0) return message(io, response, .not_found, "Not Found");
             return call.unlock(id);

@@ -373,7 +373,7 @@ const FakeS3 = struct {
         const sent = try arena.print("http://{s}{s}", .{ request.host, request.target });
         if (!try f.signedRight(arena, request, sent)) return uplink.server.Router.plain(io, response, .forbidden, "SignatureDoesNotMatch");
         const key = request.path;
-        if (request.method.eql(.PUT)) {
+        if (request.method.eql(.put)) {
             const body = try request.collect(f.gpa, io, .limited(1 << 24));
             errdefer f.gpa.free(body);
             try f.mutex.lock(io);
@@ -389,12 +389,12 @@ const FakeS3 = struct {
         const bytes = held orelse return uplink.server.Router.plain(io, response, .not_found, "NoSuchKey");
         try response.header("Content-Type", "application/octet-stream");
         try response.setLength(bytes.len);
-        if (request.method.eql(.HEAD)) return response.end(io);
+        if (request.method.eql(.head)) return response.end(io);
         return response.send(io, bytes);
     }
 
     fn signedRight(f: *FakeS3, arena: Allocator, request: *uplink.server.Request, sent: []const u8) !bool {
-        if (request.method.eql(.HEAD)) {
+        if (request.method.eql(.head)) {
             const date = request.headers.get("x-amz-date") orelse return false;
             var signed: sigv4.Signed = undefined;
             try f.signer.sign(.{ .method = "HEAD", .url = try uplink.wire.url.parse(sent), .payload = sigv4.empty_payload }, timeOf(date) orelse return false, &signed);

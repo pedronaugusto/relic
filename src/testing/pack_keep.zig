@@ -2,6 +2,14 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const seam = @import("airlock.testing");
+
+/// How many of the seam's planned faults fired: the plan is read under
+/// the seam's guard, as the raw calls decide it on several tasks.
+fn firedCount(fault: *seam.Seam) usize {
+    var shared = fault.shared.read();
+    defer shared.deinit();
+    return shared.value().plan.firedCount();
+}
 const transport_mod = @import("../transport/transport.zig");
 const testing = std.testing;
 const Io = std.Io;
@@ -116,7 +124,7 @@ test "received pack retention and rollback survive a ref commit fault" {
             // A fault Windows' replace-retry does not absorb.
             fault.setPlan(&.{seam.fail(rename_call, 1, no_space)});
             try testing.expectError(error.NoSpaceLeft, tx.commit(fault_io, null));
-            try testing.expectEqual(@as(usize, 1), fault.plan.firedCount());
+            try testing.expectEqual(@as(usize, 1), firedCount(fault));
             try target.dir.access(io, marker, .{});
         }
         try testing.expect((try repo.refStore().readOid(gpa, io, "refs/heads/faulted")) == null);

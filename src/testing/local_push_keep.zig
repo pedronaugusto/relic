@@ -3,6 +3,14 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const seam = @import("airlock.testing");
+
+/// How many of the seam's planned faults fired: the plan is read under
+/// the seam's guard, as the raw calls decide it on several tasks.
+fn firedCount(fault: *seam.Seam) usize {
+    var shared = fault.shared.read();
+    defer shared.deinit();
+    return shared.value().plan.firedCount();
+}
 const Io = std.Io;
 const testing = std.testing;
 const testgit = @import("git.zig");
@@ -101,7 +109,7 @@ test "local push retains its pack through collection failure and cancellation" {
                         release.set(io);
                         try publication.await(io);
                         try testing.expectEqual(outcome == .success, push.accepted);
-                        if (outcome == .failure) try testing.expectEqual(@as(usize, 1), fault.plan.firedCount());
+                        if (outcome == .failure) try testing.expectEqual(@as(usize, 1), firedCount(fault));
                     }
                     try testing.expectEqual(@as(usize, 0), try keeps(io, pack_dir));
                     var reopened = try repo_mod.Repository.open(gpa, io, target.dir, .{});

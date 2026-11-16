@@ -1479,7 +1479,7 @@ const Http = struct {
         const arena = h.arena.allocator();
         const list = try h.headers(arena, true, h.credentials.authorization(), false);
         h.streaming = h.client.begin(h.io, .{
-            .method = .POST,
+            .method = .post,
             .url = try h.origin.join(arena, try h.pathFor(suffix)),
             .headers = list,
             .diagnostics = &h.diagnostics,
@@ -1513,7 +1513,7 @@ const Http = struct {
             if (gzipped) body = try gzip(arena, body);
             const list = try h.headers(arena, true, h.credentials.authorization(), gzipped);
             h.in_flight = h.client.send(h.io, .{
-                .method = .POST,
+                .method = .post,
                 .url = try h.origin.join(arena, try h.pathFor(suffix)),
                 .headers = list,
                 .body = .{ .bytes = body },

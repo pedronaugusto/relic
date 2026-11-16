@@ -314,7 +314,7 @@ pub fn start(gpa: Allocator, io: Io, programs: Programs, invocation: Invocation)
             .stdout = switch (invocation.stdout) {
                 .capture => .pipe,
                 .inherit => .inherit,
-                .to_stderr => .{ .file = Io.File.stderr() },
+                .to_stderr => .{ .file = .of(Io.File.stderr()) },
                 .ignore => .ignore,
             },
             .stderr = switch (invocation.stderr) {
