@@ -59,7 +59,7 @@ pub const modules: []const gantry.NamedModule = &.{
     .{ .name = "relic_lfs", .path = "src/lfs.zig", .from = "src/benchmark.zig" },
 };
 pub const references: []const gantry.rules.ReferenceRule = &.{
-    .{ .name = "named dependencies", .unresolved_only = true, .except_targets = &.{ "aegis", "build_options", "builtin", "conduit", "reactor", "root", "std", "sweep", "parallax", "relic_options", "uplink", "cloak", "strand", "airlock", "airlock.testing", "warp", "xenoglyph", "shakedown" } },
+    .{ .name = "named dependencies", .unresolved_only = true, .except_targets = &.{ "aegis", "build_options", "builtin", "conduit", "reactor", "root", "std", "sweep", "parallax", "relic_options", "uplink", "cloak", "strand", "airlock", "airlock.testing", "warp", "xenoglyph", "ladar", "shakedown" } },
     .{ .name = "source siblings", .suffix = ".zig", .relative = true, .except_targets = &.{"src/**"} },
     .{ .name = "facade imports", .target = "src/commit.zig", .relative = true, .except_from = &.{ "src/core.zig", "src/testing/**", "src/tests.zig", "src/**/*_test.zig" } },
     .{ .name = "facade imports", .target = "src/config.zig", .relative = true, .except_from = &.{ "src/core.zig", "src/testing/**", "src/tests.zig", "src/**/*_test.zig" } },

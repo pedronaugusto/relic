@@ -61,7 +61,7 @@
       "rules": [
         "P007"
       ],
-      "reason": "SHA-1 on the processor's own instructions: the aarch64 and x86-64 rounds and cpuid as inline assembly, and the feature queries std has no checked form of (Darwin's sysctlbyname, Linux's auxiliary vector)"
+      "reason": "SHA-1 on the processor's own instructions: the aarch64 and x86-64 rounds as inline assembly (ladar answers which the processor has)"
     },
     {
       "file": "src/hooks/input.zig",

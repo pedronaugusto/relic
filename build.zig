@@ -135,13 +135,13 @@ fn rootImports(p: *std.Build, target: std.Build.ResolvedTarget, optimize: std.la
 }
 
 /// What the core imports, from `p`, relic's own build, for `target`
-/// and `optimize`: aegis, conduit, reactor, sweep, parallax, airlock, warp and xenoglyph,
+/// and `optimize`: aegis, conduit, reactor, sweep, parallax, airlock, warp, xenoglyph and ladar,
 /// `options` as the `relic_options` that say which features are on, with
 /// `http` uplink and cloak, and `extra`, each optional package once the
 /// build has fetched it. A public root takes the same.
 fn moduleImports(p: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, options: *std.Build.Module, on: Features, extra: []const []const u8) []const std.Build.Module.Import {
     var imports: std.ArrayList(std.Build.Module.Import) = .empty;
-    for ([_][]const u8{ "aegis", "conduit", "reactor", "sweep", "parallax", "airlock", "warp", "xenoglyph" }) |name| {
+    for ([_][]const u8{ "aegis", "conduit", "reactor", "sweep", "parallax", "airlock", "warp", "xenoglyph", "ladar" }) |name| {
         imports.append(p.allocator, .{ .name = name, .module = p.dependency(name, .{ .target = target, .optimize = optimize }).module(name) }) catch @panic("out of memory");
     }
     imports.append(p.allocator, .{ .name = "relic_options", .module = options }) catch @panic("out of memory");
@@ -534,6 +534,7 @@ pub fn dev(b: *std.Build, tools: type) void {
             airlock_dependency,
             p.dependency("warp", .{}),
             p.dependency("xenoglyph", .{}),
+            p.dependency("ladar", .{}),
             p.dependency("strand", .{}),
             p.dependency("uplink", .{}),
             p.dependency("cloak", .{}),

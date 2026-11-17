@@ -58,6 +58,10 @@
             .url = "git+https://github.com/pedronaugusto/reactor#2d727924ff03d468782755d7c46eb564a4eb4094",
             .hash = "reactor-0.9.0-MjQ-WM1RFwCbqbbrrarqtx8RvOrs3L1Wvk6SC1hqBy6W",
         },
+        .ladar = .{
+            .url = "git+https://github.com/pedronaugusto/ladar#489a91674a8c48d5acb28bd05e1223d96b549057",
+            .hash = "ladar-0.0.0-fezdElWPAAC3IMTzfAHstDEaIKzX8xBTY3iNrMavy6Pg",
+        },
     },
     .minimum_zig_version = "0.17.0",
     .fingerprint = 0x688191cb6037a69f,

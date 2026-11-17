@@ -7,8 +7,9 @@
 //! `sha1rnds4`, `sha1nexte`, `sha1msg1` and `sha1msg2` — and the difference
 //! is a factor of four on the compression function.
 //!
-//! Which arm runs is decided by asking the processor, once, and not by what
-//! the compiler was told about it: a binary built for a baseline target still
+//! Which arm runs is decided by asking the processor, once, through ladar
+//! (the family's one CPU feature detection), and not by what the compiler was
+//! told about it: a binary built for a baseline target still
 //! uses the instructions on a machine that has them, and the same binary
 //! falls back to the software rounds on a machine that does not. Both hardware
 //! arms assemble on a baseline target — aarch64 through `.arch_extension
@@ -24,6 +25,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const aegis = @import("aegis");
+const ladar = @import("ladar");
 
 /// SHA-1 as FIPS 180-4 defines it.
 pub const Sha1 = struct {
@@ -192,56 +194,18 @@ fn detect() Backend {
     }
 }
 
-/// Whether this aarch64 processor implements `FEAT_SHA1`.
-///
-/// Darwin answers through `sysctlbyname`, Linux through the auxiliary vector's
-/// hardware capability word. Anywhere else the question is only what the
-/// compiler was told, which is a floor rather than an answer, so a target
-/// built without the feature takes the software rounds.
+/// Whether this aarch64 processor implements `FEAT_SHA1`: ladar's answer
+/// (Darwin's sysctl, Linux's auxiliary vector, Windows' processor features;
+/// elsewhere what the target guarantees, so a target built without the feature
+/// takes the software rounds).
 fn hasAarch64Sha1() bool {
-    switch (builtin.target.os.tag) {
-        .macos, .ios, .tvos, .watchos, .visionos => {
-            var value: u32 = 0;
-            var len: usize = @sizeOf(u32);
-            const rc = std.c.sysctlbyname("hw.optional.arm.FEAT_SHA1", &value, &len, null, 0);
-            if (rc != 0) return builtin.target.cpu.has(.aarch64, .sha2);
-            return value != 0;
-        },
-        .linux => {
-            const hwcap = std.os.linux.getauxval(std.elf.AT.HWCAP);
-            // HWCAP_SHA1 is bit 5 of AT_HWCAP on aarch64.
-            return hwcap & (1 << 5) != 0;
-        },
-        else => return builtin.target.cpu.has(.aarch64, .sha2),
-    }
+    return ladar.has(.arm_sha1);
 }
 
 /// Whether this x86-64 processor implements the SHA extensions, and the
-/// `pshufb` the byte-swap needs.
+/// `pshufb` the byte-swap needs (SSSE3): ladar's answers.
 fn hasX86Sha() bool {
-    const max_leaf = cpuid(0, 0)[0];
-    if (max_leaf < 7) return false;
-    // Leaf 1, ECX bit 9: SSSE3.
-    if (cpuid(1, 0)[2] & (1 << 9) == 0) return false;
-    // Leaf 7 subleaf 0, EBX bit 29: SHA.
-    return cpuid(7, 0)[1] & (1 << 29) != 0;
-}
-
-fn cpuid(leaf: u32, subleaf: u32) [4]u32 {
-    var eax: u32 = 0;
-    var ebx: u32 = 0;
-    var ecx: u32 = 0;
-    var edx: u32 = 0;
-    // The processor's cpuid, the raw instruction alone.
-    asm volatile ("cpuid"
-        : [eax] "={eax}" (eax),
-          [ebx] "={ebx}" (ebx),
-          [ecx] "={ecx}" (ecx),
-          [edx] "={edx}" (edx),
-        : [leaf] "{eax}" (leaf),
-          [subleaf] "{ecx}" (subleaf),
-    );
-    return .{ eax, ebx, ecx, edx };
+    return ladar.has(.x86_sha) and ladar.has(.x86_ssse3);
 }
 
 /// One block.
@@ -758,6 +722,15 @@ test "the software rounds and the hardware arm agree" {
         if (blocks != 0) compressBlocks(&fast, buf[0 .. blocks * 64]);
         try testing.expectEqualSlices(u32, &soft, &fast);
     }
+}
+
+test "the hardware arm runs exactly where ladar finds the instructions" {
+    const want: Backend = if (!hardware_arms_compile) .software else switch (builtin.target.cpu.arch) {
+        .aarch64, .aarch64_be => if (ladar.has(.arm_sha1)) .aarch64_crypto else .software,
+        .x86_64 => if (ladar.has(.x86_sha) and ladar.has(.x86_ssse3)) .x86_sha_ni else .software,
+        else => .software,
+    };
+    try testing.expectEqual(want, backend());
 }
 
 /// All errors reported by this namespace.
