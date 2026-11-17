@@ -4,7 +4,7 @@ const relic = @import("../relic.zig");
 const relic_lfs = @import("../lfs.zig");
 const features = @import("relic_options");
 test "pattern constructors take defaulted policy options" {
-    inline for (.{ relic.worktree.ignore.Rules, relic.worktree.attributes.Attrs, relic.worktree.sparse.Patterns }) |T| {
+    inline for (.{ relic.worktree.ignore, relic.worktree.attributes.Attrs, relic.worktree.sparse.Patterns }) |T| {
         const options = @typeInfo(@TypeOf(T.init)).@"fn".param_types[1].?;
         try std.testing.expect(@typeInfo(options) == .@"struct");
     }

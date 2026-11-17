@@ -1,674 +1,124 @@
-//! `.gitignore`, in git's precedence order.
+//! `.gitignore`, in git's precedence order, on sweep's ignore stacks
+//! (`sweep.ignore`, git's `dir.c`): the levels, their ranking and the
+//! matching are sweep's; what a repository adds is where its files are.
 //!
-//! Four levels, lowest first: `core.excludesFile`, `$GIT_COMMON_DIR/info/exclude`,
-//! and then one level per directory from the root of the working tree down, so
-//! a deeper file overrides a shallower one. Within a level the last matching
-//! pattern wins, which is what makes a negation work at all.
-//!
-//! Three cases the field has had to fix and which are tests here before they
-//! are code: a pattern in a subdirectory beating one above it, a directory
-//! excluded by `dir/*` that must still be entered so a later negation can
-//! re-include something inside it, and a bare `!` line.
-
-const ErrorNamespace = @This();
-const Self = @This();
+//! Levels rank lowest first: `core.excludesFile` and then
+//! `$GIT_COMMON_DIR/info/exclude` (group `file`), one level per directory's
+//! `.gitignore` from the working tree's root down (group `directory`, a
+//! deeper one winning), and a command line's patterns (`clean -e`, group
+//! `command_line`). Within a level the last matching line wins.
 
 const std = @import("std");
-const aegis = @import("aegis");
-const shakedown_mod = @import("shakedown");
-const Allocator = std.mem.Allocator;
-const Io = std.Io;
-
-const sets = @import("set.zig");
 const sweep = @import("sweep");
-const Kind = sweep.Kind;
-const fs = @import("../fs/fs.zig");
+const Io = std.Io;
+const Allocator = std.mem.Allocator;
 
-/// Errors from loading ignore rules.
-pub const Error = Allocator.Error || aegis.own.ReadFileError;
+/// A working tree's ignore rules: `sweep.ignore.Stack`.
+pub const Stack = sweep.ignore.Stack;
+/// Paths asked one at a time outside a walk: `sweep.ignore.Checker`.
+pub const Checker = sweep.ignore.Checker;
+/// Whether a path is excluded, and the line that decided.
+pub const Match = sweep.ignore.Match;
+/// Where a stack stands, for a walk to pop back to on its way out.
+pub const Mark = sweep.ignore.Mark;
+/// Reading or adding a level failed.
+pub const FileError = sweep.ignore.FileError;
+/// Everything this namespace's calls fail with.
+pub const Error = FileError;
+/// What a path is, for a pattern ending in `/`.
+pub const Kind = sweep.Kind;
 
-/// One line of one ignore file.
-pub const Pattern = struct {
-    /// The line as written, without its newline. Borrowed from the rules.
-    text: []const u8,
-    /// The glob the line reduces to, with `!`, a leading `/` and a trailing
-    /// `/` removed.
-    glob: []const u8,
-    /// The directory the pattern is relative to, `/`-separated and without a
-    /// trailing slash. Empty at the root of the working tree.
-    base: []const u8,
-    /// Where the pattern came from, for a caller that wants to say which
-    /// line decided.
-    source: []const u8,
-    /// One-based.
-    line: u32,
-    /// A `!` line: a match re-includes rather than excludes.
-    negated: bool,
-    /// A trailing `/`: the pattern matches directories only.
-    dir_only: bool,
-    /// The pattern held a `/` other than a trailing one, so it is matched
-    /// against the whole path below `base` rather than against the name.
-    anchored: bool,
+/// How a working tree's rules compare names.
+pub const Options = struct {
+    /// `core.ignoreCase`: ASCII letters match either case.
+    case_fold: bool = false,
 };
 
-/// What decided, and how.
-pub const Match = struct {
-    /// Whether the path is excluded. `false` with a pattern means a negation
-    /// re-included it; `false` with no pattern means nothing matched.
-    excluded: bool,
-    /// The pattern that decided, or `null` when none did.
-    by: ?Pattern,
-};
+/// Empty rules for a working tree, which exclude nothing. A file that is
+/// there but cannot be read counts as absent, as git warns and goes on;
+/// `Stack.skipped` lists it.
+pub fn init(gpa: Allocator, options: Options) Stack {
+    return .init(gpa, .{ .case = if (options.case_fold) .ascii_git else .sensitive, .unreadable = .skip });
+}
 
-/// One file's worth of patterns, at one level of precedence.
-pub const Level = struct {
-    /// The directory this level's patterns are relative to.
-    base: []const u8,
-    patterns: []Pattern,
-    /// Private: the compiled set; the rules own its lifetime.
-    compiled: *anyopaque,
-    /// How this level compares to the others: a higher number wins.
-    depth: u32,
-};
-
-/// The loaded ignore rules for a working tree.
-///
-/// Levels are held in precedence order, lowest first. A directory walk pushes
-/// a level as it enters a directory holding a `.gitignore` and pops it on the
-/// way out, which is how a deeper file comes to override a shallower one
-/// without re-reading anything. Each level holds the cache its queries run
-/// on, so one thread at a time asks the rules.
-pub const Rules = struct {
-    pub const Error = ErrorNamespace.Error;
-
-    gpa: Allocator,
-    /// Everything the rules hold — the text of every file read and the
-    /// patterns parsed out of it — comes from here and goes at once.
-    arena: *std.heap.ArenaAllocator,
-    levels: std.ArrayList(Level),
-    /// Whether the filesystem folds case, from `core.ignoreCase`.
-    case_fold: bool,
-
-    /// Empty rules, which exclude nothing.
-    pub const InitOptions = struct { case_fold: bool = false };
-
-    pub fn init(gpa: Allocator, options: InitOptions) Allocator.Error!Rules {
-        const arena = try gpa.create(std.heap.ArenaAllocator);
-        arena.* = .init(gpa);
-        return .{
-            .gpa = gpa,
-            .arena = arena,
-            .levels = .empty,
-            .case_fold = options.case_fold,
-        };
-    }
-
-    /// Release everything.
-    pub fn deinit(rules: *Rules) void {
-        for (rules.levels.items) |level| levelMatcher(level).deinit();
-        rules.arena.deinit();
-        rules.gpa.destroy(rules.arena);
-        rules.levels.deinit(rules.gpa);
-        rules.* = undefined;
-    }
-
-    /// Load the two levels that come before any `.gitignore`: the file
-    /// `core.excludesFile` names, and `info/exclude` in the common
-    /// directory.
-    ///
-    /// Either being absent is not an error; most repositories have neither.
-    pub fn loadGlobal(
-        rules: *Rules,
-        io: Io,
-        common_dir: Io.Dir,
-        excludes_file: ?[]const u8,
-        excludes_dir: ?Io.Dir,
-    ) Self.Error!void {
-        if (excludes_file) |path| {
-            if (excludes_dir) |dir| {
-                try rules.addFileIfPresent(io, dir, path, "", path, 0);
-            }
-        }
-        try rules.addFileIfPresent(io, common_dir, "info/exclude", "", "info/exclude", 1);
-    }
-
-    /// Load `<base>/.gitignore`, if it is there, as a level relative to
-    /// `base`.
-    ///
-    /// `depth` decides precedence; the walker passes the directory's depth
-    /// below the working tree's root, offset past the two global levels.
-    pub fn addDirectory(rules: *Rules, io: Io, wt: Io.Dir, base: []const u8, depth: u32) Self.Error!void {
-        const joined = if (base.len == 0) null else try rules.gpa.print("{s}/.gitignore", .{base});
-        defer if (joined) |owned| rules.gpa.free(owned);
-        const path = joined orelse ".gitignore";
-        // An in-tree `.gitignore` is read only as a file, never through a
-        // symbolic link, as git's `PATTERN_NOFOLLOW` reads it.
-        const found = (fs.statAt(io, wt, path) catch |err| switch (err) {
-            error.Canceled => return error.Canceled,
-            else => return,
-        }) orelse return;
-        if (found.kind != .file) return;
-        try rules.addFileIfPresent(io, wt, path, base, path, depth + 2);
-    }
-
-    fn addFileIfPresent(
-        rules: *Rules,
-        io: Io,
-        dir: Io.Dir,
-        path: []const u8,
-        base: []const u8,
-        source: []const u8,
-        depth: u32,
-    ) ErrorNamespace.Error!void {
-        const a = rules.arena.allocator();
-        const bytes = (try fs.readFileAlloc(a, io, dir, path, 1 << 24)) orelse return;
-        // The rules name their source for as long as they live.
-        try rules.addText(bytes, base, try a.dupe(u8, source), depth);
-    }
-
-    /// Add a level from text already in memory.
-    ///
-    /// `text`, `base` and `source` must outlive the rules; text read by
-    /// `addDirectory` is held in the rules' own arena.
-    pub fn addText(rules: *Rules, text: []const u8, base: []const u8, source: []const u8, depth: u32) Self.Error!void {
-        var lines = std.mem.splitScalar(u8, text, '\n');
-        try rules.addLevel(.{ .lines = &lines }, base, source, depth);
-    }
-
-    /// Add a level of patterns as given, each with none of a file's line
-    /// grammar (git's `add_pattern`, as `git clean -e` adds them): `#` and
-    /// trailing spaces are part of the pattern.
-    ///
-    /// `patterns`, `base` and `source` must outlive the rules.
-    pub fn addPatterns(rules: *Rules, patterns: []const []const u8, base: []const u8, source: []const u8, depth: u32) Self.Error!void {
-        try rules.addLevel(.{ .patterns = patterns }, base, source, depth);
-    }
-
-    const Items = union(enum) {
-        lines: *std.mem.SplitIterator(u8, .scalar),
-        patterns: []const []const u8,
-
-        fn next(items: *Items, at: *usize) ?Pattern {
-            while (true) {
-                at.* += 1;
-                const options: LineOptions = .{ .line = @intCast(at.*) };
-                switch (items.*) {
-                    .lines => |lines| {
-                        var line = lines.next() orelse return null;
-                        if (line.len > 0 and line[line.len - 1] == '\r') line = line[0 .. line.len - 1];
-                        return parseLine(line, options) orelse continue;
-                    },
-                    .patterns => |all| {
-                        if (at.* > all.len) return null;
-                        return parsePattern(all[at.* - 1], options) orelse continue;
-                    },
-                }
-            }
-        }
+/// The two levels before any `.gitignore`: the file `core.excludesFile`
+/// names (`excludes_file` in `excludes_dir`), then `info/exclude` in the
+/// common directory. Either being absent adds nothing; most repositories
+/// have neither. Both are read through a link, as git reads them.
+pub fn loadGlobal(stack: *Stack, io: Io, common_dir: Io.Dir, excludes_file: ?[]const u8, excludes_dir: ?Io.Dir) FileError!void {
+    if (excludes_file) |path| if (excludes_dir) |dir| {
+        try stack.addFile(io, dir, path, .{ .group = .file, .source = path }, .follow);
     };
+    try stack.addFile(io, common_dir, "info/exclude", .{ .group = .file, .source = "info/exclude" }, .follow);
+}
 
-    fn addLevel(rules: *Rules, items_in: Items, base: []const u8, source: []const u8, depth: u32) Self.Error!void {
-        const a = rules.arena.allocator();
-        var items = items_in;
-        var patterns: std.ArrayList(Pattern) = .empty;
-        var builder: sets.Builder = try .init(rules.gpa);
-        defer builder.deinit();
-        var at: usize = 0;
-        while (items.next(&at)) |read| {
-            var pattern = read;
-            pattern.base = base;
-            pattern.source = source;
-            if (!try sets.add(&builder, pattern.glob, pattern.anchored, pattern.dir_only, rules.case_fold)) continue;
-            try patterns.append(a, pattern);
-        }
-        if (patterns.items.len == 0) return;
-        const compiled = try sets.Matcher.build(&builder);
-        errdefer compiled.deinit();
-        try rules.levels.append(rules.gpa, .{
-            .base = base,
-            .patterns = patterns.items,
-            .compiled = compiled,
-            .depth = depth,
-        });
-    }
-
-    /// Drop every level at or below `depth`, which is what a walk does on
-    /// its way back out of a directory.
-    pub fn popTo(rules: *Rules, depth: u32) void {
-        while (rules.levels.items.len != 0 and
-            rules.levels.items[rules.levels.items.len - 1].depth >= depth)
-        {
-            levelMatcher(rules.levels.pop().?).deinit();
-        }
-    }
-
-    /// Whether `path` is excluded, and by which pattern.
-    ///
-    /// `path` is `/`-separated and relative to the working tree's root.
-    /// Only the path itself is considered: a caller walking a tree does not
-    /// descend into an excluded directory, so the parents have already been
-    /// decided. `matchPath` is the call that considers them.
-    pub fn match(rules: *const Rules, path: []const u8, kind: Kind) Match {
-        var by: ?*const Pattern = null;
-        for (rules.levels.items) |level| {
-            const relative = relativeTo(level.base, path) orelse continue;
-            if (levelMatcher(level).last(relative, kind)) |i| by = &level.patterns[i];
-        }
-        const decided = by orelse return .{ .excluded = false, .by = null };
-        return .{ .excluded = !decided.negated, .by = decided.* };
-    }
-
-    /// Whether `path` is excluded, considering its parent directories.
-    ///
-    /// A file under an excluded directory is excluded even when no pattern
-    /// names the file, and a negation inside an excluded directory does not
-    /// bring it back — which is git's rule and the one that surprises
-    /// people. The exception, and the case the field had to fix, is a
-    /// directory excluded by a pattern that only names its *contents*, such
-    /// as `dir/*`: the directory itself is not excluded, so the walk enters
-    /// it and a later negation applies.
-    pub fn matchPath(rules: *const Rules, path: []const u8, kind: Kind) Match {
-        // Every level advances once over the subject.
-        for (rules.levels.items) |level| {
-            const m = levelMatcher(level);
-            m.walking = null;
-            if (relativeTo(level.base, path)) |relative| m.begin(relative, kind);
-        }
-        var at: usize = 0;
-        while (true) {
-            const slash = std.mem.findScalarPos(u8, path, at, '/');
-            const end = slash orelse path.len;
-            var by: ?Pattern = null;
-            for (rules.levels.items) |level| {
-                if (relativeTo(level.base, path[0..end]) == null) continue;
-                const m = levelMatcher(level);
-                if (m.walking) |*walking| {
-                    const step = walking.next() orelse continue;
-                    if (step.last) |i| by = level.patterns[i.raw()];
-                }
-            }
-            const decision: Match = if (by) |pattern| .{ .excluded = !pattern.negated, .by = pattern } else .{ .excluded = false, .by = null };
-            if (decision.excluded or slash == null) return decision;
-            at = slash.? + 1;
-        }
-    }
-};
-
-/// A working tree's ignore rules asked one path at a time, outside a walk:
-/// a file watcher deciding what to register, a list of changed paths, a
-/// checkout looking at an untracked file in its way.
-///
-/// The `.gitignore` of every folder above a path is read the first time a
-/// path below that folder is asked about, the shallowest first, so a deeper
-/// file still overrides a shallower one; what was read is kept for the next
-/// question. A folder is marked read only once its file has been read or
-/// found absent, so a question that failed asks again rather than answering
-/// from rules with a level missing. The checker owns its rules: start it
-/// with the two global levels, as `Repository.loadIgnore` returns them.
-pub const Checker = struct {
-    pub const Error = ErrorNamespace.Error;
-
-    rules: Rules,
-    /// The working tree the paths are relative to, which its caller keeps
-    /// open.
-    wt: aegis.own.Unowned(Io.Dir),
-    unreadable: Unreadable,
-    /// The folders whose `.gitignore` is in `rules`, or was found absent,
-    /// `""` the root. The keys live in the rules' arena.
-    read: std.StringHashMapUnmanaged(void) = .empty,
-
-    /// What a `.gitignore` that is there but cannot be read does.
-    pub const Unreadable = enum {
-        /// The question fails with the error, and the next one reads the
-        /// file again: a caller that would rather not answer than answer
-        /// without a level.
-        fail,
-        /// The file counts as absent, as git warns and goes on.
-        skip,
+/// `<base>/.gitignore` in the working tree `wt`, when it is there, as a
+/// level relative to `base`. Neither the directory nor the file is reached
+/// through a link, as git's `PATTERN_NOFOLLOW` reads it: a `base` that is
+/// not a directory of the tree adds nothing. A walk holding the directory's
+/// handle gives it to `Stack.addDirectory` instead.
+pub fn addDirectory(stack: *Stack, io: Io, wt: Io.Dir, base: []const u8) FileError!void {
+    if (base.len == 0) return stack.addDirectory(io, wt, "");
+    var dir = wt.openDir(io, base, .{ .follow_symlinks = false }) catch |err| switch (err) {
+        error.Canceled => |e| return e,
+        // Absent, not a directory, a link, or closed to us: no level, as a
+        // walk would not enter it.
+        else => return,
     };
-
-    pub const Options = struct {
-        unreadable: Unreadable = .fail,
-    };
-
-    /// A checker over `rules`, which it now owns, for the working tree `wt`.
-    pub fn init(rules: Rules, wt: Io.Dir, options: Options) Checker {
-        return .{ .rules = rules, .wt = .of(wt), .unreadable = options.unreadable };
-    }
-
-    /// Release the rules and what was read into them.
-    pub fn deinit(checker: *Checker) void {
-        checker.read.deinit(checker.rules.gpa);
-        checker.rules.deinit();
-        checker.* = undefined;
-    }
-
-    /// The rules with every level read so far, handed back; the checker is
-    /// finished, and needs no `deinit`.
-    pub fn toRules(checker: *Checker) Rules {
-        checker.read.deinit(checker.rules.gpa);
-        const rules = checker.rules;
-        checker.* = undefined;
-        return rules;
-    }
-
-    /// Whether `path` is excluded, its parent folders considered
-    /// (`Rules.matchPath`). `path` is `/`-separated and relative to the
-    /// working tree's root. A tracked path is the caller's to keep: git
-    /// reports it whatever the rules say.
-    pub fn excluded(checker: *Checker, io: Io, path: []const u8, kind: Kind) Self.Error!bool {
-        return (try checker.match(io, path, kind)).excluded;
-    }
-
-    /// What decided `path`, and how, as `excluded` decides it.
-    pub fn match(checker: *Checker, io: Io, path: []const u8, kind: Kind) Self.Error!Match {
-        try checker.readAbove(io, path);
-        return checker.rules.matchPath(path, kind);
-    }
-
-    fn readAbove(checker: *Checker, io: Io, path: []const u8) ErrorNamespace.Error!void {
-        const gpa = checker.rules.gpa;
-        var end: usize = 0;
-        var depth: u32 = 0;
-        while (true) : (depth += 1) {
-            const dir = path[0..end];
-            if (!checker.read.contains(dir)) {
-                try checker.read.ensureUnusedCapacity(gpa, 1);
-                const key = try checker.rules.arena.allocator().dupe(u8, dir);
-                checker.rules.addDirectory(io, checker.wt.get(), key, depth) catch |err| switch (err) {
-                    error.OutOfMemory, error.Canceled => |e| return e,
-                    else => if (checker.unreadable == .fail) return err,
-                };
-                checker.read.putAssumeCapacity(key, {});
-            }
-            if (end + 1 >= path.len) return;
-            end = std.mem.findScalarPos(u8, path, end + 1, '/') orelse return;
-        }
-    }
-};
-
-fn levelMatcher(level: Level) *sets.Matcher {
-    return @ptrCast(@alignCast(level.compiled)); // a Level's matcher is allocated as a sets.Matcher and never changes type
+    defer dir.close(io);
+    try stack.addDirectory(io, dir, base);
 }
 
-fn relativeTo(base: []const u8, path: []const u8) ?[]const u8 {
-    if (base.len == 0) return path;
-    if (!std.mem.startsWith(u8, path, base)) return null;
-    if (path.len <= base.len or path[base.len] != '/') return null;
-    return path[base.len + 1 ..];
-}
-
-/// Where a line was read, and how its glob compares letters.
-pub const LineOptions = struct {
-    /// The directory the line is relative to, `/`-separated, empty at the
-    /// root.
-    base: []const u8 = "",
-    source: []const u8 = "",
-    /// One-based.
-    line: u32 = 0,
-};
-
-/// Read one line of an ignore file, without its line feed, by git's line
-/// grammar (`sweep.gitignore.parseLine`): `null` for a blank line, a
-/// comment, or a line that leaves no pattern;
-/// `line`, `base` and `source` are borrowed.
-pub fn parseLine(line: []const u8, options: LineOptions) ?Pattern {
-    return fromSweep(line, sweep.gitignore.parseLine(line) orelse return null, options);
-}
-
-/// Read one pattern as given, with none of a file's line grammar
-/// (`sweep.gitignore.parsePattern`, git's `parse_path_pattern`): `null`
-/// when it leaves no pattern; `text` and the options are borrowed.
-pub fn parsePattern(text: []const u8, options: LineOptions) ?Pattern {
-    return fromSweep(text, sweep.gitignore.parsePattern(text) orelse return null, options);
-}
-
-fn fromSweep(text: []const u8, parsed: sweep.gitignore.Line, options: LineOptions) Pattern {
-    // A glob holding a `/` anywhere but at its end is matched against the
-    // whole path below the file's directory, with `WM_PATHNAME`; any other
-    // against the name alone, without it, as git's `match_basename` does.
-    const anchored = !parsed.entry.options.anywhere;
-    return .{
-        .text = text,
-        .glob = parsed.pattern,
-        .base = options.base,
-        .source = options.source,
-        .line = options.line,
-        .negated = parsed.negated,
-        .dir_only = parsed.entry.dir_only,
-        .anchored = anchored,
-    };
-}
-
-test "the last matching line in a file wins" {
-    const gpa = std.testing.allocator;
-    var rules: Rules = try .init(gpa, .{ .case_fold = false });
-    defer rules.deinit();
-    try rules.addText("*.log\n!keep.log\n", "", ".gitignore", 2);
-
-    try std.testing.expect(rules.match("a.log", .file).excluded);
-    try std.testing.expect(!rules.match("keep.log", .file).excluded);
-    try std.testing.expect(rules.match("keep.log", .file).by != null);
-    try std.testing.expect(!rules.match("a.txt", .file).excluded);
-    try std.testing.expect(rules.match("a.txt", .file).by == null);
-}
-
-test "a deeper file overrides a shallower one" {
-    const gpa = std.testing.allocator;
-    var rules: Rules = try .init(gpa, .{ .case_fold = false });
-    defer rules.deinit();
-    try rules.addText("*.log\n", "", ".gitignore", 2);
-    try rules.addText("!important.log\n", "sub", "sub/.gitignore", 3);
-
-    try std.testing.expect(rules.match("a.log", .file).excluded);
-    try std.testing.expect(rules.match("sub/a.log", .file).excluded);
-    try std.testing.expect(!rules.match("sub/important.log", .file).excluded);
-    // The deeper file only applies below its own directory.
-    try std.testing.expect(rules.match("important.log", .file).excluded);
-}
-
-test "a directory excluded by its contents is still entered" {
-    const gpa = std.testing.allocator;
-    var rules: Rules = try .init(gpa, .{ .case_fold = false });
-    defer rules.deinit();
-    // `dir/*` names the contents, not the directory, so a negation inside
-    // still applies. `other/` names the directory and nothing inside comes
-    // back.
-    try rules.addText("dir/*\n!dir/keep\nother/\n!other/keep\n", "", ".gitignore", 2);
-
-    try std.testing.expect(!rules.match("dir", .dir).excluded);
-    try std.testing.expect(rules.matchPath("dir/drop", .file).excluded);
-    try std.testing.expect(!rules.matchPath("dir/keep", .file).excluded);
-    try std.testing.expect(rules.match("other", .dir).excluded);
-    try std.testing.expect(rules.matchPath("other/keep", .file).excluded);
-}
-
-test "a bare negation line is not a pattern" {
-    try std.testing.expect(parseLine("!", .{}) == null);
-    try std.testing.expect(parseLine("#comment", .{}) == null);
-    try std.testing.expect(parseLine("", .{}) == null);
-    try std.testing.expect(parseLine("   ", .{}) == null);
-    const escaped = (parseLine("\\#notacomment", .{})).?;
-    try std.testing.expectEqualStrings("\\#notacomment", escaped.glob);
-    try std.testing.expect(!escaped.negated);
-}
-
-test "trailing spaces go and trailing tabs stay, as git trims a line" {
-    const gpa = std.testing.allocator;
-    var rules: Rules = try .init(gpa, .{ .case_fold = false });
-    defer rules.deinit();
-    try rules.addText("tabbed\t\nspaced  \nkept\\ \nesc\\\\  \n", "", ".gitignore", 2);
-    try std.testing.expect(rules.match("tabbed\t", .file).excluded);
-    try std.testing.expect(!rules.match("tabbed", .file).excluded);
-    try std.testing.expect(rules.match("spaced", .file).excluded);
-    try std.testing.expect(rules.match("kept ", .file).excluded);
-    try std.testing.expect(rules.match("esc\\", .file).excluded);
-    try std.testing.expect(!rules.match("esc\\ ", .file).excluded);
-}
-
-test "anchoring, directory-only and name matching" {
-    const gpa = std.testing.allocator;
-    var rules: Rules = try .init(gpa, .{ .case_fold = false });
-    defer rules.deinit();
-    try rules.addText("/root-only\nbuild/\ndoc/*.txt\nanywhere\n", "", ".gitignore", 2);
-
-    try std.testing.expect(rules.match("root-only", .file).excluded);
-    try std.testing.expect(!rules.match("sub/root-only", .file).excluded);
-    try std.testing.expect(rules.match("build", .dir).excluded);
-    try std.testing.expect(!rules.match("build", .file).excluded);
-    try std.testing.expect(rules.match("doc/a.txt", .file).excluded);
-    try std.testing.expect(!rules.match("other/doc/a.txt", .file).excluded);
-    try std.testing.expect(rules.match("anywhere", .file).excluded);
-    try std.testing.expect(rules.match("deep/nest/anywhere", .file).excluded);
-}
-
-test "the deciding pattern is reported" {
-    const gpa = std.testing.allocator;
-    var rules: Rules = try .init(gpa, .{ .case_fold = false });
-    defer rules.deinit();
-    try rules.addText("*.o\n*.tmp\n", "", ".gitignore", 2);
-    const decided = rules.match("a.tmp", .file);
-    try std.testing.expect(decided.excluded);
-    try std.testing.expectEqualStrings("*.tmp", decided.by.?.glob);
-    try std.testing.expectEqual(@as(u32, 2), decided.by.?.line);
-    try std.testing.expectEqualStrings(".gitignore", decided.by.?.source);
-}
-
-test "a checker reads each folder's rules the first time a path below it is asked" {
+test "the global levels rank below every directory's, info/exclude above core.excludesFile" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.createDirPath(io, "sub/deep");
-    try tmp.dir.writeFile(io, .{ .sub_path = ".gitignore", .data = "*.log\nbuild/\n" });
-    try tmp.dir.writeFile(io, .{ .sub_path = "sub/.gitignore", .data = "!keep.log\n" });
-    try tmp.dir.writeFile(io, .{ .sub_path = "sub/deep/.gitignore", .data = "*.tmp\n" });
-    var rules: Rules = try .init(gpa, .{ .case_fold = false });
-    try rules.addText("*.secret\n", "", "info/exclude", 1);
-    var checker: Checker = .init(rules, tmp.dir, .{});
-    defer checker.deinit();
+    try tmp.dir.createDirPath(io, "common/info");
+    try tmp.dir.writeFile(io, .{ .sub_path = "excludes", .data = "*.log\n*.tmp\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "common/info/exclude", .data = "!keep.log\n" });
+    try tmp.dir.createDirPath(io, "wt/sub");
+    try tmp.dir.writeFile(io, .{ .sub_path = "wt/sub/.gitignore", .data = "!x.tmp\n" });
+    var common = try tmp.dir.openDir(io, "common", .{});
+    defer common.close(io);
+    var wt = try tmp.dir.openDir(io, "wt", .{});
+    defer wt.close(io);
 
-    try std.testing.expect(try checker.excluded(io, "a.log", .file));
-    try std.testing.expect(try checker.excluded(io, "x.secret", .file));
-    try std.testing.expect(!try checker.excluded(io, "a.txt", .file));
-    // a deeper file beats a shallower one, and applies only below itself
-    try std.testing.expect(!try checker.excluded(io, "sub/keep.log", .file));
-    try std.testing.expect(try checker.excluded(io, "sub/other.log", .file));
-    try std.testing.expect(try checker.excluded(io, "sub/deep/x.tmp", .file));
-    try std.testing.expect(!try checker.excluded(io, "x.tmp", .file));
-    // a folder-only rule decides by what the path is, and covers below it
-    try std.testing.expect(try checker.excluded(io, "build", .dir));
-    try std.testing.expect(!try checker.excluded(io, "build", .file));
-    try std.testing.expect(try checker.excluded(io, "build/out.o", .file));
-    try std.testing.expectEqualStrings("*.tmp", (try checker.match(io, "sub/deep/y.tmp", .file)).by.?.glob);
-    // each folder read once: four levels of files and one of text
-    try std.testing.expectEqual(@as(usize, 4), checker.rules.levels.items.len);
-}
-
-test "a checker asks an unreadable folder's rules again, or skips them when told" {
-    const gpa = std.testing.allocator;
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.createDirPath(io, "sub");
-    try tmp.dir.writeFile(io, .{ .sub_path = "sub/.gitignore", .data = "*.log\n" });
-    // larger than any ignore file is read: present, and unreadable
-    var big = try tmp.dir.createFile(io, ".gitignore", .{});
-    try big.setLength(io, (1 << 24) + 1);
-    big.close(io);
-
-    var failing: Checker = .init(try .init(gpa, .{ .case_fold = false }), tmp.dir, .{});
-    defer failing.deinit();
-    try std.testing.expect(std.meta.isError(failing.excluded(io, "sub/a.log", .file)));
-    try std.testing.expect(!failing.read.contains(""));
-    try tmp.dir.writeFile(io, .{ .sub_path = ".gitignore", .data = "!sub/a.log\n*.txt\n" });
-    try std.testing.expect(try failing.excluded(io, "b.txt", .file));
-    try std.testing.expect(try failing.excluded(io, "sub/a.log", .file));
-
-    var big_again = try tmp.dir.createFile(io, ".gitignore", .{});
-    try big_again.setLength(io, (1 << 24) + 1);
-    big_again.close(io);
-    var skipping: Checker = .init(try .init(gpa, .{ .case_fold = false }), tmp.dir, .{ .unreadable = .skip });
-    defer skipping.deinit();
-    try std.testing.expect(try skipping.excluded(io, "sub/a.log", .file));
-    try std.testing.expect(!try skipping.excluded(io, "b.txt", .file));
-}
-
-test "a checker marks no folder read when reading it runs out of memory" {
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(io, .{ .sub_path = ".gitignore", .data = "*.log\n" });
-    var failures: usize = 0;
-    for (0..6) |offset| {
-        var no_resize = shakedown_mod.alloc.NoResize.init(std.testing.allocator);
-        var fa = std.testing.FailingAllocator.init(no_resize.allocator(), .{});
-        var checker: Checker = .init(try .init(fa.allocator(), .{ .case_fold = false }), tmp.dir, .{});
-        defer checker.deinit();
-        fa.fail_index = fa.alloc_index + offset;
-        _ = checker.excluded(io, "keep.log", .file) catch |err| {
-            try std.testing.expectEqual(error.OutOfMemory, err);
-            failures += 1;
-            try std.testing.expect(!checker.read.contains(""));
-            fa.fail_index = std.math.maxInt(usize);
-            try std.testing.expect(try checker.excluded(io, "keep.log", .file));
-            continue;
-        };
-    }
-    try std.testing.expect(failures >= 2);
-}
-
-test "a checker hands back its rules with every level it read" {
-    const gpa = std.testing.allocator;
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(io, .{ .sub_path = ".gitignore", .data = "*.o\n" });
-    var checker: Checker = .init(try .init(gpa, .{ .case_fold = false }), tmp.dir, .{});
-    try std.testing.expect(try checker.excluded(io, "a.o", .file));
-    var rules = checker.toRules();
+    var rules = init(gpa, .{});
     defer rules.deinit();
-    try std.testing.expect(rules.match("b.o", .file).excluded);
+    try loadGlobal(&rules, io, common, "excludes", tmp.dir);
+    try std.testing.expect(rules.matchPath("a.log", .file).excluded);
+    try std.testing.expect(!rules.matchPath("keep.log", .file).excluded);
+    try std.testing.expectEqualStrings("info/exclude", rules.matchPath("keep.log", .file).by.?.source);
+    const before = rules.mark();
+    try addDirectory(&rules, io, wt, "sub");
+    try std.testing.expect(!rules.matchPath("sub/x.tmp", .file).excluded);
+    try std.testing.expectEqualStrings("sub/.gitignore", rules.matchPath("sub/x.tmp", .file).by.?.source);
+    rules.popTo(before);
+    try std.testing.expect(rules.matchPath("sub/x.tmp", .file).excluded);
+    // A base the tree does not hold, or that is a file, adds nothing.
+    try addDirectory(&rules, io, wt, "absent");
+    try addDirectory(&rules, io, wt, "sub/.gitignore");
+    try std.testing.expectEqual(before, rules.mark());
 }
 
-test "fuzz: any ignore file answers without a crash" {
-    try shakedown_mod.check(std.testing.allocator, {}, fuzzIgnore, .{});
-}
-
-fn fuzzIgnore(_: void, case: *shakedown_mod.Case) anyerror!void {
+test "core.ignoreCase folds ASCII letters, and an unreadable file counts as absent" {
     const gpa = std.testing.allocator;
-    var text_buf: [1024]u8 = undefined;
-    var path_buf: [128]u8 = undefined;
-    const text = text_buf[0..shakedown_mod.gen.intRange(case.source, usize, 0, text_buf.len)];
-    case.source.bytes(text);
-    const path = path_buf[0..shakedown_mod.gen.intRange(case.source, usize, 0, path_buf.len)];
-    case.source.bytes(path);
-    var rules: Rules = try .init(gpa, .{ .case_fold = false });
-    defer rules.deinit();
-    try rules.addText(text, "", "fuzz", 2);
-    // the same bytes as one pattern given whole, as `clean -e` gives it
-    _ = parsePattern(text, .{});
-    try rules.addPatterns(&.{text}, "", "fuzz", 3);
-    _ = rules.match(path, .file);
-    _ = rules.matchPath(path, .dir);
-}
-
-test "level sets retain negation, precedence and ancestor decisions under allocation failure" {
-    var no_resize = shakedown_mod.alloc.NoResize.init(std.testing.allocator);
-    try std.testing.checkAllAllocationFailures(no_resize.allocator(), struct {
-        fn exercise(gpa: Allocator) !void {
-            var rules = try Rules.init(gpa, .{ .case_fold = true });
-            defer rules.deinit();
-            try rules.addText("*.LOG\n!keep.log\n/blocked/\n!blocked/keep.log\n", "", ".gitignore", 2);
-            try rules.addText("!special.log\n", "sub", "sub/.gitignore", 3);
-            try std.testing.expect(rules.matchPath("sub/a.log", .file).excluded);
-            try std.testing.expect(!rules.matchPath("sub/special.log", .file).excluded);
-            try std.testing.expect(!rules.matchPath("sub/keep.log", .file).excluded);
-            try std.testing.expect(rules.matchPath("blocked/keep.log", .file).excluded);
-            rules.popTo(3);
-            try std.testing.expect(rules.matchPath("sub/special.log", .file).excluded);
-        }
-    }.exercise, .{});
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // A directory where the file goes: there, and not readable as a file.
+    try tmp.dir.createDirPath(io, "sub/.gitignore");
+    var folding = init(gpa, .{ .case_fold = true });
+    defer folding.deinit();
+    try folding.addText("*.LOG\n", .{ .group = .directory, .source = ".gitignore" });
+    try std.testing.expect(folding.match("a.log", .file).excluded);
+    try addDirectory(&folding, io, tmp.dir, "sub");
+    try std.testing.expectEqual(1, folding.skipped().len);
+    var exact = init(gpa, .{});
+    defer exact.deinit();
+    try exact.addText("*.LOG\n", .{ .group = .directory, .source = ".gitignore" });
+    try std.testing.expect(!exact.match("a.log", .file).excluded);
 }
 
 test "an in-tree .gitignore that is a link is not read, as git does not follow one" {
@@ -689,8 +139,8 @@ test "an in-tree .gitignore that is a link is not read, as git does not follow o
     const listed = try repo.run(io, &.{ "ls-files", "--others", "--exclude-standard", "--", "a.log" });
     defer gpa.free(listed);
     try std.testing.expectEqualStrings("a.log\n", listed);
-    var rules = try Rules.init(gpa, .{ .case_fold = false });
+    var rules = init(gpa, .{});
     defer rules.deinit();
-    try rules.addDirectory(io, repo.dir, "", 0);
+    try addDirectory(&rules, io, repo.dir, "");
     try std.testing.expect(!rules.match("a.log", .file).excluded);
 }

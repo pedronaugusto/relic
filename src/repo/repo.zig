@@ -106,7 +106,7 @@ pub const Error = error{
     Io.Dir.CreateDirError || Io.Dir.CreateDirPathError || Io.Dir.WriteFileError ||
     Io.File.OpenError || Io.Writer.Error || Io.File.SyncError ||
     config_mod.ParseError || config_mod.ValueError || config_mod.PathSettingError || odb_mod.Error ||
-    refs_mod.ReadError || refs_mod.TransactionError || worktrees.Error;
+    refs_mod.ReadError || refs_mod.TransactionError || worktrees.Error || ignore.FileError;
 
 /// Errors from writing a commit or a tag, which may be signed.
 pub const WriteError = Error || signing.Error || object.Commit.WriteError || error{
@@ -1951,13 +1951,12 @@ pub const Repository = struct {
     ///
     /// The result is the caller's, and a walk pushes and pops deeper levels
     /// into it as it goes.
-    pub fn loadIgnore(repo: *Repository, io: Io) Self.Error!ignore.Rules {
-        const case_fold = repo.data().settings.ignore_case;
-        var rules = try ignore.Rules.init(repo.data().gpa, .{ .case_fold = case_fold });
+    pub fn loadIgnore(repo: *Repository, io: Io) Self.Error!ignore.Stack {
+        var rules = ignore.init(repo.data().gpa, .{ .case_fold = repo.data().settings.ignore_case });
         errdefer rules.deinit();
         const excludes = try repo.configuration().getPath(repo.data().gpa, io, repo.topDirectory(), "core.excludesfile");
         defer if (excludes) |p| repo.data().gpa.free(p);
-        try rules.loadGlobal(io, repo.commonDirectory(), excludes, repo.topDirectory());
+        try ignore.loadGlobal(&rules, io, repo.commonDirectory(), excludes, repo.topDirectory());
         return rules;
     }
 

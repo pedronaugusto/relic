@@ -1253,7 +1253,7 @@ const Negotiation = struct {
         n: *Negotiation,
         last: ?[]const u8 = null,
 
-        pub fn rules(l: *SparseLookup, name: []const u8) Self.Error!?*const ignore.Rules {
+        pub fn rules(l: *SparseLookup, name: []const u8) Self.Error!?*ignore.Stack {
             l.last = name;
             return l.n.sparseRules(name);
         }
@@ -1261,7 +1261,7 @@ const Negotiation = struct {
 
     /// The patterns in the blob `name` names, or `null` when there is no
     /// such blob.
-    fn sparseRules(n: *Negotiation, name: []const u8) Error!?*const ignore.Rules {
+    fn sparseRules(n: *Negotiation, name: []const u8) Error!?*ignore.Stack {
         const s = n.server;
         const repo = &s.remote.repo;
         const oid = (try n.resolveBlob(name)) orelse return null;
@@ -1271,10 +1271,10 @@ const Negotiation = struct {
         };
         defer repo.objectDatabase().allocator().free(found.bytes);
         if (found.type != .blob) return null;
-        const rules = try n.arena.create(ignore.Rules);
-        rules.* = try .init(n.arena, .{});
-        // The rules keep slices of the text.
-        try rules.addText(try n.arena.dupe(u8, found.bytes), "", "sparse:oid", 0);
+        // On the arena: the patterns go when it does.
+        const rules = try n.arena.create(ignore.Stack);
+        rules.* = ignore.init(n.arena, .{});
+        try rules.addText(found.bytes, .{ .group = .directory, .source = "sparse:oid" });
         return rules;
     }
 

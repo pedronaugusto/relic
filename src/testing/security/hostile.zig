@@ -25,7 +25,7 @@ pub const Harness = struct {
     git_dir: Io.Dir,
     db: odb_mod.Odb,
     index: index_mod.Index,
-    rules: ignore.Rules,
+    rules: ignore.Stack,
     attrs: attributes.Attrs,
 
     pub fn init(gpa: Allocator, io: Io) !Harness {
@@ -39,7 +39,7 @@ pub const Harness = struct {
             .git_dir = git_dir,
             .db = db,
             .index = index_mod.Index.initEmpty(gpa, .sha1),
-            .rules = try ignore.Rules.init(gpa, .{ .case_fold = false }),
+            .rules = ignore.init(gpa, .{}),
             .attrs = try attributes.Attrs.init(gpa, .{ .case_fold = false }),
         };
     }

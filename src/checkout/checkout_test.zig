@@ -28,7 +28,7 @@ const Harness = struct {
     git_dir: Io.Dir,
     db: odb_mod.Odb,
     index: index_mod.Index,
-    rules: ignore.Rules,
+    rules: ignore.Stack,
     attrs: attributes.Attrs,
 
     fn init(gpa: std.mem.Allocator, io: Io, extra: []const []const u8) !Harness {
@@ -43,7 +43,7 @@ const Harness = struct {
             .git_dir = git_dir,
             .db = db,
             .index = index,
-            .rules = try ignore.Rules.init(gpa, .{ .case_fold = false }),
+            .rules = ignore.init(gpa, .{}),
             .attrs = try attributes.Attrs.init(gpa, .{ .case_fold = false }),
         };
     }
@@ -554,7 +554,7 @@ test "status agrees with git on every path" {
     try h.repo.exec(io, &.{ "add", ".gitignore" });
 
     try h.reload(gpa, io);
-    try h.rules.addDirectory(io, h.repo.dir, "", 0);
+    try ignore.addDirectory(&h.rules, io, h.repo.dir, "");
     const head_tree_text = try h.repo.line(io, &.{ "rev-parse", "HEAD^{tree}" });
     defer gpa.free(head_tree_text);
 
@@ -604,7 +604,7 @@ test "list is the index's paths plus the untracked ones" {
     try h.repo.writeFile(io, "x.log", "d\n");
 
     try h.reload(gpa, io);
-    try h.rules.addDirectory(io, h.repo.dir, "", 0);
+    try ignore.addDirectory(&h.rules, io, h.repo.dir, "");
 
     var listing = try worktree.list(gpa, io, h.repo.dir, &h.index, h.worktreeRules());
     defer listing.deinit();
@@ -653,7 +653,7 @@ test "core.autocrlf with text=auto stores the blob git stores" {
     defer db.deinit(io);
     var index = index_mod.Index.initEmpty(gpa, .sha1);
     defer index.deinit();
-    var rules = try ignore.Rules.init(gpa, .{ .case_fold = false });
+    var rules = ignore.init(gpa, .{});
     defer rules.deinit();
     var attrs = try attributes.Attrs.init(gpa, .{ .case_fold = false });
     defer attrs.deinit();
@@ -911,7 +911,7 @@ test "checkout refuses to lose local changes or untracked files, lists them as g
     defer gpa.free(git_untracked);
 
     try h.reload(gpa, io);
-    var ignore_rules = try ignore.Rules.init(gpa, .{ .case_fold = false });
+    var ignore_rules = ignore.init(gpa, .{});
     defer ignore_rules.deinit();
     var obstructions: worktree.Obstructions = .init(gpa);
     defer obstructions.deinit();
@@ -1518,9 +1518,9 @@ test "ignore rules decide every path as git check-ignore decides it" {
     // git folds the patterns then.
     const fold = try h.repo.line(io, &.{ "config", "--bool", "--default", "false", "core.ignorecase" });
     defer gpa.free(fold);
-    var rules: ignore.Rules = try .init(gpa, .{ .case_fold = std.mem.eql(u8, fold, "true") });
+    var rules = ignore.init(gpa, .{ .case_fold = std.mem.eql(u8, fold, "true") });
     defer rules.deinit();
-    try rules.addText(glob_lines, "", ".gitignore", 2);
+    try rules.addText(glob_lines, .{ .group = .directory, .source = ".gitignore" });
 
     const all_paths = [_]struct { []const u8, bool }{
         .{ "tabbed", false },     .{ "spaced", false },          .{ "kept ", false },

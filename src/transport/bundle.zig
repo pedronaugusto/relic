@@ -633,7 +633,7 @@ fn walkFilter(a: Allocator, io: Io, repo: *Repository, spec: filter_spec.Spec, s
 
 /// The sparse-checkout patterns in the blob `name` names, by any revision
 /// expression.
-fn sparseRules(a: Allocator, io: Io, repo: *Repository, name: []const u8) CreateError!*const ignore.Rules {
+fn sparseRules(a: Allocator, io: Io, repo: *Repository, name: []const u8) CreateError!*ignore.Stack {
     const oid = rev_parse.resolve(a, io, repo.revisionSource(), name) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.Canceled => return error.Canceled,
@@ -645,10 +645,10 @@ fn sparseRules(a: Allocator, io: Io, repo: *Repository, name: []const u8) Create
     };
     defer repo.objectDatabase().allocator().free(found.bytes);
     if (found.type != .blob) return error.SparseBlobMissing;
-    const rules = try a.create(ignore.Rules);
-    rules.* = try .init(a, .{});
-    // The rules keep slices of the text.
-    try rules.addText(try a.dupe(u8, found.bytes), "", "sparse:oid", 0);
+    // On `a`: the patterns go when it does.
+    const rules = try a.create(ignore.Stack);
+    rules.* = ignore.init(a, .{});
+    try rules.addText(found.bytes, .{ .group = .directory, .source = "sparse:oid" });
     return rules;
 }
 

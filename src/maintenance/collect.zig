@@ -134,7 +134,7 @@ pub const Report = struct {
 };
 
 /// Failures of `gc`.
-pub const Error = repack_mod.Error || prune_mod.Error || filter_spec.Error || filter_spec.WalkError || ignore.Error || worktrees.Error || rerere.Error || hooks_mod.Error ||
+pub const Error = repack_mod.Error || prune_mod.Error || filter_spec.Error || filter_spec.WalkError || ignore.FileError || worktrees.Error || rerere.Error || hooks_mod.Error ||
     ops.MaintenanceError || fs.LockError || fs.CommitError || fs.HostNameError || Io.Writer.Error ||
     Io.Dir.StatFileError || Io.Dir.ReadFileError || Io.Dir.DeleteFileError || error{
     /// Another gc holds `gc.pid`, and neither `auto` nor `force` was
@@ -322,16 +322,17 @@ const NamedBlob = struct {
     io: Io,
     repo: *Repository,
 
-    pub fn rules(l: *NamedBlob, name: []const u8) Self.Error!?*const ignore.Rules {
+    pub fn rules(l: *NamedBlob, name: []const u8) Self.Error!?*ignore.Stack {
         const oid = hash.Oid.parse(l.repo.objectFormat(), name) catch return null;
         const db = l.repo.objectDatabase();
         if (!try db.exists(l.io, oid)) return null;
         const found = try db.read(l.io, oid);
         defer db.allocator().free(found.bytes);
         if (found.type != .blob) return null;
-        const r = try l.arena.create(ignore.Rules);
-        r.* = try .init(l.arena, .{});
-        try r.addText(try l.arena.dupe(u8, found.bytes), "", "sparse:oid", 0);
+        // On the arena: the patterns go when it does.
+        const r = try l.arena.create(ignore.Stack);
+        r.* = ignore.init(l.arena, .{});
+        try r.addText(found.bytes, .{ .group = .directory, .source = "sparse:oid" });
         return r;
     }
 };

@@ -12,16 +12,16 @@ const paths = [_][]const u8{ "src/main.zig", "d/keep.log", "d/a.log", "src/a.tmp
 
 const Context = struct {
     gpa: Allocator,
-    rules: *const relic.worktree.ignore.Rules,
+    rules: *relic.worktree.ignore.Stack,
     config: *const relic.config.Config,
     bytes: []u8,
     checksum: u64 = 0,
 
     fn ignoreLoad(c: *Context, units: u64) !void {
         for (0..units) |_| {
-            var rules = try relic.worktree.ignore.Rules.init(c.gpa, .{ .case_fold = false });
+            var rules = relic.worktree.ignore.init(c.gpa, .{});
             defer rules.deinit();
-            try rules.addText(patterns, "", ".gitignore", 1);
+            try rules.addText(patterns, .{ .group = .directory, .source = ".gitignore" });
             c.checksum +%= @intFromBool(rules.match("d/a.log", .file).excluded);
         }
     }
@@ -61,9 +61,9 @@ const WorkloadError = @typeInfo(@typeInfo(@TypeOf(Context.ignoreLoad)).@"fn".ret
 pub fn run(init: std.process.Init, args: []const [:0]const u8) !void {
     const gpa = init.gpa;
     const run_options = try shared.options(init, args);
-    var rules = try relic.worktree.ignore.Rules.init(gpa, .{ .case_fold = false });
+    var rules = relic.worktree.ignore.init(gpa, .{});
     defer rules.deinit();
-    try rules.addText(patterns, "", ".gitignore", 1);
+    try rules.addText(patterns, .{ .group = .directory, .source = ".gitignore" });
     var config = try relic.config.Config.open(gpa, init.io, .{}, .{ .git_dir = "/tmp/project/.git" });
     defer config.deinit();
     const bytes = try gpa.alloc(u8, 1024 * 1024);

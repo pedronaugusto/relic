@@ -14,6 +14,7 @@
 //! there only with `http` (`Surface.http_only`) is passed over without it.
 const std = @import("std");
 const conduit = @import("conduit");
+const sweep = @import("sweep");
 const fs = @import("fs/fs.zig");
 const features = @import("relic_options");
 
@@ -131,7 +132,7 @@ fn checkNamespaces(comptime ns: type, comptime prefix: []const u8, comptime dept
 
 /// Types relic publishes as the family package's own, whose conventions
 /// are that package's.
-const foreign = .{ conduit.Child, fs.OwnedDir, fs.OwnedFile, fs.OwnedStream, fs.OwnedServer };
+const foreign = .{ conduit.Child, fs.OwnedDir, fs.OwnedFile, fs.OwnedStream, fs.OwnedServer, sweep.ignore.Stack, sweep.ignore.Checker };
 
 fn isForeign(comptime T: type) bool {
     inline for (foreign) |F| if (T == F) return true;
@@ -172,7 +173,7 @@ fn checkInputs(comptime ns: type, comptime prefix: []const u8, comptime depth: u
         const value = @field(ns, name);
         const path = if (prefix.len == 0) name else prefix ++ "." ++ name;
         if (@TypeOf(value) == type) {
-            checkInputs(value, path, depth - 1, &.{});
+            if (!isForeign(value)) checkInputs(value, path, depth - 1, &.{});
         } else if (@typeInfo(@TypeOf(value)) == .@"fn") {
             const inputs = @typeInfo(@TypeOf(value)).@"fn".param_types.len;
             if (inputs > 5) @compileError(std.fmt.comptimePrint("`{s}` takes {d} positional inputs; at most five, the rest in an options or inputs struct", .{ path, inputs }));

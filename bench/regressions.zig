@@ -566,18 +566,18 @@ fn row4() !void {
     const Load = struct {
         text: []const u8,
         fn ignoreRules(l: @This()) !void {
-            var rules = try worktree.ignore.Rules.init(std.heap.smp_allocator, .{ .case_fold = false });
+            var rules = worktree.ignore.init(std.heap.smp_allocator, .{});
             defer rules.deinit();
-            for (levels, 0..) |base, depth| try rules.addText(l.text, base, ".gitignore", @intCast(depth + 2));
+            for (levels) |base| try rules.addText(l.text, .{ .group = .directory, .base = base, .source = ".gitignore" });
         }
     };
     const load_ms = try bestMs(io, 20, Load{ .text = ignore_text.items }, Load.ignoreRules);
 
-    var rules = try worktree.ignore.Rules.init(gpa, .{ .case_fold = false });
+    var rules = worktree.ignore.init(gpa, .{});
     defer rules.deinit();
-    for (levels, 0..) |base, depth| try rules.addText(ignore_text.items, base, ".gitignore", @intCast(depth + 2));
+    for (levels) |base| try rules.addText(ignore_text.items, .{ .group = .directory, .base = base, .source = ".gitignore" });
     const Ask = struct {
-        rules: *const worktree.ignore.Rules,
+        rules: *worktree.ignore.Stack,
         paths: []const []const u8,
         fn all(a: @This()) void {
             var excluded: usize = 0;

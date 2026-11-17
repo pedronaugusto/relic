@@ -97,7 +97,7 @@ pub const Error = error{
     NestedRepository,
 } || pretty.Error || pathspec_mod.Error || repo_mod.WriteError || refs_mod.TransactionError || worktree.Error || merge.Error || diff.TextError ||
     diff.Error || hooks.Error || refs_mod.LogReadError || fs.LockError || fs.CommitError ||
-    ignore.Error || attributes.Error || convert.Error || state_file.Error || aegis.own.ReadFileError ||
+    ignore.FileError || attributes.Error || convert.Error || state_file.Error || aegis.own.ReadFileError ||
     reset.Error || refs_mod.ReadError || error{NameTooLong};
 
 /// Where a refusal writes the path it is about.
@@ -296,7 +296,7 @@ const Ctx = struct {
     arena: Allocator,
     /// The working tree, the repository's to close.
     wt: aegis.own.Unowned(Io.Dir),
-    ignore_rules: ignore.Rules,
+    ignore_rules: ignore.Stack,
     attrs: attributes.Attrs,
     rules: worktree.Rules,
     locked: Repository.LockedIndex,

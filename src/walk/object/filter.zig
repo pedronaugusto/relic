@@ -62,7 +62,7 @@ const State = union(enum) {
     };
 
     const Sparse = struct {
-        rules: *const ignore.Rules,
+        rules: *ignore.Stack,
         frames: std.ArrayList(Frame) = .empty,
 
         const Frame = struct { matched: bool, omitted_below: bool = false };
@@ -304,7 +304,7 @@ const Traversal = struct {
 
     /// The sparse patterns' answer for `path`: theirs when one decides,
     /// the directory's when none does.
-    fn match(rules: *const ignore.Rules, path: []const u8, is_dir: bool, inherited: bool) bool {
+    fn match(rules: *ignore.Stack, path: []const u8, is_dir: bool, inherited: bool) bool {
         if (path.len == 0) return inherited;
         const m = rules.match(path, if (is_dir) .dir else .file);
         return if (m.by != null) m.excluded else inherited;

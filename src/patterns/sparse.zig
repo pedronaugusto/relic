@@ -25,13 +25,49 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const sets = @import("set.zig");
-const Kind = @import("sweep").Kind;
-const ignore = @import("ignore.zig");
+const sweep = @import("sweep");
+const Kind = sweep.Kind;
 const glob_mod = @import("../text.zig").glob;
 const fs = @import("../fs/fs.zig");
 
 /// Errors from loading sparse patterns.
 pub const Error = Allocator.Error || aegis.own.ReadFileError;
+
+/// One line of the file, read by gitignore's line grammar
+/// (`sweep.gitignore.parseLine`). Borrowed from the text it was read from.
+pub const Pattern = struct {
+    /// The line as written, without its newline.
+    text: []const u8,
+    /// The glob the line reduces to, with `!`, a leading `/` and a trailing
+    /// `/` removed.
+    glob: []const u8,
+    /// One-based.
+    line: u32,
+    /// A `!` line: a match leaves the path out.
+    negated: bool,
+    /// A trailing `/`: the pattern matches directories only.
+    dir_only: bool,
+    /// The glob held a `/` other than a trailing one, so it is matched
+    /// against the whole path rather than against the name.
+    anchored: bool,
+};
+
+/// `line` as a pattern, or `null` for a blank line, a comment, or a line
+/// that leaves no pattern.
+fn parseLine(line: []const u8, number: u32) ?Pattern {
+    const parsed = sweep.gitignore.parseLine(line) orelse return null;
+    // A glob holding a `/` anywhere but at its end is matched against the
+    // whole path, with `WM_PATHNAME`; any other against the name alone, as
+    // git's `match_basename` does.
+    return .{
+        .text = line,
+        .glob = parsed.pattern,
+        .line = number,
+        .negated = parsed.negated,
+        .dir_only = parsed.entry.dir_only,
+        .anchored = !parsed.entry.options.anywhere,
+    };
+}
 
 /// The patterns that decide what is in the working tree. They hold the cache
 /// their queries run on, so one thread at a time asks them.
@@ -40,7 +76,7 @@ pub const Patterns = struct {
 
     gpa: Allocator,
     arena: *std.heap.ArenaAllocator,
-    items: std.ArrayList(ignore.Pattern),
+    items: std.ArrayList(Pattern),
     case_fold: bool,
     /// Private: the compiled non-cone patterns.
     compiled: ?*anyopaque = null,
@@ -112,14 +148,14 @@ pub const Patterns = struct {
         var builder: sets.Builder = try .init(p.gpa);
         defer builder.deinit();
         for (p.items.items) |item| _ = try sets.add(&builder, item.glob, item.anchored, item.dir_only, p.case_fold);
-        var added: std.ArrayList(ignore.Pattern) = .empty;
+        var added: std.ArrayList(Pattern) = .empty;
         defer added.deinit(p.gpa);
         var line_number: u32 = 0;
         var lines = std.mem.splitScalar(u8, text, '\n');
         while (lines.next()) |raw| {
             line_number += 1;
             const line = if (std.mem.endsWith(u8, raw, "\r")) raw[0 .. raw.len - 1] else raw;
-            const pattern = ignore.parseLine(line, .{ .source = "info/sparse-checkout", .line = line_number }) orelse continue;
+            const pattern = parseLine(line, line_number) orelse continue;
             if (!try sets.add(&builder, pattern.glob, pattern.anchored, pattern.dir_only, p.case_fold)) continue;
             try added.append(p.gpa, pattern);
         }

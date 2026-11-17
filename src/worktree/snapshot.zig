@@ -128,7 +128,7 @@ pub const Store = struct {
             .repository => |r| r.workDirectory() orelse return error.BareRepository,
             .folder => |dir| dir.get(),
         };
-        var ignored = if (source_repo) |r| try r.loadIgnore(io) else try ignore_mod.Rules.init(store.gpa, .{ .case_fold = false });
+        var ignored = if (source_repo) |r| try r.loadIgnore(io) else ignore_mod.init(store.gpa, .{});
         defer ignored.deinit();
         var attrs = if (source_repo) |r| try r.loadAttrs(io) else try attributes_mod.Attrs.init(store.gpa, .{ .case_fold = false });
         defer attrs.deinit();

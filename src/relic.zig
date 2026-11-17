@@ -52,7 +52,7 @@
 //! | `worktree.remove` | `git rm`: the index entries a pathspec names removed, and their files and submodules, after git's check for what the removal would lose. |
 //! | `worktree.move` | `git mv`: files, directories and submodules renamed in the working tree and the index together, after git's checks of every source. |
 //! | `worktree.sparse` | Sparse checkout: which tracked paths belong in the working tree. |
-//! | `worktree.ignore` | `Rules.init` / `loadGlobal` / `addDirectory` / `addText` / `popTo` / `match` / `matchPath`, with the pattern that decided. |
+//! | `worktree.ignore` | sweep's ignore stacks (`Stack`, `Checker`) for a working tree: `init`, `loadGlobal`, `addDirectory`; then the stack's `addText` / `mark` / `popTo` / `match` / `matchPath`, with the line that decided. |
 //! | `worktree.attributes` | `Attrs`, `Attributes`, `unsupported`, `toGit`, `toWorktree`, `isBinaryForDiff`, `isBinaryForCheckIn`. |
 //! | `worktree.convert` | What happens to a file's bytes between the working tree and the object database, in git's order. |
 //! | `worktree.encoding` | Character sets, converted as git converts them through iconv: one place for both of git's jobs. |

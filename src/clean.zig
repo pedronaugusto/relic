@@ -53,7 +53,7 @@ pub const Error = error{
     BareRepository,
     /// A directory nested deeper than a walk goes.
     TreeTooDeep,
-} || pathspec_mod.Error || index_mod.ReadError || repo_mod.Error || ignore.Error || dir_scan.Error ||
+} || pathspec_mod.Error || index_mod.ReadError || repo_mod.Error || ignore.FileError || dir_scan.Error ||
     gitlink.Error || Io.Writer.Error || config_core.ValueError;
 
 /// What happens to ignored paths: kept (the default), removed with the
@@ -147,13 +147,13 @@ pub fn clean(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.E
     var index = try repo.openIndex(io);
     defer index.deinit();
 
-    var standard: ?ignore.Rules = if (options.ignored != .too) try repo.loadIgnore(io) else null;
-    defer if (standard) |*r| r.deinit();
     const case_fold = try config.getBool("core.ignorecase", false);
     const precompose = repo.settings().precompose_unicode;
-    var command_line = try ignore.Rules.init(gpa, .{ .case_fold = case_fold });
-    defer command_line.deinit();
-    try command_line.addPatterns(options.excludes, "", "--exclude option", 0);
+    // `-x` reads no ignore file; `-e`'s patterns rank above every one read.
+    const standard = options.ignored != .too;
+    var rules = if (standard) try repo.loadIgnore(io) else ignore.init(gpa, .{ .case_fold = case_fold });
+    defer rules.deinit();
+    try rules.addPatterns(options.excludes, .{ .group = .command_line, .source = "--exclude option" });
 
     var spec = try pathspec_mod.parse(gpa, options.pathspecs);
     defer spec.deinit();
@@ -167,8 +167,8 @@ pub fn clean(gpa: Allocator, io: Io, repo: *Repository, options: Options) Self.E
         .io = io,
         .wt = .of(wt),
         .index = &index,
-        .standard = if (standard) |*r| r else null,
-        .command_line = &command_line,
+        .rules = &rules,
+        .standard = standard,
         .spec = if (options.pathspecs.len > 0) &spec else null,
         .case_fold = case_fold,
         .precompose = precompose,
@@ -243,8 +243,10 @@ const Walk = struct {
     /// The working tree, the caller's.
     wt: aegis.own.Unowned(Io.Dir),
     index: *Index,
-    standard: ?*ignore.Rules,
-    command_line: *ignore.Rules,
+    /// The ignore files and `-e`'s patterns, ranked as git ranks them.
+    rules: *ignore.Stack,
+    /// Whether each directory's `.gitignore` is read: not under `-x`.
+    standard: bool,
     spec: ?*const pathspec_mod.Pathspec,
     case_fold: bool,
     /// `core.precomposeUnicode` on macOS: names read composed.
@@ -271,8 +273,9 @@ const Walk = struct {
         defer if (base.len != 0) dir.close(w.io);
         // Inside an excluded directory everything is excluded, and its own
         // ignore file is not read: git's `prep_exclude`.
-        if (w.standard) |rules| if (!excluded) try rules.addDirectory(w.io, w.wt.get(), base, depth);
-        defer if (w.standard) |rules| if (!excluded) rules.popTo(depth + 2);
+        const ignore_mark = w.rules.mark();
+        if (w.standard and !excluded) try w.rules.addDirectory(w.io, dir, base);
+        defer w.rules.popTo(ignore_mark);
 
         var names: std.ArrayList(Named) = .empty;
         defer {
@@ -393,11 +396,9 @@ const Walk = struct {
     }
 
     fn isExcluded(w: *Walk, path: []const u8, is_dir: bool) bool {
-        // the command line's patterns decide first, whichever way they go
-        const by_command = w.command_line.match(path, if (is_dir) .dir else .file);
-        if (by_command.by != null) return by_command.excluded;
-        if (w.standard) |rules| return rules.match(path, if (is_dir) .dir else .file).excluded;
-        return false;
+        // The command line's patterns rank above every file's, whichever
+        // way they go.
+        return w.rules.match(path, if (is_dir) .dir else .file).excluded;
     }
 
     /// git's `index_file_exists`: an entry at any stage is `path` itself.

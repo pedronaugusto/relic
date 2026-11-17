@@ -32,7 +32,7 @@ pub const Filter = union(enum) {
     /// sparse-checkout patterns take in, a path no pattern decides taking
     /// its directory's answer, as git's sparse filter decides. One to a
     /// filter.
-    sparse: *const ignore.Rules,
+    sparse: *ignore.Stack,
     /// `combine:<a>+<b>…`: what every one of them keeps.
     combine: []const Filter,
 };

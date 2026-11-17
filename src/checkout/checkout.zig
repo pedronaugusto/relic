@@ -92,14 +92,15 @@ pub const Error = error{
     Io.Dir.CreateDirError || Io.Dir.CreateDirPathError || Io.Dir.SymLinkError ||
     Io.Dir.ReadLinkError || Io.Writer.Error || fs.SyncError ||
     Io.File.SetPermissionsError || object.Tree.Builder.AddError ||
-    object.TreeParseError || convert.Error || sparse_index.Error || gitlink.Error;
+    object.TreeParseError || convert.Error || sparse_index.Error || gitlink.Error ||
+    ignore.FileError;
 
 /// What the caller supplies so that a blob is hashed the way git would hash
 /// it, and so that ignore rules are the ones git would apply.
 pub const Rules = struct {
     /// Ignore rules, already loaded for the root. The walk pushes and pops
     /// deeper levels itself.
-    ignore: ?*ignore.Rules = null,
+    ignore: ?*ignore.Stack = null,
     /// Attributes, already loaded for the root.
     attrs: ?*attributes.Attrs = null,
     /// The `core` settings that take part in line-ending conversion.
@@ -483,8 +484,9 @@ const Walker = struct {
         if (prefix.len != 0) if (try fs.statAt(w.io, w.wt.get(), prefix)) |found| switch (found.kind) {
             .sym_link, .file => {
                 const parent = std.Io.Dir.path.dirnamePosix(prefix) orelse "";
-                if (w.options.rules.ignore) |rules| try rules.addDirectory(w.io, w.wt.get(), parent, 0);
-                defer if (w.options.rules.ignore) |rules| rules.popTo(2);
+                const ignore_mark = if (w.options.rules.ignore) |rules| rules.mark() else null;
+                if (w.options.rules.ignore) |rules| try ignore.addDirectory(rules, w.io, w.wt.get(), parent);
+                defer if (ignore_mark) |at| w.options.rules.ignore.?.popTo(at);
                 if (w.options.rules.attrs) |attrs| try attrs.addDirectory(w.io, w.wt.get(), parent, 0);
                 defer if (w.options.rules.attrs) |attrs| attrs.popTo(1);
                 return w.stageFile(prefix, found);
@@ -500,8 +502,9 @@ const Walker = struct {
         defer opened.deinit(w.io);
         const dir = opened.borrow().*;
 
-        if (w.options.rules.ignore) |rules| try rules.addDirectory(w.io, w.wt.get(), dir_path, depth);
-        defer if (w.options.rules.ignore) |rules| rules.popTo(depth + 2);
+        const ignore_mark = if (w.options.rules.ignore) |rules| rules.mark() else null;
+        if (w.options.rules.ignore) |rules| try rules.addDirectory(w.io, dir, dir_path);
+        defer if (ignore_mark) |at| w.options.rules.ignore.?.popTo(at);
         if (w.options.rules.attrs) |attrs| try attrs.addDirectory(w.io, w.wt.get(), dir_path, depth);
         defer if (w.options.rules.attrs) |attrs| attrs.popTo(depth + 1);
 
@@ -1562,8 +1565,9 @@ const StatusScan = struct {
         defer opened.deinit(s.io);
         const dir = opened.borrow().*;
 
-        if (s.options.rules.ignore) |rules| try rules.addDirectory(s.io, s.wt.get(), dir_path, depth);
-        defer if (s.options.rules.ignore) |rules| rules.popTo(depth + 2);
+        const ignore_mark = if (s.options.rules.ignore) |rules| rules.mark() else null;
+        if (s.options.rules.ignore) |rules| try rules.addDirectory(s.io, dir, dir_path);
+        defer if (ignore_mark) |at| s.options.rules.ignore.?.popTo(at);
         if (s.options.rules.attrs) |attrs| try attrs.addDirectory(s.io, s.wt.get(), dir_path, depth);
         defer if (s.options.rules.attrs) |attrs| attrs.popTo(depth + 1);
 
@@ -1740,8 +1744,9 @@ const StatusScan = struct {
     /// as untracked content, whatever it holds, and is not looked into.
     fn classify(s: *StatusScan, path: []const u8, depth: u32, ignored: *std.ArrayList([]const u8)) Error!bool {
         if (depth > 64) return error.TreeTooDeep;
-        if (s.options.rules.ignore) |rules| try rules.addDirectory(s.io, s.wt.get(), path, depth);
-        defer if (s.options.rules.ignore) |rules| rules.popTo(depth + 2);
+        const ignore_mark = if (s.options.rules.ignore) |rules| rules.mark() else null;
+        if (s.options.rules.ignore) |rules| try ignore.addDirectory(rules, s.io, s.wt.get(), path);
+        defer if (ignore_mark) |at| s.options.rules.ignore.?.popTo(at);
 
         var names = try s.readNames(path);
         defer names.deinit(s.gpa);
@@ -2080,7 +2085,7 @@ pub const CheckoutOptions = struct {
     /// which is replaced as git replaces it, from an untracked one, which
     /// is not. The `.gitignore` files further down are read into it as
     /// needed. Without it every file in the way counts as untracked.
-    ignore: ?*ignore.Rules = null,
+    ignore: ?*ignore.Stack = null,
     /// Whether to remove a directory once the last file in it is removed.
     remove_empty_directories: bool = true,
     /// Where to write the path and the rule when a tree entry is refused.
@@ -3438,7 +3443,7 @@ pub const VerifyOptions = struct {
     /// into it as needed. An ignored file in the way is not an obstruction,
     /// as git's checkout and merge overwrite it. Without rules, none is
     /// ignored.
-    ignore: ?*ignore.Rules = null,
+    ignore: ?*ignore.Stack = null,
     obstructions: ?*Obstructions = null,
     /// Whether what stands in the way of a new path is looked for. An
     /// update that writes nothing, `read-tree` without `-u`, does not look:
@@ -3475,9 +3480,9 @@ pub fn verifyUpdates(
     var untracked: std.ArrayList([]const u8) = .empty;
     // the caller's rules, with every `.gitignore` read along the way, go
     // back to the caller; one that cannot be read counts as absent
-    var ignores: ?ignore.Checker = if (options.ignore) |rules| .init(rules.*, wt, .{ .unreadable = .skip }) else null;
+    var ignores: ?ignore.Checker = if (options.ignore) |rules| .init(rules.*, wt) else null;
     defer if (ignores) |*checker| {
-        options.ignore.?.* = checker.toRules();
+        options.ignore.?.* = checker.toStack();
     };
 
     const paths = try arena.dupe([]const u8, updates.keys());
@@ -3502,7 +3507,7 @@ pub fn verifyUpdates(
                 else if (index.find(prefix) != null)
                     false
                 else
-                    !(if (ignores) |*checker| try checker.excluded(io, prefix, .file) else false);
+                    !(if (ignores) |*checker| (try checker.match(io, prefix, .file)).excluded else false);
                 if (blocks) {
                     try untracked.append(arena, prefix);
                     break;
@@ -4192,8 +4197,9 @@ const ListScan = struct {
         defer opened.deinit(s.io);
         const dir = opened.borrow().*;
 
-        if (s.rules.ignore) |rules| try rules.addDirectory(s.io, s.wt.get(), dir_path, depth);
-        defer if (s.rules.ignore) |rules| rules.popTo(depth + 2);
+        const ignore_mark = if (s.rules.ignore) |rules| rules.mark() else null;
+        if (s.rules.ignore) |rules| try rules.addDirectory(s.io, dir, dir_path);
+        defer if (ignore_mark) |at| s.rules.ignore.?.popTo(at);
 
         var scan = try dir_scan.Scan.init(s.gpa, s.io, dir, .{ .precompose = s.rules.precompose_unicode });
 

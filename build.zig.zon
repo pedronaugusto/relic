@@ -13,8 +13,8 @@
         },
 
         .sweep = .{
-            .url = "git+https://github.com/pedronaugusto/sweep#66e3941948aa1496a167775fce90c6051a173e00",
-            .hash = "sweep-0.3.0-6ErwaXPZPAASqJDX212jnFV6yEwW82dzatL8H86L5tuE",
+            .url = "git+https://github.com/pedronaugusto/sweep#0c7ce3733f8cf03bf9a3981a9400ec58dfe73f10",
+            .hash = "sweep-0.3.0-6ErwaZLwPABbRllkSGCbWjfDleBirEpmn3f2-YoHCi4n",
         },
 
         .parallax = .{
