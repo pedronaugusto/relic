@@ -1594,8 +1594,8 @@ test "an https proxy is checked against http.proxySSLCAInfo, or the system's, wh
     const io = testing.io;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(io, .{ .sub_path = "cert.pem", .data = @embedFile("../testing/certs/p256.cert.pem") });
-    try tmp.dir.writeFile(io, .{ .sub_path = "key.pem", .data = @embedFile("../testing/certs/p256.sec1.pem") });
+    try tmp.dir.writeFile(io, .{ .sub_path = "cert.pem", .data = @import("testdata").file("certs/p256.cert.pem") });
+    try tmp.dir.writeFile(io, .{ .sub_path = "key.pem", .data = @import("testdata").file("certs/p256.sec1.pem") });
     const base = try tmp.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(base);
     const escaped = try config_mod.escapeValue(gpa, base);

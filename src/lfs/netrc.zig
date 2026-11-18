@@ -339,7 +339,7 @@ test "netrc files are read as go-netrc reads them" {
     // too, and bytes that are not UTF-8), each with go-netrc's answer: `ERR`,
     // or the entry `FindMachine` gives for each query below, in hex.
     const queries = [_]struct { []const u8, []const u8 }{ .{ "h", "" }, .{ "h", "ada" }, .{ "h", "bob" }, .{ "g.example", "" }, .{ "g.example", "ada" }, .{ "", "" }, .{ "x", "" }, .{ "#c", "" } };
-    var lines = std.mem.splitScalar(u8, @embedFile("../testing/lfs/go_netrc.tsv"), '\n');
+    var lines = std.mem.splitScalar(u8, @import("testdata").file("lfs/go_netrc.tsv"), '\n');
     var cases: usize = 0;
     while (lines.next()) |line| {
         if (line.len == 0) continue;

@@ -378,6 +378,8 @@ pub fn dev(b: *std.Build, tools: type) void {
     const shakedown = b.dependency("shakedown", .{ .target = target, .optimize = optimize });
     test_module.addImport("airlock.testing", airlock_build.testing(airlock_dependency, shakedown.module("shakedown")));
     test_module.addImport("shakedown", shakedown.module("shakedown"));
+    // The fixtures the tests read, outside src/ and the paths a project fetches.
+    test_module.addImport("testdata", p.createModule(.{ .root_source_file = p.path("testdata/root.zig") }));
     filter_helper.root_module.addImport("relic", module);
     if (lfs_transfer_helper) |helper| {
         helper.root_module.addImport("relic", module);

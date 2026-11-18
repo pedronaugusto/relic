@@ -145,13 +145,13 @@ test "a certificate and key are read from one file or two, and each refusal has 
     const arena = arena_state.allocator();
     var dir = testing.tmpDir(.{});
     defer dir.cleanup();
-    const cert = @embedFile("../testing/certs/p256.cert.pem");
-    const key = @embedFile("../testing/certs/p256.sec1.pem");
+    const cert = @import("testdata").file("certs/p256.cert.pem");
+    const key = @import("testdata").file("certs/p256.sec1.pem");
     try dir.dir.writeFile(io, .{ .sub_path = "cert.pem", .data = cert });
     try dir.dir.writeFile(io, .{ .sub_path = "key.pem", .data = key });
     try dir.dir.writeFile(io, .{ .sub_path = "both.pem", .data = cert ++ key });
-    try dir.dir.writeFile(io, .{ .sub_path = "enc.pem", .data = @embedFile("../testing/certs/p256.enc-aes128-sha1.pem") });
-    try dir.dir.writeFile(io, .{ .sub_path = "other.pem", .data = @embedFile("../testing/certs/p384.pkcs8.pem") });
+    try dir.dir.writeFile(io, .{ .sub_path = "enc.pem", .data = @import("testdata").file("certs/p256.enc-aes128-sha1.pem") });
+    try dir.dir.writeFile(io, .{ .sub_path = "other.pem", .data = @import("testdata").file("certs/p384.pkcs8.pem") });
     const base = try dir.dir.realPathFileAlloc(io, ".", arena);
     const at = struct {
         fn f(a: Allocator, b: []const u8, name: []const u8) []const u8 {

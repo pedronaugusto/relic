@@ -1,6 +1,6 @@
 //! The LFS answers relic reads, held to what git-lfs's Go makes of them.
 //!
-//! `testing/lfs/go_json.tsv` holds 600 random answers, a hundred of each
+//! `testdata/lfs/go_json.tsv` holds 600 random answers, a hundred of each
 //! kind (batch, lock, lock list, verify list, ssh authentication, custom
 //! adapter), each with Go 1.27's reading of it into git-lfs 3.8.0's own types
 //! (`tq.BatchResponse`, `locking.lockResponse`, `lockList`,
@@ -25,7 +25,7 @@ const locks = @import("locks.zig");
 const custom = @import("custom.zig");
 const time_text = @import("time_text.zig");
 
-const corpus = @embedFile("../testing/lfs/go_json.tsv");
+const corpus = @import("testdata").file("lfs/go_json.tsv");
 
 test "LFS answers are read as git-lfs's Go reads them" {
     var lines = std.mem.splitScalar(u8, corpus, '\n');
