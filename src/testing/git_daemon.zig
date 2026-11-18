@@ -19,6 +19,7 @@ const fetch_mod = @import("../transport/fetch.zig");
 const push_mod = @import("../transport/push.zig");
 const repo_mod = @import("../repo/repo.zig");
 const config_mod = @import("../config/config.zig");
+const testnet = @import("net.zig");
 
 const who: object.Signature = .{ .name = "T", .email = "t@example.com", .when_secs = 1_700_000_000, .offset_minutes = 0 };
 
@@ -136,7 +137,7 @@ fn expectSameClone(s: *Served, io: Io, theirs: []const u8, ours: []const u8) !vo
 fn lsRemote(s: *Served, io: Io, remote: []const u8, options: transport.Options) ![]const u8 {
     var opts = options;
     opts.who = who;
-    if (opts.programs == null) opts.programs = .{ .environ = &s.env };
+    if (opts.means.programs == null) opts.means = .{ .programs = .{ .environ = &s.env }, .network = &testnet.network };
     var session = try transport.Session.open(s.gpa, io, remote, .{ .service = .upload_pack }, opts);
     defer session.deinit(io);
     var refs = try session.listRefs(s.gpa, io, &.{});
@@ -172,7 +173,7 @@ test "git://: a clone, a fetch and ls-remote under protocol v0 and v2 are what g
         const theirs_listed = try s.git(io, &.{ "-c", setting, "ls-remote", remote });
         const git_asked = try s.asked(before_git);
         const before_ours = try s.logLength();
-        const ours_listed = try lsRemote(s, io, remote, .{ .config = &config });
+        const ours_listed = try lsRemote(s, io, remote, .{ .means = testnet.means(null), .config = &config });
         try testing.expectEqualStrings(git_asked, try s.asked(before_ours));
         try testing.expectEqualStrings(theirs_listed, ours_listed);
         try testing.expectEqual(std.mem.eql(u8, version, "2"), std.mem.find(u8, git_asked, "\"protocol\": version=2") != null);
@@ -185,7 +186,7 @@ test "git://: a clone, a fetch and ls-remote under protocol v0 and v2 are what g
         {
             var dir = try s.out.dir.openDir(io, ours_name, .{ .iterate = true });
             defer dir.close(io);
-            var repo = try clone_mod.clone(gpa, io, remote, dir, .{ .who = who, .config = &config, .programs = .{ .environ = &s.env } });
+            var repo = try clone_mod.clone(gpa, io, remote, dir, .{ .who = who, .config = &config, .means = .{ .programs = .{ .environ = &s.env }, .network = &testnet.network } });
             repo.deinit(io);
         }
         try expectSameClone(s, io, theirs, ours);
@@ -201,7 +202,7 @@ test "git://: a clone, a fetch and ls-remote under protocol v0 and v2 are what g
             defer dir.close(io);
             var repo = try repo_mod.Repository.open(gpa, io, dir, .{});
             defer repo.deinit(io);
-            var fetched = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = who, .programs = .{ .environ = &s.env } });
+            var fetched = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = who, .means = .{ .programs = .{ .environ = &s.env }, .network = &testnet.network } });
             fetched.deinit();
         }
         try expectSameClone(s, io, theirs, ours);
@@ -222,14 +223,14 @@ test "git://: a push goes where the daemon takes receive-pack, and where it does
         try s.out.dir.createDirPath(io, "ours");
         var dir = try s.out.dir.openDir(io, "ours", .{ .iterate = true });
         defer dir.close(io);
-        var repo = try clone_mod.clone(gpa, io, remote, dir, .{ .who = who, .programs = .{ .environ = &s.env } });
+        var repo = try clone_mod.clone(gpa, io, remote, dir, .{ .who = who, .means = .{ .programs = .{ .environ = &s.env }, .network = &testnet.network } });
         defer repo.deinit(io);
         const ours = try std.Io.Dir.path.join(s.arena(), &.{ s.out_path, "ours" });
         try dir.writeFile(io, .{ .sub_path = "pushed.txt", .data = "pushed\n" });
         _ = try s.git(io, &.{ "-C", ours, "add", "pushed.txt" });
         _ = try s.git(io, &.{ "-C", ours, "commit", "-q", "-m", "pushed" });
         const before = try s.logLength();
-        var pushed = try push_mod.push(gpa, io, &repo, "origin", .{ .who = who, .programs = .{ .environ = &s.env }, .refspecs = &.{"main"} });
+        var pushed = try push_mod.push(gpa, io, &repo, "origin", .{ .who = who, .means = .{ .programs = .{ .environ = &s.env }, .network = &testnet.network }, .refspecs = &.{"main"} });
         pushed.deinit();
         try testing.expectEqualStrings(try s.git(io, &.{ "-C", ours, "rev-parse", "main" }), try s.git(io, &.{ "-C", served, "rev-parse", "main" }));
         // git keeps protocol v0 for a push.
@@ -243,7 +244,7 @@ test "git://: a push goes where the daemon takes receive-pack, and where it does
         _ = try s.publish(io, &source, "repo.git");
         const remote = try s.url("repo.git");
         try testing.expectError(error.GitFailed, testremote.gitInputEnv(s.arena(), io, source.dir, &s.env, &.{ "push", remote, "HEAD:refs/heads/other" }, "", false));
-        try testing.expectError(error.RemoteError, transport.Session.open(gpa, io, remote, .{ .service = .receive_pack }, .{ .who = who, .programs = .{ .environ = &s.env } }));
+        try testing.expectError(error.RemoteError, transport.Session.open(gpa, io, remote, .{ .service = .receive_pack }, .{ .who = who, .means = .{ .programs = .{ .environ = &s.env }, .network = &testnet.network } }));
     }
     {
         const s = try Served.init(gpa, io, .{ .export_all = false });
@@ -251,12 +252,12 @@ test "git://: a push goes where the daemon takes receive-pack, and where it does
         const served = try s.publish(io, &source, "repo.git");
         const remote = try s.url("repo.git");
         try testing.expectError(error.GitFailed, testremote.gitInputEnv(s.arena(), io, s.out.dir, &s.env, &.{ "ls-remote", remote }, "", false));
-        try testing.expectError(error.RemoteError, lsRemote(s, io, remote, .{}));
+        try testing.expectError(error.RemoteError, lsRemote(s, io, remote, .{ .means = testnet.means(null) }));
         // Exported, it is served.
         var dir = try Io.Dir.cwd().openDir(io, served, .{});
         defer dir.close(io);
         try dir.writeFile(io, .{ .sub_path = "git-daemon-export-ok", .data = "" });
-        try testing.expectEqualStrings(try s.git(io, &.{ "ls-remote", remote }), try lsRemote(s, io, remote, .{}));
+        try testing.expectEqualStrings(try s.git(io, &.{ "ls-remote", remote }), try lsRemote(s, io, remote, .{ .means = testnet.means(null) }));
     }
 }
 
@@ -320,7 +321,7 @@ test "git://: core.gitProxy and GIT_PROXY_COMMAND choose the program git chooses
             const listed = if (run == 0)
                 try testremote.gitInputEnv(s.arena(), io, s.out.dir, &env, git_args.items, "", true)
             else
-                try lsRemote(s, io, remote, .{ .config = &config, .programs = .{ .environ = &env } });
+                try lsRemote(s, io, remote, .{ .config = &config, .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network } });
             try testing.expectEqualStrings(expected, listed);
             const logged = Io.Dir.cwd().readFileAlloc(io, proxy_log, s.arena(), .limited(4096)) catch |err| switch (err) {
                 error.FileNotFound => "",
@@ -329,6 +330,29 @@ test "git://: core.gitProxy and GIT_PROXY_COMMAND choose the program git chooses
             try testing.expectEqualStrings(if (case.proxied) try s.arena().print("[127.0.0.1][{d}]\n", .{s.server.port}) else "", logged);
         }
     }
+}
+
+test "git://: with no network a proxy command still reaches the daemon, and a TCP dial is DaemonUnavailable" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const s = try Served.init(gpa, io, .{});
+    defer s.deinit();
+    var source = try testremote.historyRepo(gpa, io, 2);
+    defer source.deinit();
+    _ = try s.publish(io, &source, "repo.git");
+    var tools = testing.tmpDir(.{});
+    defer tools.cleanup();
+    const proxy = try testremote.fakeSsh(gpa, io, tools.dir);
+    defer gpa.free(proxy);
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.mem.concat(s.arena(), u8, &.{ proxy, ".fixture" }), .data = try std.mem.concat(s.arena(), u8, &.{ "daemon\n", s.root_path, "\n" }) });
+
+    const remote = try s.url("repo.git");
+    const expected = try s.git(io, &.{ "ls-remote", remote });
+    var config = try config_mod.Config.parseText(gpa, try std.mem.concat(s.arena(), u8, &.{ "[core]\n\tgitProxy = ", proxy, "\n" }), .local);
+    defer config.deinit();
+    const offline: transport.Means = .{ .programs = .{ .environ = &s.env }, .network = null };
+    try testing.expectEqualStrings(expected, try lsRemote(s, io, remote, .{ .config = &config, .means = offline }));
+    try testing.expectError(error.DaemonUnavailable, lsRemote(s, io, remote, .{ .means = offline }));
 }
 
 test "git://: GIT_OVERRIDE_VIRTUAL_HOST and a ~user path reach the daemon as git sends them, and a newline in either is refused before anything is sent" {
@@ -356,7 +380,7 @@ test "git://: GIT_OVERRIDE_VIRTUAL_HOST and a ~user path reach the daemon as git
         const git_asked = try s.asked(before_git);
         try testing.expect(git_asked.len != 0);
         const before_ours = try s.logLength();
-        _ = lsRemote(s, io, remote, .{ .programs = .{ .environ = case.env } }) catch |err| switch (err) {
+        _ = lsRemote(s, io, remote, .{ .means = .{ .programs = .{ .environ = case.env }, .network = &testnet.network } }) catch |err| switch (err) {
             error.RemoteError => "",
             else => |e| return e,
         };
@@ -366,7 +390,7 @@ test "git://: GIT_OVERRIDE_VIRTUAL_HOST and a ~user path reach the daemon as git
     // git dies on a newline in either, before it connects.
     try env.put("GIT_OVERRIDE_VIRTUAL_HOST", "virtual\nexample");
     const before = try s.logLength();
-    try testing.expectError(error.NewlineInRequest, lsRemote(s, io, try s.url("repo.git"), .{ .programs = .{ .environ = &env } }));
-    try testing.expectError(error.NewlineInRequest, lsRemote(s, io, try s.url("repo%0A.git"), .{}));
+    try testing.expectError(error.NewlineInRequest, lsRemote(s, io, try s.url("repo.git"), .{ .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network } }));
+    try testing.expectError(error.NewlineInRequest, lsRemote(s, io, try s.url("repo%0A.git"), .{ .means = testnet.means(null) }));
     try testing.expectEqual(before, try s.logLength());
 }

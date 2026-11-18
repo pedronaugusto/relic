@@ -31,7 +31,7 @@ test "what an LFS server teaches is written without another process's settings l
     try repo.editConfig(io, &.{.{ .name = "fixture.memory", .value = "only" }}, .{});
     try git.exec(io, &.{ "config", "fixture.external", "yes" });
     const settings: lfs_settings.Settings = .{ .gpa = gpa, .config = repo.configuration() };
-    var client = try lfsapi.Client.open(gpa, io, &settings, .{ .remote = "origin", .where = .{}, .reach = .{} });
+    var client = try lfsapi.Client.open(gpa, io, &settings, .{ .remote = "origin", .where = .{}, .reach = .{ .means = .none } });
     defer client.deinit(io);
     try client.learnLocksVerify(io, "https://example.com/project", false);
     try client.remember(io, &repo);

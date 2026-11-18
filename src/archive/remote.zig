@@ -25,6 +25,7 @@ const connection = @import("../wire.zig").connection;
 const url_mod = @import("../wire.zig").url;
 const ssh = @import("../wire.zig").ssh;
 const program = @import("../process.zig").program;
+const Means = @import("../transport/transport.zig").Means;
 const config_mod = @import("../config/config.zig");
 const date = @import("../text.zig").date;
 const repo_mod = @import("../repo/repo.zig");
@@ -333,8 +334,9 @@ pub const FetchOptions = struct {
     /// `--exec`: the program asked for on the other side, in place of
     /// `git-upload-archive`.
     exec: ?[]const u8 = null,
-    /// For ssh, and for the server's filters in this process.
-    programs: ?program.Programs = null,
+    /// What the remote is reached with: its programs for ssh, and for the
+    /// server's filters in this process (`transport.Means`).
+    means: Means,
     config: ?*const config_mod.Config = null,
     /// What the server says on channel two.
     progress: ?progress_mod.Progress = null,
@@ -393,14 +395,14 @@ pub fn fetch(gpa: Allocator, io: Io, out: *Io.Writer, request: Request, options:
                 .gpa = gpa,
                 .io = io,
                 .repo = &here.repo,
-                .options = .{ .programs = options.programs, .now = options.now },
+                .options = .{ .programs = options.means.programs, .now = options.now },
             });
         },
         .ssh => blk: {
             var identity = try url_mod.Identity.parse(gpa, url);
             defer identity.deinit();
             break :blk try ssh.connect(gpa, io, identity.url, .upload_archive, .{
-                .programs = options.programs,
+                .programs = options.means.programs,
                 .config = options.config,
                 .service_program = options.exec,
                 .protocol_v2 = false,

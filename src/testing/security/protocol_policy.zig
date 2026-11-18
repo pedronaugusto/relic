@@ -14,6 +14,7 @@ const object = @import("../../object/object.zig");
 const clone_mod = @import("../../transport/clone.zig");
 const testgit = @import("../git.zig");
 const testremote = @import("../remote.zig");
+const testnet = @import("../net.zig");
 
 test "CVE-2015-7545, t5812..t5815-proto-disable: ext:: is never allowed, file:// only when the person asked, and the allow-list is the whole answer" {
     const gpa = std.testing.allocator;
@@ -47,10 +48,11 @@ test "CVE-2015-7545, t5812..t5815-proto-disable: ext:: is never allowed, file://
     const url = try gpa.print("ext::sh -c touch% {s}/pwned", .{dir});
     defer gpa.free(url);
     try std.testing.expectError(error.TransportNotAllowed, transport.Session.open(gpa, io, url, .{ .service = .upload_pack, .kind = .sha1 }, .{
-        .programs = .{ .environ = &programs_env },
+        .means = .{ .programs = .{ .environ = &programs_env }, .network = &testnet.network },
     }));
     // A path on this machine that the person did not name.
     try std.testing.expectError(error.TransportNotAllowed, transport.Session.open(gpa, io, dir, .{ .service = .upload_pack, .kind = .sha1 }, .{
+        .means = testnet.means(null),
         .from_user = false,
     }));
     try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "pwned", .{}));
@@ -71,7 +73,7 @@ test "CVE-2015-7545, t5815-submodule-protos: a .gitmodules URL is not the person
     for ([_][]const u8{ "ext::sh -c touch% pwned", source_path }) |url| {
         var tmp = std.testing.tmpDir(.{ .iterate = true });
         defer tmp.cleanup();
-        var t = clone_mod.SubmoduleTransport.init(.{ .who = who, .programs = .{ .environ = &env } });
+        var t = clone_mod.SubmoduleTransport.init(.{ .who = who, .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network } });
         defer t.deinit();
         const seam = t.transport();
         try std.testing.expectError(error.TransportFailed, seam.clone(gpa, io, .{ .url = url, .git_dir = .of(tmp.dir) }));
@@ -107,7 +109,7 @@ test "git 2.11.1, t5812-proto-disable-http 'curl limits redirects' and t5550-htt
         defer server.stop();
         const url = try server.url(gpa, "moved/repo.git");
         defer gpa.free(url);
-        if (transport.Session.open(gpa, io, url, .{ .service = .upload_pack, .kind = .sha1 }, .{})) |opened| {
+        if (transport.Session.open(gpa, io, url, .{ .service = .upload_pack, .kind = .sha1 }, .{ .means = testnet.means(null) })) |opened| {
             var session = opened;
             session.deinit(io);
             std.debug.print("a redirect to {s} was followed\n", .{to});
@@ -122,8 +124,8 @@ test "git 2.11.1, t5812-proto-disable-http 'curl limits redirects' and t5550-htt
     defer gpa.free(url);
     var never = try config_mod.Config.parseText(gpa, "[http]\n\tfollowRedirects = false\n", .local);
     defer never.deinit();
-    try std.testing.expectError(error.HttpStatus, transport.Session.open(gpa, io, url, .{ .service = .upload_pack, .kind = .sha1 }, .{ .config = &never }));
-    var session = try transport.Session.open(gpa, io, url, .{ .service = .upload_pack, .kind = .sha1 }, .{});
+    try std.testing.expectError(error.HttpStatus, transport.Session.open(gpa, io, url, .{ .service = .upload_pack, .kind = .sha1 }, .{ .means = testnet.means(null), .config = &never }));
+    var session = try transport.Session.open(gpa, io, url, .{ .service = .upload_pack, .kind = .sha1 }, .{ .means = testnet.means(null) });
     defer session.deinit(io);
     var refs = try session.listRefs(gpa, io, &.{"refs/heads/"});
     defer refs.deinit();

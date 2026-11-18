@@ -32,15 +32,17 @@ const urlmatch = @import("../text.zig").urlmatch;
 const decimal = @import("../text.zig").decimal;
 const Io = std.Io;
 const aegis = @import("aegis");
-const uplink = @import("uplink");
 const shakedown = @import("shakedown");
-/// Whether relic was built with HTTP: the `http` build option.
-const http_enabled = @import("relic_options").http;
 
 /// What an HTTP conversation with one URL is configured to do.
 pub const Settings = struct {
     /// The proxy to go through, as written, or `null` for none.
     proxy: ?[]const u8 = null,
+    /// The configuration named `proxy` (`http.proxy` or
+    /// `remote.<name>.proxy`, an empty one included), which the
+    /// environment's proxy variables do not replace. The network's engine
+    /// reads those, curl's way, and `no_proxy` with them.
+    proxy_from_config: bool = false,
     /// Whether the server's certificate is checked.
     ssl_verify: bool = true,
     /// A file of certificates to trust in place of the system's.
@@ -287,10 +289,10 @@ pub const Settings = struct {
     const Paths = struct { home: ?[]const u8, base: ?aegis.own.Unowned(Io.Dir) };
 
     /// What the environment says over the configuration, as git reads it:
-    /// `GIT_SSL_*`, `GIT_HTTP_*`, `GIT_PROXY_SSL_*`, and the proxy
-    /// variables unless the configuration named a proxy, `no_proxy`
-    /// turning a proxy off for the hosts it names.
-    fn takeEnvironment(settings: *Settings, arena: Allocator, env: *const Environ.Map, url: url_mod.Url, proxy_set: bool) Allocator.Error!void {
+    /// `GIT_SSL_*`, `GIT_HTTP_*` and `GIT_PROXY_SSL_*`. The proxy
+    /// variables and `no_proxy` are the network engine's to read, as curl
+    /// reads them (`proxy_from_config`).
+    fn takeEnvironment(settings: *Settings, arena: Allocator, env: *const Environ.Map, url: url_mod.Url) Allocator.Error!void {
         if (env.get("GIT_SSL_NO_VERIFY") != null) {
             settings.ssl_verify = false;
             settings.ssl_verify_from = "GIT_SSL_NO_VERIFY";
@@ -341,14 +343,6 @@ pub const Settings = struct {
             }
         }
         settings.env_unparsed = try unparsed.toOwnedSlice(arena);
-        if (!proxy_set) settings.proxy = uplink.Proxy.environmentValue(env, url.scheme == .https, .lowercase);
-        if (settings.proxy) |_| {
-            // git supplies an explicitly set lowercase list to curl even
-            // when it is empty, overriding curl's environment fallback.
-            const list = env.get("no_proxy") orelse uplink.Proxy.noProxyValue(env, .lowercase);
-            const port = url.port orelse @as(u16, if (url.scheme == .https) 443 else 80);
-            if (uplink.Proxy.bypassed(list, url.host, port, .lowercase)) settings.proxy = null;
-        }
     }
 };
 
@@ -374,8 +368,6 @@ pub const Error = error{
     /// A value that does not parse: a `http.sslVerify` that is not a
     /// boolean, a `http.postBuffer` that is not a size.
     InvalidHttpSetting,
-    /// relic was built without HTTP: its `http` build option is off.
-    HttpUnavailable,
 } || Allocator.Error || Io.Cancelable;
 
 /// Which proxy an HTTP remote is reached through, chosen by the caller.
@@ -421,7 +413,6 @@ pub fn resolve(arena: Allocator, io: Io, url: url_mod.Url, sources: Sources) Sel
     const config = sources.config;
     const environ = sources.environ;
     const remote_name = sources.remote_name;
-    if (comptime !http_enabled) return error.HttpUnavailable;
     var s: Settings = .{};
     var headers: std.ArrayList([]const u8) = .empty;
     var proxy_set = false;
@@ -466,7 +457,8 @@ pub fn resolve(arena: Allocator, io: Io, url: url_mod.Url, sources: Sources) Sel
             proxy_set = true;
         }
     };
-    if (environ) |env| try s.takeEnvironment(arena, env, url, proxy_set);
+    s.proxy_from_config = proxy_set;
+    if (environ) |env| try s.takeEnvironment(arena, env, url);
     if (s.proxy) |p| {
         if (p.len == 0) s.proxy = null;
     }
@@ -579,7 +571,7 @@ test "the environment overrides the files, and no_proxy names hosts as curl read
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const plain = try resolve(arena, testing.io, try url_mod.Url.parse("http://git.example.com/r.git"), .{ .config = &config, .environ = &env });
+    const plain = try resolveWithEnvironment(arena, testing.io, try url_mod.Url.parse("http://git.example.com/r.git"), .{ .config = &config, .environ = &env });
     try testing.expectEqualStrings("/etc/from-env.pem", plain.ca_info.?);
     // curl ignores an upper-case HTTP_PROXY, and so git does. On Windows a
     // variable's name has no case: `http_proxy` is the variable set as
@@ -589,9 +581,9 @@ test "the environment overrides the files, and no_proxy names hosts as curl read
     } else {
         try testing.expect(plain.proxy == null);
     }
-    const secure = try resolve(arena, testing.io, try url_mod.Url.parse("https://git.example.com/r.git"), .{ .config = &config, .environ = &env });
+    const secure = try resolveWithEnvironment(arena, testing.io, try url_mod.Url.parse("https://git.example.com/r.git"), .{ .config = &config, .environ = &env });
     try testing.expectEqualStrings("http://secure:3128", secure.proxy.?);
-    const inside = try resolve(arena, testing.io, try url_mod.Url.parse("https://git.internal.example.com/r.git"), .{ .config = &config, .environ = &env });
+    const inside = try resolveWithEnvironment(arena, testing.io, try url_mod.Url.parse("https://git.internal.example.com/r.git"), .{ .config = &config, .environ = &env });
     try testing.expect(inside.proxy == null);
 }
 
@@ -618,12 +610,12 @@ test "a remote's SOCKS proxy overrides http.proxy and remains subject to no_prox
     defer env.deinit();
     try env.put("all_proxy", "socks4a://environment");
     const url = try url_mod.Url.parse("https://git.example.com/repo.git");
-    const named = try resolve(arena.allocator(), testing.io, url, .{ .config = &config, .environ = &env, .remote_name = "origin" });
+    const named = try resolveWithEnvironment(arena.allocator(), testing.io, url, .{ .config = &config, .environ = &env, .remote_name = "origin" });
     try testing.expectEqualStrings("socks5h://specific", named.proxy.?);
-    const direct = try resolve(arena.allocator(), testing.io, url, .{ .config = &config, .environ = &env, .remote_name = "direct" });
+    const direct = try resolveWithEnvironment(arena.allocator(), testing.io, url, .{ .config = &config, .environ = &env, .remote_name = "direct" });
     try testing.expect(direct.proxy == null);
     try env.put("no_proxy", ".example.com");
-    const bypassed = try resolve(arena.allocator(), testing.io, url, .{ .config = &config, .environ = &env, .remote_name = "origin" });
+    const bypassed = try resolveWithEnvironment(arena.allocator(), testing.io, url, .{ .config = &config, .environ = &env, .remote_name = "origin" });
     try testing.expect(bypassed.proxy == null);
 }
 
@@ -636,17 +628,25 @@ test "a proxy the caller chooses stands over the configuration, the environment 
     defer env.deinit();
     try env.put("no_proxy", ".example.com");
     const url = try url_mod.Url.parse("https://git.example.com/repo.git");
-    var s = try resolve(arena.allocator(), testing.io, url, .{ .config = &config, .environ = &env, .remote_name = "origin" });
+    var s = try resolveWithEnvironment(arena.allocator(), testing.io, url, .{ .config = &config, .environ = &env, .remote_name = "origin" });
     chooseProxy(&s, .auto);
     try testing.expect(s.proxy == null);
     chooseProxy(&s, .{ .url = "http://chosen:8080" });
     try testing.expectEqualStrings("http://chosen:8080", s.proxy.?);
     chooseProxy(&s, .none);
     try testing.expect(s.proxy == null);
-    var t = try resolve(arena.allocator(), testing.io, url, .{ .config = &config, .environ = null, .remote_name = "origin" });
+    var t = try resolveWithEnvironment(arena.allocator(), testing.io, url, .{ .config = &config, .environ = null, .remote_name = "origin" });
     try testing.expectEqualStrings("socks5h://specific", t.proxy.?);
     chooseProxy(&t, .none);
     try testing.expect(t.proxy == null);
     chooseProxy(&t, .{ .url = "" });
     try testing.expect(t.proxy == null);
+}
+
+/// `resolve`, then the environment's proxy as the network's engine reads
+/// it (`smart_http.environmentProxy`).
+fn resolveWithEnvironment(arena: Allocator, io: Io, url: url_mod.Url, sources: Sources) !Settings {
+    var s = try resolve(arena, io, url, sources);
+    if (sources.environ) |env| @import("smart_http.zig").environmentProxy(&s, env, url);
+    return s;
 }

@@ -19,6 +19,7 @@ const object = @import("../object/object.zig");
 const repo_mod = @import("../repo/repo.zig");
 const push_mod = @import("push.zig");
 const fetch_mod = @import("fetch.zig");
+const testnet = @import("../testing/net.zig");
 
 const zero = "0000000000000000000000000000000000000000";
 
@@ -557,11 +558,11 @@ test "relic pushes to a repository on this machine through its receive-pack, hoo
     defer repo.deinit(io);
     const who: object.Signature = .{ .name = "F", .email = "f@example.com", .when_secs = 1_700_000_000, .offset_minutes = 0 };
     // Without permission to run programs, a repository with hooks refuses.
-    try testing.expectError(error.RemoteHooksNotRun, push_mod.push(gpa, io, &repo, p.ours, .{ .who = who, .refspecs = &.{"main:refs/heads/main"} }));
+    try testing.expectError(error.RemoteHooksNotRun, push_mod.push(gpa, io, &repo, p.ours, .{ .means = testnet.means(null), .who = who, .refspecs = &.{"main:refs/heads/main"} }));
     const theirs = try p.push(p.theirs, false, &.{ "main:refs/heads/main", "main:refs/heads/declined" });
     defer gpa.free(theirs.report);
     defer gpa.free(theirs.remote_lines);
-    var outcome = try push_mod.push(gpa, io, &repo, p.ours, .{ .who = who, .refspecs = &.{ "main:refs/heads/main", "main:refs/heads/declined" }, .programs = .{ .environ = &p.env } });
+    var outcome = try push_mod.push(gpa, io, &repo, p.ours, .{ .who = who, .refspecs = &.{ "main:refs/heads/main", "main:refs/heads/declined" }, .means = .{ .programs = .{ .environ = &p.env }, .network = &testnet.network } });
     defer outcome.deinit();
     try testing.expectEqual(@as(usize, 2), outcome.refs.len);
     try testing.expectEqual(push_mod.RefResult.Status.ok, outcome.refs[0].status);
@@ -884,7 +885,7 @@ test "a push to a repository on this machine and a fetch back cross as they are 
         var repo = try repo_mod.Repository.open(gpa, io, source.dir, .{});
         defer repo.deinit(io);
         const who: object.Signature = .{ .name = "F", .email = "f@example.com", .when_secs = 1_700_000_000, .offset_minutes = 0 };
-        var pushed = try push_mod.push(gpa, io, &repo, target_path, .{ .who = who, .refspecs = &.{"HEAD:refs/heads/main"} });
+        var pushed = try push_mod.push(gpa, io, &repo, target_path, .{ .means = testnet.means(null), .who = who, .refspecs = &.{"HEAD:refs/heads/main"} });
         defer pushed.deinit();
         try testing.expectEqual(push_mod.RefResult.Status.ok, pushed.refs[0].status);
         try target.exec(io, &.{ "fsck", "--strict" });
@@ -893,7 +894,7 @@ test "a push to a repository on this machine and a fetch back cross as they are 
         defer empty.deinit();
         var back = try repo_mod.Repository.open(gpa, io, empty.dir, .{});
         defer back.deinit(io);
-        var fetched = try fetch_mod.fetch(gpa, io, &back, target_path, .{ .refspecs = &.{"refs/heads/main:refs/heads/fetched"}, .who = who });
+        var fetched = try fetch_mod.fetch(gpa, io, &back, target_path, .{ .means = testnet.means(null), .refspecs = &.{"refs/heads/main:refs/heads/fetched"}, .who = who });
         defer fetched.deinit();
         const sent = try source.line(io, &.{ "rev-parse", "HEAD:noise.bin" });
         defer gpa.free(sent);
@@ -973,7 +974,7 @@ test "the alternates' refs are shown as .have and fetched against as git's are, 
             var repo = try repo_mod.Repository.open(gpa, io, dir, .{});
             defer repo.deinit(io);
             const who: object.Signature = .{ .name = "F", .email = "f@example.com", .when_secs = 1_700_000_000, .offset_minutes = 0 };
-            var fetched = try fetch_mod.fetch(gpa, io, &repo, source_path, .{ .refspecs = &.{"refs/heads/main:refs/heads/main"}, .who = who, .programs = .{ .environ = &p.env } });
+            var fetched = try fetch_mod.fetch(gpa, io, &repo, source_path, .{ .refspecs = &.{"refs/heads/main:refs/heads/main"}, .who = who, .means = .{ .programs = .{ .environ = &p.env }, .network = &testnet.network } });
             fetched.deinit();
         } else try p.git(dir, &.{ "fetch", "-q", source_path, "refs/heads/main:refs/heads/main" });
         const counted = try testremote.gitInputEnv(gpa, io, dir, &p.env, &.{ "count-objects", "-v" }, "", true);

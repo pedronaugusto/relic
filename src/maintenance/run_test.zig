@@ -280,6 +280,7 @@ test "the tasks a run takes, as git's initialize_task_config chooses them" {
 }
 
 const schedule = @import("schedule.zig");
+const testnet = @import("../testing/net.zig");
 
 /// The files git's `maintenance start` writes for `scheduler`, its
 /// scheduler a no-op as git's tests have it, compared with relic's.
@@ -432,7 +433,7 @@ test "the prefetch task fetches each remote into refs/prefetch/ as git's" {
 
     var native = try repo_mod.Repository.open(gpa, io, repos[1].dir, .{});
     defer native.deinit(io);
-    var prefetcher: fetch.Prefetcher = .{ .gpa = gpa, .options = .{ .who = .{ .name = "Fixture", .email = "fixture@example.com", .when_secs = testgit.fixture_date, .offset_minutes = 0 }, .programs = .{ .environ = &repos[1].isolated.? } } };
+    var prefetcher: fetch.Prefetcher = .{ .gpa = gpa, .options = .{ .who = .{ .name = "Fixture", .email = "fixture@example.com", .when_secs = testgit.fixture_date, .offset_minutes = 0 }, .means = .{ .programs = .{ .environ = &repos[1].isolated.? }, .network = &testnet.network } } };
     const report = try run_mod.run(gpa, io, &native, .{ .clock = .{ .now = Io.Clock.real.now(io) }, .tasks = &.{.prefetch}, .prefetch = prefetcher.maintenance() });
     try std.testing.expect(report.succeeded());
     const expected = try repos[0].run(io, &.{ "for-each-ref", "--format=%(refname) %(objectname)" });
@@ -576,7 +577,7 @@ test "a cancel that lands in the prefetch comes back through maintenance.Prefetc
     };
     var prefetch: Prefetch = .{
         .repo = &native,
-        .prefetcher = .{ .gpa = gpa, .options = .{ .who = .{ .name = "Fixture", .email = "fixture@example.com", .when_secs = testgit.fixture_date, .offset_minutes = 0 }, .programs = .{ .environ = &ours.isolated.? } } },
+        .prefetcher = .{ .gpa = gpa, .options = .{ .who = .{ .name = "Fixture", .email = "fixture@example.com", .when_secs = testgit.fixture_date, .offset_minutes = 0 }, .means = .{ .programs = .{ .environ = &ours.isolated.? }, .network = &testnet.network } } },
         .now = Io.Clock.real.now(io),
     };
     try testing_io.eachCallCanceled(gpa, io, &prefetch, .dirOpenFile);

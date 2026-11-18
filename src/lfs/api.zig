@@ -117,9 +117,20 @@ test "a server's JSON is read as git-lfs reads it, within limits" {
     try std.testing.expectError(error.MalformedResponse, parseAuthenticate(arena, .init(nested.items)));
 }
 
+test "LFS with no network is HttpUnavailable, before anything is dialed" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const t = try testSettings("", null);
+    defer freeSettings(t);
+    var client = try Client.open(gpa, io, &t.settings, .{ .remote = "origin", .where = .{}, .reach = .{ .means = .none } });
+    defer client.deinit(io);
+    try testing.expectError(error.HttpUnavailable, client.send(io, .{ .method = .GET, .url = "http://127.0.0.1:1/object" }));
+    var reaching = try Client.open(gpa, io, &t.settings, .{ .remote = "origin", .where = .{}, .reach = .{ .means = .{ .programs = null, .network = &test_network } } });
+    defer reaching.deinit(io);
+    try testing.expectError(error.ConnectionFailed, reaching.send(io, .{ .method = .GET, .url = "http://127.0.0.1:1/object" }));
+}
+
 test "LFS checks certificates with the request Io before dialing" {
-    // Only with `http`: the request is sent by uplink's client.
-    if (!@import("relic_options").http) return error.SkipZigTest;
     const gpa = testing.allocator;
     const faults = try shakedown.FaultIo.init(gpa, testing.io, .{});
     defer faults.deinit();
@@ -134,7 +145,7 @@ test "LFS checks certificates with the request Io before dialing" {
     defer gpa.free(text);
     const t = try testSettings(text, null);
     defer freeSettings(t);
-    var client = try Client.open(gpa, testing.io, &t.settings, .{ .remote = "origin", .where = .{}, .reach = .{} });
+    var client = try Client.open(gpa, testing.io, &t.settings, .{ .remote = "origin", .where = .{}, .reach = .{ .means = .{ .programs = null, .network = &test_network } } });
     defer client.deinit(io);
     const before = faults.count(.dirOpenFile);
     try testing.expectError(error.SslClientCertificateUnreadable, client.send(io, .{ .method = .GET, .url = "http://127.0.0.1:1/object" }));
@@ -175,9 +186,7 @@ const uplink = @import("uplink");
 const cloak = @import("cloak");
 const strand = @import("strand");
 const shakedown = @import("shakedown");
-/// Whether relic was built with HTTP, which Git LFS needs: the `http` build
-/// option.
-pub const http_enabled = @import("relic_options").http;
+const Means = core.transport.Means;
 
 const Config = config_mod.Config;
 
@@ -866,11 +875,12 @@ pub fn checkHeader(name: []const u8, value: []const u8) CheckHeaderError!void {
 
 /// How a client behaves.
 pub const Options = struct {
-    /// The permission to run programs: ssh for an ssh remote, credential
-    /// helpers and askpass for a server that wants a credential. Its
-    /// environment is where `GIT_SSH_COMMAND`, `GIT_SSH` and the proxy
-    /// variables are read.
-    programs: ?program.Programs = null,
+    /// What the server is reached with. Its programs: ssh for an ssh
+    /// remote, credential helpers and askpass for a server that wants a
+    /// credential; their environment is where `GIT_SSH_COMMAND`, `GIT_SSH`
+    /// and the proxy variables are read. Its network: every HTTP request,
+    /// `error.HttpUnavailable` without one (`relic.transport.Means`).
+    means: Means,
     /// What stands in for a terminal when a server asks for a credential no
     /// helper has.
     prompt: ?credential.Prompt = null,
@@ -914,8 +924,8 @@ pub const Client = struct {
     where: Where,
     options: Options,
     /// One HTTP client for each set of connection settings the operation's
-    /// URLs need: `transportFor`.
-    transports: aegis.BlockingGuarded(?*TransportPool) = .init(null),
+    /// URLs need: the engine's (`transportFor`), which only it reads.
+    transports: aegis.BlockingGuarded(?*anyopaque) = .init(null),
     /// What the operation's tasks learn and keep between requests.
     shared: aegis.BlockingGuarded(Shared),
     /// What the server or the program last said about a failure.
@@ -961,9 +971,8 @@ pub const Client = struct {
     const SshTransferSlot = union(enum) { untried, none, open: *lfsssh.Transfer };
 
     /// Open a client for `remote`. `settings` is borrowed.
-    pub const OpenOptions = struct { remote: []const u8, where: Where, reach: Options = .{} };
+    pub const OpenOptions = struct { remote: []const u8, where: Where, reach: Options };
     pub fn open(gpa: Allocator, io: Io, settings: *const Settings, with: OpenOptions) Self.Error!Client {
-        if (comptime !http_enabled) return error.HttpUnavailable;
         const remote = with.remote;
         const where = with.where;
         const options = with.reach;
@@ -981,7 +990,7 @@ pub const Client = struct {
     /// git-lfs reads it. One that does not parse is not used, as git-lfs
     /// does not use it. A cancel that lands in reading it is returned.
     fn loadNetrc(gpa: Allocator, io: Io, options: Options) (Allocator.Error || Io.Cancelable)!?netrc_mod.Netrc {
-        const programs = options.programs orelse return null;
+        const programs = options.means.programs orelse return null;
         const home = programs.environ.get("HOME") orelse return null;
         if (home.len == 0) return null;
         var dir = Io.Dir.cwd().openDir(io, home, .{}) catch |err| switch (err) {
@@ -1042,15 +1051,27 @@ pub const Client = struct {
             else => {},
         };
         shared.ssh_failure.deinit(c.gpa);
-        // Only HTTP makes transports.
-        if (comptime http_enabled) c.freeTransports(io);
+        // Only the network's engine makes transports.
+        if (c.options.means.network) |network| engineOf(network).freeTransports(c, io);
         shared.arena.deinit();
         c.* = undefined;
     }
 
+    /// The engine `network` holds for Git LFS.
+    fn engineOf(network: *const core.transport.Network) *const Engine {
+        return @ptrCast(@alignCast(network.lfs)); // safe: a Network's `lfs` is an Engine, as its doc says
+    }
+
+    /// The network's engine for this client's requests: `HttpUnavailable`
+    /// without one.
+    fn networkEngine(c: *const Client) ErrorNamespace.Error!*const Engine {
+        const network = c.options.means.network orelse return error.HttpUnavailable;
+        return engineOf(network);
+    }
+
     /// Close the HTTP clients `transportFor` made.
     fn freeTransports(c: *Client, io: Io) void {
-        const pool = c.transports.teardown().* orelse return;
+        const pool: *TransportPool = @ptrCast(@alignCast(c.transports.teardown().* orelse return)); // safe: only transportFor sets it, to a TransportPool
         for (pool.items.items) |t| {
             t.client.deinit(io);
             t.free(c.gpa);
@@ -1175,7 +1196,7 @@ pub const Client = struct {
                 }, error.LfsAuthenticateDisabled);
             }
         }
-        const programs = c.options.programs orelse return error.ProgramsNotGranted;
+        const programs = c.options.means.programs orelse return error.ProgramsNotGranted;
         const invocation = try sshArguments(arena, programs.environ, c.settings, ssh, operation);
         const retries = std.math.cast(usize, @max(0, c.settings.getInt("lfs.ssh.retries", 5))) orelse std.math.maxInt(usize);
         var attempt: usize = 0;
@@ -1237,7 +1258,7 @@ pub const Client = struct {
         if (try c.settings.urlGet(arena, "lfs", e.original, "sshtransfer")) |mode| {
             if (!std.mem.eql(u8, mode, "negotiate") and !std.mem.eql(u8, mode, "always")) return null;
         }
-        const programs = c.options.programs orelse return error.ProgramsNotGranted;
+        const programs = c.options.means.programs orelse return error.ProgramsNotGranted;
         const remote = try arena.print("git-lfs-transfer {s} {s}", .{ ssh.path, @tagName(operation) });
         var first = try sshInvocation(arena, programs.environ, c.settings, .{ .ssh = ssh, .remote_command = remote }, .{ .multiplex = null });
         var rest = first;
@@ -1370,7 +1391,7 @@ pub const Client = struct {
     }
 
     fn credentialOptions(c: *const Client) credential.Options {
-        return .{ .config = c.settings.config, .programs = c.options.programs, .prompt = c.options.prompt, .now = c.options.now };
+        return .{ .config = c.settings.config, .programs = c.options.means.programs, .prompt = c.options.prompt, .now = c.options.now };
     }
 
     /// Everything a request needs besides its URL and method.
@@ -1442,7 +1463,7 @@ pub const Client = struct {
     /// redirects git-lfs follows. The answer is open for its body and is the
     /// caller's to `close`, whatever its status.
     pub fn send(c: *Client, io: Io, request: Request) Self.Error!*Exchange {
-        if (comptime !http_enabled) return error.HttpUnavailable;
+        const eng = try c.networkEngine();
         const operation: Operation = switch (request.method) {
             .POST, .PUT => .upload,
             else => .download,
@@ -1471,7 +1492,7 @@ pub const Client = struct {
             };
             defer attempt.deinit(c.gpa);
 
-            const ex = c.exchangeOnce(io, current, url, attempt.headerValue()) catch |err| switch (err) {
+            const ex = eng.exchange(c, io, current, url, attempt.headerValue()) catch |err| switch (err) {
                 error.ConnectionFailed => {
                     if (retries_left > 0) {
                         retries_left -= 1;
@@ -1692,7 +1713,7 @@ pub const Client = struct {
     fn exchangeOnce(c: *Client, io: Io, request: Request, url: []const u8, auth_header: ?[]const u8) ErrorNamespace.Error!*Exchange {
         const state = try c.gpa.create(ExchangeState);
         errdefer c.gpa.destroy(state);
-        state.* = .{ .exchange = .{ .client = c, .arena = .init(c.gpa) } };
+        state.* = .{ .exchange = .{ .client = c, .engine = &uplink_engine, .arena = .init(c.gpa) } };
         const ex = &state.exchange;
         errdefer ex.arena.deinit();
         const a = ex.arena.allocator();
@@ -1758,8 +1779,8 @@ pub const Client = struct {
                     .url = request_url,
                     .headers = headers.items,
                     .body = .{ .streamed = .{ .length = if (chunked) null else o.pointer.size } },
-                    .diagnostics = &ex.state().diagnostics,
-                }) catch |err| return c.clientFailed(io, &ex.state().diagnostics, err, request_url);
+                    .diagnostics = &UplinkExchange.state(ex).diagnostics,
+                }) catch |err| return c.clientFailed(io, &UplinkExchange.state(ex).diagnostics, err, request_url);
                 defer outgoing.deinit(io);
                 var chunk: [64 * 1024]u8 = undefined;
                 var fr = lfs_input.stream(io, file, &.{});
@@ -1777,7 +1798,7 @@ pub const Client = struct {
                     if (request.sent) |count| count.* += n;
                     if (request.on_bytes) |cb| cb.add(n);
                 }
-                ex.state().response = outgoing.finish(io) catch |err| return c.clientFailed(io, &ex.state().diagnostics, err, request_url);
+                UplinkExchange.state(ex).response = outgoing.finish(io) catch |err| return c.clientFailed(io, &UplinkExchange.state(ex).diagnostics, err, request_url);
             },
         }
         ex.in_flight = true;
@@ -1786,13 +1807,13 @@ pub const Client = struct {
 
     /// Send `ex`'s request with a body given whole, and read its answer's head.
     fn sendWhole(c: *Client, io: Io, ex: *Exchange, transport: *uplink.Client, method: uplink.Method, headers: []const http.Header, body: uplink.Request.Body) ErrorNamespace.Error!void {
-        ex.state().response = transport.send(io, .{
+        UplinkExchange.state(ex).response = transport.send(io, .{
             .method = method,
             .url = ex.url,
             .headers = headers,
             .body = body,
-            .diagnostics = &ex.state().diagnostics,
-        }) catch |err| return c.clientFailed(io, &ex.state().diagnostics, err, ex.url);
+            .diagnostics = &UplinkExchange.state(ex).diagnostics,
+        }) catch |err| return c.clientFailed(io, &UplinkExchange.state(ex).diagnostics, err, ex.url);
     }
 
     /// What an uplink client can fail with: a request, or the end of one
@@ -1805,7 +1826,7 @@ pub const Client = struct {
     /// A write of an upload's body that failed: `finish` says why, a
     /// cancel among the reasons.
     fn uploadBroke(c: *Client, io: Io, ex: *Exchange, outgoing: *uplink.Outgoing, url: []const u8) ErrorNamespace.Error {
-        var res = outgoing.finish(io) catch |err| return c.clientFailed(io, &ex.state().diagnostics, err, url);
+        var res = outgoing.finish(io) catch |err| return c.clientFailed(io, &UplinkExchange.state(ex).diagnostics, err, url);
         res.deinit(io);
         return c.fail("upload: the connection broke", io, .{}, error.ConnectionFailed);
     }
@@ -1876,11 +1897,10 @@ pub const Client = struct {
     /// (`clientCertificate`).
     fn transportFor(c: *Client, scratch: Allocator, io: Io, request_url: []const u8) ErrorNamespace.Error!*uplink.Client {
         const url = url_mod.Url.parse(request_url) catch return c.fail("malformed URL {s}", io, .{stripQuery(request_url)}, error.MalformedUrl);
-        const environ: ?*const std.process.Environ.Map = if (c.options.programs) |p| p.environ else null;
+        const environ: ?*const std.process.Environ.Map = if (c.options.means.programs) |p| p.environ else null;
         const settings = http_settings.resolve(scratch, io, url, .{ .config = c.settings.config, .environ = environ }) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidHttpSetting => return c.fail("an http.* setting for {s} does not parse", io, .{stripQuery(request_url)}, error.InvalidHttpSetting),
-            error.HttpUnavailable => return error.HttpUnavailable,
             error.Canceled => return error.Canceled,
         };
         var ca_info: ?[]const u8 = null;
@@ -1914,7 +1934,7 @@ pub const Client = struct {
             pool.* = .{};
             handle.* = pool;
         }
-        const pool = handle.*.?;
+        const pool: *TransportPool = @ptrCast(@alignCast(handle.*.?)); // safe: set to a TransportPool just above, or before
         for (pool.items.items) |t| {
             if (std.mem.eql(u8, t.key, key)) return &t.client;
         }
@@ -2082,7 +2102,7 @@ pub const Client = struct {
     /// host `NO_PROXY`, else `no_proxy`, names, or for `localhost` and a
     /// loopback address, by Go's rules (`uplink.Proxy.bypassed`).
     fn proxyFor(c: *Client, scratch: Allocator, request_url: []const u8, url: url_mod.Url) ErrorNamespace.Error!?[]const u8 {
-        const environ: ?*const std.process.Environ.Map = if (c.options.programs) |p| p.environ else null;
+        const environ: ?*const std.process.Environ.Map = if (c.options.means.programs) |p| p.environ else null;
         var chosen: ?[]const u8 = null;
         if (try c.settings.urlGet(scratch, "http", request_url, "proxy")) |v| {
             if (v.len != 0) chosen = v;
@@ -2222,6 +2242,8 @@ pub const Exchange = struct {
     /// Owned with its network state in one allocation, an `ExchangeState`'s
     /// `exchange`.
     client: *Client,
+    /// The engine that made it, which reads its answer.
+    engine: *const Engine,
     arena: std.heap.ArenaAllocator,
     /// Where the request went, without a credential, in the exchange's
     /// arena.
@@ -2235,52 +2257,28 @@ pub const Exchange = struct {
     decompress: warp.zstd.Decompress.Reader = undefined,
     body: ?*Io.Reader = null,
 
-    /// Without `http` no exchange is made: `Client.send` and `Client.api`
-    /// return `error.HttpUnavailable` first, so what reads one's network
-    /// state, uplink's, is never reached, and is not compiled.
-    fn noExchange() noreturn {
-        @panic("relic_lfs: an Exchange without http, which Client.send and Client.api never make");
-    }
-
-    fn state(ex: *Exchange) *ExchangeState {
-        return @fieldParentPtr("exchange", ex);
-    }
-
-    fn held(ex: *const Exchange) *const ExchangeState {
-        return @fieldParentPtr("exchange", ex);
-    }
-
     /// The answer's status.
     pub fn status(ex: *const Exchange) http.Status {
-        if (comptime !http_enabled) noExchange();
-        return ex.held().response.status;
+        return ex.engine.status(ex);
     }
 
     /// A header of the answer, or `null`.
     pub fn header(ex: *const Exchange, name: []const u8) ?[]const u8 {
-        if (comptime !http_enabled) noExchange();
-        return ex.held().response.headers.get(name);
+        return ex.engine.header(ex, name);
     }
 
     fn location(ex: *const Exchange) ?[]const u8 {
-        if (comptime !http_enabled) noExchange();
-        return ex.held().response.headers.get("location");
+        return ex.header("location");
     }
 
-    const Offers = struct { basic: bool = false, other: bool = false };
+    /// Which schemes a refusal's `WWW-Authenticate` and `LFS-Authenticate`
+    /// offer.
+    pub const Offers = struct { basic: bool = false, other: bool = false };
 
     /// The server's `LFS-Authenticate` values, then its `WWW-Authenticate`
     /// ones, into `a`: what git-lfs hands the helpers as `wwwauth[]`.
     fn challenges(ex: *const Exchange, a: Allocator) Allocator.Error![]const []const u8 {
-        if (comptime !http_enabled) noExchange();
-        var out: std.ArrayList([]const u8) = .empty;
-        for ([_][]const u8{ "lfs-authenticate", "www-authenticate" }) |name| {
-            var it = ex.held().response.headers.iterator();
-            while (it.next()) |h| {
-                if (std.ascii.eqlIgnoreCase(h.name, name)) try out.append(a, try a.dupe(u8, h.value));
-            }
-        }
-        return out.items;
+        return ex.engine.challenges(ex, a);
     }
 
     /// What the server said in refusing, into `a`: the API's `message`, or
@@ -2299,16 +2297,7 @@ pub const Exchange = struct {
     }
 
     fn authenticateOffers(ex: *const Exchange) Offers {
-        if (comptime !http_enabled) noExchange();
-        var offers: Offers = .{};
-        var it = ex.held().response.headers.iterator();
-        while (it.next()) |h| {
-            if (!std.ascii.eqlIgnoreCase(h.name, "www-authenticate") and !std.ascii.eqlIgnoreCase(h.name, "lfs-authenticate")) continue;
-            const value = std.mem.trim(u8, h.value, " \t");
-            const end = std.mem.findAny(u8, value, " \t") orelse value.len;
-            if (std.ascii.eqlIgnoreCase(value[0..end], "basic")) offers.basic = true else offers.other = true;
-        }
-        return offers;
+        return ex.engine.authenticateOffers(ex);
     }
 
     /// `Retry-After` in seconds: a number, or an HTTP date counted from
@@ -2333,17 +2322,19 @@ pub const Exchange = struct {
     }
 
     fn causeOf(context: *const anyopaque) ?anyerror {
-        if (comptime !http_enabled) noExchange();
         const ex: *const Exchange = @ptrCast(@alignCast(context)); // safe: reader passes an Exchange
-        return ex.held().response.failure();
+        return ex.engine.failure(ex);
     }
 
     fn decoded(ex: *Exchange, io: Io) Self.Error!*Io.Reader {
-        if (comptime !http_enabled) noExchange();
-        const raw = ex.state().response.reader(io);
         if (ex.body) |r| return r;
-        const codings = uplink.wire.coding.Codings.of(&ex.state().response.headers) catch uplink.wire.coding.Codings{};
-        const only: ?uplink.wire.coding.ContentCoding = if (codings.len == 1) codings.items[0] else null;
+        return ex.engine.decoded(ex, io);
+    }
+
+    /// The body over the client's undecoded bytes, `raw`, and the codings
+    /// the answer names: inflated or decompressed where the request asked
+    /// for it.
+    fn decode(ex: *Exchange, raw: *Io.Reader, only: ?Coding) Self.Error!*Io.Reader {
         if (only == .gzip and (ex.accept == .default or ex.accept == .gzip)) {
             const options: warp.Inflate.Options = .{ .accept = .gzip };
             const buffer = try ex.arena.allocator().alloc(u8, options.windowLen() + 4096);
@@ -2406,8 +2397,8 @@ pub const Exchange = struct {
 
     /// The reason a read of the body failed.
     pub fn bodyError(ex: *const Exchange) []const u8 {
-        if (comptime !http_enabled) noExchange();
-        return switch (ex.held().response.failure()) {
+        const failure = ex.engine.failure(ex) orelse return "the body ended early";
+        return switch (failure) {
             error.TimedOut => "timed out",
             else => |err| @errorName(err),
         };
@@ -2415,9 +2406,116 @@ pub const Exchange = struct {
 
     /// Give the connection back and release everything.
     pub fn deinit(ex: *Exchange, io: Io) void {
-        if (comptime !http_enabled) noExchange();
+        ex.engine.deinit(ex, io);
+    }
+};
+
+/// The one coding of a body that `Exchange.reader` undoes.
+const Coding = enum { gzip, zstd };
+
+/// Git LFS's HTTP engine: what a client's requests are made with and
+/// their answers read through, over uplink's client with cloak's
+/// certificates, keys and trust. relic reaches it only through a
+/// `relic.transport.Network`, whose `lfs` it is: `relic_net.network`'s.
+pub const Engine = struct {
+    /// Make one request to `url` with `auth_header`, no credential asked
+    /// for and no redirect followed: `Client.send` does both.
+    exchange: *const fn (c: *Client, io: Io, request: Client.Request, url: []const u8, auth_header: ?[]const u8) Error!*Exchange,
+    /// Close the HTTP clients the engine made for `c`.
+    freeTransports: *const fn (c: *Client, io: Io) void,
+    status: *const fn (ex: *const Exchange) http.Status,
+    header: *const fn (ex: *const Exchange, name: []const u8) ?[]const u8,
+    challenges: *const fn (ex: *const Exchange, a: Allocator) Allocator.Error![]const []const u8,
+    authenticateOffers: *const fn (ex: *const Exchange) Exchange.Offers,
+    /// Why a read of the answer's body failed, or `null`.
+    failure: *const fn (ex: *const Exchange) ?anyerror,
+    /// The answer's body, its codings undone as `Exchange.reader` says.
+    decoded: *const fn (ex: *Exchange, io: Io) Error!*Io.Reader,
+    deinit: *const fn (ex: *Exchange, io: Io) void,
+};
+
+/// The engine relic makes, over uplink and cloak: `relic_net.network`'s
+/// `lfs`. A function, so that only what calls it compiles the engine.
+pub fn engine() *const Engine {
+    return &uplink_engine;
+}
+
+/// What this file's tests reach a server over: relic's network, with
+/// this engine for Git LFS, as `relic_net.network` holds it.
+const test_network: core.transport.Network = core.wire.engines.network(&uplink_engine);
+
+const uplink_engine: Engine = .{
+    .exchange = Client.exchangeOnce,
+    .freeTransports = Client.freeTransports,
+    .status = UplinkExchange.status,
+    .header = UplinkExchange.header,
+    .challenges = UplinkExchange.challenges,
+    .authenticateOffers = UplinkExchange.authenticateOffers,
+    .failure = UplinkExchange.failure,
+    .decoded = UplinkExchange.decoded,
+    .deinit = UplinkExchange.deinit,
+};
+
+/// What `engine` reads an answer with: uplink's response, held beside the
+/// exchange in an `ExchangeState`.
+const UplinkExchange = struct {
+    fn state(ex: *Exchange) *ExchangeState {
+        return @fieldParentPtr("exchange", ex);
+    }
+
+    fn held(ex: *const Exchange) *const ExchangeState {
+        return @fieldParentPtr("exchange", ex);
+    }
+
+    fn status(ex: *const Exchange) http.Status {
+        return held(ex).response.status;
+    }
+
+    fn header(ex: *const Exchange, name: []const u8) ?[]const u8 {
+        return held(ex).response.headers.get(name);
+    }
+
+    fn challenges(ex: *const Exchange, a: Allocator) Allocator.Error![]const []const u8 {
+        var out: std.ArrayList([]const u8) = .empty;
+        for ([_][]const u8{ "lfs-authenticate", "www-authenticate" }) |name| {
+            var it = held(ex).response.headers.iterator();
+            while (it.next()) |h| {
+                if (std.ascii.eqlIgnoreCase(h.name, name)) try out.append(a, try a.dupe(u8, h.value));
+            }
+        }
+        return out.items;
+    }
+
+    fn authenticateOffers(ex: *const Exchange) Exchange.Offers {
+        var offers: Exchange.Offers = .{};
+        var it = held(ex).response.headers.iterator();
+        while (it.next()) |h| {
+            if (!std.ascii.eqlIgnoreCase(h.name, "www-authenticate") and !std.ascii.eqlIgnoreCase(h.name, "lfs-authenticate")) continue;
+            const value = std.mem.trim(u8, h.value, " \t");
+            const end = std.mem.findAny(u8, value, " \t") orelse value.len;
+            if (std.ascii.eqlIgnoreCase(value[0..end], "basic")) offers.basic = true else offers.other = true;
+        }
+        return offers;
+    }
+
+    fn failure(ex: *const Exchange) ?anyerror {
+        return held(ex).response.failure();
+    }
+
+    fn decoded(ex: *Exchange, io: Io) Error!*Io.Reader {
+        const raw = state(ex).response.reader(io);
+        const codings = uplink.wire.coding.Codings.of(&state(ex).response.headers) catch uplink.wire.coding.Codings{};
+        const only: ?Coding = if (codings.len != 1) null else switch (codings.items[0]) {
+            .gzip => .gzip,
+            .zstd => .zstd,
+            else => null,
+        };
+        return ex.decode(raw, only);
+    }
+
+    fn deinit(ex: *Exchange, io: Io) void {
         const c = ex.client;
-        const owned = ex.state();
+        const owned = state(ex);
         // The allocation also contains ex, so free it after invalidation.
         defer c.gpa.destroy(owned);
         if (ex.in_flight) owned.response.deinit(io);
@@ -2460,7 +2558,6 @@ pub const Server = struct {
     /// is sent until an operation asks. `repo` is borrowed for as long as
     /// the server is open.
     pub fn open(gpa: Allocator, io: Io, repo: *repo_mod.Repository, remote: ?[]const u8, options: Options) OpenError!*Server {
-        if (comptime !http_enabled) return error.HttpUnavailable;
         const s = try gpa.create(Server);
         errdefer gpa.destroy(s);
         s.* = .{
@@ -2906,8 +3003,6 @@ test "FETCH_HEAD's first line names the URL as git-lfs's pattern reads it" {
 }
 
 test "git-lfs's timeouts are read as git-lfs reads them: 30 seconds unless set, the activity one by host under https" {
-    // Only with `http`: its activity timeout is uplink's.
-    if (!@import("relic_options").http) return error.SkipZigTest;
     var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
@@ -2953,8 +3048,6 @@ test "Retry-After is a number of seconds, or a date counted from the time the ca
 }
 
 test "LFS proxy parsing preserves allocation resource failures" {
-    // Only with `http`: the client's transport is uplink's.
-    if (!@import("relic_options").http) return error.SkipZigTest;
     var client: Client = undefined;
     client.said = .init(.{});
     var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
@@ -2962,8 +3055,6 @@ test "LFS proxy parsing preserves allocation resource failures" {
 }
 
 test "LFS accepts each SOCKS proxy scheme and decodes its credentials" {
-    // Only with `http`: the client's transport is uplink's.
-    if (!@import("relic_options").http) return error.SkipZigTest;
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     var client: Client = undefined;
@@ -2995,7 +3086,7 @@ test "learned LFS policy writes the shared source without replacing worktree con
     var repo = try repo_mod.Repository.open(gpa, io, tmp.dir, .{});
     defer repo.deinit(io);
     const settings: Settings = .{ .gpa = gpa, .config = repo.configuration() };
-    var client = try Client.open(gpa, io, &settings, .{ .remote = "origin", .where = .{}, .reach = .{} });
+    var client = try Client.open(gpa, io, &settings, .{ .remote = "origin", .where = .{}, .reach = .{ .means = .none } });
     defer client.deinit(io);
     try client.learnLocksVerify(io, "https://example.com/project", false);
     try client.remember(io, &repo);

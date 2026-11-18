@@ -13,6 +13,7 @@ const clone_mod = @import("../../transport/clone.zig");
 const config_mod = @import("../../config/config.zig");
 const object = @import("../../object/object.zig");
 const testgit = @import("../git.zig");
+const testnet = @import("../net.zig");
 
 test "git 2.39.4 defense-in-depth (reverted in 2.39.5 and 2.45.2), t5601-clone 'clone -c core.hooksPath=/dev/null works again'" {
     const gpa = std.testing.allocator;
@@ -52,7 +53,7 @@ test "git 2.39.4 defense-in-depth (reverted in 2.39.5 and 2.45.2), t5601-clone '
         var env = try testgit.programEnviron(gpa);
         defer env.deinit();
         const who: object.Signature = .{ .name = "S", .email = "s@example.com", .when_secs = 1, .offset_minutes = 0 };
-        var clone = try clone_mod.clone(gpa, io, path, target, .{ .who = who, .config = &config, .programs = .{ .environ = &env } });
+        var clone = try clone_mod.clone(gpa, io, path, target, .{ .who = who, .config = &config, .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network } });
         clone.deinit(io);
         try target.access(io, "a", .{});
         try std.testing.expectError(error.FileNotFound, owner.dir.access(io, "ran", .{}));

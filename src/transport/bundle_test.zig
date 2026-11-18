@@ -335,6 +335,7 @@ test "git's bundles are read, verified, listed, unbundled and fetched from as gi
     // Fetched from, as a path: refs, FETCH_HEAD and logs as git's.
     try twins[0].exec(io, &.{ "fetch", path, "refs/heads/*:refs/remotes/b/*", "lw" });
     var outcome = try fetch_mod.fetch(gpa, io, &repo, path, .{
+        .means = .none,
         .who = .{ .name = "Fixture", .email = "fixture@example.com", .when_secs = 1_700_000_000, .offset_minutes = 0 },
         .refspecs = &.{ "refs/heads/*:refs/remotes/b/*", "lw" },
     });

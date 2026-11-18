@@ -87,7 +87,7 @@ fn loadFilters(_: *const clone_mod.FilterLoader, gpa: Allocator, io: Io, reposit
         .gpa = gpa,
         .repo = repository,
         .remote = options.remote,
-        .options = .{ .programs = options.programs, .prompt = options.prompt, .auth_failure = options.auth_failure },
+        .options = .{ .means = options.means, .prompt = options.prompt, .auth_failure = options.auth_failure },
     };
     const configured = repository.configuration().get("filter.lfs.process") != null or repository.configuration().get("filter.lfs.smudge") != null;
     return .{

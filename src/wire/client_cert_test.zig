@@ -19,6 +19,7 @@ const testgit = @import("../testing/git.zig");
 const testlfs = @import("../testing/lfs.zig");
 const testremote = @import("../testing/remote.zig");
 const object = @import("../object/object.zig");
+const testnet = @import("../testing/net.zig");
 
 const test_who: object.Signature = .{ .name = "F", .email = "f@example.com", .when_secs = 1, .offset_minutes = 0 };
 const Pki = testremote.Pki;
@@ -100,8 +101,6 @@ fn relicGet(gpa: Allocator, io: Io, pki: *Pki, port: u16, auth: ?cloak.ClientAut
 }
 
 test "the certificates relic reads answer OpenSSL's demand for one in TLS 1.3 and TLS 1.2, with RSA, ECDSA and Ed25519 keys, plain and encrypted" {
-    // Only with `http`: the certificate is cloak's and the fetch uplink's.
-    if (!@import("relic_options").http) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     const pki = try Pki.make(gpa, io);
@@ -179,7 +178,7 @@ fn expectSameFetch(gpa: Allocator, io: Io, by_git: *testgit.Repo, by_relic: *tes
 fn relicFetch(gpa: Allocator, io: Io, dir: Io.Dir, env: *const Environ.Map) !void {
     var repo = try repo_mod.Repository.open(gpa, io, dir, .{});
     defer repo.deinit(io);
-    var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = env } });
+    var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .means = .{ .programs = .{ .environ = env }, .network = &testnet.network } });
     outcome.deinit();
 }
 
@@ -199,8 +198,6 @@ const Case = struct {
 };
 
 test "git and relic fetch from a server that requires a certificate alike: key beside or with the certificate, a passphrase from the helper, and the refusals" {
-    // Only with `http`: the certificate is cloak's and the fetch uplink's.
-    if (!@import("relic_options").http) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     const pki = try Pki.make(gpa, io);

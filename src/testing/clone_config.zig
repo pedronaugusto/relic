@@ -10,6 +10,7 @@ const testing = std.testing;
 const clone_mod = @import("../transport/clone.zig");
 const object = @import("../object/object.zig");
 const testremote = @import("remote.zig");
+const testnet = @import("net.zig");
 
 const test_who: object.Signature = .{ .name = "F", .email = "f@example.com", .when_secs = 1, .offset_minutes = 0 };
 
@@ -43,7 +44,7 @@ test "a clone given no settings of its own reaches the remote with the person's,
     defer d.close(io);
     var repo = try clone_mod.clone(gpa, io, url, d, .{
         .who = test_who,
-        .programs = .{ .environ = &env },
+        .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network },
         .user_config = .{ .global = .{ .dir = .of(root.dir), .sub_path = "gitconfig" } },
     });
     defer repo.deinit(io);
@@ -99,7 +100,7 @@ test "a clone goes where url.<base>.insteadOf sends it and records the URL as gi
     defer d.close(io);
     var repo = try clone_mod.clone(gpa, io, "here:repo.git", d, .{
         .who = test_who,
-        .programs = .{ .environ = &env },
+        .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network },
         .user_config = .{ .global = .{ .dir = .of(root.dir), .sub_path = ".gitconfig" } },
     });
     defer repo.deinit(io);

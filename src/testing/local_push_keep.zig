@@ -30,7 +30,7 @@ const Push = struct {
 
     fn run(push: *Push, io: Io, path: []const u8, from: *odb_mod.Odb, commands: []const send_pack.Command, entries: []const odb_mod.PackEntry, atomic: bool) !void {
         const who: object.Signature = .{ .name = "Fixture", .email = "fixture@example.com", .when_secs = 1_700_000_000, .offset_minutes = 0 };
-        var session = try transport.Session.open(testing.allocator, io, path, .{ .service = .receive_pack, .kind = from.objectFormat() }, .{ .who = who });
+        var session = try transport.Session.open(testing.allocator, io, path, .{ .service = .receive_pack, .kind = from.objectFormat() }, .{ .means = .none, .who = who });
         defer session.deinit(io);
         var report = try session.push(testing.allocator, io, from, .{ .commands = commands, .objects = entries, .atomic = atomic, .who = who });
         defer report.deinit();

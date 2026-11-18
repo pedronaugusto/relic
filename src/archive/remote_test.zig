@@ -13,6 +13,7 @@ const repo_mod = @import("../repo/repo.zig");
 const testgit = @import("../testing/git.zig");
 const testremote = @import("../testing/remote.zig");
 const suite = @import("../testing/helpers.zig");
+const testnet = @import("../testing/net.zig");
 
 fn fixture(io: Io, git: *testgit.Repo) !void {
     // UTC, so a zip's DOS times are the same on both sides
@@ -226,7 +227,7 @@ test "relic's client takes git's archive, here and from git's upload-archive ove
             var out: Io.Writer.Allocating = .init(gpa);
             defer out.deinit();
             try remote.fetch(gpa, io, &out.writer, .{ .url = url, .args = args }, .{
-                .programs = .{ .environ = &env },
+                .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network },
                 .config = repo.configuration(),
                 .now = Io.Clock.real.now(io),
             });
@@ -239,7 +240,7 @@ test "relic's client takes git's archive, here and from git's upload-archive ove
         var out: Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
         try std.testing.expectError(error.ArchiveFailed, remote.fetch(gpa, io, &out.writer, .{ .url = url, .args = &.{"nowhere"} }, .{
-            .programs = .{ .environ = &env },
+            .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network },
             .config = repo.configuration(),
             .said = &said,
         }));
@@ -277,7 +278,7 @@ test "a cancel that stops a read of git's upload-archive is Canceled, not a prot
             var out: Io.Writer.Allocating = .init(gpa);
             defer out.deinit();
             try remote.fetch(gpa, run_io, &out.writer, .{ .url = f.path, .args = &.{"HEAD"} }, .{
-                .programs = .{ .environ = f.env },
+                .means = .{ .programs = .{ .environ = f.env }, .network = &testnet.network },
                 .config = f.repo.configuration(),
             });
         }

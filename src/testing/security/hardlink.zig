@@ -46,7 +46,7 @@ test "CVE-2024-32020, t5605-clone-local: a local clone shares no object file wit
     var target = try owner.dir.openDir(io, "c", .{ .iterate = true });
     defer target.close(io);
     const who: object.Signature = .{ .name = "S", .email = "s@example.com", .when_secs = 1, .offset_minutes = 0 };
-    var clone = try clone_mod.clone(gpa, io, path, target, .{ .who = who });
+    var clone = try clone_mod.clone(gpa, io, path, target, .{ .means = .none, .who = who });
     clone.deinit(io);
 
     var theirs: std.AutoHashMapUnmanaged(Io.File.INode, void) = .empty;

@@ -19,6 +19,7 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const smart_http = @import("smart_http.zig");
+const Network = @import("network.zig").Network;
 const protocol = @import("protocol.zig");
 const policy = @import("policy.zig");
 const url_mod = @import("url.zig");
@@ -85,6 +86,9 @@ pub const Remote = struct {
     pub const Options = struct {
         pub const Error = ErrorNamespace.Error;
 
+        /// The network the files came through, which opens an
+        /// alternate's.
+        network: *const Network,
         /// The conversation's own, for an alternate's files.
         http: smart_http.Options = .{},
         /// What `protocol.<name>.allow` an alternate's scheme is checked
@@ -836,7 +840,7 @@ fn readAlternatesImpl(r: *Remote, io: Io) Self.Error!void {
         try r.warn("adding alternate object store: {s}", .{alt});
         // An alternate that is no URL relic reads is passed over.
         const parsed: url_mod.Url = (url_mod.Url.parse(alt) catch null) orelse continue;
-        const files = try smart_http.Files.open(r.gpa, io, parsed, r.options.http);
+        const files = try r.options.network.openFiles(r.gpa, io, parsed, r.options.http);
         errdefer {
             var f = files;
             f.deinit(io);
@@ -849,7 +853,7 @@ fn readAlternatesImpl(r: *Remote, io: Io) Self.Error!void {
 /// and only over a transport `protocol.allow` lets an alternate use. ftp
 /// and ftps, which git reaches through curl, relic does not speak.
 fn alternateAllowedImpl(r: *Remote, alt: []const u8) Self.Error!bool {
-    if (r.files.h.follow_redirects != .always) {
+    if (r.files.follow_redirects != .always) {
         try r.warn("alternate disabled by http.followRedirects: {s}", .{alt});
         return false;
     }

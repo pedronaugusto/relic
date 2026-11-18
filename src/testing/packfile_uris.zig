@@ -22,6 +22,7 @@ const clone_mod = @import("../transport/clone.zig");
 const fetch_mod = @import("../transport/fetch.zig");
 const partial = @import("../transport/partial.zig");
 const hash_mod = @import("../hash/hash.zig");
+const testnet = @import("net.zig");
 
 const who: object.Signature = .{ .name = "T", .email = "t@example.com", .when_secs = 1_700_000_000, .offset_minutes = 0 };
 
@@ -159,7 +160,7 @@ test "packfile URIs: a clone and a fetch take the blobs a server names by URI as
     const by_relic = try std.Io.Dir.path.join(arena, &.{ outside, "by-relic" });
     var dir = try out.dir.openDir(io, "by-relic", .{});
     defer dir.close(io);
-    var cloned = try clone_mod.clone(gpa, io, url, dir, .{ .who = who, .checkout = false, .programs = .{ .environ = &env }, .config = &config });
+    var cloned = try clone_mod.clone(gpa, io, url, dir, .{ .who = who, .checkout = false, .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network }, .config = &config });
     cloned.deinit(io);
 
     // The same packs, the named one among them, and nothing kept.
@@ -187,7 +188,7 @@ test "packfile URIs: a clone and a fetch take the blobs a server names by URI as
     try src.exec(io, &.{ "-C", by_relic, "config", "transfer.fsckObjects", "true" });
     var repo = try repo_mod.Repository.open(gpa, io, dir, .{});
     defer repo.deinit(io);
-    var fetched = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = who, .programs = .{ .environ = &env } });
+    var fetched = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = who, .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network } });
     fetched.deinit();
     {
         const theirs = try packsOf(gpa, io, by_git);
@@ -226,7 +227,7 @@ test "packfile URIs: a clone and a fetch take the blobs a server names by URI as
     try out.dir.createDirPath(io, "refused");
     var refused = try out.dir.openDir(io, "refused", .{});
     defer refused.close(io);
-    try testing.expectError(error.PackfileUriMismatch, clone_mod.clone(gpa, io, url, refused, .{ .who = who, .checkout = false, .programs = .{ .environ = &env }, .config = &config }));
+    try testing.expectError(error.PackfileUriMismatch, clone_mod.clone(gpa, io, url, refused, .{ .who = who, .checkout = false, .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network }, .config = &config }));
 }
 
 test "packfile URIs in a partial clone: the packs named by URI are promisor packs, as git 2.56 marks them, in a clone, a fetch and a lazy fetch" {
@@ -276,7 +277,7 @@ test "packfile URIs in a partial clone: the packs named by URI are promisor pack
     const by_relic = try std.Io.Dir.path.join(arena, &.{ outside, "by-relic" });
     var dir = try out.dir.openDir(io, "by-relic", .{});
     defer dir.close(io);
-    var cloned = try clone_mod.clone(gpa, io, url, dir, .{ .who = who, .checkout = false, .filter = "blob:limit=1m", .programs = .{ .environ = &env }, .config = &config });
+    var cloned = try clone_mod.clone(gpa, io, url, dir, .{ .who = who, .checkout = false, .filter = "blob:limit=1m", .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network }, .config = &config });
     cloned.deinit(io);
     try expectSamePacks(gpa, io, &src, by_git, by_relic, &.{first_pack}, 4);
 
@@ -293,7 +294,7 @@ test "packfile URIs in a partial clone: the packs named by URI are promisor pack
     {
         var repo = try repo_mod.Repository.open(gpa, io, dir, .{});
         defer repo.deinit(io);
-        var fetched = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = who, .programs = .{ .environ = &env } });
+        var fetched = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = who, .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network } });
         fetched.deinit();
     }
     try expectSamePacks(gpa, io, &src, by_git, by_relic, &.{ first_pack, second_pack }, 8);
@@ -306,7 +307,7 @@ test "packfile URIs in a partial clone: the packs named by URI are promisor pack
     const lazy_relic = try std.Io.Dir.path.join(arena, &.{ outside, "lazy-relic" });
     var lazy_dir = try out.dir.openDir(io, "lazy-relic", .{});
     defer lazy_dir.close(io);
-    var none = try clone_mod.clone(gpa, io, url, lazy_dir, .{ .who = who, .checkout = false, .filter = "blob:none", .programs = .{ .environ = &env } });
+    var none = try clone_mod.clone(gpa, io, url, lazy_dir, .{ .who = who, .checkout = false, .filter = "blob:none", .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network } });
     none.deinit(io);
     for ([_][]const u8{ lazy_git, lazy_relic }) |path| try src.exec(io, &.{ "-C", path, "config", "fetch.uriProtocols", "http" });
     const blob_text = try src.line(io, &.{ "rev-parse", "HEAD:big.bin" });
@@ -331,7 +332,7 @@ test "packfile URIs in a partial clone: the packs named by URI are promisor pack
     {
         var repo = try repo_mod.Repository.open(gpa, io, lazy_dir, .{});
         defer repo.deinit(io);
-        var lazy: partial.Lazy = .init(gpa, &repo, .{ .programs = .{ .environ = &env } });
+        var lazy: partial.Lazy = .init(gpa, &repo, .{ .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network } });
         defer lazy.deinit();
         lazy.install();
         const found = try repo.objectDatabase().read(io, try hash_mod.Oid.parse(repo.objectFormat(), blob_text));
@@ -483,7 +484,7 @@ test "packfile URIs from relic's upload-pack: git's clone is named the packs git
         try out.dir.createDirPath(io, "relic-both");
         var dir = try out.dir.openDir(io, "relic-both", .{});
         defer dir.close(io);
-        var cloned = try clone_mod.clone(gpa, io, url, dir, .{ .who = who, .checkout = false, .programs = .{ .environ = &env }, .config = &config });
+        var cloned = try clone_mod.clone(gpa, io, url, dir, .{ .who = who, .checkout = false, .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network }, .config = &config });
         cloned.deinit(io);
         const packs = try packsOf(gpa, io, try std.Io.Dir.path.join(arena, &.{ outside, "relic-both" }));
         defer gpa.free(packs);

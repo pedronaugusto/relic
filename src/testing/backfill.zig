@@ -21,6 +21,7 @@ const testremote = @import("remote.zig");
 const repo_mod = @import("../repo/repo.zig");
 const pathspec = @import("../patterns.zig").pathspec;
 const backfill = @import("../transport/backfill.zig");
+const testnet = @import("net.zig");
 
 const Server = struct {
     tmp: testing.TmpDir,
@@ -241,7 +242,7 @@ fn run(gpa: Allocator, io: Io, server: *Server, format: testgit.RefFormat, case:
     var inputs = case.inputs;
     if (case.paths.len != 0) inputs.paths = &paths;
     var options = case.options;
-    options.lazy.programs = .{ .environ = &server.env };
+    options.lazy.means = .{ .programs = .{ .environ = &server.env }, .network = &testnet.network };
     const said = try std.mem.join(gpa, " ", argv.items);
     defer gpa.free(said);
     _ = backfill.backfill(gpa, io, &repo, inputs, options) catch |err| {
@@ -369,7 +370,7 @@ test "backfill refuses what git refuses: a blob size limit, a filter the path wa
         var repo = try repo_mod.Repository.open(gpa, io, twins.by_relic, .{});
         defer repo.deinit(io);
         var options = case[0].options;
-        options.lazy.programs = .{ .environ = &server.env };
+        options.lazy.means = .{ .programs = .{ .environ = &server.env }, .network = &testnet.network };
         try testing.expectError(case[1], backfill.backfill(gpa, io, &repo, case[0].inputs, options));
         try expectSame(gpa, io, &server, &twins);
     }

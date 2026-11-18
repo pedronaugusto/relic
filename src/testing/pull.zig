@@ -96,7 +96,7 @@ const Clones = struct {
             .fast_forward = given.fast_forward,
             .autostash = given.autostash,
             .reflog_action = given.action,
-            .fetch = .{ .who = who, .refspecs = given.refspecs },
+            .fetch = .{ .means = .none, .who = who, .refspecs = given.refspecs },
             .merge = .{ .who = who },
             .rebasing = .{ .who = who },
         });

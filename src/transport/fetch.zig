@@ -51,7 +51,7 @@ const refspec_mod = @import("../wire.zig").refspec;
 const ref_names = @import("../names.zig").ref;
 const remote_mod = @import("../wire.zig").remote;
 const url_mod = @import("../wire.zig").url;
-const program = @import("../process.zig").program;
+const Means = @import("transport.zig").Means;
 const protocol = @import("../wire.zig").protocol;
 const transport = @import("transport.zig");
 const bundle_uri = @import("bundle/uri.zig");
@@ -208,9 +208,10 @@ pub const Options = struct {
     /// `--filter`, for a partial clone's promisor remote; `null` takes
     /// `remote.<name>.partialclonefilter`, as git does.
     filter: ?[]const u8 = null,
-    /// The permission to run programs, which an ssh remote and a
-    /// credential helper need.
-    programs: ?program.Programs = null,
+    /// What the remote is reached with: the permission to run programs,
+    /// which an ssh remote and a credential helper need, and the network,
+    /// which an `http(s)` or `git://` remote needs (`transport.Means`).
+    means: Means,
     /// What stands in for a terminal when an HTTP server asks for a
     /// credential no helper has. Without one nothing is asked, and
     /// askpass runs only when it says so.
@@ -496,7 +497,7 @@ pub fn fetch(gpa: Allocator, io: Io, repo: *Repository, remote_name: []const u8,
 fn takeBundleUri(gpa: Allocator, io: Io, repo: *Repository, options: Options) Error!void {
     const uri = repo.configuration().get("fetch.bundleuri") orelse return;
     const got = try bundle_uri.fetch(gpa, io, repo, uri, .{ .who = options.who, .transport = .{
-        .programs = options.programs,
+        .means = options.means,
         .config = repo.configuration(),
         .proxy = options.proxy,
         .prompt = options.prompt,
@@ -609,7 +610,7 @@ fn fetchSubmodules(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, 
         .tags = options.tags,
         .write_fetch_head = options.write_fetch_head,
         .recurse_submodules = plan.explicit,
-        .programs = options.programs,
+        .means = options.means,
         .proxy = options.proxy,
         .prompt = options.prompt,
         .auth_failure = options.auth_failure,
@@ -1257,7 +1258,7 @@ fn askedRefspecs(
 /// The session a fetch from `remote` at `url` talks over.
 fn openSession(gpa: Allocator, io: Io, repo: *Repository, remote: *const remote_mod.Remote, url: []const u8, options: Options) Error!transport.Session {
     const session = try transport.Session.open(gpa, io, url, .{ .service = .upload_pack, .kind = repo.objectFormat() }, .{
-        .programs = options.programs,
+        .means = options.means,
         .config = repo.configuration(),
         .remote_name = remote.name,
         .service_program = remote.upload_pack,
@@ -1496,7 +1497,7 @@ fn negotiationTips(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, 
         .direct => |oid| try tips.append(arena, oid),
         .symbolic => |target| gpa.free(target),
     };
-    const borrowed = try alternate_refs.read(gpa, io, repo, options.programs, options.warnings);
+    const borrowed = try alternate_refs.read(gpa, io, repo, options.means.programs, options.warnings);
     defer gpa.free(borrowed);
     var alternates: usize = 0;
     for (borrowed) |oid| {
@@ -2500,7 +2501,7 @@ test "a fetch from a local repository leaves what git fetch leaves: refs, logs a
     var twins = try Twins.init(gpa, io, 4);
     defer twins.deinit(gpa);
 
-    var first = try twins.fetchBoth(gpa, io, &.{"origin"}, .{ .who = test_who });
+    var first = try twins.fetchBoth(gpa, io, &.{"origin"}, .{ .means = .none, .who = test_who });
     defer first.deinit();
     try testing.expect(first.objects > 0);
 
@@ -2511,7 +2512,7 @@ test "a fetch from a local repository leaves what git fetch leaves: refs, logs a
     try twins.source.exec(io, &.{ "checkout", "-q", "side" });
     try twins.source.exec(io, &.{ "commit", "-q", "--amend", "-m", "rewritten" });
     try twins.source.exec(io, &.{ "checkout", "-q", "main" });
-    var second = try twins.fetchBoth(gpa, io, &.{"origin"}, .{ .who = test_who });
+    var second = try twins.fetchBoth(gpa, io, &.{"origin"}, .{ .means = .none, .who = test_who });
     defer second.deinit();
     var saw_forced = false;
     var saw_fast_forward = false;
@@ -2522,7 +2523,7 @@ test "a fetch from a local repository leaves what git fetch leaves: refs, logs a
     try testing.expect(saw_forced and saw_fast_forward);
 
     // Nothing new: nothing fetched, and FETCH_HEAD still written.
-    var third = try twins.fetchBoth(gpa, io, &.{"origin"}, .{ .who = test_who });
+    var third = try twins.fetchBoth(gpa, io, &.{"origin"}, .{ .means = .none, .who = test_who });
     defer third.deinit();
     try testing.expectEqual(@as(u32, 0), third.objects);
 }
@@ -2558,7 +2559,7 @@ test "git 2.56, followRemoteHEAD and fetch.followRemoteHEAD do with refs/remotes
         errdefer std.debug.print("case: {s}, before {?s}\n", .{ case.config[0], case.before });
         var twins = try Twins.init(gpa, io, 3);
         defer twins.deinit(gpa);
-        var first = try twins.fetchBoth(gpa, io, &.{"origin"}, .{ .who = test_who });
+        var first = try twins.fetchBoth(gpa, io, &.{"origin"}, .{ .means = .none, .who = test_who });
         first.deinit();
         for ([_]*testgit.Repo{ &twins.by_git, &twins.by_relic }) |twin| {
             if (case.before) |before| {
@@ -2585,7 +2586,7 @@ test "git 2.56, followRemoteHEAD and fetch.followRemoteHEAD do with refs/remotes
         {
             var repo = try Repository.open(gpa, io, twins.by_relic.dir, .{});
             defer repo.deinit(io);
-            var outcome = try fetch(gpa, io, &repo, "origin", .{ .who = test_who, .warnings = &said });
+            var outcome = try fetch(gpa, io, &repo, "origin", .{ .means = .none, .who = test_who, .warnings = &said });
             outcome.deinit();
         }
         try expectSameRefs(gpa, io, &twins.by_git, &twins.by_relic);
@@ -2616,6 +2617,7 @@ test "named refspecs, pruning and every tag are what git makes of them" {
     defer twins.deinit(gpa);
 
     var named = try twins.fetchBoth(gpa, io, &.{ "origin", "main:refs/heads/copy", "side", "refs/tags/old" }, .{
+        .means = .none,
         .who = test_who,
         .refspecs = &.{ "main:refs/heads/copy", "side", "refs/tags/old" },
         .reflog_action = "fetch origin main:refs/heads/copy side refs/tags/old",
@@ -2623,11 +2625,12 @@ test "named refspecs, pruning and every tag are what git makes of them" {
     defer named.deinit();
 
     try twins.source.exec(io, &.{ "branch", "gone" });
-    var with_gone = try twins.fetchBoth(gpa, io, &.{"origin"}, .{ .who = test_who });
+    var with_gone = try twins.fetchBoth(gpa, io, &.{"origin"}, .{ .means = .none, .who = test_who });
     defer with_gone.deinit();
     try twins.source.exec(io, &.{ "branch", "-D", "gone" });
     try twins.source.exec(io, &.{ "tag", "extra", "HEAD~2" });
     var pruned = try twins.fetchBoth(gpa, io, &.{ "--prune", "--tags", "origin" }, .{
+        .means = .none,
         .who = test_who,
         .prune = true,
         .tags = .all,
@@ -2641,6 +2644,7 @@ test "named refspecs, pruning and every tag are what git makes of them" {
     try testremote.addCommits(gpa, io, &twins.source, 20, 1);
     try twins.source.exec(io, &.{ "branch", "-f", "side", "HEAD" });
     var atomic = try twins.fetchBoth(gpa, io, &.{ "--atomic", "origin" }, .{
+        .means = .none,
         .who = test_who,
         .atomic = true,
         .reflog_action = "fetch --atomic origin",
@@ -2658,7 +2662,7 @@ test "a non-fast-forward and a moved tag are refused as git refuses them, and fo
     for ([_]*testgit.Repo{ &twins.by_git, &twins.by_relic }) |twin| {
         try twin.exec(io, &.{ "config", "remote.origin.fetch", "refs/heads/*:refs/remotes/origin/*" });
     }
-    var first = try twins.fetchBoth(gpa, io, &.{"origin"}, .{ .who = test_who });
+    var first = try twins.fetchBoth(gpa, io, &.{"origin"}, .{ .means = .none, .who = test_who });
     defer first.deinit();
 
     try twins.source.exec(io, &.{ "checkout", "-q", "side" });
@@ -2666,6 +2670,7 @@ test "a non-fast-forward and a moved tag are refused as git refuses them, and fo
     try twins.source.exec(io, &.{ "checkout", "-q", "main" });
     try twins.source.exec(io, &.{ "tag", "-f", "-a", "v1", "-m", "moved", "HEAD~1" });
     var refused = try twins.fetchBoth(gpa, io, &.{ "--tags", "origin" }, .{
+        .means = .none,
         .who = test_who,
         .tags = .all,
         .reflog_action = "fetch --tags origin",
@@ -2680,6 +2685,7 @@ test "a non-fast-forward and a moved tag are refused as git refuses them, and fo
     try testing.expect(non_ff and clobber);
 
     var forced = try twins.fetchBoth(gpa, io, &.{ "--tags", "--force", "origin" }, .{
+        .means = .none,
         .who = test_who,
         .tags = .all,
         .force = true,
@@ -2700,6 +2706,7 @@ test "the branch a working tree has checked out is not fetched into" {
     var repo = try Repository.open(gpa, io, twins.by_relic.dir, .{});
     defer repo.deinit(io);
     try testing.expectError(error.WouldUpdateCheckedOutBranch, fetch(gpa, io, &repo, "origin", .{
+        .means = .none,
         .who = test_who,
         .refspecs = &.{"+main:main"},
     }));
@@ -2727,7 +2734,7 @@ test "fetch.fsckObjects and fetch.fsck.* refuse and allow what they do for git f
     {
         var repo = try Repository.open(gpa, io, twins.by_relic.dir, .{});
         defer repo.deinit(io);
-        try testing.expectError(error.MalformedBlob, fetch(gpa, io, &repo, "origin", .{ .who = test_who }));
+        try testing.expectError(error.MalformedBlob, fetch(gpa, io, &repo, "origin", .{ .means = .none, .who = test_who }));
     }
 
     // Lowered to a warning, it comes in for both, and is said.
@@ -2740,7 +2747,7 @@ test "fetch.fsckObjects and fetch.fsck.* refuse and allow what they do for git f
     {
         var repo = try Repository.open(gpa, io, twins.by_relic.dir, .{});
         defer repo.deinit(io);
-        var outcome = try fetch(gpa, io, &repo, "origin", .{ .who = test_who, .warnings = &warnings });
+        var outcome = try fetch(gpa, io, &repo, "origin", .{ .means = .none, .who = test_who, .warnings = &warnings });
         outcome.deinit();
     }
     try expectSameRefs(gpa, io, &twins.by_git, &twins.by_relic);
@@ -2759,8 +2766,8 @@ test "unshallowing a whole repository and a filtered fetch are refused by name" 
     defer tmp.cleanup();
     var repo = try Repository.create(gpa, io, tmp.dir, .{ .default_branch = "main" });
     defer repo.deinit(io);
-    try testing.expectError(error.NotShallow, fetch(gpa, io, &repo, "origin", .{ .who = test_who, .unshallow = true }));
-    try testing.expectError(error.NotAPromisorRemote, fetch(gpa, io, &repo, "origin", .{ .who = test_who, .filter = "blob:none" }));
+    try testing.expectError(error.NotShallow, fetch(gpa, io, &repo, "origin", .{ .means = .none, .who = test_who, .unshallow = true }));
+    try testing.expectError(error.NotAPromisorRemote, fetch(gpa, io, &repo, "origin", .{ .means = .none, .who = test_who, .filter = "blob:none" }));
 }
 
 test "a linked reftable fetch sees the main worktree branch through its backend" {

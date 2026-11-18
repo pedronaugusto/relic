@@ -18,7 +18,7 @@ pub const fetch_pack = @import("wire.zig").fetch_pack;
 pub const send_pack = @import("wire.zig").send_pack;
 pub const local = @import("transport/local.zig");
 pub const ssh = @import("wire.zig").ssh;
-pub const smart_http = if (features.http) @import("wire.zig").smart_http else smart_http_without_http;
+pub const smart_http = smart_http_facade;
 pub const credential = @import("wire.zig").credential;
 pub const credential_cache_daemon = @import("wire.zig").credential_cache_daemon;
 pub const auth = @import("wire.zig").auth;
@@ -34,23 +34,23 @@ pub const remote_helper = @import("transport/remote_helper.zig");
 pub const policy = @import("wire.zig").policy;
 pub const Error = @import("transport/transport.zig").Error;
 pub const Options = @import("transport/transport.zig").Options;
+pub const Means = @import("transport/transport.zig").Means;
+pub const Network = @import("transport/transport.zig").Network;
 pub const wantsV2 = @import("transport/transport.zig").wantsV2;
 pub const Session = @import("transport/transport.zig").Session;
 pub const download = @import("transport/transport.zig").download;
 
-/// The features this build has: `http` (uplink and cloak) and `lfs` (strand).
-const features = @import("relic_options");
-
-/// `smart_http` without `http`: every name of its file but a dumb server's
-/// `Files` and the `Early` requests they send, which only uplink makes.
-/// `connect` and `download` are `error.HttpUnavailable`.
-const smart_http_without_http = struct {
+/// `smart_http`'s names a program uses: its options, errors and the
+/// interfaces of what a network opens. Its engine (`connect`, `openFiles`,
+/// `download`) is reached through a `Network`, `relic_net.network`, so
+/// that a program that names none compiles none of it.
+const smart_http_facade = struct {
     const full = @import("wire.zig").smart_http;
     pub const max_dumb_file_bytes = full.max_dumb_file_bytes;
     pub const Error = full.Error;
     pub const Options = full.Options;
     pub const user_agent = full.user_agent;
     pub const Opened = full.Opened;
-    pub const connect = full.connect;
-    pub const download = full.download;
+    pub const Files = full.Files;
+    pub const Early = full.Early;
 };

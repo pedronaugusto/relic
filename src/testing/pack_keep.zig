@@ -223,7 +223,7 @@ test "local receive owns a keep token with default receive options" {
             defer repository.deinit(io);
             const path = try source.dir.realPathFileAlloc(io, ".", gpa);
             defer gpa.free(path);
-            var session = try transport_mod.Session.open(gpa, io, path, .{ .service = .upload_pack, .kind = repository.objectFormat() }, .{ .local_copy = true });
+            var session = try transport_mod.Session.open(gpa, io, path, .{ .service = .upload_pack, .kind = repository.objectFormat() }, .{ .means = .none, .local_copy = true });
             defer session.deinit(io);
             var pack_dir = try repository.objectDatabase().objectsDirectory().openDir(io, "pack", .{ .iterate = true });
             defer pack_dir.close(io);

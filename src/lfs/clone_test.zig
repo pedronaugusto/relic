@@ -6,6 +6,7 @@ const transfer_test_mod = @import("transfer_test.zig");
 const lfs_mod = @import("../testing/lfs.zig");
 const lfs = @import("lfs.zig");
 const clone = @import("clone.zig").clone;
+const testlfs = @import("../testing/lfs.zig");
 
 test "native LFS clone fetches content and skip-smudge leaves pointers" {
     const testing = std.testing;
@@ -38,7 +39,7 @@ test "native LFS clone fetches content and skip-smudge leaves pointers" {
         if (skip) try env.put("GIT_LFS_SKIP_SMUDGE", "1");
         var repository = try clone(gpa, io, url, target, .{
             .who = .{ .name = "F", .email = "f@example.com", .when_secs = 1, .offset_minutes = 0 },
-            .programs = .{ .environ = &env },
+            .means = .{ .programs = .{ .environ = &env }, .network = &testlfs.network },
             .user_config = .{ .command = &.{ "filter.lfs.clean=git-lfs clean -- %f", "filter.lfs.smudge=git-lfs smudge -- %f", "filter.lfs.process=git-lfs filter-process" } },
         });
         defer repository.deinit(io);

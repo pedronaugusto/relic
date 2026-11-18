@@ -163,7 +163,7 @@ fn relicUpload(fx: *Fixture, d: Io.Dir) !lfstransfer.Outcome {
     defer fx.gpa.free(head.name);
     var collected = try object_walk.missing(fx.gpa, fx.io, repo.objectDatabase(), &.{head.oid}, .{ .exclude = &.{} });
     defer collected.deinit();
-    const server = try lfsapi.Server.open(fx.gpa, fx.io, &repo, "origin", .{ .programs = .{ .environ = &fx.env } });
+    const server = try lfsapi.Server.open(fx.gpa, fx.io, &repo, "origin", .{ .means = .{ .programs = .{ .environ = &fx.env }, .network = &testlfs.network } });
     defer server.deinit(fx.io);
     return lfstransfer.pushObjects(std.testing.io, server, repo.objectDatabase(), collected.entries, .{});
 }
@@ -171,7 +171,7 @@ fn relicUpload(fx: *Fixture, d: Io.Dir) !lfstransfer.Outcome {
 fn relicFetch(fx: *Fixture, d: Io.Dir) !lfstransfer.Outcome {
     var repo = try repo_mod.Repository.open(fx.gpa, fx.io, d, .{});
     defer repo.deinit(fx.io);
-    const server = try lfsapi.Server.open(fx.gpa, fx.io, &repo, "origin", .{ .programs = .{ .environ = &fx.env } });
+    const server = try lfsapi.Server.open(fx.gpa, fx.io, &repo, "origin", .{ .means = .{ .programs = .{ .environ = &fx.env }, .network = &testlfs.network } });
     defer server.deinit(fx.io);
     return lfstransfer.fetch(std.testing.io, server, &repo, .{});
 }

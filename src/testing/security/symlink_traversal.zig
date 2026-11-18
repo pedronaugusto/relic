@@ -27,6 +27,7 @@ const object = @import("../../object/object.zig");
 const hash = @import("../../hash/hash.zig");
 const hostile = @import("hostile.zig");
 const testgit = @import("../git.zig");
+const testnet = @import("../net.zig");
 
 const Repository = repo_mod.Repository;
 const who: object.Signature = .{ .name = "S", .email = "s@example.com", .when_secs = 1, .offset_minutes = 0 };
@@ -233,7 +234,7 @@ fn relicClone(gpa: std.mem.Allocator, io: Io, path: []const u8, into: *testgit.R
     try into.dir.createDirPath(io, "c");
     var target = try into.dir.openDir(io, "c", .{ .iterate = true });
     defer target.close(io);
-    return clone_mod.clone(gpa, io, path, target, .{ .who = who }) catch |err| switch (err) {
+    return clone_mod.clone(gpa, io, path, target, .{ .means = testnet.means(null), .who = who }) catch |err| switch (err) {
         error.OutOfMemory => err,
         else => null,
     };
@@ -279,7 +280,7 @@ test "CVE-2023-22490, t5604-clone-reference 'clone repo with symlinked objects d
     defer only_file.deinit();
     try only_file.put("GIT_ALLOW_PROTOCOL", "file");
     try std.testing.expectError(error.TransportNotAllowed, transport.Session.open(gpa, io, "http://127.0.0.1:1/dumb/sub.git", .{ .service = .upload_pack, .kind = .sha1 }, .{
-        .programs = .{ .environ = &only_file },
+        .means = .{ .programs = .{ .environ = &only_file }, .network = &testnet.network },
     }));
     try std.testing.expectError(error.NotARepository, local.Remote.open(gpa, io, "http://127.0.0.1:1/dumb/sub.git", .{}));
     if (!links) return;

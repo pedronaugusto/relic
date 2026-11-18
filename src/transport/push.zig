@@ -44,6 +44,7 @@ const ref_names = @import("../names.zig").ref;
 const remote_mod = @import("../wire.zig").remote;
 const branch_mod = @import("../commit/branch.zig");
 const program = @import("../process.zig").program;
+const Means = @import("transport.zig").Means;
 const protocol = @import("../wire.zig").protocol;
 const transport = @import("transport.zig");
 const send_pack = @import("../wire.zig").send_pack;
@@ -235,14 +236,17 @@ pub const Options = struct {
     in_superproject: bool = false,
     /// Sign the push with a certificate the server keeps: `--signed`.
     /// `null` takes `push.gpgSign`. Signing runs `signing`'s programs,
-    /// which needs `programs`.
+    /// which needs `means.programs`.
     signed: ?send_pack.PushCert = null,
     /// Who the remote-tracking refs' log entries are written as, and when.
     who: object.Signature,
     pre_push: ?*PrePush = null,
     /// Content preparation by an operation owner, before any ref is sent.
     before_send: ?*BeforeSend = null,
-    programs: ?program.Programs = null,
+    /// What the remote is reached with: the permission to run programs,
+    /// which an ssh remote and a credential helper need, and the network,
+    /// which an `http(s)` or `git://` remote needs (`transport.Means`).
+    means: Means,
     /// The proxy for an HTTP remote, over the one the configuration and
     /// the environment choose.
     proxy: httpsettings_mod.Proxy = .auto,
@@ -675,7 +679,7 @@ fn pushSubmodules(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, n
             .dry_run = options.dry_run,
             .in_superproject = true,
             .who = options.who,
-            .programs = options.programs,
+            .means = options.means,
             .proxy = options.proxy,
             .prompt = options.prompt,
             .auth_failure = options.auth_failure,
@@ -777,7 +781,7 @@ fn negotiatedCommons(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository
     if (restrict.items.len == 0 and remote.negotiation_include.len == 0) return &.{};
     const acked = fetch_mod.negotiateOnly(gpa, io, repo, url, .{
         .who = options.who,
-        .programs = options.programs,
+        .means = options.means,
         .proxy = options.proxy,
         .prompt = options.prompt,
         .warnings = options.warnings,
@@ -859,7 +863,7 @@ fn pushCertificate(
     commands: []const send_pack.Command,
     options: Options,
 ) Error![]const u8 {
-    const programs = options.programs orelse return error.SigningRequiresPrograms;
+    const programs = options.means.programs orelse return error.SigningRequiresPrograms;
     var signer = try signing.Signer.init(gpa, io, repo.configuration(), repo.topDirectory(), programs);
     defer signer.deinit();
     const key_id = try signer.keyId(io, options.who);
@@ -892,7 +896,7 @@ fn pushCertificate(
 /// The session a push to `remote` at `url` talks over.
 fn openSession(gpa: Allocator, io: Io, repo: *Repository, remote: *const remote_mod.Remote, url: []const u8, options: Options) Error!transport.Session {
     const session = try transport.Session.open(gpa, io, url, .{ .service = .receive_pack, .kind = repo.objectFormat() }, .{
-        .programs = options.programs,
+        .means = options.means,
         .config = repo.configuration(),
         .remote_name = remote.name,
         .service_program = remote.receive_pack,
@@ -1468,6 +1472,7 @@ const fetch_mod = @import("fetch.zig");
 const submodule = @import("../submodule/submodule.zig");
 const sub_changes = @import("../submodule/changes.zig");
 const testremote = @import("../testing/remote.zig");
+const testnet = @import("../testing/net.zig");
 
 const test_who: object.Signature = .{ .name = "F", .email = "f@example.com", .when_secs = 1, .offset_minutes = 0 };
 
@@ -1586,7 +1591,7 @@ const PushTwins = struct {
         defer repo.deinit(io);
         var opts = options;
         opts.who = test_who;
-        opts.programs = .{ .environ = &t.env };
+        opts.means = .{ .programs = .{ .environ = &t.env }, .network = &testnet.network };
         var outcome = try push(t.gpa, io, &repo, "origin", opts);
         errdefer outcome.deinit();
         try testing.expectEqual(git_failed, outcome.anyRejected());
@@ -1620,18 +1625,18 @@ test "a push leaves the remote and the remote-tracking refs as git push leaves t
     var twins = try PushTwins.init(gpa, io);
     defer twins.deinit();
 
-    var first = try twins.pushBoth(&.{ "origin", "main", "feature", "v2" }, .{ .who = test_who, .refspecs = &.{ "main", "feature", "v2" } });
+    var first = try twins.pushBoth(&.{ "origin", "main", "feature", "v2" }, .{ .means = .none, .who = test_who, .refspecs = &.{ "main", "feature", "v2" } });
     defer first.deinit();
     for (first.refs) |r| try testing.expectEqual(RefResult.Status.ok, r.status);
 
     // Up to date, and a deletion.
-    var second = try twins.pushBoth(&.{ "origin", "main", ":refs/heads/feature" }, .{ .who = test_who, .refspecs = &.{ "main", ":refs/heads/feature" } });
+    var second = try twins.pushBoth(&.{ "origin", "main", ":refs/heads/feature" }, .{ .means = .none, .who = test_who, .refspecs = &.{ "main", ":refs/heads/feature" } });
     defer second.deinit();
     try testing.expectEqual(RefResult.Status.up_to_date, second.refs[0].status);
     try testing.expectEqual(RefResult.Status.ok, second.refs[1].status);
 
     // `push.default` of `simple`: the current branch, to its upstream.
-    var simple = try twins.pushBoth(&.{}, .{ .who = test_who });
+    var simple = try twins.pushBoth(&.{}, .{ .means = .none, .who = test_who });
     defer simple.deinit();
     try testing.expectEqual(@as(usize, 1), simple.refs.len);
     try testing.expectEqualStrings("refs/heads/main", simple.refs[0].remote_ref);
@@ -1655,7 +1660,7 @@ test "git 2.56, a push to a URL moves the remote-tracking refs of the one config
     try twins.git(work_git, &.{ "push", "-q", std.mem.trimEnd(u8, git_url, "\n"), "main", "feature" });
     var repo = try Repository.open(gpa, io, work_relic, .{});
     defer repo.deinit(io);
-    var outcome = try push(gpa, io, &repo, std.mem.trimEnd(u8, relic_url, "\n"), .{ .who = test_who, .refspecs = &.{ "main", "feature" }, .programs = .{ .environ = &twins.env } });
+    var outcome = try push(gpa, io, &repo, std.mem.trimEnd(u8, relic_url, "\n"), .{ .who = test_who, .refspecs = &.{ "main", "feature" }, .means = .{ .programs = .{ .environ = &twins.env }, .network = &testnet.network } });
     defer outcome.deinit();
     try twins.expectSame();
     const tracked = try twins.gitOut(work_relic, &.{ "for-each-ref", "--format=%(refname)", "refs/remotes/origin/feature" });
@@ -1695,13 +1700,13 @@ test "push.followTags, --set-upstream and push.autoSetupRemote as git's, and a b
     try inBothWorks(&twins, &.{ "tag", "-a", "reached", "-m", "reached", "HEAD~1" });
     try inBothWorks(&twins, &.{ "tag", "lightweight" });
     try inBothWorks(&twins, &.{ "config", "push.followTags", "true" });
-    var followed = try twins.pushBoth(&.{ "origin", "main" }, .{ .who = test_who, .refspecs = &.{"main"} });
+    var followed = try twins.pushBoth(&.{ "origin", "main" }, .{ .means = .none, .who = test_who, .refspecs = &.{"main"} });
     defer followed.deinit();
     try testing.expectEqual(@as(usize, 3), followed.refs.len);
 
     // `--set-upstream`.
     try inBothWorks(&twins, &.{ "branch", "topic" });
-    var upstream = try twins.pushBoth(&.{ "--set-upstream", "origin", "topic" }, .{ .who = test_who, .refspecs = &.{"topic"}, .set_upstream = true });
+    var upstream = try twins.pushBoth(&.{ "--set-upstream", "origin", "topic" }, .{ .means = .none, .who = test_who, .refspecs = &.{"topic"}, .set_upstream = true });
     defer upstream.deinit();
     try testing.expectEqual(@as(usize, 1), upstream.upstreams.len);
     try expectSameBranchConfig(&twins);
@@ -1718,11 +1723,11 @@ test "push.followTags, --set-upstream and push.autoSetupRemote as git's, and a b
         defer work_relic.close(io);
         var repo = try Repository.open(gpa, io, work_relic, .{});
         defer repo.deinit(io);
-        try testing.expectError(error.NoUpstreamBranch, push(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &twins.env } }));
+        try testing.expectError(error.NoUpstreamBranch, push(gpa, io, &repo, "origin", .{ .who = test_who, .means = .{ .programs = .{ .environ = &twins.env }, .network = &testnet.network } }));
     }
     // `push.autoSetupRemote`: pushed to its own name, and set to track it.
     try inBothWorks(&twins, &.{ "config", "push.autoSetupRemote", "true" });
-    var auto = try twins.pushBoth(&.{"origin"}, .{ .who = test_who });
+    var auto = try twins.pushBoth(&.{"origin"}, .{ .means = .none, .who = test_who });
     defer auto.deinit();
     try testing.expectEqualStrings("refs/heads/lone", auto.refs[0].remote_ref);
     try expectSameBranchConfig(&twins);
@@ -1752,11 +1757,11 @@ test "push.pushOption gives the push options when none are named, an empty one c
         }
     }
     for ([_][]const u8{ "dropped", "", "first", "second" }) |value| try inBothWorks(&twins, &.{ "config", "--add", "push.pushOption", value });
-    var pushed = try twins.pushBoth(&.{ "origin", "main" }, .{ .who = test_who, .refspecs = &.{"main"} });
+    var pushed = try twins.pushBoth(&.{ "origin", "main" }, .{ .means = .none, .who = test_who, .refspecs = &.{"main"} });
     defer pushed.deinit();
     try expectSameHookLogs(&twins, io);
     // Named ones take their place.
-    var named = try twins.pushBoth(&.{ "--push-option", "named", "origin", "main:refs/heads/again" }, .{ .who = test_who, .refspecs = &.{"main:refs/heads/again"}, .push_options = &.{"named"} });
+    var named = try twins.pushBoth(&.{ "--push-option", "named", "origin", "main:refs/heads/again" }, .{ .means = .none, .who = test_who, .refspecs = &.{"main:refs/heads/again"}, .push_options = &.{"named"} });
     defer named.deinit();
     try expectSameHookLogs(&twins, io);
 }
@@ -1777,19 +1782,19 @@ test "--force-if-includes and push.useForceIfIncludes refuse a lease the local r
     }
     try inBothWorks(&twins, &.{ "fetch", "-q", "origin" });
     const lease: []const Lease = &.{.{ .ref = "refs/heads/main" }};
-    var refused = try twins.pushBoth(&.{ "--force-with-lease", "--force-if-includes", "origin", "main" }, .{ .who = test_who, .refspecs = &.{"main"}, .leases = lease, .force_if_includes = true });
+    var refused = try twins.pushBoth(&.{ "--force-with-lease", "--force-if-includes", "origin", "main" }, .{ .means = .none, .who = test_who, .refspecs = &.{"main"}, .leases = lease, .force_if_includes = true });
     defer refused.deinit();
     try testing.expectEqual(RefResult.Status.rejected_remote_updated, refused.refs[0].status);
     // Without it the lease alone holds, and the push goes.
     try inBothWorks(&twins, &.{ "config", "push.useForceIfIncludes", "true" });
-    var by_setting = try twins.pushBoth(&.{ "--force-with-lease", "origin", "main" }, .{ .who = test_who, .refspecs = &.{"main"}, .leases = lease });
+    var by_setting = try twins.pushBoth(&.{ "--force-with-lease", "origin", "main" }, .{ .means = .none, .who = test_who, .refspecs = &.{"main"}, .leases = lease });
     defer by_setting.deinit();
     try testing.expectEqual(RefResult.Status.rejected_remote_updated, by_setting.refs[0].status);
     // Once the local ref has been at the remote's value, a rewrite on top
     // of it goes.
     try inBothWorks(&twins, &.{ "reset", "-q", "--hard", "origin/main" });
     try inBothWorks(&twins, &.{ "commit", "-q", "--amend", "--allow-empty", "-m", "rewritten" });
-    var forced = try twins.pushBoth(&.{ "--force-with-lease", "origin", "main" }, .{ .who = test_who, .refspecs = &.{"main"}, .leases = lease });
+    var forced = try twins.pushBoth(&.{ "--force-with-lease", "origin", "main" }, .{ .means = .none, .who = test_who, .refspecs = &.{"main"}, .leases = lease });
     defer forced.deinit();
     try testing.expectEqual(RefResult.Status.ok, forced.refs[0].status);
 }
@@ -1823,7 +1828,7 @@ test "push.negotiate leaves out what a negotiation finds the remote has, asking 
         } else {
             var repo = try Repository.open(gpa, io, dir, .{});
             defer repo.deinit(io);
-            var outcome = try push(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &twins.env }, .refspecs = &.{"main"} });
+            var outcome = try push(gpa, io, &repo, "origin", .{ .who = test_who, .means = .{ .programs = .{ .environ = &twins.env }, .network = &testnet.network }, .refspecs = &.{"main"} });
             defer outcome.deinit();
             try testing.expect(!outcome.anyRejected());
         }
@@ -1854,7 +1859,7 @@ test "refusals are git's: non-fast-forward, fetch first, an existing tag, a stal
     // it: fetch first. The tag v1 is there already.
     try twins.inBothRemotes(&.{ "update-ref", "refs/heads/elsewhere", "refs/heads/main" });
     try twins.inBothRemotes(&.{ "tag", "-f", "v2", "main" });
-    var refused = try twins.pushBoth(&.{ "origin", "main", "v2" }, .{ .who = test_who, .refspecs = &.{ "main", "v2" } });
+    var refused = try twins.pushBoth(&.{ "origin", "main", "v2" }, .{ .means = .none, .who = test_who, .refspecs = &.{ "main", "v2" } });
     defer refused.deinit();
     try testing.expectEqual(RefResult.Status.ok, refused.refs[0].status);
     try testing.expectEqual(RefResult.Status.rejected_already_exists, refused.refs[1].status);
@@ -1867,7 +1872,7 @@ test "refusals are git's: non-fast-forward, fetch first, an existing tag, a stal
         defer gpa.free(made);
         try twins.git(dir, &.{ "update-ref", "refs/heads/main", std.mem.trimEnd(u8, made, "\n") });
     }
-    var fetch_first = try twins.pushBoth(&.{ "origin", "feature:main" }, .{ .who = test_who, .refspecs = &.{"feature:main"} });
+    var fetch_first = try twins.pushBoth(&.{ "origin", "feature:main" }, .{ .means = .none, .who = test_who, .refspecs = &.{"feature:main"} });
     defer fetch_first.deinit();
     try testing.expectEqual(RefResult.Status.rejected_fetch_first, fetch_first.refs[0].status);
     try twins.inBothRemotes(&.{ "update-ref", "refs/heads/main", "refs/heads/main~1" });
@@ -1878,13 +1883,14 @@ test "refusals are git's: non-fast-forward, fetch first, an existing tag, a stal
     var work_git = try twins.root.dir.openDir(io, "work-git", .{});
     defer work_git.close(io);
     for ([_]Io.Dir{ work_git, work_relic }) |dir| try twins.git(dir, &.{ "reset", "-q", "--hard", "main~2" });
-    var non_ff = try twins.pushBoth(&.{ "origin", "main" }, .{ .who = test_who, .refspecs = &.{"main"} });
+    var non_ff = try twins.pushBoth(&.{ "origin", "main" }, .{ .means = .none, .who = test_who, .refspecs = &.{"main"} });
     defer non_ff.deinit();
     try testing.expectEqual(RefResult.Status.rejected_non_fast_forward, non_ff.refs[0].status);
 
     // A lease on a value the remote no longer has is stale; on the value it
     // has, the update is forced.
     var stale = try twins.pushBoth(&.{ "origin", "--force-with-lease=refs/heads/main:refs/tags/v1", "main" }, .{
+        .means = .none,
         .who = test_who,
         .refspecs = &.{"main"},
         .leases = &.{.{ .ref = "refs/heads/main", .expect = try tagTarget(gpa, io, work_relic, "v1") }},
@@ -1892,6 +1898,7 @@ test "refusals are git's: non-fast-forward, fetch first, an existing tag, a stal
     defer stale.deinit();
     try testing.expectEqual(RefResult.Status.rejected_stale, stale.refs[0].status);
     var leased = try twins.pushBoth(&.{ "origin", "--force-with-lease=refs/heads/main", "main" }, .{
+        .means = .none,
         .who = test_who,
         .refspecs = &.{"main"},
         .leases = &.{.{ .ref = "refs/heads/main" }},
@@ -1901,7 +1908,7 @@ test "refusals are git's: non-fast-forward, fetch first, an existing tag, a stal
     try testing.expect(leased.refs[0].forced);
 
     // Atomic: one refused, none applied.
-    var atomic = try twins.pushBoth(&.{ "origin", "--atomic", "feature", "v2" }, .{ .who = test_who, .refspecs = &.{ "feature", "v2" }, .atomic = true });
+    var atomic = try twins.pushBoth(&.{ "origin", "--atomic", "feature", "v2" }, .{ .means = .none, .who = test_who, .refspecs = &.{ "feature", "v2" }, .atomic = true });
     defer atomic.deinit();
     try testing.expectEqual(RefResult.Status.atomic_failed, atomic.refs[0].status);
 }
@@ -1950,6 +1957,7 @@ test "the pre-push hook point is shown what git's pre-push hook is shown, and ca
     var seen: PrePushSeen = .{};
     defer seen.text.deinit(gpa);
     var outcome = try twins.pushBoth(&.{ "origin", "main", "feature" }, .{
+        .means = .none,
         .who = test_who,
         .refspecs = &.{ "main", "feature" },
         .pre_push = &seen.interface,
@@ -1966,6 +1974,7 @@ test "the pre-push hook point is shown what git's pre-push hook is shown, and ca
     var repo = try Repository.open(gpa, io, work_relic, .{});
     defer repo.deinit(io);
     try testing.expectError(error.PrePushRefused, push(gpa, io, &repo, "origin", .{
+        .means = .none,
         .who = test_who,
         .refspecs = &.{"v2"},
         .pre_push = &seen.interface,
@@ -2008,6 +2017,7 @@ test "a push over ssh and over HTTP leaves the remote as git push leaves it" {
             try twins.git(work, &.{ "config", "http.postBuffer", "1024" });
         }
         var outcome = try twins.pushBoth(&.{ "origin", "main", "feature", "v2", ":refs/heads/side" }, .{
+            .means = .none,
             .who = test_who,
             .refspecs = &.{ "main", "feature", "v2", ":refs/heads/side" },
         });
@@ -2050,7 +2060,7 @@ test "a proc-receive hook's report-status-v2 options move the remote-tracking re
             try twins.git(work, &.{ "config", "core.sshCommand", fake });
         }
         errdefer std.debug.print("{s}\n", .{answer});
-        var outcome = try twins.pushBoth(&.{ "origin", "main:refs/for/main" }, .{ .who = test_who, .refspecs = &.{"main:refs/for/main"} });
+        var outcome = try twins.pushBoth(&.{ "origin", "main:refs/for/main" }, .{ .means = .none, .who = test_who, .refspecs = &.{"main:refs/for/main"} });
         defer outcome.deinit();
     }
 }
@@ -2146,6 +2156,7 @@ test "a signed push carries a certificate git's receive-pack checks, as git's pu
         if (over_http) server = try testremote.HttpServer.start(gpa, io, twins.root.dir, .{});
         if (!try signedTwins(&twins, io, server, true)) return error.SkipZigTest;
         var outcome = try twins.pushBoth(&.{ "--signed", "-o", "an option", "origin", "main", "feature", ":refs/heads/side" }, .{
+            .means = .none,
             .refspecs = &.{ "main", "feature", ":refs/heads/side" },
             .push_options = &.{"an option"},
             .signed = .always,
@@ -2171,7 +2182,7 @@ test "push.gpgSign signs a push, and a server asking for no certificate takes on
         var warnings: warning.Warnings = .init(gpa);
         defer warnings.deinit();
         twins.git_settings = &.{ "-c", "push.gpgSign=if-asked" };
-        var outcome = try twins.pushBoth(&.{ "origin", "main" }, .{ .refspecs = &.{"main"}, .signed = .if_asked, .warnings = &warnings, .who = test_who });
+        var outcome = try twins.pushBoth(&.{ "origin", "main" }, .{ .means = .none, .refspecs = &.{"main"}, .signed = .if_asked, .warnings = &warnings, .who = test_who });
         defer outcome.deinit();
         try testing.expectEqual(@as(usize, 1), warnings.items.items.len);
         try testing.expectEqual(warning.Warning.push_cert_not_asked, warnings.items.items[0]);
@@ -2188,12 +2199,12 @@ test "push.gpgSign signs a push, and a server asking for no certificate takes on
     const refused = try twins.gitOut(work_git, &.{ "push", "--signed", "origin", "feature" });
     defer gpa.free(refused);
     try testing.expectEqualStrings("failed", refused);
-    try testing.expectError(error.SignedPushUnsupported, push(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &twins.env }, .refspecs = &.{"feature"}, .signed = .always }));
+    try testing.expectError(error.SignedPushUnsupported, push(gpa, io, &repo, "origin", .{ .who = test_who, .means = .{ .programs = .{ .environ = &twins.env }, .network = &testnet.network }, .refspecs = &.{"feature"}, .signed = .always }));
     for ([_][2][]const u8{ .{ "true", "SignedPushUnsupported" }, .{ "sometimes", "InvalidPushGpgSign" } }) |case| {
         try twins.git(work, &.{ "config", "push.gpgSign", case[0] });
         var configured = try Repository.open(gpa, io, work, .{});
         defer configured.deinit(io);
-        const got = push(gpa, io, &configured, "origin", .{ .who = test_who, .programs = .{ .environ = &twins.env }, .refspecs = &.{"feature"} });
+        const got = push(gpa, io, &configured, "origin", .{ .who = test_who, .means = .{ .programs = .{ .environ = &twins.env }, .network = &testnet.network }, .refspecs = &.{"feature"} });
         if (got) |pushed| {
             var outcome = pushed;
             outcome.deinit();
@@ -2228,7 +2239,7 @@ test "under transfer.advertiseSID a push and a fetch name their session to a ser
     try twins.git(work, &.{ "config", "transfer.advertiseSID", "true" });
     var repo = try Repository.open(gpa, io, work, .{});
     defer repo.deinit(io);
-    var pushed = try push(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &twins.env }, .refspecs = &.{"main:refs/heads/sid"} });
+    var pushed = try push(gpa, io, &repo, "origin", .{ .who = test_who, .means = .{ .programs = .{ .environ = &twins.env }, .network = &testnet.network }, .refspecs = &.{"main:refs/heads/sid"} });
     defer pushed.deinit();
     for ([_][]const u8{ "2", "0" }) |version| {
         try twins.git(work, &.{ "config", "protocol.version", version });
@@ -2238,7 +2249,7 @@ test "under transfer.advertiseSID a push and a fetch name their session to a ser
         try twins.git(remote_dir, &.{ "update-ref", "refs/heads/main", std.mem.trimEnd(u8, made, "\n") });
         var reopened = try Repository.open(gpa, io, work, .{});
         defer reopened.deinit(io);
-        var fetched = try fetch_mod.fetch(gpa, io, &reopened, "origin", .{ .who = test_who, .programs = .{ .environ = &twins.env }, .refspecs = &.{"refs/heads/main:refs/heads/fetched"} });
+        var fetched = try fetch_mod.fetch(gpa, io, &reopened, "origin", .{ .who = test_who, .means = .{ .programs = .{ .environ = &twins.env }, .network = &testnet.network }, .refspecs = &.{"refs/heads/main:refs/heads/fetched"} });
         fetched.deinit();
     }
     const log = try Io.Dir.cwd().readFileAlloc(io, events, gpa, .unlimited);
@@ -2278,7 +2289,7 @@ test "a push goes through the proxy it is given, and past the configured one whe
     var repo = try Repository.open(gpa, io, work, .{});
     defer repo.deinit(io);
     {
-        var outcome = try push(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &twins.env }, .refspecs = &.{"main"}, .proxy = .{ .url = proxy_url } });
+        var outcome = try push(gpa, io, &repo, "origin", .{ .who = test_who, .means = .{ .programs = .{ .environ = &twins.env }, .network = &testnet.network }, .refspecs = &.{"main"}, .proxy = .{ .url = proxy_url } });
         defer outcome.deinit();
         for (outcome.refs) |r| try testing.expectEqual(RefResult.Status.ok, r.status);
         const seen = try proxy.take(gpa);
@@ -2286,7 +2297,7 @@ test "a push goes through the proxy it is given, and past the configured one whe
         try testing.expect(seen.len != 0);
     }
     {
-        var outcome = try push(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &twins.env }, .refspecs = &.{"feature"}, .proxy = .none });
+        var outcome = try push(gpa, io, &repo, "origin", .{ .who = test_who, .means = .{ .programs = .{ .environ = &twins.env }, .network = &testnet.network }, .refspecs = &.{"feature"}, .proxy = .none });
         defer outcome.deinit();
         for (outcome.refs) |r| try testing.expectEqual(RefResult.Status.ok, r.status);
         const seen = try proxy.take(gpa);
@@ -2316,7 +2327,7 @@ test "a repository on this machine refuses its checked-out branch as receive-pac
 
     var repo = try Repository.open(gpa, io, here.dir, .{});
     defer repo.deinit(io);
-    var outcome = try push(gpa, io, &repo, "origin", .{ .who = test_who, .refspecs = &.{ "main", "main:refs/heads/other" } });
+    var outcome = try push(gpa, io, &repo, "origin", .{ .means = .none, .who = test_who, .refspecs = &.{ "main", "main:refs/heads/other" } });
     defer outcome.deinit();
     try testing.expectEqual(RefResult.Status.rejected_by_remote, outcome.refs[0].status);
     try testing.expectEqualStrings("branch is currently checked out", outcome.refs[0].message.?);
@@ -2326,7 +2337,7 @@ test "a repository on this machine refuses its checked-out branch as receive-pac
     try testing.expectError(error.GitFailed, here.exec(io, &.{ "push", "-q", "origin", "main" }));
 
     try testgit.fixtureHook(gpa, io, target.dir, ".git/hooks/pre-receive", "status", "0");
-    try testing.expectError(error.RemoteHooksNotRun, push(gpa, io, &repo, "origin", .{ .who = test_who, .refspecs = &.{"main:refs/heads/third"} }));
+    try testing.expectError(error.RemoteHooksNotRun, push(gpa, io, &repo, "origin", .{ .means = .none, .who = test_who, .refspecs = &.{"main:refs/heads/third"} }));
 }
 
 test "a repository on this machine refuses a ref of one level under refs/ as receive-pack does" {
@@ -2346,7 +2357,7 @@ test "a repository on this machine refuses a ref of one level under refs/ as rec
 
     var repo = try Repository.open(gpa, io, here.dir, .{});
     defer repo.deinit(io);
-    var outcome = try push(gpa, io, &repo, "origin", .{ .who = test_who, .refspecs = &.{ "main:refs/funny", "main:refs/heads/fine" } });
+    var outcome = try push(gpa, io, &repo, "origin", .{ .means = .none, .who = test_who, .refspecs = &.{ "main:refs/funny", "main:refs/heads/fine" } });
     defer outcome.deinit();
     // receive-pack checks the name after `refs/` as a full ref name, which
     // `funny` alone is not.
@@ -2378,7 +2389,7 @@ test "a remote with two push URLs is pushed to both, as git pushes to both" {
         try twins.git(work, &.{ "config", "--add", "remote.origin.pushurl", first });
         try twins.git(work, &.{ "config", "--add", "remote.origin.pushurl", second });
     }
-    var outcome = try twins.pushBoth(&.{ "origin", "main" }, .{ .who = test_who, .refspecs = &.{"main"} });
+    var outcome = try twins.pushBoth(&.{ "origin", "main" }, .{ .means = .none, .who = test_who, .refspecs = &.{"main"} });
     defer outcome.deinit();
     try testing.expectEqual(@as(usize, 2), outcome.refs.len);
     try testing.expect(!std.mem.eql(u8, outcome.refs[0].url, outcome.refs[1].url));

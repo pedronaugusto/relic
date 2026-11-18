@@ -30,7 +30,7 @@ fn relicPush(fx: *Fixture, d: Io.Dir, report: *lfspush.Report) !push_mod.Outcome
         .transport = .{
             .refspecs = &.{"refs/heads/main:refs/heads/main"},
             .who = test_who,
-            .programs = fx.programs(),
+            .means = .{ .programs = fx.programs(), .network = &testlfs.network },
         },
         .lfs = .{ .report = report },
     });

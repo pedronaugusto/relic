@@ -686,7 +686,6 @@ fn fromReference(io: Io, store: *const lfs.Store, references: []const []const u8
 }
 
 fn run(io: Io, server: *lfsapi.Server, operation: lfsapi.Operation, objects: []const Object, given: Options) Error!Outcome {
-    if (comptime !lfsapi.http_enabled) return error.HttpUnavailable;
     var outcome = try runTransfers(io, server, operation, objects, given);
     // git-lfs sweeps its temporary files when a command ends.
     if (server.client.options.now) |now| {
@@ -1008,7 +1007,7 @@ fn runStandalone(
 /// one, as git-lfs starts them, each told `init`.
 fn startAgents(state: *Run, adapter: custom.Adapter) Error!void {
     const server = state.server;
-    const programs = server.client.options.programs orelse return error.ProgramsNotGranted;
+    const programs = server.client.options.means.programs orelse return error.ProgramsNotGranted;
     const count: u32 = if (adapter.concurrent) state.limits.concurrency else 1;
     // On the calling task before any worker starts: held throughout.
     var guard = state.arena.acquireUncancelable(state.io());
@@ -1346,7 +1345,6 @@ fn accessUrl(href: []const u8, oid: []const u8) []const u8 {
 }
 
 fn attemptDownload(state: *Run, r: *Result, action: Action, authenticated: bool) Error!Attempt {
-    if (comptime !lfsapi.http_enabled) return error.HttpUnavailable;
     const server = state.server;
     const io = state.io();
     const store = server.store();
@@ -1622,7 +1620,6 @@ fn requestFrom(state: *Run, scratch: Allocator, partial: *Partial, req: Download
 }
 
 fn attemptUpload(state: *Run, r: *Result, action: Action, verify: ?Action, authenticated: bool) Error!Attempt {
-    if (comptime !lfsapi.http_enabled) return error.HttpUnavailable;
     const server = state.server;
     var scratch_state: std.heap.ArenaAllocator = .init(server.gpa);
     defer scratch_state.deinit();
@@ -1763,7 +1760,6 @@ fn batchRequest(
     limits: Limits,
     comptime_into: anytype,
 ) Error!if (@TypeOf(comptime_into) == @TypeOf(null)) Answered else BatchResponse {
-    if (comptime !lfsapi.http_enabled) return error.HttpUnavailable;
     const own = @TypeOf(comptime_into) == @TypeOf(null);
     var arena_state: std.heap.ArenaAllocator = .init(server.gpa);
     errdefer arena_state.deinit();
@@ -2210,7 +2206,7 @@ pub const Fetcher = struct {
 
     fn skipDownloadErrors(f: *const Fetcher) bool {
         if (f.skip_download_errors) |skip| return skip;
-        if (f.server.client.options.programs) |programs| {
+        if (f.server.client.options.means.programs) |programs| {
             if (lfsapi.gitLfsBool(programs.environ.get("GIT_LFS_SKIP_DOWNLOAD_ERRORS"), false)) return true;
         }
         var buf: [256]u8 = undefined;
@@ -2264,7 +2260,6 @@ pub const FetchError = Error || object_walk.Error || repo_mod.Error || error{
 /// `lfs.fetchinclude` leaves out, or `lfs.fetchexclude` names, is not
 /// fetched unless `all_paths` says so.
 pub fn fetch(io: Io, server: *lfsapi.Server, repo: *Repository, options: FetchOptions) transfer.FetchError!Outcome {
-    if (comptime !lfsapi.http_enabled) return error.HttpUnavailable;
     const gpa = server.gpa;
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
@@ -2589,7 +2584,6 @@ fn replaceWith(io: Io, wt: Io.Dir, path: []const u8, source: Io.File, executable
 /// have, as git-lfs's pre-push hook uploads them. A blob that is not a
 /// pointer is not looked at twice.
 pub fn pushObjects(io: Io, server: *lfsapi.Server, db: *odb_mod.Odb, pushed: []const odb_mod.PackEntry, options: Options) transfer.FetchError!Outcome {
-    if (comptime !lfsapi.http_enabled) return error.HttpUnavailable;
     const gpa = server.gpa;
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();

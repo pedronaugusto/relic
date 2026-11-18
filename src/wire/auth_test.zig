@@ -32,6 +32,7 @@ const testlfs = @import("../testing/lfs.zig");
 const object = @import("../object/object.zig");
 const url_mod = @import("url.zig");
 const warning = @import("../report.zig").warning;
+const testnet = @import("../testing/net.zig");
 
 const test_who: object.Signature = .{ .name = "F", .email = "f@example.com", .when_secs = 1, .offset_minutes = 0 };
 
@@ -291,7 +292,7 @@ test "with only the person's environment, relic asks the helpers git asks: gh's 
         defer failure.deinit();
         const result = fetch_mod.fetch(gpa, io, &repo, "origin", .{
             .who = test_who,
-            .programs = .{ .environ = &person.env },
+            .means = .{ .programs = .{ .environ = &person.env }, .network = &testnet.network },
             .auth_failure = &failure,
         });
         for (names, 0..) |n, i| {
@@ -362,7 +363,7 @@ test "named helpers run as git runs them: Git Credential Manager, and git's own 
         var repo = try person.open(io, by_relic.dir, &locations);
         defer repo.deinit(io);
         defer locations.deinit();
-        var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &person.env } });
+        var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .means = .{ .programs = .{ .environ = &person.env }, .network = &testnet.network } });
         outcome.deinit();
         const ours = try person.log(io, "manager");
         defer gpa.free(ours);
@@ -395,7 +396,7 @@ test "named helpers run as git runs them: Git Credential Manager, and git's own 
                 var repo = try person.open(io, r.dir, &locations);
                 defer repo.deinit(io);
                 defer locations.deinit();
-                if (fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &person.env } })) |fetched| {
+                if (fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .means = .{ .programs = .{ .environ = &person.env }, .network = &testnet.network } })) |fetched| {
                     var outcome = fetched;
                     outcome.deinit();
                     try testing.expectEqualStrings("secret", password);
@@ -445,7 +446,7 @@ test "named helpers run as git runs them: Git Credential Manager, and git's own 
         var asker: credential.Asker = .{ .vtable = &.{ .ask = Asker.ask } };
         var first = try fetch_mod.fetch(gpa, io, &repo, "origin", .{
             .who = test_who,
-            .programs = .{ .environ = &person.env },
+            .means = .{ .programs = .{ .environ = &person.env }, .network = &testnet.network },
             .prompt = .{ .asker = &asker },
         });
         first.deinit();
@@ -454,7 +455,7 @@ test "named helpers run as git runs them: Git Credential Manager, and git's own 
         const filled = try testremote.gitInputEnv(gpa, io, r.dir, &person.env, &.{ "credential", "fill" }, question, true);
         defer gpa.free(filled);
         try testing.expect(std.mem.find(u8, filled, "password=secret\n") != null);
-        var second = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &person.env } });
+        var second = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .means = .{ .programs = .{ .environ = &person.env }, .network = &testnet.network } });
         second.deinit();
     }
 }
@@ -502,7 +503,7 @@ test "a refusal says what git says: the server's words, the helpers asked, the p
         defer failure.deinit();
         try testing.expectError(case.err, fetch_mod.fetch(gpa, io, &repo, "origin", .{
             .who = test_who,
-            .programs = .{ .environ = &person.env },
+            .means = .{ .programs = .{ .environ = &person.env }, .network = &testnet.network },
             .auth_failure = &failure,
         }));
         try testing.expectEqual(case.reason, failure.reason);
@@ -536,7 +537,7 @@ test "a refusal says what git says: the server's words, the helpers asked, the p
     defer locations.deinit();
     var failure: auth.Failure = .{};
     defer failure.deinit();
-    try testing.expectError(error.ProgramsNotGranted, fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .auth_failure = &failure }));
+    try testing.expectError(error.ProgramsNotGranted, fetch_mod.fetch(gpa, io, &repo, "origin", .{ .means = testnet.means(null), .who = test_who, .auth_failure = &failure }));
     try testing.expectEqual(auth.Failure.Reason.programs_not_granted, failure.reason);
     try testing.expectEqual(auth.Failure.Answer.failed, failure.helpers[0].answer);
 }
@@ -590,7 +591,7 @@ test "a helper's bearer token is sent as git sends it, and handed back with its 
     var repo = try person.open(io, by_relic.dir, &locations);
     defer repo.deinit(io);
     defer locations.deinit();
-    var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &person.env } });
+    var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .means = .{ .programs = .{ .environ = &person.env }, .network = &testnet.network } });
     outcome.deinit();
     const ours = try person.log(io, "helper");
     defer gpa.free(ours);
@@ -645,7 +646,7 @@ test "a helper that says continue=1 is asked again with its state and the server
     var repo = try person.open(io, by_relic.dir, &locations);
     defer repo.deinit(io);
     defer locations.deinit();
-    try testing.expectError(error.AuthenticationFailed, fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &person.env } }));
+    try testing.expectError(error.AuthenticationFailed, fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .means = .{ .programs = .{ .environ = &person.env }, .network = &testnet.network } }));
     const ours = try person.log(io, "helper");
     defer gpa.free(ours);
     try testing.expectEqualStrings(theirs, ours);
@@ -703,7 +704,7 @@ test "a helper's password past its password_expiry_utc is passed over for the ne
     // The caller's clock says when it is.
     var who = test_who;
     who.when_secs = @intCast(@divTrunc(Io.Clock.real.now(io).nanoseconds, std.time.ns_per_s));
-    var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = who, .programs = .{ .environ = &person.env } });
+    var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = who, .means = .{ .programs = .{ .environ = &person.env }, .network = &testnet.network } });
     outcome.deinit();
     for (names, theirs) |name, t| {
         const ours = try person.log(io, name);
@@ -746,7 +747,7 @@ test "what ssh says on a conversation that succeeds is handed back as a warning,
     defer locations.deinit();
     var warnings: warning.Warnings = .init(gpa);
     defer warnings.deinit();
-    var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &person.env }, .warnings = &warnings });
+    var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .means = .{ .programs = .{ .environ = &person.env }, .network = &testnet.network }, .warnings = &warnings });
     outcome.deinit();
     var ours: std.ArrayList(u8) = .empty;
     defer ours.deinit(gpa);
@@ -824,7 +825,7 @@ test "ssh's refusal is named once ssh has ended, while something it started stil
     defer failure.deinit();
     try testing.expectError(error.AuthenticationFailed, fetch_mod.fetch(gpa, io, &repo, "origin", .{
         .who = test_who,
-        .programs = .{ .environ = &person.env },
+        .means = .{ .programs = .{ .environ = &person.env }, .network = &testnet.network },
         .auth_failure = &failure,
     }));
     try testing.expectEqualStrings(said, failure.server_message);
@@ -905,7 +906,7 @@ test "ssh gets the person's host alias, agent and command line untouched, as git
         var repo = try person.open(io, by_relic.dir, &locations);
         defer repo.deinit(io);
         defer locations.deinit();
-        var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &person.env } });
+        var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .means = .{ .programs = .{ .environ = &person.env }, .network = &testnet.network } });
         outcome.deinit();
         const ours = try person.tools.dir.readFileAlloc(io, "ssh.log", gpa, .unlimited);
         defer gpa.free(ours);
@@ -948,7 +949,7 @@ test "ssh's refusal of a key or a host is named, with what ssh said" {
         defer failure.deinit();
         try testing.expectError(case.err, fetch_mod.fetch(gpa, io, &repo, "origin", .{
             .who = test_who,
-            .programs = .{ .environ = &person.env },
+            .means = .{ .programs = .{ .environ = &person.env }, .network = &testnet.network },
             .auth_failure = &failure,
         }));
         try testing.expectEqual(case.reason, failure.reason);

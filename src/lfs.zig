@@ -1,14 +1,14 @@
 //! relic_lfs — Git LFS without git-lfs: pointers and the store, the native
 //! filters, clone and push with LFS, transfers, locks, custom transfer agents,
-//! and with `http` a server.
+//! and a server.
 //!
 //! The `relic_lfs` module of the relic package, built over relic's core and
-//! strand. It exists only while relic's `lfs` option is on (the default), and
-//! what it hands out are relic's own types: a `relic.repo.Repository` is
-//! what its operations take. Over ssh and custom agents it needs `lfs` alone;
-//! over HTTP(S), `http` too. `server` is uplink's, so it is here only with
-//! `http`: a build without it that names `server` stops, saying so, and
-//! fetches nothing of uplink's.
+//! strand, and what it hands out are relic's own types: a
+//! `relic.repo.Repository` is what its operations take. An operation that
+//! reaches a remote takes a `relic.transport.Means`, as relic's own do:
+//! over ssh and custom agents its programs, over HTTP(S) its network,
+//! `relic_net.network`. `server` is a handler for uplink's server, which a
+//! program that names it compiles.
 //!
 //! The table below describes its namespaces; it is checked against the API,
 //! and the README's against both, wherever relic_lfs compiles.
@@ -26,7 +26,7 @@
 //! | `custom` | Custom transfer adapters: `lfs.customtransfer.<name>`, the programs git-lfs hands its transfers to, one line of JSON each way. |
 //! | `api` | The Git LFS server a remote has, and how it is reached: where its API is, who the person is to it, and the HTTP requests that carry both. |
 //! | `settings` | git-lfs's configuration and `.lfsconfig`, read as git-lfs reads them. |
-//! | `server` | `Backend`, `Store`, `Directory`, `S3` — a Git LFS server as a handler for uplink's server: the batch API, basic transfers into the caller's store (a directory, or S3-compatible storage through signed URLs), the locking API, authorization by the caller's hook. Only with `http`. |
+//! | `server` | `Backend`, `Store`, `Directory`, `S3` — a Git LFS server as a handler for uplink's server: the batch API, basic transfers into the caller's store (a directory, or S3-compatible storage through signed URLs), the locking API, authorization by the caller's hook. |
 
 pub const filter = @import("lfs/filter.zig");
 pub const clone = @import("lfs/clone.zig");
@@ -56,13 +56,10 @@ pub const FetchError = implementation.FetchError;
 pub const Fetcher = implementation.Fetcher;
 pub const Lfs = implementation.Lfs;
 pub const Error = implementation.Error;
-/// Only with `http`: the untaken branch's file is never compiled, so a
-/// build without it neither needs nor fetches uplink.
-pub const server = if (options.http) @import("lfs/server.zig") else @compileError("relic_lfs.server needs relic built with -Dhttp=true");
+pub const server = @import("lfs/server.zig");
 
 const implementation = @import("lfs/lfs.zig");
 const core = @import("relic_core");
-const options = @import("relic_options");
 
 // relic_lfs's public surface keeps relic's contract (`core.contract`), and
 // publishes every declaration of its implementation.
@@ -79,5 +76,4 @@ const surface: core.contract.Surface = .{
     .begin = "<!-- BEGIN LFS MODULES -->",
     .end = "<!-- END LFS MODULES -->",
     .depth = 2,
-    .http_only = &.{"server"},
 };

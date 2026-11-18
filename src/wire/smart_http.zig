@@ -83,8 +83,6 @@ const pinned_key = @import("pinned_key.zig");
 const uplink = @import("uplink");
 const cloak = @import("cloak");
 const aegis = @import("aegis");
-/// Whether relic was built with HTTP: the `http` build option.
-const http_enabled = @import("relic_options").http;
 const warning = @import("../report.zig").warning;
 
 const Connection = connection.Connection;
@@ -152,7 +150,8 @@ pub const Error = error{
     /// A URL no request can carry: a space or a control character in its
     /// path, which curl refuses too.
     MalformedUrl,
-    /// relic was built without HTTP: its `http` build option is off.
+    /// No engine to reach it with: the operation's `Means` has no
+    /// `network` (`transport.Means.network`).
     HttpUnavailable,
     /// The server answered 429 to every request `http.maxRetries` allows,
     /// or asked for a longer wait than `http.maxRetryTime`, or
@@ -209,15 +208,14 @@ pub const Opened = union(enum) {
     pub const Error = Self.Error;
 
     smart: *Connection,
-    /// Only with `http`: without it nothing is opened.
-    dumb: if (http_enabled) Files else void,
+    dumb: Files,
 };
 
 /// Open a conversation with the service at `url`: smart HTTP, or for
 /// upload-pack a dumb server's files, as git's `check_smart_http` tells
-/// them apart.
+/// them apart. The engine `relic_net.network.connect` is: relic reaches it
+/// through a `transport.Network`.
 pub fn connect(gpa: Allocator, io: Io, url: url_mod.Url, service: Service, options: Options) Self.Error!Opened {
-    if (comptime !http_enabled) return error.HttpUnavailable;
     const h = try prepare(gpa, io, url, service, options);
     errdefer Http.deinit(io, h);
     // The advertisement is asked for here, so that what can go wrong with
@@ -226,7 +224,7 @@ pub fn connect(gpa: Allocator, io: Io, url: url_mod.Url, service: Service, optio
     switch (try h.advertisementInner()) {
         .smart => return .{ .smart = &h.connection },
         .dumb => |listing| switch (service) {
-            .upload_pack => return .{ .dumb = .{ .h = h, .listing = listing } },
+            .upload_pack => return .{ .dumb = h.filesOf(listing) },
             .receive_pack => return error.DumbHttpPushUnsupported,
             .upload_archive => return error.DumbHttpUnsupported,
         },
@@ -236,29 +234,31 @@ pub fn connect(gpa: Allocator, io: Io, url: url_mod.Url, service: Service, optio
 /// A dumb server's files, asked for through the conversation that found
 /// it: its settings, credentials, proxy and TLS. A redirect is followed
 /// only under `http.followRedirects=true`, as git's `initial` follows the
-/// first request alone.
+/// first request alone. The engine behind them is the network's
+/// (`transport.Network`): relic asks through this interface.
 pub const Files = struct {
     pub const Error = Self.Error;
 
-    h: *Http,
+    context: *anyopaque,
+    vtable: *const VTable,
     /// `info/refs` as the server sent it; the files' own.
     listing: []const u8,
+    /// `http.followRedirects` for the files' URL: an alternate a dumb
+    /// server names is asked for only under `always`.
+    follow_redirects: http_settings.FollowRedirects,
 
-    /// The files under `url`, with no request made: an alternate a dumb
-    /// server names, asked as its own repository is.
-    pub fn open(gpa: Allocator, io: Io, url: url_mod.Url, options: Options) Self.Error!Files {
-        if (comptime !http_enabled) return error.HttpUnavailable;
-        var plain = options;
-        plain.protocol_v2 = false;
-        const h = try prepare(gpa, io, url, .upload_pack, plain);
-        h.downloading = true;
-        h.base_path = std.mem.trimEnd(u8, url.path, "/");
-        return .{ .h = h, .listing = "" };
-    }
+    /// What an engine's files do, each the method of the same name.
+    pub const VTable = struct {
+        deinit: *const fn (context: *anyopaque, io: Io) void,
+        get: *const fn (context: *anyopaque, suffix: []const u8) Self.Error!?aegis.io.ReadEnd,
+        requests: *const fn (context: *const anyopaque) usize,
+        begin: *const fn (context: *anyopaque, e: *Early, suffix: []const u8) Allocator.Error!void,
+        baseUrl: *const fn (context: *const anyopaque, arena: Allocator) Allocator.Error![]const u8,
+        message: *const fn (context: *const anyopaque) []const u8,
+    };
 
     pub fn deinit(f: *Files, io: Io) void {
-        if (comptime !http_enabled) aegis.assert.never("a Files is made only with http");
-        Http.deinit(io, f.h);
+        f.vtable.deinit(f.context, io);
         f.* = undefined;
     }
 
@@ -268,18 +268,12 @@ pub const Files = struct {
     /// refuses it. The body's end settles a failed read: a cancel as
     /// `Canceled`.
     pub fn get(f: *Files, suffix: []const u8) Self.Error!?aegis.io.ReadEnd {
-        if (comptime !http_enabled) aegis.assert.never("a Files is made only with http");
-        const h = f.h;
-        const res = try h.get(suffix);
-        if (res.status == .not_found) return null;
-        try h.checkStatus(res);
-        return responseEnd(res.readerBuffered(h.io, h.body_buffer), res);
+        return f.vtable.get(f.context, suffix);
     }
 
     /// How many requests `begin` keeps under way: `http.maxRequests`.
     pub fn requests(f: *const Files) usize {
-        if (comptime !http_enabled) aegis.assert.never("a Files is made only with http");
-        return f.h.max_requests;
+        return f.vtable.requests(f.context);
     }
 
     /// `GET` of `suffix` made ready in `e`, to be sent beside others with
@@ -288,35 +282,18 @@ pub const Files = struct {
     /// with the session's URL and credentials as they are, and the
     /// session is not changed by it.
     pub fn begin(f: *Files, e: *Early, suffix: []const u8) Allocator.Error!void {
-        if (comptime !http_enabled) aegis.assert.never("a Files is made only with http");
-        const h = f.h;
-        e.reset(h.io);
-        const a = e.arena.allocator();
-        e.client = &h.client;
-        if (h.credentials.authorization()) |text| {
-            // Its own copy, as a 401 to `get` may change the session's.
-            var copy = aegis.SecretBytes.init(e.arena.child_allocator, text.len) catch return error.OutOfMemory;
-            copy.appendSlice(e.arena.child_allocator, text) catch {
-                copy.deinit(e.arena.child_allocator);
-                return error.OutOfMemory;
-            };
-            e.authorization = copy;
-        }
-        e.headers = try h.headers(a, false, if (e.authorization) |*copy| copy.expose() else null, false);
-        e.url = try h.origin.join(a, try a.print("{s}{s}", .{ h.base_path, suffix }));
+        return f.vtable.begin(f.context, e, suffix);
     }
 
     /// The repository's URL, where the first request's redirect led, in
     /// `arena`.
     pub fn baseUrl(f: *const Files, arena: Allocator) Allocator.Error![]const u8 {
-        if (comptime !http_enabled) aegis.assert.never("a Files is made only with http");
-        return f.h.origin.join(arena, f.h.base_path);
+        return f.vtable.baseUrl(f.context, arena);
     }
 
     /// What failed last, in words: a status, a reason.
     pub fn message(f: *const Files) []const u8 {
-        if (comptime !http_enabled) aegis.assert.never("a Files is made only with http");
-        return f.h.connection.message();
+        return f.vtable.message(f.context);
     }
 };
 
@@ -330,59 +307,56 @@ pub const Early = struct {
     pub const Answer = enum { ok, missing, again };
 
     arena: std.heap.ArenaAllocator,
-    client: if (http_enabled) ?*uplink.Client else void = if (http_enabled) null else {},
     url: []const u8 = "",
     headers: []const http.Header = &.{},
     /// The request's `Authorization`, wiped when it ends.
     authorization: ?aegis.SecretBytes = null,
-    diagnostics: if (http_enabled) uplink.Diagnostics else void = if (http_enabled) .{} else {},
-    /// An `ok` answer's, its body unread.
-    response: if (http_enabled) ?uplink.Response else void = if (http_enabled) null else {},
+    /// The engine's request, which `Files.begin` makes in `arena`: what
+    /// `send` sends and `body` reads. `null` until then, and after `reset`.
+    request: ?Request = null,
+
+    /// An engine's request: its state and what it does.
+    pub const Request = struct {
+        context: *anyopaque,
+        vtable: *const Request.VTable,
+
+        pub const VTable = struct {
+            /// `Early.send`.
+            send: *const fn (context: *anyopaque, e: *Early, io: Io) Early.Error!Answer,
+            /// `Early.body`.
+            body: *const fn (context: *anyopaque, io: Io, buffer: []u8) ?aegis.io.ReadEnd,
+            /// The request's end: an answer still held let go.
+            end: *const fn (context: *anyopaque, io: Io) void,
+        };
+    };
 
     pub fn init(gpa: Allocator) Early {
         return .{ .arena = .init(gpa) };
     }
 
-    /// Send the request and read the head of its answer. The client is
-    /// one several tasks may use at once.
+    /// Send the request and read the head of its answer. The engine's
+    /// client is one several tasks may use at once. With nothing begun,
+    /// `again`.
     pub fn send(e: *Early, io: Io) Early.Error!Answer {
-        // Without http no session gives an Early its client.
-        if (comptime !http_enabled) return .again;
-        const client = e.client orelse return .again;
-        var res = client.send(io, .{ .url = e.url, .headers = e.headers, .diagnostics = &e.diagnostics }) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.Canceled => return error.Canceled,
-            else => return .again,
-        };
-        const answer: Answer = switch (res.status) {
-            .ok => .ok,
-            .not_found => .missing,
-            else => .again,
-        };
-        if (answer == .ok) e.response = res else res.deinit(io);
-        return answer;
+        const request = e.request orelse return .again;
+        return request.vtable.send(request.context, e, io);
     }
 
     /// An `ok` answer's body, read through `buffer`; its end settles a
     /// failed read, a cancel as `Canceled`.
     pub fn body(e: *Early, io: Io, buffer: []u8) ?aegis.io.ReadEnd {
-        if (comptime !http_enabled) return null;
-        const res = &(e.response orelse return null);
-        return responseEnd(res.readerBuffered(io, buffer), res);
+        const request = e.request orelse return null;
+        return request.vtable.body(request.context, io, buffer);
     }
 
     /// The request ended, ready for the next.
     pub fn reset(e: *Early, io: Io) void {
-        if (comptime http_enabled) {
-            if (e.response) |*res| res.deinit(io);
-            e.response = null;
-            e.client = null;
-        }
+        if (e.request) |request| request.vtable.end(request.context, io);
+        e.request = null;
         if (e.authorization) |*copy| copy.deinit(e.arena.child_allocator);
         e.authorization = null;
         e.url = "";
         e.headers = &.{};
-        if (comptime http_enabled) e.diagnostics = .{};
         _ = e.arena.reset(.retain_capacity);
     }
 
@@ -393,6 +367,125 @@ pub const Early = struct {
     }
 };
 
+/// The files under `url`, with no request made: an alternate a dumb
+/// server names, asked as its own repository is. The engine
+/// `relic_net.network.openFiles` is.
+pub fn openFiles(gpa: Allocator, io: Io, url: url_mod.Url, options: Options) Self.Error!Files {
+    var plain = options;
+    plain.protocol_v2 = false;
+    const h = try prepare(gpa, io, url, .upload_pack, plain);
+    h.downloading = true;
+    h.base_path = std.mem.trimEnd(u8, url.path, "/");
+    return h.filesOf("");
+}
+
+/// What the engine's `Files` are: a conversation's, through its `Http`.
+const FilesEngine = struct {
+    const vtable: Files.VTable = .{
+        .deinit = deinit,
+        .get = get,
+        .requests = requests,
+        .begin = begin,
+        .baseUrl = baseUrl,
+        .message = message,
+    };
+
+    fn of(context: *anyopaque) *Http {
+        return @ptrCast(@alignCast(context)); // safe: Http.files makes the context an Http
+    }
+
+    fn ofConst(context: *const anyopaque) *const Http {
+        return @ptrCast(@alignCast(context)); // safe: Http.files makes the context an Http
+    }
+
+    fn deinit(context: *anyopaque, io: Io) void {
+        Http.deinit(io, of(context));
+    }
+
+    fn get(context: *anyopaque, suffix: []const u8) Self.Error!?aegis.io.ReadEnd {
+        const h = of(context);
+        const res = try h.get(suffix);
+        if (res.status == .not_found) return null;
+        try h.checkStatus(res);
+        return responseEnd(res.readerBuffered(h.io, h.body_buffer), res);
+    }
+
+    fn requests(context: *const anyopaque) usize {
+        return ofConst(context).max_requests;
+    }
+
+    fn begin(context: *anyopaque, e: *Early, suffix: []const u8) Allocator.Error!void {
+        const h = of(context);
+        e.reset(h.io);
+        const a = e.arena.allocator();
+        const state = try a.create(EarlyState);
+        state.* = .{ .client = &h.client };
+        e.request = .{ .context = state, .vtable = &EarlyState.vtable };
+        if (h.credentials.authorization()) |text| {
+            // Its own copy, as a 401 to `get` may change the session's.
+            var copy = aegis.SecretBytes.init(e.arena.child_allocator, text.len) catch return error.OutOfMemory;
+            copy.appendSlice(e.arena.child_allocator, text) catch {
+                copy.deinit(e.arena.child_allocator);
+                return error.OutOfMemory;
+            };
+            e.authorization = copy;
+        }
+        e.headers = try h.headers(a, false, if (e.authorization) |*copy| copy.expose() else null, false);
+        e.url = try h.origin.join(a, try a.print("{s}{s}", .{ h.base_path, suffix }));
+    }
+
+    fn baseUrl(context: *const anyopaque, arena: Allocator) Allocator.Error![]const u8 {
+        const h = ofConst(context);
+        return h.origin.join(arena, h.base_path);
+    }
+
+    fn message(context: *const anyopaque) []const u8 {
+        return ofConst(context).connection.message();
+    }
+};
+
+/// An `Early` request's state in the engine: the conversation's client,
+/// and the answer an `ok` holds, its body unread.
+const EarlyState = struct {
+    client: *uplink.Client,
+    diagnostics: uplink.Diagnostics = .{},
+    response: ?uplink.Response = null,
+
+    const vtable: Early.Request.VTable = .{ .send = send, .body = body, .end = end };
+
+    fn of(context: *anyopaque) *EarlyState {
+        return @ptrCast(@alignCast(context)); // safe: FilesEngine.begin makes the context an EarlyState
+    }
+
+    fn send(context: *anyopaque, e: *Early, io: Io) Early.Error!Early.Answer {
+        const s = of(context);
+        var res = s.client.send(io, .{ .url = e.url, .headers = e.headers, .diagnostics = &s.diagnostics }) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.Canceled => return error.Canceled,
+            else => return .again,
+        };
+        const answer: Early.Answer = switch (res.status) {
+            .ok => .ok,
+            .not_found => .missing,
+            else => .again,
+        };
+        if (answer == .ok) s.response = res else res.deinit(io);
+        return answer;
+    }
+
+    fn body(context: *anyopaque, io: Io, buffer: []u8) ?aegis.io.ReadEnd {
+        const s = of(context);
+        const res = &(s.response orelse return null);
+        return responseEnd(res.readerBuffered(io, buffer), res);
+    }
+
+    fn end(context: *anyopaque, io: Io) void {
+        const s = of(context);
+        if (s.response) |*res| res.deinit(io);
+        s.response = null;
+    }
+};
+
 /// One `GET` of `url`, its body written to `w`: what git-remote-https's
 /// `get` does for a bundle URI. git's `http.*` settings for the URL hold
 /// and its credentials are asked for on a 401, as for a conversation; a
@@ -400,7 +493,6 @@ pub const Early = struct {
 /// `initial` follows a conversation's first request and a download is
 /// none. Any status but 200 is `HttpStatus`, as the helper's `get` fails.
 pub fn download(gpa: Allocator, io: Io, w: *Io.Writer, url: url_mod.Url, options: Options) (Self.Error || Io.Writer.Error)!void {
-    if (comptime !http_enabled) return error.HttpUnavailable;
     var plain = options;
     plain.protocol_v2 = false;
     const h = try prepare(gpa, io, url, .upload_pack, plain);
@@ -414,6 +506,25 @@ pub fn download(gpa: Allocator, io: Io, w: *Io.Writer, url: url_mod.Url, options
         error.WriteFailed => error.WriteFailed,
         error.ReadFailed => h.cutShort(body),
     };
+}
+
+/// The environment's proxy put into `settings` for `url`, as git hands
+/// curl its environment: `http_proxy` (or on Windows `HTTP_PROXY`, the same
+/// variable), `https_proxy` and `all_proxy` unless the configuration named
+/// a proxy (`Settings.proxy_from_config`), then `no_proxy` turning any
+/// proxy off for the hosts it names. An empty proxy is none.
+pub fn environmentProxy(settings: *http_settings.Settings, env: *const std.process.Environ.Map, url: url_mod.Url) void {
+    if (!settings.proxy_from_config) settings.proxy = uplink.Proxy.environmentValue(env, url.scheme == .https, .lowercase);
+    if (settings.proxy) |p| if (p.len == 0) {
+        settings.proxy = null;
+    };
+    if (settings.proxy) |_| {
+        // git supplies an explicitly set lowercase list to curl even
+        // when it is empty, overriding curl's environment fallback.
+        const list = env.get("no_proxy") orelse uplink.Proxy.noProxyValue(env, .lowercase);
+        const port = url.port orelse @as(u16, if (url.scheme == .https) 443 else 80);
+        if (uplink.Proxy.bypassed(list, url.host, port, .lowercase)) settings.proxy = null;
+    }
 }
 
 /// A response body's end: `reader`, read from `res`, with the response's
@@ -502,9 +613,9 @@ const Http = struct {
     gpa: Allocator,
     io: Io,
     arena: std.heap.ArenaAllocator,
-    client: if (http_enabled) uplink.Client else void,
+    client: uplink.Client,
     /// Why the exchange under way failed, in detail.
-    diagnostics: if (http_enabled) uplink.Diagnostics else void = if (http_enabled) .{} else {},
+    diagnostics: uplink.Diagnostics = .{},
     /// Where the repository is, and the path of its URL without a
     /// trailing slash; a redirect of the first request moves both.
     origin: Origin,
@@ -525,8 +636,8 @@ const Http = struct {
     proxied: bool = false,
     /// `http.maxRequests`: how many a dumb fetch keeps under way.
     max_requests: usize = 1,
-    in_flight: if (http_enabled) ?uplink.Response else void = if (http_enabled) null else {},
-    streaming: if (http_enabled) ?uplink.Outgoing else void = if (http_enabled) null else {},
+    in_flight: ?uplink.Response = null,
+    streaming: ?uplink.Outgoing = null,
     post_buffer: []u8,
     post: Io.Writer,
     /// What a response's body is read through: room for the longest
@@ -542,21 +653,21 @@ const Http = struct {
     proxy_secret: ?aegis.SecretBytes = null,
     /// `http.sslCAInfo` and `http.sslCAPath`, when they name authorities;
     /// `http.proxySSLCAInfo`, when it does.
-    trust: if (http_enabled) ?cloak.Trust.Snapshot else void = if (http_enabled) null else {},
-    proxy_trust: if (http_enabled) ?cloak.Trust.Snapshot else void = if (http_enabled) null else {},
+    trust: ?cloak.Trust.Snapshot = null,
+    proxy_trust: ?cloak.Trust.Snapshot = null,
     /// `http.sslCert` and its key, and the passphrase's credential when
     /// `http.sslCertPasswordProtected` asks for one.
-    client_auth: if (http_enabled) ?cloak.ClientAuth else void = if (http_enabled) null else {},
+    client_auth: ?cloak.ClientAuth = null,
     cert_credentials: ?credential.Session = null,
     /// The same for an `https` proxy.
-    proxy_client_auth: if (http_enabled) ?cloak.ClientAuth else void = if (http_enabled) null else {},
+    proxy_client_auth: ?cloak.ClientAuth = null,
     proxy_cert_credentials: ?credential.Session = null,
     /// A failure met inside a writer, which can only say that it failed.
     write_error: ?Error = null,
     /// `http.cookieFile`'s cookies, sent and kept by the client; written
     /// back to `cookie_jar_file` when the conversation ends, as curl
     /// writes its jar for git's `http.saveCookies`.
-    cookies: if (http_enabled) ?uplink.CookieJar else void = if (http_enabled) null else {},
+    cookies: ?uplink.CookieJar = null,
     cookie_jar_file: ?[]const u8 = null,
     /// The warning kept for a jar that cannot be written back, reserved
     /// where the conversation starts, as its end returns nothing.
@@ -575,7 +686,7 @@ const Http = struct {
     /// What `configure` read: the settings, and the client they make.
     const Configured = struct {
         settings: http_settings.Settings,
-        client: if (http_enabled) uplink.Client.Options else void,
+        client: uplink.Client.Options,
     };
 
     const vtable: Connection.VTable = .{
@@ -590,6 +701,12 @@ const Http = struct {
         return @ptrCast(@alignCast(context)); // the context handed out with this vtable is an Http
     }
 
+    /// The conversation's files, handed over with `listing`, `info/refs`
+    /// as the server sent it.
+    fn filesOf(h: *Http, listing: []const u8) Files {
+        return .{ .context = h, .vtable = &FilesEngine.vtable, .listing = listing, .follow_redirects = h.follow_redirects };
+    }
+
     /// The settings, and the client they make: certificates to trust
     /// loaded, checks turned off where git's settings say so, the extra
     /// headers read, and a proxy set up.
@@ -602,6 +719,7 @@ const Http = struct {
 
         const environ: ?*const std.process.Environ.Map = if (h.options.programs) |p| p.environ else null;
         var settings = try http_settings.resolve(arena, h.io, url, .{ .config = h.options.config, .environ = environ, .remote_name = h.options.remote_name, .base = h.options.base });
+        if (environ) |env| environmentProxy(&settings, env, url);
         http_settings.chooseProxy(&settings, h.options.proxy);
         var tls_options: uplink.tls.ClientOptions = .{};
         if (url.scheme == .https) {
@@ -1589,7 +1707,6 @@ const testing = std.testing;
 
 test "an https proxy is checked against http.proxySSLCAInfo, or the system's, whatever http.sslVerify says, and answered with http.proxySSLCert" {
     // Only with `http`: the proxy is uplink's.
-    if (!@import("relic_options").http) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var tmp = testing.tmpDir(.{});
@@ -1644,7 +1761,6 @@ test "an https proxy is checked against http.proxySSLCAInfo, or the system's, wh
 }
 
 test "a cancel that lands in a request too large to send whole is returned, not taken for a broken connection" {
-    if (comptime !http_enabled) return error.SkipZigTest;
     const testremote = @import("../testing/remote.zig");
     const testing_io = @import("../testing/io.zig");
     const protocol = @import("protocol.zig");

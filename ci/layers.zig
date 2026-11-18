@@ -44,6 +44,8 @@ pub const layers: []const gantry.rules.Layer = &.{
     .{ .name = "core", .patterns = &.{ "src/core.zig", "src/contract.zig" } },
     // relic_lfs, over the core.
     .{ .name = "lfs", .patterns = &.{ "src/lfs/**", "src/lfs.zig" } },
+    // relic_net, over the core and relic_lfs: the one name of the engines.
+    .{ .name = "net", .patterns = &.{"src/net.zig"} },
     .{ .name = "public", .patterns = &.{"src/relic.zig"} },
 };
 
@@ -57,9 +59,10 @@ pub const modules: []const gantry.NamedModule = &.{
     .{ .name = "relic_lfs", .path = "src/lfs.zig", .from = "src/testing/**" },
     .{ .name = "relic", .path = "src/relic.zig", .from = "src/benchmark.zig" },
     .{ .name = "relic_lfs", .path = "src/lfs.zig", .from = "src/benchmark.zig" },
+    .{ .name = "relic_net", .path = "src/net.zig", .from = "src/benchmark.zig" },
 };
 pub const references: []const gantry.rules.ReferenceRule = &.{
-    .{ .name = "named dependencies", .unresolved_only = true, .except_targets = &.{ "aegis", "build_options", "builtin", "conduit", "reactor", "root", "std", "sweep", "parallax", "relic_options", "uplink", "cloak", "strand", "airlock", "airlock.testing", "warp", "xenoglyph", "ladar", "shakedown", "testdata" } },
+    .{ .name = "named dependencies", .unresolved_only = true, .except_targets = &.{ "aegis", "build_options", "builtin", "conduit", "reactor", "root", "std", "sweep", "parallax", "relic_lfs", "uplink", "cloak", "strand", "airlock", "airlock.testing", "warp", "xenoglyph", "ladar", "shakedown", "testdata" } },
     .{ .name = "source siblings", .suffix = ".zig", .relative = true, .except_targets = &.{"src/**"} },
     .{ .name = "facade imports", .target = "src/commit.zig", .relative = true, .except_from = &.{ "src/core.zig", "src/testing/**", "src/tests.zig", "src/**/*_test.zig" } },
     .{ .name = "facade imports", .target = "src/config.zig", .relative = true, .except_from = &.{ "src/core.zig", "src/testing/**", "src/tests.zig", "src/**/*_test.zig" } },

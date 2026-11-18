@@ -79,7 +79,7 @@ test "CVE-2025-48384, t7450-bad-git-dotfiles 'submodule must not checkout into d
     var target = try owner.dir.openDir(io, "bad-clone", .{ .iterate = true });
     defer target.close(io);
     const who: object.Signature = .{ .name = "S", .email = "s@example.com", .when_secs = 1, .offset_minutes = 0 };
-    var clone = try clone_mod.clone(gpa, io, repo_path, target, .{ .who = who });
+    var clone = try clone_mod.clone(gpa, io, repo_path, target, .{ .means = .none, .who = who });
     defer clone.deinit(io);
     var cloned = owner;
     cloned.dir = target;

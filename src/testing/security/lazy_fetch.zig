@@ -13,6 +13,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const clone_mod = @import("../../transport/clone.zig");
+const testnet = @import("../net.zig");
 
 test "CVE-2024-32465, t0411-clone-from-partial 'local clone must not fetch from promisor remote and execute script' and 'clone from file://... must not fetch'" {
     const gpa = std.testing.allocator;
@@ -53,7 +54,7 @@ test "CVE-2024-32465, t0411-clone-from-partial 'local clone must not fetch from 
         defer target.close(io);
         // The blobs are missing and nothing brings them: the clone fails,
         // or leaves them missing; it never runs the promisor's program.
-        if (clone_mod.clone(gpa, io, url, target, .{ .who = who, .programs = .{ .environ = &env } })) |opened| {
+        if (clone_mod.clone(gpa, io, url, target, .{ .who = who, .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network } })) |opened| {
             var repo = opened;
             repo.deinit(io);
         } else |_| {}

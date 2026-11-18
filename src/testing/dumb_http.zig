@@ -20,6 +20,7 @@ const fetch_mod = @import("../transport/fetch.zig");
 const repo_mod = @import("../repo/repo.zig");
 const config_mod = @import("../config/config.zig");
 const testing_io = @import("io.zig");
+const testnet = @import("net.zig");
 
 const who: object.Signature = .{ .name = "T", .email = "t@example.com", .when_secs = 1_700_000_000, .offset_minutes = 0 };
 
@@ -134,7 +135,7 @@ fn cloneBoth(s: *Served, io: Io, name: []const u8, tag: []const u8, git_args: []
     defer dir.close(io);
     var opts = options;
     opts.who = who;
-    opts.programs = .{ .environ = &s.env };
+    opts.means = .{ .programs = .{ .environ = &s.env }, .network = &testnet.network };
     var repo = try clone_mod.clone(s.gpa, io, remote, dir, opts);
     repo.deinit(io);
     return .{ .theirs = theirs, .ours = made.path };
@@ -184,12 +185,12 @@ test "dumb HTTP: a clone of a repository all loose, all packed and mixed is the 
     try source.exec(io, &.{ "push", "-q", mixed, "HEAD:main" });
 
     for ([_][]const u8{ "loose.git", "packed.git", "mixed.git" }) |name| {
-        const made = try cloneBoth(s, io, name, name, &.{}, .{ .who = who });
+        const made = try cloneBoth(s, io, name, name, &.{}, .{ .means = testnet.means(null), .who = who });
         try expectSameClone(s, io, made.theirs, made.ours, false);
 
         // The refs, as git's ls-remote lists them.
         const theirs = try s.git(io, &.{ "ls-remote", try s.url(name) });
-        var session = try transport.Session.open(gpa, io, try s.url(name), .{ .service = .upload_pack }, .{ .who = who, .programs = .{ .environ = &s.env } });
+        var session = try transport.Session.open(gpa, io, try s.url(name), .{ .service = .upload_pack }, .{ .who = who, .means = .{ .programs = .{ .environ = &s.env }, .network = &testnet.network } });
         defer session.deinit(io);
         var refs = try session.listRefs(gpa, io, &.{});
         defer refs.deinit();
@@ -204,7 +205,7 @@ test "dumb HTTP: a clone of a repository all loose, all packed and mixed is the 
 
 /// relic's listing of `remote`, as git's ls-remote prints one.
 fn lsRemote(s: *Served, io: Io, remote: []const u8) ![]const u8 {
-    var session = try transport.Session.open(s.gpa, io, remote, .{ .service = .upload_pack }, .{ .who = who, .programs = .{ .environ = &s.env } });
+    var session = try transport.Session.open(s.gpa, io, remote, .{ .service = .upload_pack }, .{ .who = who, .means = .{ .programs = .{ .environ = &s.env }, .network = &testnet.network } });
     defer session.deinit(io);
     var refs = try session.listRefs(s.gpa, io, &.{});
     defer refs.deinit();
@@ -237,7 +238,7 @@ test "dumb HTTP: a SHA-256 repository, a detached HEAD and a HEAD naming no list
     _ = try s.git(io, &.{ "-C", nowhere, "symbolic-ref", "HEAD", "refs/heads/gone" });
 
     for ([_][]const u8{ "sha256.git", "detached.git", "nowhere.git" }) |name| {
-        const made = try cloneBoth(s, io, name, name, &.{}, .{ .who = who });
+        const made = try cloneBoth(s, io, name, name, &.{}, .{ .means = testnet.means(null), .who = who });
         try expectSameClone(s, io, made.theirs, made.ours, false);
         const remote = try s.url(name);
         try testing.expectEqualStrings(try s.git(io, &.{ "ls-remote", remote }), try lsRemote(s, io, remote));
@@ -276,7 +277,7 @@ test "dumb HTTP: objects borrowed through http-alternates (/, ../ and a URL) and
         try dir.writeFile(io, .{ .sub_path = "alternates", .data = "../../base.git/objects\n" });
         try dir.writeFile(io, .{ .sub_path = case.file, .data = case.text });
 
-        const made = try cloneBoth(s, io, case.name, case.name, &.{ "-c", "http.followRedirects=true" }, .{ .who = who, .config = &config });
+        const made = try cloneBoth(s, io, case.name, case.name, &.{ "-c", "http.followRedirects=true" }, .{ .means = testnet.means(null), .who = who, .config = &config });
         try expectSameClone(s, io, made.theirs, made.ours, false);
     }
 
@@ -286,7 +287,7 @@ test "dumb HTTP: objects borrowed through http-alternates (/, ../ and a URL) and
     const made = try s.target(io, "relic-refused");
     var dir = made.dir;
     defer dir.close(io);
-    try testing.expectError(error.ObjectMissing, clone_mod.clone(gpa, io, try s.url("slash.git"), dir, .{ .who = who, .programs = .{ .environ = &s.env } }));
+    try testing.expectError(error.ObjectMissing, clone_mod.clone(gpa, io, try s.url("slash.git"), dir, .{ .who = who, .means = .{ .programs = .{ .environ = &s.env }, .network = &testnet.network } }));
 }
 
 test "dumb HTTP: a fetch takes only what is missing, as the server's log shows, and its refs are git's" {
@@ -297,7 +298,7 @@ test "dumb HTTP: a fetch takes only what is missing, as the server's log shows, 
     var source = try testremote.historyRepo(gpa, io, 3);
     defer source.deinit();
     const served = try s.publish(io, &source, "repo.git");
-    const made = try cloneBoth(s, io, "repo.git", "repo", &.{}, .{ .who = who });
+    const made = try cloneBoth(s, io, "repo.git", "repo", &.{}, .{ .means = testnet.means(null), .who = who });
     const before = try s.git(io, &.{ "-C", served, "rev-parse", "main" });
 
     try testremote.addCommits(gpa, io, &source, 10, 2);
@@ -309,7 +310,7 @@ test "dumb HTTP: a fetch takes only what is missing, as the server's log shows, 
         defer dir.close(io);
         var repo = try repo_mod.Repository.open(gpa, io, dir, .{});
         defer repo.deinit(io);
-        var fetched = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = who, .programs = .{ .environ = &s.env } });
+        var fetched = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = who, .means = .{ .programs = .{ .environ = &s.env }, .network = &testnet.network } });
         fetched.deinit();
     }
     try expectSameClone(s, io, made.theirs, made.ours, false);
@@ -347,7 +348,7 @@ test "dumb HTTP: loose objects are asked for up to http.maxRequests at once, as 
     const made = try s.target(io, "relic-repo");
     var dir = made.dir;
     defer dir.close(io);
-    var repo = try clone_mod.clone(gpa, io, remote, dir, .{ .who = who, .programs = .{ .environ = &s.env } });
+    var repo = try clone_mod.clone(gpa, io, remote, dir, .{ .who = who, .means = .{ .programs = .{ .environ = &s.env }, .network = &testnet.network } });
     repo.deinit(io);
     const ours_most = s.server.mostAtOnce();
     try expectSameClone(s, io, theirs, made.path, false);
@@ -381,7 +382,7 @@ fn expectBothRefuse(s: *Served, io: Io, remote: []const u8, tag: []const u8, git
     var dir = made.dir;
     defer dir.close(io);
     var opts = options;
-    opts.programs = .{ .environ = &s.env };
+    opts.means = .{ .programs = .{ .environ = &s.env }, .network = &testnet.network };
     try testing.expectError(expected, clone_mod.clone(s.gpa, io, remote, dir, opts));
 }
 
@@ -420,18 +421,18 @@ test "dumb HTTP: a corrupt or missing object, a depth or a date, a push and a re
     _ = whole;
 
     // Followed only where every redirect is.
-    try expectBothRefuse(s, io, try s.url("whole.git"), "initial", &.{}, .{ .who = who }, error.HttpStatus);
+    try expectBothRefuse(s, io, try s.url("whole.git"), "initial", &.{}, .{ .means = testnet.means(null), .who = who }, error.HttpStatus);
     var follow = try config_mod.Config.parseText(gpa, "[http]\n\tfollowRedirects = true\n", .command);
     defer follow.deinit();
     const git_follow = [_][]const u8{ "-c", "http.followRedirects=true" };
     {
-        const made = try cloneBoth(s, io, "whole.git", "followed", &git_follow, .{ .who = who, .config = &follow });
+        const made = try cloneBoth(s, io, "whole.git", "followed", &git_follow, .{ .means = testnet.means(null), .who = who, .config = &follow });
         try expectSameClone(s, io, made.theirs, made.ours, false);
     }
-    try expectBothRefuse(s, io, try s.url("corrupt.git"), "corrupt", &git_follow, .{ .who = who, .config = &follow }, error.CorruptObject);
-    try expectBothRefuse(s, io, try s.url("missing.git"), "missing", &git_follow, .{ .who = who, .config = &follow }, error.ObjectMissing);
-    try expectBothRefuse(s, io, try s.url("whole.git"), "depth", &(git_follow ++ [_][]const u8{ "--depth", "1" }), .{ .who = who, .config = &follow, .depth = 1 }, error.DumbHttpShallow);
-    try expectBothRefuse(s, io, try s.url("whole.git"), "since", &(git_follow ++ [_][]const u8{"--shallow-since=2000-01-01"}), .{ .who = who, .config = &follow, .shallow_since = .fromNanoseconds(946_684_800 * std.time.ns_per_s) }, error.DumbHttpShallow);
+    try expectBothRefuse(s, io, try s.url("corrupt.git"), "corrupt", &git_follow, .{ .means = testnet.means(null), .who = who, .config = &follow }, error.CorruptObject);
+    try expectBothRefuse(s, io, try s.url("missing.git"), "missing", &git_follow, .{ .means = testnet.means(null), .who = who, .config = &follow }, error.ObjectMissing);
+    try expectBothRefuse(s, io, try s.url("whole.git"), "depth", &(git_follow ++ [_][]const u8{ "--depth", "1" }), .{ .means = testnet.means(null), .who = who, .config = &follow, .depth = 1 }, error.DumbHttpShallow);
+    try expectBothRefuse(s, io, try s.url("whole.git"), "since", &(git_follow ++ [_][]const u8{"--shallow-since=2000-01-01"}), .{ .means = testnet.means(null), .who = who, .config = &follow, .shallow_since = .fromNanoseconds(946_684_800 * std.time.ns_per_s) }, error.DumbHttpShallow);
 
     // An exclusion, which git's `fetch_dumb` drops without a word
     // (remote-curl.c:1175), handing back a whole clone: relic refuses it,
@@ -443,18 +444,18 @@ test "dumb HTTP: a corrupt or missing object, a depth or a date, a push and a re
         const made = try s.target(io, "relic-exclude");
         var dir = made.dir;
         defer dir.close(io);
-        try testing.expectError(error.DumbHttpShallow, clone_mod.clone(gpa, io, try s.url("whole.git"), dir, .{ .who = who, .config = &follow, .shallow_exclude = &.{"side"}, .programs = .{ .environ = &s.env } }));
+        try testing.expectError(error.DumbHttpShallow, clone_mod.clone(gpa, io, try s.url("whole.git"), dir, .{ .who = who, .config = &follow, .shallow_exclude = &.{"side"}, .means = .{ .programs = .{ .environ = &s.env }, .network = &testnet.network } }));
     }
 
     // A filter is never read: everything comes, and what each records of
     // it is git's.
     {
-        const made = try cloneBoth(s, io, "whole.git", "filter", &(git_follow ++ [_][]const u8{"--filter=blob:none"}), .{ .who = who, .config = &follow, .filter = "blob:none" });
+        const made = try cloneBoth(s, io, "whole.git", "filter", &(git_follow ++ [_][]const u8{"--filter=blob:none"}), .{ .means = testnet.means(null), .who = who, .config = &follow, .filter = "blob:none" });
         try expectSameClone(s, io, made.theirs, made.ours, false);
     }
 
     // A push goes nowhere: git's needs WebDAV.
-    try testing.expectError(error.DumbHttpPushUnsupported, transport.Session.open(gpa, io, try s.url("whole.git"), .{ .service = .receive_pack }, .{ .who = who, .programs = .{ .environ = &s.env } }));
+    try testing.expectError(error.DumbHttpPushUnsupported, transport.Session.open(gpa, io, try s.url("whole.git"), .{ .service = .receive_pack }, .{ .who = who, .means = testnet.means(.{ .environ = &s.env }) }));
 }
 
 test "dumb HTTP: a cancel that stops any read of an answer or of the cookie file is Canceled, not a broken or corrupt download" {
@@ -491,7 +492,7 @@ test "dumb HTTP: a cancel that stops any read of an answer or of the cookie file
             const made = try c.s.target(io, try c.s.arena().print("{s}-{d}", .{ c.name, c.runs }));
             var dir = made.dir;
             defer dir.close(io);
-            var repo = try clone_mod.clone(gpa, run_io, try c.s.url(c.name), dir, .{ .who = who, .programs = .{ .environ = &c.s.env } });
+            var repo = try clone_mod.clone(gpa, run_io, try c.s.url(c.name), dir, .{ .who = who, .means = .{ .programs = .{ .environ = &c.s.env }, .network = &testnet.network } });
             repo.deinit(run_io);
         }
     };
@@ -508,7 +509,7 @@ test "dumb HTTP: a cancel that stops any read of an answer or of the cookie file
         s: *Served,
         config: *const config_mod.Config,
         pub fn run(l: *const @This(), run_io: Io) !void {
-            var session = try transport.Session.open(gpa, run_io, try l.s.url("packed.git"), .{ .service = .upload_pack }, .{ .who = who, .config = l.config, .programs = .{ .environ = &l.s.env } });
+            var session = try transport.Session.open(gpa, run_io, try l.s.url("packed.git"), .{ .service = .upload_pack }, .{ .who = who, .config = l.config, .means = .{ .programs = .{ .environ = &l.s.env }, .network = &testnet.network } });
             defer session.deinit(run_io);
             var refs = try session.listRefs(gpa, run_io, &.{});
             refs.deinit();

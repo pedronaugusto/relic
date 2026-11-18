@@ -157,7 +157,7 @@ fn relicPrePush(fx: *Fixture, d: Io.Dir) !void {
     defer collected.deinit();
     var report: lfspush.Report = .init(gpa);
     defer report.deinit();
-    try lfspush.beforePush(gpa, io, &repo, .{ .remote = "origin", .remote_refs = &.{"refs/heads/main"}, .pushed = collected.entries, .reach = .{ .programs = fx.programs() } }, .{ .report = &report });
+    try lfspush.beforePush(gpa, io, &repo, .{ .remote = "origin", .remote_refs = &.{"refs/heads/main"}, .pushed = collected.entries, .reach = .{ .means = .{ .programs = fx.programs(), .network = &testlfs.network } } }, .{ .report = &report });
     for (report.uploads) |r| try testing.expect(!r.isFailure());
 }
 
@@ -673,7 +673,7 @@ test "a cancel that stops a read of an object going up over git-lfs-transfer, or
             try Io.Dir.cwd().deleteTree(io, u.s.root);
             var repo = try repo_mod.Repository.open(gpa, run_io, u.d, .{});
             defer repo.deinit(run_io);
-            const server = try lfsapi.Server.open(gpa, run_io, &repo, "origin", .{ .programs = u.s.fx.programs() });
+            const server = try lfsapi.Server.open(gpa, run_io, &repo, "origin", .{ .means = .{ .programs = u.s.fx.programs(), .network = &testlfs.network } });
             defer server.deinit(run_io);
             var uploaded = try lfstransfer.upload(run_io, server, &.{u.object}, .{});
             defer uploaded.deinit();

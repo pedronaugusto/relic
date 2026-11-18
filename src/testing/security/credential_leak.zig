@@ -19,6 +19,7 @@ fn open(gpa: std.mem.Allocator, url: []const u8, value: []const u8, warnings: *w
     var config = try config_mod.Config.parseText(gpa, text, .local);
     defer config.deinit();
     var session = try transport.Session.open(gpa, std.testing.io, url, .{ .service = .upload_pack, .kind = .sha1 }, .{
+        .means = .none,
         .config = &config,
         .warnings = warnings,
     });

@@ -1,10 +1,10 @@
-//! relic's core: every file but the public roots, `src/relic.zig` and
-//! `src/lfs.zig`, and LFS's own under `src/lfs/`. Not an API: the build makes
-//! it with `createModule`, under no name a consumer can import, and the
-//! `relic` and `relic_lfs` modules are built over the one instance of it, so
-//! what each hands out is the same type. This is a plain list of its
-//! namespaces, for those two roots to reach them by; nothing here imports
-//! either root.
+//! relic's core: every file but the public roots, `src/relic.zig`,
+//! `src/lfs.zig` and `src/net.zig`, and LFS's own under `src/lfs/`. Not an
+//! API: the build makes it with `createModule`, under no name a consumer can
+//! import, and the `relic`, `relic_lfs` and `relic_net` modules are built
+//! over the one instance of it, so what each hands out is the same type.
+//! This is a plain list of its namespaces, for those roots to reach them by;
+//! nothing here imports any root.
 
 // The namespaces `relic` publishes, each a facade over its implementation.
 pub const repo = @import("repo.zig");
@@ -44,8 +44,7 @@ pub const stage = @import("stage.zig");
 pub const text = @import("text.zig");
 pub const walk = @import("walk.zig");
 pub const wire = @import("wire.zig");
-/// git's smart HTTP served on uplink's server. It names uplink's types, so
-/// it is reached only where `relic_options.http` holds.
+/// git's smart HTTP served on uplink's server, which `relic_net` publishes.
 pub const http_backend = @import("transport/http_backend.zig");
 
 /// The contract a public root keeps: its module table, the README's, and

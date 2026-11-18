@@ -48,7 +48,6 @@ comptime {
 }
 const std = @import("std");
 const builtin = @import("builtin");
-const features = @import("relic_options");
 const relic = @import("relic.zig");
 
 test "the plumbing is relic's own: no public name reaches it" {
@@ -62,9 +61,9 @@ test "the plumbing is relic's own: no public name reaches it" {
     try std.testing.expect(!@hasDecl(transport, "client_cert"));
 }
 
-// relic_lfs's tests, where it is built.
+// relic_lfs's tests.
 test {
-    if (features.lfs) _ = @import("lfs_tests.zig");
+    _ = @import("lfs_tests.zig");
 }
 
 test {
@@ -193,8 +192,7 @@ test {
         _ = @import("merge/ort_test.zig");
         _ = @import("transport/upload_pack_test.zig");
         _ = @import("transport/receive_pack_test.zig");
-        // relic's HTTP server, uplink's: there only with `http`.
-        if (features.http) _ = @import("transport/http_backend_test.zig");
+        _ = @import("transport/http_backend_test.zig");
         _ = @import("testing/clone_config.zig");
         _ = @import("wire/client_cert_test.zig");
         _ = @import("wire/pinned_key.zig");

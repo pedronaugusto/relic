@@ -1011,13 +1011,12 @@ fn row9() !void {
         defer server.stop();
         var url_buf: [64]u8 = undefined;
         const url = try relic.transport.url.Url.parse(try std.mem.print(&url_buf, "http://127.0.0.1:{d}/repo.git", .{server.port}));
-        var opened = try relic.transport.smart_http.connect(gpa, io, url, .upload_pack, .{ .protocol_v2 = false });
+        var opened = try @import("relic").net.network.connect(gpa, io, url, .upload_pack, .{ .protocol_v2 = false });
         const conn = switch (opened) {
             .smart => |c| c,
-            // The canned server answers as a smart one. Without `http` the
-            // arm holds nothing, and there is nothing to release.
+            // The canned server answers as a smart one.
             .dumb => |*files| {
-                if (@TypeOf(files.*) != void) files.deinit(io);
+                files.deinit(io);
                 return error.UnexpectedDumbServer;
             },
         };
@@ -1060,7 +1059,7 @@ fn row10() !void {
     try repo_git.exec(io, &.{ "remote", "add", "origin", url });
     var repo = try repo_mod.Repository.open(gpa, io, repo_git.dir, .{});
     defer repo.deinit(io);
-    const lfs_server = try relic_lfs.api.Server.open(gpa, io, &repo, "origin", .{});
+    const lfs_server = try relic_lfs.api.Server.open(gpa, io, &repo, "origin", .{ .means = .{ .programs = null, .network = &@import("relic").net.network } });
     defer lfs_server.deinit(io);
     const Pass = struct {
         server: *relic_lfs.api.Server,

@@ -3,151 +3,139 @@ const std = @import("std");
 const airlock_build = @import("airlock");
 
 /// What a project that depends on relic builds: the `relic` module, on aegis,
-/// conduit, reactor, sweep, parallax, airlock, warp and xenoglyph; with `http`
-/// (the default) uplink and cloak; with `lfs` (the default) strand. The four
-/// combinations: both on fetches all three, today's default; `.http = false`
-/// fetches strand alone, for Git LFS over ssh and custom transfer agents;
-/// `.lfs = false` fetches uplink and cloak, for HTTP(S) remotes without Git LFS;
-/// both off fetches none of them. The tests, examples, benchmarks and gate are
-/// `dev`'s.
+/// conduit, reactor, sweep, parallax, airlock, warp, xenoglyph and ladar;
+/// `relic_lfs`, Git LFS, over strand; and `relic_net`, the network relic
+/// reaches remotes over, over uplink and cloak. All three are always
+/// there, and strand, uplink and cloak are lazy dependencies: what a
+/// program reaches is chosen where it calls relic, never by a build option.
+/// An operation that reaches a remote takes a `transport.Means`, whose
+/// `network` is `&relic_net.network` or `null`; a program that never names
+/// relic_net compiles neither uplink nor cloak. The tests, examples,
+/// benchmarks and gate are `dev`'s.
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
     //=====================================================================
-    // The module. aegis owns its secrets; conduit runs programs and carries its platform linkage;
-    // command preparation and the permission to run remain here. sweep
-    // matches git's globs, parallax diffs and merges lines, warp compresses,
-    // airlock makes writes durable and xenoglyph composes the names macOS
-    // hands back decomposed.
+    // The modules. aegis owns its secrets; conduit runs programs and carries
+    // its platform linkage; command preparation and the permission to run
+    // remain here. sweep matches git's globs, parallax diffs and merges
+    // lines, warp compresses, airlock makes writes durable and xenoglyph
+    // composes the names macOS hands back decomposed.
     //
-    // Fetching and pushing over HTTP and HTTPS take two more: uplink speaks
-    // HTTP and cloak holds the certificates, keys and trust TLS uses. Git LFS
-    // takes strand, which reads the JSON its servers and custom transfer
-    // agents send, within limits. Each is lazy, fetched only while the
-    // feature that needs it is on: uplink and cloak with `http`, strand with
-    // `lfs`, both on by default. LFS over HTTP needs both; over ssh or a
-    // custom agent, `lfs` alone. A program that works on local repositories,
-    // or over ssh and the file system alone, turns both off and fetches none.
+    // HTTP and HTTPS, and a git daemon over TCP, take two more: uplink
+    // speaks HTTP and dials, and cloak holds the certificates, keys and
+    // trust TLS uses. Their engines are relic_net's `network`, the one name
+    // that reaches them: relic's core calls the network only through the
+    // `Means` an operation is given. Git LFS takes strand, which reads the
+    // JSON its servers and custom transfer agents send, within limits.
     //=====================================================================
 
-    const http = b.option(bool, "http", http_description) orelse true;
-    const lfs = b.option(bool, "lfs", lfs_description) orelse true;
-    const on: Features = .{ .http = http, .lfs = lfs };
-    // One core under both: what `relic_lfs` hands out is `relic`'s own type.
-    const core = coreModule(b, target, optimize, on);
+    // One core under all three: what `relic_lfs` and `relic_net` hand out
+    // is `relic`'s own type.
+    const core = coreModule(b, target, optimize, .{});
     // Each module said in the literal form, its root a path, so what the
     // package exports is read from this text (preflight's changelog check).
     _ = b.addModule("relic", .{
         .root_source_file = b.path("src/relic.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = rootImports(b, target, optimize, core, on, &.{}),
+        .imports = rootImports(b, target, optimize, core, &.{}),
     });
-    if (lfs) _ = b.addModule("relic_lfs", .{
+    const lfs = b.addModule("relic_lfs", .{
         .root_source_file = b.path("src/lfs.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = rootImports(b, target, optimize, core, on, &lfs_packages),
+        .imports = rootImports(b, target, optimize, core, &lfs_packages),
     });
+    const net = b.addModule("relic_net", .{
+        .root_source_file = b.path("src/net.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = rootImports(b, target, optimize, core, &.{}),
+    });
+    net.addImport("relic_lfs", lfs);
 }
-
-const http_description = "Fetch and push over HTTP(S), with uplink and cloak (default on)";
-const lfs_description = "Git LFS: its filters, transfers, locks and servers, with strand (default on)";
-
-/// The optional features, each with the packages it fetches.
-const Features = struct { http: bool, lfs: bool };
 
 /// relic's core, from `p`, relic's own build, for `target` and `optimize`:
 /// every file but the public roots and LFS's, rooted at `src/core.zig`,
 /// made with `createModule` so that no consumer can name it. It imports
-/// aegis, conduit, reactor, sweep, parallax, airlock, warp and xenoglyph,
-/// the `relic_options` that say which features are on, and with `http`
-/// uplink and cloak, each once the build has fetched it.
-fn coreModule(p: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, on: Features) Core {
-    const options = featureOptions(p, on);
+/// aegis, conduit, reactor, sweep, parallax, airlock, warp, xenoglyph and
+/// ladar, and uplink and cloak once the build has fetched them, or what
+/// `poison` puts in their place (`dev`'s proof that only relic_net reaches
+/// them).
+fn coreModule(p: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, poison: Poison) Core {
     return .{
         .module = p.createModule(.{
             .root_source_file = p.path("src/core.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = moduleImports(p, target, optimize, options, on, &.{}),
+            .imports = moduleImports(p, target, optimize, poison, &.{}),
         }),
-        .options = options,
+        .poison = poison,
         .readme = p.createModule(.{ .root_source_file = p.path("README.md") }),
     };
 }
 
 /// The core, and the modules the roots over it share with it: a file
-/// belongs to one module in a compilation, and two options modules with
-/// the same contents are one file.
+/// belongs to one module in a compilation.
 const Core = struct {
     module: *std.Build.Module,
-    /// `relic_options`: which features are on.
-    options: *std.Build.Module,
+    /// What stands for uplink and cloak, where `dev` proves nothing
+    /// reaches them.
+    poison: Poison,
     /// `README.md`, whose module tables the public roots check.
     readme: *std.Build.Module,
 };
 
-/// `relic_options`, saying which features `on` turns on.
-fn featureOptions(p: *std.Build, on: Features) *std.Build.Module {
-    const features = p.addOptions();
-    features.addOption(bool, "http", on.http);
-    features.addOption(bool, "lfs", on.lfs);
-    return features.createModule();
-}
-
-/// The `relic` module over `core`, as `build` adds it, for the benchmarks:
-/// `src/relic.zig`, which reaches every namespace through the core and
-/// checks the README's module table against the API as it compiles.
-fn relicModule(p: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, core: Core, on: Features) std.Build.Module.CreateOptions {
+/// The `relic` module over `core`, as `build` adds it, for the benchmarks
+/// and the network proof: `src/relic.zig`, which reaches every namespace
+/// through the core and checks the README's module table against the API
+/// as it compiles.
+fn relicModule(p: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, core: Core) std.Build.Module.CreateOptions {
     return .{
         .root_source_file = p.path("src/relic.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = rootImports(p, target, optimize, core, on, &.{}),
+        .imports = rootImports(p, target, optimize, core, &.{}),
     };
 }
 
-/// The `relic_lfs` module over `core` and strand, which exists only with
-/// `lfs`, as `build` adds it, for the benchmarks: rooted at `src/lfs.zig`,
-/// whose `server`, on uplink's server, is there only with `http`. Without
-/// it `server` is a branch never taken, whose file is never compiled, so
-/// uplink is neither imported nor fetched.
-fn lfsModule(p: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, core: Core, on: Features) std.Build.Module.CreateOptions {
+/// The `relic_lfs` module over `core` and strand, as `build` adds it, for
+/// the benchmarks and the network proof: rooted at `src/lfs.zig`.
+fn lfsModule(p: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, core: Core) std.Build.Module.CreateOptions {
     return .{
         .root_source_file = p.path("src/lfs.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = rootImports(p, target, optimize, core, on, &lfs_packages),
+        .imports = rootImports(p, target, optimize, core, &lfs_packages),
     };
 }
 
 /// What a public root imports: the core's own imports and `extra`, the core
 /// itself as `relic_core`, and `README.md`, whose module table it checks
 /// against its API as it compiles.
-fn rootImports(p: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, core: Core, on: Features, extra: []const []const u8) []const std.Build.Module.Import {
+fn rootImports(p: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, core: Core, extra: []const []const u8) []const std.Build.Module.Import {
     var imports: std.ArrayList(std.Build.Module.Import) = .empty;
-    imports.appendSlice(p.allocator, moduleImports(p, target, optimize, core.options, on, extra)) catch @panic("out of memory");
+    imports.appendSlice(p.allocator, moduleImports(p, target, optimize, core.poison, extra)) catch @panic("out of memory");
     imports.append(p.allocator, .{ .name = "relic_core", .module = core.module }) catch @panic("out of memory");
     imports.append(p.allocator, .{ .name = "README.md", .module = core.readme }) catch @panic("out of memory");
     return imports.items;
 }
 
 /// What the core imports, from `p`, relic's own build, for `target`
-/// and `optimize`: aegis, conduit, reactor, sweep, parallax, airlock, warp, xenoglyph and ladar,
-/// `options` as the `relic_options` that say which features are on, with
-/// `http` uplink and cloak, and `extra`, each optional package once the
-/// build has fetched it. A public root takes the same.
-fn moduleImports(p: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, options: *std.Build.Module, on: Features, extra: []const []const u8) []const std.Build.Module.Import {
+/// and `optimize`: aegis, conduit, reactor, sweep, parallax, airlock, warp,
+/// xenoglyph and ladar; uplink and cloak, or `poison`'s in their place; and
+/// `extra`, each lazy package once the build has fetched it. A public root
+/// takes the same.
+fn moduleImports(p: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, poison: Poison, extra: []const []const u8) []const std.Build.Module.Import {
     var imports: std.ArrayList(std.Build.Module.Import) = .empty;
     for ([_][]const u8{ "aegis", "conduit", "reactor", "sweep", "parallax", "airlock", "warp", "xenoglyph", "ladar" }) |name| {
         imports.append(p.allocator, .{ .name = name, .module = p.dependency(name, .{ .target = target, .optimize = optimize }).module(name) }) catch @panic("out of memory");
     }
-    imports.append(p.allocator, .{ .name = "relic_options", .module = options }) catch @panic("out of memory");
-    if (on.http) for (http_packages) |name| if (lazyModule(p, name, target, optimize)) |m| {
-        imports.append(p.allocator, .{ .name = name, .module = m }) catch @panic("out of memory");
-    };
+    for ([_]struct { []const u8, ?*std.Build.Module }{ .{ "uplink", poison.uplink }, .{ "cloak", poison.cloak } }) |net| {
+        if (net[1] orelse lazyModule(p, net[0], target, optimize)) |m| imports.append(p.allocator, .{ .name = net[0], .module = m }) catch @panic("out of memory");
+    }
     for (extra) |name| if (lazyModule(p, name, target, optimize)) |m| {
         imports.append(p.allocator, .{ .name = name, .module = m }) catch @panic("out of memory");
     };
@@ -160,12 +148,7 @@ pub fn dev(b: *std.Build, tools: type) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const preflight = tools.preflight;
-    // The option of `build`, passed on to relic.
-    const features: Features = .{
-        .http = b.option(bool, "http", http_description) orelse true,
-        .lfs = b.option(bool, "lfs", lfs_description) orelse true,
-    };
-    const package = relicPackage(b, target, optimize, features);
+    const package = relicPackage(b, target, optimize);
     const p = package.builder;
     const module = package.module("relic");
     const airlock_dependency = p.dependency("airlock", .{ .target = target, .optimize = optimize });
@@ -205,17 +188,15 @@ pub fn dev(b: *std.Build, tools: type) void {
 
     // git-lfs does not ship a `git-lfs-transfer` server, so the suite
     // brings one: relic and git-lfs are each pointed at it over the same
-    // stand-in ssh and what it was asked is compared. It is relic_lfs's
-    // server, so it is built where that is: with `lfs` and `http`; the
-    // tests that run it skip elsewhere.
-    const lfs_transfer_helper: ?*std.Build.Step.Compile = if (features.lfs and features.http) b.addExecutable(.{
+    // stand-in ssh and what it was asked is compared: relic_lfs's server.
+    const lfs_transfer_helper = b.addExecutable(.{
         .name = "relic-lfs-transfer-helper",
         .root_module = b.createModule(.{
             .root_source_file = p.path("src/testing/lfs/transfer.zig"),
             .target = target,
             .optimize = optimize,
         }),
-    }) else null;
+    });
 
     // relic's own upload-pack, as a program real git can be pointed at with
     // `--upload-pack`, so what git makes of relic's server is compared with
@@ -328,7 +309,7 @@ pub fn dev(b: *std.Build, tools: type) void {
         p.path(gnupg_fixture_root));
     build_options.addOptionPath("lock_helper_path", lock_helper.getEmittedBin());
     build_options.addOptionPath("filter_helper_path", filter_helper.getEmittedBin());
-    if (lfs_transfer_helper) |helper| build_options.addOptionPath("lfs_transfer_helper_path", helper.getEmittedBin()) else build_options.addOption([]const u8, "lfs_transfer_helper_path", "");
+    build_options.addOptionPath("lfs_transfer_helper_path", lfs_transfer_helper.getEmittedBin());
     // A real `git-lfs-transfer` server — Scutiger's is the one git-lfs's
     // own suite uses — for the tests that prove relic's client against one
     // rather than against the suite's own; they skip without it.
@@ -355,8 +336,8 @@ pub fn dev(b: *std.Build, tools: type) void {
     build_options.addOptionPath("remote_helper_path", remote_helper.getEmittedBin());
     build_options.addOptionPath("lfs_agent_path", lfs_agent.getEmittedBin());
     // The tests: `src/tests.zig`, which holds the core's files and names
-    // their tests, with relic's public root compiled among them, and with
-    // `lfs` relic_lfs's root, files and tests (`src/lfs_tests.zig`). It has
+    // their tests, with relic's public root compiled among them, and
+    // relic_lfs's root, files and tests (`src/lfs_tests.zig`). It has
     // every name of `src/core.zig` and is its own `relic_core`, so the
     // files that reach the core through it reach these; its comptime check
     // holds its list to the core's. One module on purpose, where a
@@ -369,8 +350,8 @@ pub fn dev(b: *std.Build, tools: type) void {
         .root_source_file = p.path("src/tests.zig"),
         .target = target,
         .optimize = optimize,
-        // The imports of the module a consumer gets, the options among them.
-        .imports = moduleImports(p, target, optimize, featureOptions(p, features), features, if (features.lfs) &lfs_packages else &.{}),
+        // The imports of the modules a consumer gets.
+        .imports = moduleImports(p, target, optimize, .{}, &lfs_packages),
     });
     test_module.addImport("relic_core", test_module);
     test_module.addImport("README.md", p.createModule(.{ .root_source_file = p.path("README.md") }));
@@ -381,10 +362,8 @@ pub fn dev(b: *std.Build, tools: type) void {
     // The fixtures the tests read, outside src/ and the paths a project fetches.
     test_module.addImport("testdata", p.createModule(.{ .root_source_file = p.path("testdata/root.zig") }));
     filter_helper.root_module.addImport("relic", module);
-    if (lfs_transfer_helper) |helper| {
-        helper.root_module.addImport("relic", module);
-        helper.root_module.addImport("relic_lfs", package.module("relic_lfs"));
-    }
+    lfs_transfer_helper.root_module.addImport("relic", module);
+    lfs_transfer_helper.root_module.addImport("relic_lfs", package.module("relic_lfs"));
     hook_fixture.root_module.addImport("relic", module);
     upload_pack_helper.root_module.addImport("relic", module);
     receive_pack_helper.root_module.addImport("relic", module);
@@ -422,7 +401,7 @@ pub fn dev(b: *std.Build, tools: type) void {
     check_step.dependOn(&held_git.step);
     check_step.dependOn(&lock_helper.step);
     check_step.dependOn(&filter_helper.step);
-    if (lfs_transfer_helper) |helper| check_step.dependOn(&helper.step);
+    check_step.dependOn(&lfs_transfer_helper.step);
     check_step.dependOn(&upload_pack_helper.step);
     check_step.dependOn(&receive_pack_helper.step);
     check_step.dependOn(&upload_archive_helper.step);
@@ -506,27 +485,20 @@ pub fn dev(b: *std.Build, tools: type) void {
         } } else .default,
         .bench = .{
             .programs = &.{ .{ .name = "relic-regressions", .source = "bench/regressions.zig" }, .{ .name = "relic-rows", .source = "bench/rows.zig" } },
-            .imports = BenchImports(preflight.Bench.Imports).of(b, features),
+            .imports = &BenchImports(preflight.Bench.Imports).hook,
             .target = target,
             .optimize = optimize,
         },
     });
-    // A project that depends on relic as a fetch gives it, in each of the
-    // four builds the options make (`configurations` in ci/workflow.json,
-    // where the ci tier also compiles relic's own `check` in each): the
-    // build a consumer gets, with aegis,
-    // conduit, reactor, sweep, parallax, airlock, warp and xenoglyph, and
-    // uplink, cloak and strand for the builds that take them. Its program
-    // names the entry points that may speak HTTP, so each compiles without
-    // uplink and cloak; imports `relic_lfs` where `.lfs` builds it; and
-    // asserts with `@hasDecl` that what a build leaves out is absent. A
-    // build that named a package it left out would fail: the module is not
-    // among relic's imports there.
+    // A project that depends on relic as a fetch gives it: the three
+    // modules, over every package relic takes. Its program names the
+    // entry points that reach a remote, relic_lfs's, and relic_net's
+    // network put in a `Means`.
     const conduit_dependency = p.dependency("conduit", .{ .target = target, .optimize = optimize });
     preflight.addConsumerCheck(b, p, .{
         .package = "relic",
         .program = p.path("ci/consumer.zig"),
-        .modules = &.{ "relic", "relic_lfs" },
+        .modules = &.{ "relic", "relic_lfs", "relic_net" },
         .packages = &.{
             conduit_dependency,
             p.dependency("aegis", .{}),
@@ -551,6 +523,27 @@ pub fn dev(b: *std.Build, tools: type) void {
     // The installer runs only on a hosted runner; its version reading is
     // proved everywhere.
     b.step("check-ci-setup", "Test the hosted tool installer").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = setup.root_module })).step);
+
+    // Only relic_net reaches the network's engines. A program over `relic`
+    // alone, every public declaration referenced, compiles with uplink and
+    // cloak replaced by a module that stops any compilation reaching it;
+    // one over `relic_lfs` too, with cloak replaced: its server's
+    // signatures name uplink's server, but its HTTP client, which needs
+    // cloak, is reached only through relic_net. Part of `check`.
+    const poison = p.createModule(.{ .root_source_file = p.path("src/testing/poison.zig") });
+    const offline_step = b.step("check-offline", "Prove a program that names no relic_net compiles none of the network's engines");
+    for ([_]struct { []const u8, Poison, bool }{
+        .{ "src/testing/offline.zig", .{ .uplink = poison, .cloak = poison }, false },
+        .{ "src/testing/offline_lfs.zig", .{ .cloak = poison }, true },
+    }) |proof| {
+        const offline_core = coreModule(p, target, optimize, proof[1]);
+        const offline = p.createModule(.{ .root_source_file = p.path(proof[0]), .target = target, .optimize = optimize });
+        offline.addImport("relic", p.createModule(relicModule(p, target, optimize, offline_core)));
+        if (proof[2]) offline.addImport("relic_lfs", p.createModule(lfsModule(p, target, optimize, offline_core)));
+        const offline_check = b.addObject(.{ .name = std.Io.Dir.path.stem(proof[0]), .root_module = offline });
+        offline_step.dependOn(&offline_check.step);
+        check_step.dependOn(&offline_check.step);
+    }
 
     // The encodings' deltas (designs/relic.md §14): the generator runs
     // Apple's libiconv, so on macOS, and reads glibc's from its source.
@@ -583,9 +576,11 @@ pub fn dev(b: *std.Build, tools: type) void {
     b.step("encodings", "Write src/text/legacy/tables.zig and the tests' src/testing/legacy_disputes.zig from Apple's libiconv and glibc's source (-Dglibc-source)").dependOn(&measure.step);
 }
 
-/// What fetching and pushing over HTTP need, fetched only while `http` is on.
-const http_packages = [_][]const u8{ "uplink", "cloak" };
-/// What Git LFS needs, fetched only while `lfs` is on.
+/// What stands for relic_net's packages, uplink (HTTP and TCP) and cloak
+/// (TLS's certificates, keys and trust), in a build that proves nothing
+/// reaches them: `null` for the package itself.
+const Poison = struct { uplink: ?*std.Build.Module = null, cloak: ?*std.Build.Module = null };
+/// What Git LFS's JSON is read with.
 const lfs_packages = [_][]const u8{"strand"};
 
 /// `name`'s module of the same name, or `null` until the build has fetched
@@ -603,44 +598,42 @@ const example_sources = [_][]const u8{
     "examples/usage.zig",
 };
 
-/// relic as the development build has it: the package, with `-Dhttp` and
-/// `-Dlfs`, as `dev` read them, passed on.
-fn relicPackage(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, features: Features) *std.Build.Dependency {
-    return b.dependency("relic", .{ .target = target, .optimize = optimize, .http = features.http, .lfs = features.lfs });
+/// relic as the development build has it: the package.
+fn relicPackage(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) *std.Build.Dependency {
+    return b.dependency("relic", .{ .target = target, .optimize = optimize });
 }
 
 /// preflight's hook for the benchmarks' modules (`Imports` is its
-/// `Bench.Imports`), holding the features `dev` read: preflight makes the
-/// modules for each mode it builds them in, after `dev` has returned.
+/// `Bench.Imports`): preflight makes the modules for each mode it builds
+/// them in, after `dev` has returned.
 fn BenchImports(comptime Imports: type) type {
     return struct {
-        const Hook = @This();
-        imports: Imports = .{ .make = make },
-        features: Features,
+        const hook: Imports = .{ .make = make };
 
-        /// A hook that lives as long as the build.
-        fn of(b: *std.Build, features: Features) *const Imports {
-            const hook = b.allocator.create(Hook) catch @panic("out of memory");
-            hook.* = .{ .features = features };
-            return &hook.imports;
-        }
-
-        fn make(imports: *const Imports, b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) []const std.Build.Module.Import {
-            const hook: *const Hook = @alignCast(@fieldParentPtr("imports", imports));
-            return benchImports(b, target, optimize, hook.features);
+        fn make(_: *const Imports, b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) []const std.Build.Module.Import {
+            return benchImports(b, target, optimize);
         }
     };
 }
 
 /// The benchmarks' relic: `src/benchmark.zig`, in the mode the benchmark
-/// builds in, over the `relic` and `relic_lfs` modules and the core beneath
-/// them, as a consumer gets them, and shakedown.
-fn benchImports(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, features: Features) []const std.Build.Module.Import {
-    const p = relicPackage(b, target, optimize, features).builder;
-    const core = coreModule(p, target, optimize, features);
-    const module = b.createModule(.{ .root_source_file = p.path("src/benchmark.zig"), .target = target, .optimize = optimize, .imports = moduleImports(p, target, optimize, core.options, features, &.{}) });
+/// builds in, over the `relic`, `relic_lfs` and `relic_net` modules and the
+/// core beneath them, as a consumer gets them, and shakedown.
+fn benchImports(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) []const std.Build.Module.Import {
+    const p = relicPackage(b, target, optimize).builder;
+    const core = coreModule(p, target, optimize, .{});
+    const module = b.createModule(.{ .root_source_file = p.path("src/benchmark.zig"), .target = target, .optimize = optimize, .imports = moduleImports(p, target, optimize, .{}, &.{}) });
     module.addImport("relic_core", core.module);
-    module.addImport("relic", p.createModule(relicModule(p, target, optimize, core, features)));
-    module.addImport("relic_lfs", p.createModule(lfsModule(p, target, optimize, core, features)));
+    module.addImport("relic", p.createModule(relicModule(p, target, optimize, core)));
+    const lfs = p.createModule(lfsModule(p, target, optimize, core));
+    module.addImport("relic_lfs", lfs);
+    const net = p.createModule(.{
+        .root_source_file = p.path("src/net.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = rootImports(p, target, optimize, core, &.{}),
+    });
+    net.addImport("relic_lfs", lfs);
+    module.addImport("relic_net", net);
     return b.allocator.dupe(std.Build.Module.Import, &.{.{ .name = "relic", .module = module }}) catch @panic("out of memory");
 }

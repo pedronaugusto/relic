@@ -29,7 +29,7 @@ const Io = std.Io;
 
 const hash = @import("../hash/hash.zig");
 const object = @import("../object/object.zig");
-const program = @import("../process.zig").program;
+const Means = @import("transport.zig").Means;
 const config_mod = @import("../config/config.zig");
 const credential = @import("../wire.zig").credential;
 const auth = @import("../wire.zig").auth;
@@ -166,8 +166,8 @@ pub const Lazy = struct {
 
     /// What the fetches are made with.
     pub const Options = struct {
-        /// The permission to run `ssh` and credential helpers.
-        programs: ?program.Programs = null,
+        /// What the promisor remote is reached with (`transport.Means`).
+        means: Means,
         prompt: ?credential.Prompt = null,
         /// Whether what arrives is checked as a fetch checks it: `null`
         /// takes `fetch.fsckObjects` or `transfer.fsckObjects`; see
@@ -292,7 +292,7 @@ pub const Lazy = struct {
         defer remote.deinit();
         if (remote.urls.len == 0) return error.NotAPartialClone;
         var session = try transport.Session.open(l.gpa, io, remote.urls[0], .{ .service = .upload_pack, .kind = repo.objectFormat() }, .{
-            .programs = l.options.programs,
+            .means = l.options.means,
             .config = repo.configuration(),
             .service_program = remote.upload_pack,
             .prompt = l.options.prompt,

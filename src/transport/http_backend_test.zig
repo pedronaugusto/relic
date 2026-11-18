@@ -15,6 +15,7 @@ const http_backend = @import("http_backend.zig");
 const repo_mod = @import("../repo/repo.zig");
 const fetch_mod = @import("fetch.zig");
 const object = @import("../object.zig");
+const testnet = @import("../testing/net.zig");
 
 /// The backend, with what the requests it saw were sent as.
 const Served = struct {
@@ -205,7 +206,7 @@ test "under http.version=HTTP/2 git and relic ask relic's server to upgrade a pl
     {
         var repo = try repo_mod.Repository.open(gpa, io, by_relic.dir, .{});
         defer repo.deinit(io);
-        var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &env } });
+        var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network } });
         outcome.deinit();
     }
     try testing.expect(served.h2.load(.monotonic) > by_git_h2);

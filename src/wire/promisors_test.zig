@@ -16,6 +16,7 @@ const warning = @import("../report.zig").warning;
 const testgit = @import("../testing/git.zig");
 const testremote = @import("../testing/remote.zig");
 const program = @import("../process.zig").program;
+const testnet = @import("../testing/net.zig");
 
 const testing = std.testing;
 const Repository = repo_mod.Repository;
@@ -139,7 +140,7 @@ test "a fetch takes and stores what a server advertises as git fetch does" {
     {
         var repo = try Repository.open(gpa, io, by_relic.dir, .{});
         defer repo.deinit(io);
-        var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .warnings = &warnings });
+        var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .means = testnet.means(null), .who = test_who, .warnings = &warnings });
         outcome.deinit();
     }
     for ([_][]const u8{ "remote.lop.partialclonefilter", "remote.lop.token" }) |key| {
@@ -190,7 +191,7 @@ test "a clone with the filter auto takes it from the promisor remotes taken, as 
     defer b.close(io);
     var env = try testremote.environ(gpa);
     defer env.deinit();
-    var repo = try clone_mod.clone(gpa, io, url, b, .{ .who = test_who, .filter = "auto", .user_config = .{ .command = &.{ "protocol.version=2", "promisor.acceptFromServer=All", lop_url, "remote.lop.promisor=true" } }, .programs = .{ .environ = &env } });
+    var repo = try clone_mod.clone(gpa, io, url, b, .{ .who = test_who, .filter = "auto", .user_config = .{ .command = &.{ "protocol.version=2", "promisor.acceptFromServer=All", lop_url, "remote.lop.promisor=true" } }, .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network } });
     repo.deinit(io);
 
     for ([_][]const []const u8{
@@ -299,7 +300,7 @@ test "git 2.56, promisor.acceptFromServerUrl configures and takes the advertised
         {
             var repo = try Repository.open(gpa, io, by_relic.dir, .{});
             defer repo.deinit(io);
-            var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .warnings = &warnings });
+            var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .means = testnet.means(null), .who = test_who, .warnings = &warnings });
             outcome.deinit();
         }
         const theirs = try by_git.run(io, &.{ "config", "--get-regexp", "^remote\\." });

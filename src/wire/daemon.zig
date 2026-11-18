@@ -17,7 +17,6 @@ const Io = std.Io;
 
 const aegis = @import("aegis");
 const uplink = @import("uplink");
-const http_enabled = @import("relic_options").http;
 
 const program = @import("../process.zig").program;
 const config_mod = @import("../config/config.zig");
@@ -25,6 +24,7 @@ const pkt_line = @import("../codec.zig").pkt_line;
 const url_mod = @import("url.zig");
 const connection = @import("connection.zig");
 const input = @import("input.zig");
+const Means = @import("network.zig").Means;
 
 const Connection = connection.Connection;
 
@@ -44,17 +44,20 @@ pub const Error = error{
     NewlineInRequest,
     /// A `core.gitProxy` with no value, which git refuses.
     InvalidProxySetting,
-    /// This build has no TCP dialer (relic built without `http`, so
-    /// without uplink); a proxy still reaches the host.
-    UnsupportedTransport,
+    /// No engine to dial the host with: the operation's `Means` has no
+    /// `network` (`transport.Means.network`). A proxy program still
+    /// reaches the host.
+    DaemonUnavailable,
 } || connection.Error || program.Error;
 
 /// How the conversation is started.
 pub const Options = struct {
-    /// The environment (`GIT_PROXY_COMMAND`, `GIT_OVERRIDE_VIRTUAL_HOST`)
-    /// and the permission to run a proxy. Without it neither variable is
-    /// read and a configured proxy is refused.
-    programs: ?program.Programs = null,
+    /// What the host is reached with. Its programs: the environment
+    /// (`GIT_PROXY_COMMAND`, `GIT_OVERRIDE_VIRTUAL_HOST`) and the
+    /// permission to run a proxy; without them neither variable is read and
+    /// a configured proxy is refused. Its network: the TCP dial to the
+    /// host where no proxy is configured.
+    means: Means,
     config: ?*const config_mod.Config = null,
     /// The program asked for on the remote side, in place of
     /// `git-upload-pack` or `git-receive-pack`.
@@ -69,7 +72,7 @@ pub fn connect(gpa: Allocator, io: Io, url: url_mod.Url, service: connection.Ser
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const environ = if (options.programs) |p| p.environ else null;
+    const environ = if (options.means.programs) |p| p.environ else null;
     // git's `hostandport`: the URL's target as written.
     const target = url.target;
     const virtual_host = if (environ) |e| e.get("GIT_OVERRIDE_VIRTUAL_HOST") orelse target else target;
@@ -78,7 +81,7 @@ pub fn connect(gpa: Allocator, io: Io, url: url_mod.Url, service: connection.Ser
     const host = if (url.user) |user| try arena.print("{s}@{s}", .{ user, url.host }) else url.host;
     const port = url.port orelse default_port;
     const conn = if (try proxyCommand(environ, options.config, target)) |command| proxied: {
-        const programs = options.programs orelse return error.ProgramsNotGranted;
+        const programs = options.means.programs orelse return error.ProgramsNotGranted;
         if (host.len != 0 and host[0] == '-') return error.SuspiciousHostname;
         var port_buf: [8]u8 = undefined;
         const port_text = std.mem.print(&port_buf, "{d}", .{port}) catch aegis.assert.never("a u16 is at most five digits");
@@ -86,7 +89,10 @@ pub fn connect(gpa: Allocator, io: Io, url: url_mod.Url, service: connection.Ser
             .argv = &.{ command, host, port_text },
             .stderr = .inherit,
         });
-    } else try dial(gpa, io, host, port);
+    } else dialed: {
+        const network = options.means.network orelse return error.DaemonUnavailable;
+        break :dialed try network.dial(gpa, io, host, port);
+    };
     errdefer conn.deinit(io);
 
     // git keeps protocol v0 for every service but upload-pack.
@@ -136,9 +142,9 @@ fn proxyCommand(environ: ?*const std.process.Environ.Map, config: ?*const config
 
 /// A TCP connection to `host` on `port`, through the family's dialer,
 /// with keepalive on as git's `enable_keepalive` turns it on, its timings
-/// the system's own.
-fn dial(gpa: Allocator, io: Io, host: []const u8, port: u16) Self.Error!*Connection {
-    if (comptime !http_enabled) return error.UnsupportedTransport;
+/// the system's own. The engine `relic_net.network.dial` is: relic reaches
+/// it through a `transport.Network`.
+pub fn dial(gpa: Allocator, io: Io, host: []const u8, port: u16) connection.Error!*Connection {
     // A host that cannot be reached is `ConnectionFailed`, however the dial
     // failed, as smart HTTP names it.
     var dialed = uplink.net.dial.dial(io, host, port, .{ .socket = .{ .nodelay = true, .keepalive = .{ .on = .{} } } }) catch |err| switch (err) {

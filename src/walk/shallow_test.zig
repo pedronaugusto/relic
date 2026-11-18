@@ -20,6 +20,7 @@ const testremote = @import("../testing/remote.zig");
 const builtin = @import("builtin");
 const warning = @import("../report.zig").warning;
 const push_mod = @import("../transport/push.zig");
+const testnet = @import("../testing/net.zig");
 
 const Oid = hash.Oid;
 const test_who: object.Signature = .{ .name = "F", .email = "f@example.com", .when_secs = 1, .offset_minutes = 0 };
@@ -148,12 +149,12 @@ test "a shallow clone is the one git makes, cut by depth, by date and by ref, in
     var since_arg_buf: [64]u8 = undefined;
     const since_arg = try std.mem.print(&since_arg_buf, "--shallow-since={d}", .{since});
     const cases = [_]Case{
-        .{ .git_args = &.{"--depth=1"}, .options = .{ .who = test_who, .depth = 1 } },
-        .{ .git_args = &.{"--depth=3"}, .options = .{ .who = test_who, .depth = 3 } },
-        .{ .git_args = &.{ "--depth=2", "--no-single-branch" }, .options = .{ .who = test_who, .depth = 2, .single_branch = false } },
-        .{ .git_args = &.{ "--depth=2", "--branch=side" }, .options = .{ .who = test_who, .depth = 2, .branch = "side" } },
-        .{ .git_args = &.{since_arg}, .options = .{ .who = test_who, .shallow_since = @import("../text.zig").date.timestamp(since) } },
-        .{ .git_args = &.{"--shallow-exclude=light"}, .options = .{ .who = test_who, .shallow_exclude = &.{"light"} } },
+        .{ .git_args = &.{"--depth=1"}, .options = .{ .means = testnet.means(null), .who = test_who, .depth = 1 } },
+        .{ .git_args = &.{"--depth=3"}, .options = .{ .means = testnet.means(null), .who = test_who, .depth = 3 } },
+        .{ .git_args = &.{ "--depth=2", "--no-single-branch" }, .options = .{ .means = testnet.means(null), .who = test_who, .depth = 2, .single_branch = false } },
+        .{ .git_args = &.{ "--depth=2", "--branch=side" }, .options = .{ .means = testnet.means(null), .who = test_who, .depth = 2, .branch = "side" } },
+        .{ .git_args = &.{since_arg}, .options = .{ .means = testnet.means(null), .who = test_who, .shallow_since = @import("../text.zig").date.timestamp(since) } },
+        .{ .git_args = &.{"--shallow-exclude=light"}, .options = .{ .means = testnet.means(null), .who = test_who, .shallow_exclude = &.{"light"} } },
     };
     for ([_]bool{ true, false }) |v2| {
         const server = try testremote.HttpServer.start(gpa, io, root.dir, .{ .protocol_v2 = v2 });
@@ -171,7 +172,7 @@ test "a shallow clone is the one git makes, cut by depth, by date and by ref, in
             const out = try testremote.gitInputEnv(gpa, io, twins.tmp.dir, &env, args.items, "", true);
             gpa.free(out);
             var options = case.options;
-            options.programs = .{ .environ = &env };
+            options.means = .{ .programs = .{ .environ = &env }, .network = &testnet.network };
             var repo = try clone_mod.clone(gpa, io, url, twins.by_relic, options);
             repo.deinit(io);
             try expectSameShallow(gpa, io, twins.by_git, twins.by_relic);
@@ -210,10 +211,10 @@ test "a fetch deepens, and unshallows, as git fetch does, and a plain fetch into
     const Step = struct { git_args: []const []const u8, options: fetch_mod.Options };
     for ([_]Step{
         // Nothing asked of the boundary: the tips move, the history is kept.
-        .{ .git_args = &.{}, .options = .{ .who = test_who } },
-        .{ .git_args = &.{"--deepen=2"}, .options = .{ .who = test_who, .deepen = 2 } },
-        .{ .git_args = &.{"--depth=5"}, .options = .{ .who = test_who, .depth = 5 } },
-        .{ .git_args = &.{"--unshallow"}, .options = .{ .who = test_who, .unshallow = true } },
+        .{ .git_args = &.{}, .options = .{ .means = testnet.means(null), .who = test_who } },
+        .{ .git_args = &.{"--deepen=2"}, .options = .{ .means = testnet.means(null), .who = test_who, .deepen = 2 } },
+        .{ .git_args = &.{"--depth=5"}, .options = .{ .means = testnet.means(null), .who = test_who, .depth = 5 } },
+        .{ .git_args = &.{"--unshallow"}, .options = .{ .means = testnet.means(null), .who = test_who, .unshallow = true } },
     }, 0..) |step, i| {
         if (i == 0) {
             // A new commit on the remote for the plain fetch to bring.
@@ -240,7 +241,7 @@ test "a fetch deepens, and unshallows, as git fetch does, and a plain fetch into
         var repo = try repo_mod.Repository.open(gpa, io, twins.by_relic, .{});
         defer repo.deinit(io);
         var options = step.options;
-        options.programs = .{ .environ = &env };
+        options.means = .{ .programs = .{ .environ = &env }, .network = &testnet.network };
         var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", options);
         outcome.deinit();
         try expectSameShallow(gpa, io, twins.by_git, twins.by_relic);
@@ -253,7 +254,7 @@ test "a fetch deepens, and unshallows, as git fetch does, and a plain fetch into
     // Whole again: there is nothing left to unshallow.
     var repo = try repo_mod.Repository.open(gpa, io, twins.by_relic, .{});
     defer repo.deinit(io);
-    try testing.expectError(error.NotShallow, fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .unshallow = true, .programs = .{ .environ = &env } }));
+    try testing.expectError(error.NotShallow, fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .unshallow = true, .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network } }));
 }
 
 test "a shallow clone over ssh is git's, and one from a path is a whole local clone, as git's is" {
@@ -278,7 +279,7 @@ test "a shallow clone over ssh is git's, and one from a path is a whole local cl
     defer twins.deinit(gpa, io);
     const out = try testremote.gitInputEnv(gpa, io, twins.tmp.dir, &env, &.{ "clone", "-q", "--depth=2", url, twins.git_path }, "", true);
     gpa.free(out);
-    var repo = try clone_mod.clone(gpa, io, url, twins.by_relic, .{ .who = test_who, .depth = 2, .programs = .{ .environ = &env } });
+    var repo = try clone_mod.clone(gpa, io, url, twins.by_relic, .{ .who = test_who, .depth = 2, .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network } });
     repo.deinit(io);
     try expectSameShallow(gpa, io, twins.by_git, twins.by_relic);
 
@@ -292,7 +293,7 @@ test "a shallow clone over ssh is git's, and one from a path is a whole local cl
     gpa.free(cloned);
     var warnings: warning.Warnings = .init(gpa);
     defer warnings.deinit();
-    var plain = try clone_mod.clone(gpa, io, path, local.by_relic, .{ .who = test_who, .depth = 1, .warnings = &warnings });
+    var plain = try clone_mod.clone(gpa, io, path, local.by_relic, .{ .means = testnet.means(null), .who = test_who, .depth = 1, .warnings = &warnings });
     plain.deinit(io);
     try expectSameShallow(gpa, io, local.by_git, local.by_relic);
     try testing.expectEqualStrings("--depth", warnings.items.items[0].ignored_for_local);
@@ -335,7 +336,7 @@ test "from a shallow remote a fetch leaves the refs that would move the boundary
         defer repo.deinit(io);
         var warnings: warning.Warnings = .init(gpa);
         defer warnings.deinit();
-        var outcome = try fetch_mod.fetch(gpa, io, &repo, "s", .{ .who = test_who, .update_shallow = update, .warnings = &warnings, .programs = .{ .environ = &env } });
+        var outcome = try fetch_mod.fetch(gpa, io, &repo, "s", .{ .who = test_who, .update_shallow = update, .warnings = &warnings, .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network } });
         defer outcome.deinit();
         try testing.expect(!outcome.anyRejected());
         for ([_][]const u8{ ".git/shallow", ".git/FETCH_HEAD" }) |name| {
@@ -426,7 +427,7 @@ test "a push from a shallow repository tells the server its boundary, as git's s
             } else {
                 var repo = try repo_mod.Repository.open(gpa, io, work, .{});
                 defer repo.deinit(io);
-                var outcome = try push_mod.push(gpa, io, &repo, url, .{ .who = test_who, .refspecs = &.{"main"}, .programs = .{ .environ = &env } });
+                var outcome = try push_mod.push(gpa, io, &repo, url, .{ .who = test_who, .refspecs = &.{"main"}, .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network } });
                 defer outcome.deinit();
                 if (!to_origin) {
                     try testing.expectEqualStrings("shallow update not allowed", outcome.refs[0].message.?);

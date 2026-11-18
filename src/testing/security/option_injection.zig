@@ -15,6 +15,7 @@ const gitmodules = @import("../../config/gitmodules.zig");
 const fsck = @import("../../object/fsck.zig");
 const program = @import("../../process.zig").program;
 const testgit = @import("../git.zig");
+const testnet = @import("../net.zig");
 
 test "CVE-2017-1000117, t5813-proto-disable-ssh 'hostnames starting with dash are rejected' and 'repo names starting with dash are rejected': ssh never sees an option a URL wrote" {
     const gpa = std.testing.allocator;
@@ -41,14 +42,14 @@ test "CVE-2017-1000117, t5813-proto-disable-ssh 'hostnames starting with dash ar
         .{ .url = "remote:-repo.git", .refused = error.SuspiciousPathname },
     }) |case| {
         try std.testing.expectError(case.refused, transport.Session.open(gpa, io, case.url, .{ .service = .upload_pack, .kind = .sha1 }, .{
-            .programs = .{ .environ = &env },
+            .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network },
         }));
     }
     // t5532-fetch-proxy 'funny hostnames are rejected before running
     // proxy': the proxy would read the host as an option.
     try env.put("GIT_PROXY_COMMAND", ssh);
     try std.testing.expectError(error.SuspiciousHostname, transport.Session.open(gpa, io, "git://-remote/repo.git", .{ .service = .upload_pack, .kind = .sha1 }, .{
-        .programs = .{ .environ = &env },
+        .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network },
     }));
     try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "ran", .{}));
 }

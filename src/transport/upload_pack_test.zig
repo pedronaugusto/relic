@@ -25,6 +25,7 @@ const upload_pack_mod = @import("upload_pack.zig");
 const transport = @import("transport.zig");
 const pkt_line = @import("../codec.zig").pkt_line;
 const program = @import("../process.zig").program;
+const testnet = @import("../testing/net.zig");
 
 const test_who: object.Signature = .{ .name = "F", .email = "f@example.com", .when_secs = 1, .offset_minutes = 0 };
 
@@ -263,9 +264,9 @@ test "relic clones and fetches over file:// through its own upload-pack, and ign
 
     const Case = struct { git_args: []const []const u8, options: clone_mod.Options };
     for ([_]Case{
-        .{ .git_args = &.{"--depth=2"}, .options = .{ .who = test_who, .depth = 2 } },
-        .{ .git_args = &.{"--filter=blob:none"}, .options = .{ .who = test_who, .filter = "blob:none" } },
-        .{ .git_args = &.{}, .options = .{ .who = test_who } },
+        .{ .git_args = &.{"--depth=2"}, .options = .{ .means = testnet.means(null), .who = test_who, .depth = 2 } },
+        .{ .git_args = &.{"--filter=blob:none"}, .options = .{ .means = testnet.means(null), .who = test_who, .filter = "blob:none" } },
+        .{ .git_args = &.{}, .options = .{ .means = testnet.means(null), .who = test_who } },
     }) |case| {
         var tmp = testing.tmpDir(.{ .iterate = true });
         defer tmp.cleanup();
@@ -280,7 +281,7 @@ test "relic clones and fetches over file:// through its own upload-pack, and ign
         var b = try tmp.dir.openDir(io, "by-relic", .{ .iterate = true });
         defer b.close(io);
         var options = case.options;
-        options.programs = .{ .environ = &env };
+        options.means = .{ .programs = .{ .environ = &env }, .network = &testnet.network };
         var repo = try clone_mod.clone(gpa, io, url, b, options);
         repo.deinit(io);
         var a = try tmp.dir.openDir(io, "by-git", .{});
@@ -292,7 +293,7 @@ test "relic clones and fetches over file:// through its own upload-pack, and ign
             gpa.free(fetched);
             var again = try repo_mod.Repository.open(gpa, io, b, .{});
             defer again.deinit(io);
-            var outcome = try fetch_mod.fetch(gpa, io, &again, "origin", .{ .who = test_who, .deepen = 3, .programs = .{ .environ = &env } });
+            var outcome = try fetch_mod.fetch(gpa, io, &again, "origin", .{ .who = test_who, .deepen = 3, .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network } });
             outcome.deinit();
             try expectSame(gpa, io, &env, a, b);
         }
@@ -304,7 +305,7 @@ test "relic clones and fetches over file:// through its own upload-pack, and ign
     defer tmp.cleanup();
     var warnings: warning.Warnings = .init(gpa);
     defer warnings.deinit();
-    var repo = try clone_mod.clone(gpa, io, bare, tmp.dir, .{ .who = test_who, .depth = 1, .warnings = &warnings });
+    var repo = try clone_mod.clone(gpa, io, bare, tmp.dir, .{ .means = testnet.means(null), .who = test_who, .depth = 1, .warnings = &warnings });
     repo.deinit(io);
     try testing.expectEqual(@as(usize, 1), warnings.items.items.len);
     const text = try warnings.items.items[0].message(warnings.arena.allocator());
@@ -362,7 +363,7 @@ test "git and relic clone over HTTP from relic's upload-pack, one request at a t
         defer c.close(io);
         var config = try config_mod.Config.parseText(gpa, if (std.mem.eql(u8, version, "0")) "[protocol]\nversion = 0\n" else "", .command);
         defer config.deinit();
-        var options: clone_mod.Options = .{ .who = test_who, .checkout = false, .programs = .{ .environ = &env }, .config = &config };
+        var options: clone_mod.Options = .{ .who = test_who, .checkout = false, .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network }, .config = &config };
         for (extra) |arg| {
             if (std.mem.eql(u8, arg, "--depth=2")) options.depth = 2;
             if (std.mem.eql(u8, arg, "--filter=blob:none")) options.filter = "blob:none";
@@ -522,7 +523,7 @@ test "git 2.56, a client's object-info says what cat-file's remote-object-info s
         const theirs = try testremote.gitInputEnv(gpa, io, client.dir, &env, &.{ "-c", "protocol.version=2", "cat-file", "--batch-command=%(objectname) %(objecttype) %(objectsize)" }, input.items, true);
         defer gpa.free(theirs);
 
-        var session = try transport.Session.open(gpa, io, url, .{ .service = .upload_pack, .kind = .sha1 }, .{ .protocol_v2 = true, .programs = .{ .environ = &env } });
+        var session = try transport.Session.open(gpa, io, url, .{ .service = .upload_pack, .kind = .sha1 }, .{ .protocol_v2 = true, .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network } });
         defer session.deinit(io);
         const info = try session.objectInfo(arena, .{ .oids = oids.items, .size = true, .type = true });
         var ours: std.ArrayList(u8) = .empty;

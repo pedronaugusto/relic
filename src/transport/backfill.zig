@@ -78,7 +78,7 @@ pub const Options = struct {
     /// `--filter=<spec>`: see `path_walk.Options.filter`.
     filter: ?[]const u8 = null,
     /// What the promisor remote is asked with.
-    lazy: partial.Lazy.Options = .{},
+    lazy: partial.Lazy.Options = .{ .means = .none },
 };
 
 /// What was asked for.

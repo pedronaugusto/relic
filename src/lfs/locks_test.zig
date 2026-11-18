@@ -72,7 +72,7 @@ const Pair = struct {
     }
 
     fn open(p: *Pair, repo: *repo_mod.Repository) !*lfsapi.Server {
-        return lfsapi.Server.open(p.fx.gpa, p.fx.io, repo, "origin", .{ .programs = p.fx.programs() });
+        return lfsapi.Server.open(p.fx.gpa, p.fx.io, repo, "origin", .{ .means = .{ .programs = p.fx.programs(), .network = &testlfs.network } });
     }
 };
 
@@ -339,7 +339,7 @@ test "a server with no locking API is named" {
     defer d.close(io);
     var repo = try repo_mod.Repository.open(gpa, io, d, .{});
     defer repo.deinit(io);
-    const server = try lfsapi.Server.open(gpa, io, &repo, "origin", .{ .programs = fx.programs() });
+    const server = try lfsapi.Server.open(gpa, io, &repo, "origin", .{ .means = .{ .programs = fx.programs(), .network = &testlfs.network } });
     defer server.deinit(io);
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
@@ -452,7 +452,7 @@ test "LFS HTTP pagination ends or fails without publishing partial caches" {
             defer d.close(fx.io);
             var repo = try repo_mod.Repository.open(fx.gpa, fx.io, d, .{});
             defer repo.deinit(fx.io);
-            const server = try lfsapi.Server.open(fx.gpa, fx.io, &repo, "origin", .{ .programs = fx.programs() });
+            const server = try lfsapi.Server.open(fx.gpa, fx.io, &repo, "origin", .{ .means = .{ .programs = fx.programs(), .network = &testlfs.network } });
             defer server.deinit(fx.io);
             try fx.server.addLock("a.bin", "anonymous");
             const cache_path = "lfs/cache/locks/refs/heads/main";

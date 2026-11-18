@@ -175,7 +175,7 @@ pub const List = struct {
 /// What a fetch from bundle URIs is made with.
 pub const Options = struct {
     /// The transfer settings an http or https download is made with.
-    transport: transport.Options = .{},
+    transport: transport.Options,
     /// Who `fetch.bundleCreationToken`'s and the refs' updates are written as.
     who: object.Signature,
 };

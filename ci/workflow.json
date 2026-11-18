@@ -31,12 +31,6 @@
       "aarch64": "c130c04301d06995ef08f1cbd895342844d1fbb3312f5d32cb27cc05b4b394dc"
     }
   },
-  "configurations": [
-    {"name": "default", "options": {"http": true, "lfs": true}},
-    {"name": "no-http", "options": {"http": false, "lfs": true}},
-    {"name": "no-lfs", "options": {"http": true, "lfs": false}, "modules": ["relic"]},
-    {"name": "neither", "options": {"http": false, "lfs": false}, "modules": ["relic"]}
-  ],
   "jobs": [
     {
       "name": "ThreadSanitizer (Linux)",

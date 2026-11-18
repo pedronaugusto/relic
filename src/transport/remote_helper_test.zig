@@ -23,6 +23,7 @@ const testgit = @import("../testing/git.zig");
 const testremote = @import("../testing/remote.zig");
 const program = @import("../process.zig").program;
 const warning = @import("../report.zig").warning;
+const testnet = @import("../testing/net.zig");
 
 const Repository = repo_mod.Repository;
 
@@ -164,7 +165,7 @@ test "clone, fetch and push through a helper's import and export as git does, it
     try scratch.dir.createDirPath(io, "mine");
     const mine_dir = try scratch.dir.openDir(io, "mine", .{ .iterate = true });
     defer mine_dir.close(io);
-    var repo = try clone_mod.clone(gpa, io, mine_url, mine_dir, .{ .who = who, .programs = helpers.programs() });
+    var repo = try clone_mod.clone(gpa, io, mine_url, mine_dir, .{ .who = who, .means = .{ .programs = helpers.programs(), .network = &testnet.network } });
     defer repo.deinit(io);
     try expectSameRefs(gpa, io, &scratch, "theirs", "mine");
     const marks_a = try scratch.readFile(io, "theirs/.git/testgit/origin/git.marks");
@@ -184,7 +185,7 @@ test "clone, fetch and push through a helper's import and export as git does, it
         try r.exec(io, &.{ "commit", "-q", "-m", "three" });
     }
     try scratch.exec(io, &.{ "-C", "theirs", "fetch", "-q", "origin" });
-    var fetched = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = who, .programs = helpers.programs() });
+    var fetched = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = who, .means = .{ .programs = helpers.programs(), .network = &testnet.network } });
     fetched.deinit();
     try expectSameRefs(gpa, io, &scratch, "theirs", "mine");
 
@@ -194,7 +195,7 @@ test "clone, fetch and push through a helper's import and export as git does, it
         try commitIn(gpa, io, &scratch, side, testgit.fixture_date + 200, "pushed.txt");
     }
     try scratch.exec(io, &.{ "-C", "theirs", "push", "-q", "origin", "main" });
-    var pushed = try push_mod.push(gpa, io, &repo, "origin", .{ .who = who, .programs = helpers.programs(), .refspecs = &.{"refs/heads/main:refs/heads/main"} });
+    var pushed = try push_mod.push(gpa, io, &repo, "origin", .{ .who = who, .means = .{ .programs = helpers.programs(), .network = &testnet.network }, .refspecs = &.{"refs/heads/main:refs/heads/main"} });
     defer pushed.deinit();
     try std.testing.expect(!pushed.anyRejected());
     const remote_a = try theirs_remote.run(io, &.{ "for-each-ref", "--format=%(refname) %(objectname)" });
@@ -211,7 +212,7 @@ test "clone, fetch and push through a helper's import and export as git does, it
     const faults = try shakedown.FaultIo.init(gpa, io, .{ .plan = &plan });
     defer faults.deinit();
     const canceled = faults.io();
-    if (push_mod.push(gpa, canceled, &repo, "origin", .{ .who = who, .programs = helpers.programs(), .refspecs = &.{"refs/heads/main:refs/heads/main"} })) |stood| {
+    if (push_mod.push(gpa, canceled, &repo, "origin", .{ .who = who, .means = .{ .programs = helpers.programs(), .network = &testnet.network }, .refspecs = &.{"refs/heads/main:refs/heads/main"} })) |stood| {
         var again = stood;
         again.deinit();
         try std.testing.expectError(error.Canceled, canceled.sleep(.fromMilliseconds(1), .awake));
@@ -256,7 +257,7 @@ test "clone and push through a helper's fetch and push, and a connect helper's c
         try scratch.dir.createDirPath(io, mine);
         const mine_dir = try scratch.dir.openDir(io, mine, .{ .iterate = true });
         defer mine_dir.close(io);
-        var repo = try clone_mod.clone(gpa, io, url, mine_dir, .{ .who = who, .programs = helpers.programs(), .config = &config });
+        var repo = try clone_mod.clone(gpa, io, url, mine_dir, .{ .who = who, .means = .{ .programs = helpers.programs(), .network = &testnet.network }, .config = &config });
         defer repo.deinit(io);
         try expectSameRefs(gpa, io, &scratch, theirs, mine);
     }
@@ -268,7 +269,7 @@ test "clone and push through a helper's fetch and push, and a connect helper's c
     defer mine_dir.close(io);
     var repo = try Repository.open(gpa, io, mine_dir, .{});
     defer repo.deinit(io);
-    var pushed = try push_mod.push(gpa, io, &repo, "origin", .{ .who = who, .programs = helpers.programs(), .refspecs = &.{"refs/heads/main:refs/heads/pushed"} });
+    var pushed = try push_mod.push(gpa, io, &repo, "origin", .{ .who = who, .means = .{ .programs = helpers.programs(), .network = &testnet.network }, .refspecs = &.{"refs/heads/main:refs/heads/pushed"} });
     defer pushed.deinit();
     try std.testing.expect(!pushed.anyRejected());
     const there = try remote.line(io, &.{ "rev-parse", "refs/heads/pushed" });
@@ -285,10 +286,10 @@ test "a helper that is not there, or not allowed, is refused by name" {
     defer scratch.deinit();
     var helpers = try Helpers.init(gpa, io, &scratch);
     defer helpers.deinit();
-    try std.testing.expectError(error.HelperNotFound, transport.Session.open(gpa, io, "nosuchhelper::x", .{ .service = .upload_pack, .kind = null }, .{ .programs = helpers.programs() }));
-    try std.testing.expectError(error.HelperNotFound, transport.Session.open(gpa, io, "nosuchscheme://host/x", .{ .service = .upload_pack, .kind = null }, .{ .programs = helpers.programs() }));
-    try std.testing.expectError(error.TransportNotAllowed, transport.Session.open(gpa, io, "ext::git %s /x", .{ .service = .upload_pack, .kind = null }, .{ .programs = helpers.programs() }));
-    try std.testing.expectError(error.ProgramsNotGranted, transport.Session.open(gpa, io, "testgit::/x", .{ .service = .upload_pack, .kind = null }, .{}));
+    try std.testing.expectError(error.HelperNotFound, transport.Session.open(gpa, io, "nosuchhelper::x", .{ .service = .upload_pack, .kind = null }, .{ .means = .{ .programs = helpers.programs(), .network = &testnet.network } }));
+    try std.testing.expectError(error.HelperNotFound, transport.Session.open(gpa, io, "nosuchscheme://host/x", .{ .service = .upload_pack, .kind = null }, .{ .means = .{ .programs = helpers.programs(), .network = &testnet.network } }));
+    try std.testing.expectError(error.TransportNotAllowed, transport.Session.open(gpa, io, "ext::git %s /x", .{ .service = .upload_pack, .kind = null }, .{ .means = .{ .programs = helpers.programs(), .network = &testnet.network } }));
+    try std.testing.expectError(error.ProgramsNotGranted, transport.Session.open(gpa, io, "testgit::/x", .{ .service = .upload_pack, .kind = null }, .{ .means = .none }));
 }
 
 /// A helper's answers given by a script, to git and to relic in the same
@@ -387,7 +388,7 @@ test "a helper's ref list is read as git reads it: values, symrefs, `?`, `unchan
         defer warnings.deinit();
         const ours: ?[]const u8 = blk: {
             var session = transport.Session.open(gpa, io, "testscript::x", .{ .service = .upload_pack, .kind = .sha1 }, .{
-                .programs = s.helpers.programs(),
+                .means = .{ .programs = s.helpers.programs(), .network = &testnet.network },
                 .repository = &repo,
                 .warnings = &warnings,
             }) catch break :blk null;
@@ -480,7 +481,7 @@ test "a helper's push answers are read as git reads them: the states its reasons
         var warnings: warning.Warnings = .init(gpa);
         defer warnings.deinit();
         const ours: ?[]const u8 = blk: {
-            var outcome = push_mod.push(gpa, io, &repo, "testscript::x", .{ .who = who, .programs = s.helpers.programs(), .refspecs = refspecs, .warnings = &warnings }) catch break :blk null;
+            var outcome = push_mod.push(gpa, io, &repo, "testscript::x", .{ .who = who, .means = .{ .programs = s.helpers.programs(), .network = &testnet.network }, .refspecs = refspecs, .warnings = &warnings }) catch break :blk null;
             defer outcome.deinit();
             var out: std.ArrayList(u8) = .empty;
             // git prints nothing for a ref the helper had no match for.

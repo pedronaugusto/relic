@@ -39,7 +39,7 @@ const daemon = @import("../wire.zig").daemon;
 const smart_http = @import("../wire.zig").smart_http;
 const dumb_http = @import("../wire.zig").dumb_http;
 const aegis = @import("aegis");
-const http_enabled = @import("relic_options").http;
+const network_mod = @import("../wire/network.zig");
 
 const credential = @import("../wire.zig").credential;
 const auth = @import("../wire.zig").auth;
@@ -103,11 +103,20 @@ pub const Error = error{
 } || local.Error || receive_pack.Error || fetch_pack.Error || protocol.Error || program.Error || ssh.Error || daemon.Error || smart_http.Error || dumb_http.Error || send_pack.Error || bundle.Error ||
     remote_helper.Error;
 
+/// What an operation that reaches a remote is given to reach it with:
+/// the permission to run programs, and the network's engines. Every such
+/// operation's options require one.
+pub const Means = network_mod.Means;
+
+/// The engines that reach a remote over relic's own sockets, as a
+/// `Means` holds them: `relic_net.network`.
+pub const Network = network_mod.Network;
+
 /// How a remote is reached.
 pub const Options = struct {
-    /// The permission to run programs: `ssh` for an ssh URL. Without it an
-    /// ssh URL is `error.ProgramsNotGranted`.
-    programs: ?program.Programs = null,
+    /// What the remote is reached with: `ssh` for an ssh URL, the network
+    /// for an `http(s)` or `git://` one (see `Means`).
+    means: Means,
     /// The repository's configuration, for `core.sshCommand`, `ssh.variant`
     /// and the `http.*` settings.
     config: ?*const config_mod.Config = null,
@@ -156,7 +165,7 @@ pub const Options = struct {
     /// Whether the person named this remote themselves, which a transport
     /// git allows only for the person — `file`, a remote helper — needs.
     /// A submodule's URL was not named by the person: false. `null` takes
-    /// `GIT_PROTOCOL_FROM_USER` from `programs`' environment, as git does.
+    /// `GIT_PROTOCOL_FROM_USER` from `means.programs`' environment, as git does.
     from_user: ?bool = null,
 };
 
@@ -199,12 +208,14 @@ pub fn wantsV2(config: ?*const config_mod.Config) bool {
 
 /// An open remote.
 /// `remote_url`'s body written to `w` with the transfer settings `options`
-/// hold: one `GET` over http or https (`smart_http.download`), what a
-/// bundle URI is fetched with. Any other scheme is `UnsupportedTransport`.
+/// hold: one `GET` over http or https, through `options.means.network`,
+/// what a bundle URI is fetched with. Any other scheme is
+/// `UnsupportedTransport`; with no network, `HttpUnavailable`.
 pub fn download(gpa: Allocator, io: Io, w: *Io.Writer, remote_url: []const u8, options: Options) (Error || Io.Writer.Error)!void {
     const parsed = try url.Url.parse(remote_url);
     if (parsed.scheme != .http and parsed.scheme != .https) return error.UnsupportedTransport;
-    return smart_http.download(gpa, io, w, parsed, Session.httpOptions(options));
+    const network = options.means.network orelse return error.HttpUnavailable;
+    return network.download(gpa, io, w, parsed, Session.httpOptions(options));
 }
 
 pub const Session = struct {
@@ -224,7 +235,7 @@ pub const Session = struct {
     /// What the session was opened with, borrowed for its life as
     /// `server_options` is: a pack the server names by URI is downloaded
     /// with its `http.*` settings and credentials.
-    transfer: Options = .{},
+    transfer: Options = .{ .means = .none },
     impl: union(enum) {
         local: *local.Remote,
         /// A bundle file named by a path, as git's bundle transport reads
@@ -244,9 +255,8 @@ pub const Session = struct {
             creates: []const promisors.Create = &.{},
             stores: []const promisors.Store = &.{},
         },
-        /// A server that speaks git's dumb HTTP protocol: its files. Only
-        /// with `http`: without it no session is one.
-        dumb: if (http_enabled) *dumb_http.Remote else void,
+        /// A server that speaks git's dumb HTTP protocol: its files.
+        dumb: *dumb_http.Remote,
         /// A remote helper spoken to in its own commands.
         helper: struct {
             h: *remote_helper.Helper,
@@ -399,7 +409,7 @@ pub const Session = struct {
                 errdefer if (owned) here.deinit(io);
                 if (kind) |k| if (k != here.repo.objectFormat()) return error.ObjectFormatMismatch;
                 const v2 = options.protocol_v2 orelse wantsV2(options.config);
-                const conn = try upload_pack.connect(gpa, io, here, if (v2) .v2 else .v0, .{ .programs = options.programs });
+                const conn = try upload_pack.connect(gpa, io, here, if (v2) .v2 else .v0, .{ .programs = options.means.programs });
                 owned = false;
                 errdefer conn.deinit(io);
                 return fromConnection(gpa, conn, service, kind);
@@ -415,7 +425,7 @@ pub const Session = struct {
                 if (kind) |k| if (k != here.repo.objectFormat()) return error.ObjectFormatMismatch;
                 const conn = try receive_pack.connect(gpa, io, here, .{
                     .who = options.who orelse unknown_pusher,
-                    .programs = options.programs,
+                    .programs = options.means.programs,
                     // The path git's receive-pack would be started on.
                     .service_dir = parsed.path,
                 });
@@ -434,7 +444,7 @@ pub const Session = struct {
                 var identity = try url.Identity.parse(gpa, remote_url);
                 defer identity.deinit();
                 const conn = try ssh.connect(gpa, io, identity.url, service, .{
-                    .programs = options.programs,
+                    .programs = options.means.programs,
                     .config = options.config,
                     .service_program = options.service_program,
                     .protocol_v2 = options.protocol_v2 orelse wantsV2(options.config),
@@ -452,18 +462,19 @@ pub const Session = struct {
     }
 
     /// A session over HTTP: smart where the server answers as git's
-    /// http-backend does, else the dumb listing and files. `error.HttpUnavailable`
-    /// where relic was built without HTTP.
+    /// http-backend does, else the dumb listing and files, through
+    /// `options.means.network`: `error.HttpUnavailable` without one.
     fn openHttp(gpa: Allocator, io: Io, parsed: url.Url, service: Service, kind: ?hash.Kind, options: Options) ErrorNamespace.Error!Session {
-        if (comptime !http_enabled) return error.HttpUnavailable;
-        switch (try smart_http.connect(gpa, io, parsed, service, httpOptions(options))) {
+        const network = options.means.network orelse return error.HttpUnavailable;
+        switch (try network.connect(gpa, io, parsed, service, httpOptions(options))) {
             .smart => |conn| {
                 errdefer conn.deinit(io);
                 return fromConnection(gpa, conn, service, kind);
             },
             .dumb => |files| {
-                const environ = if (options.programs) |p| p.environ else null;
+                const environ = if (options.means.programs) |p| p.environ else null;
                 const remote = try dumb_http.Remote.open(gpa, io, files, .{
+                    .network = network,
                     .http = httpOptions(options),
                     .policy = .{ .config = options.config, .environ = environ, .from_user = options.from_user },
                     .warnings = options.warnings,
@@ -480,7 +491,7 @@ pub const Session = struct {
         var identity = try url.Identity.parse(gpa, remote_url);
         defer identity.deinit();
         const conn = try daemon.connect(gpa, io, identity.url, service, .{
-            .programs = options.programs,
+            .means = options.means,
             .config = options.config,
             .service_program = options.service_program,
             .protocol_v2 = options.protocol_v2 orelse wantsV2(options.config),
@@ -496,7 +507,7 @@ pub const Session = struct {
             .remote_name = options.remote_name,
             .base = if (options.repository) |r| .of(r.topDirectory()) else null,
             .proxy = options.proxy,
-            .programs = options.programs,
+            .programs = options.means.programs,
             .protocol_v2 = options.protocol_v2 orelse wantsV2(options.config),
             .prompt = options.prompt,
             .auth_failure = options.auth_failure,
@@ -507,7 +518,7 @@ pub const Session = struct {
     }
 
     fn checkAllowed(options: Options, name: []const u8) ErrorNamespace.Error!void {
-        const environ = if (options.programs) |p| p.environ else null;
+        const environ = if (options.means.programs) |p| p.environ else null;
         if (!policy.allowed(name, .{ .config = options.config, .environ = environ, .from_user = options.from_user })) return error.TransportNotAllowed;
     }
 
@@ -528,7 +539,7 @@ pub const Session = struct {
         } else null else null;
         const spec = remote_helper.Spec.of(remote_url, options.remote_name, vcs) orelse return null;
         try checkAllowed(options, spec.name);
-        const programs = options.programs orelse return error.ProgramsNotGranted;
+        const programs = options.means.programs orelse return error.ProgramsNotGranted;
         const git_dir: ?[:0]u8 = if (options.repository) |r| try fs.realPathAlloc(gpa, io, r.gitDirectory(), ".") else null;
         defer if (git_dir) |d| gpa.free(d);
         const h = try remote_helper.Helper.open(gpa, io, spec, .{
@@ -576,7 +587,7 @@ pub const Session = struct {
                 s.gpa.destroy(here);
             },
             .bundle => |f| f.deinit(io),
-            .dumb => |remote| if (comptime http_enabled) remote.deinit(io),
+            .dumb => |remote| remote.deinit(io),
             .helper => |helper| helper.h.deinit(io),
             .smart => |*smart| {
                 // A conversation over a pipe that the server still waits on
@@ -614,7 +625,7 @@ pub const Session = struct {
             .local => |here| here.repo.objectFormat(),
             .bundle => |f| f.header.object_format,
             .smart => |smart| smart.advertisement.kind,
-            .dumb => |remote| if (comptime http_enabled) remote.kind else neverDumb(),
+            .dumb => |remote| remote.kind,
             .helper => |helper| helper.h.kind,
         };
     }
@@ -653,7 +664,7 @@ pub const Session = struct {
         return switch (s.impl) {
             .local => |here| here.listRefs(gpa, io, prefixes),
             .bundle => |f| bundleRefs(gpa, f),
-            .dumb => |remote| if (comptime http_enabled) remote.listRefs(gpa, prefixes) else neverDumb(),
+            .dumb => |remote| remote.listRefs(gpa, prefixes),
             .smart => |*smart| protocol.listRefs(gpa, smart.conn, &smart.advertisement, .{ .prefixes = prefixes, .server_options = s.server_options }),
             .helper => |helper| helper.h.list(gpa, helper.repository, .{ .for_push = s.service == .receive_pack }),
         };
@@ -891,7 +902,6 @@ pub const Session = struct {
                 return .{ .pack = null, .objects = 0 };
             },
             .dumb => |remote| {
-                if (comptime !http_enabled) neverDumb();
                 // git's `fetch_dumb`: no depth and no date, and a filter
                 // is never read, so everything comes. An exclusion git
                 // drops without a word (remote-curl.c:1175), and a caller
@@ -996,7 +1006,8 @@ pub const Session = struct {
         }
         var buf: [64 * 1024]u8 = undefined;
         var w = file.writer(io, &buf);
-        smart_http.download(gpa, io, &w.interface, parsed, httpOptions(s.transfer)) catch |err| return switch (err) {
+        const network = s.transfer.means.network orelse return error.HttpUnavailable;
+        network.download(gpa, io, &w.interface, parsed, httpOptions(s.transfer)) catch |err| return switch (err) {
             error.WriteFailed => w.err orelse error.WriteFailed,
             else => |e| e,
         };
@@ -1020,9 +1031,4 @@ fn bundleRefs(gpa: Allocator, f: *bundle.File) Error!protocol.RefList {
     for (f.header.references, 0..) |ref, i| refs[refs.len - 1 - i] = .{ .name = try a.dupe(u8, ref.name), .oid = ref.oid };
     list.refs = refs;
     return list;
-}
-
-/// A dumb session's arm without `http`, where none is made.
-fn neverDumb() noreturn {
-    aegis.assert.never("a dumb HTTP session is made only with http");
 }

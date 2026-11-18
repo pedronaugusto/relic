@@ -185,7 +185,7 @@ pub fn relicUploadHead(fx: *Fixture, d: Io.Dir, options: lfstransfer.Options) !l
     defer fx.gpa.free(head.name);
     var collected = try object_walk.missing(fx.gpa, fx.io, repo.objectDatabase(), &.{head.oid}, .{ .exclude = &.{} });
     defer collected.deinit();
-    const server = try lfsapi.Server.open(fx.gpa, fx.io, &repo, "origin", .{ .programs = fx.programs() });
+    const server = try lfsapi.Server.open(fx.gpa, fx.io, &repo, "origin", .{ .means = .{ .programs = fx.programs(), .network = &testlfs.network } });
     defer server.deinit(fx.io);
     return lfstransfer.pushObjects(std.testing.io, server, repo.objectDatabase(), collected.entries, options);
 }
@@ -273,7 +273,7 @@ test "what relic uploads git lfs pull downloads, what git-lfs pushes relic pulls
     {
         var repo = try repo_mod.Repository.open(gpa, io, ours, .{});
         defer repo.deinit(io);
-        const server = try lfsapi.Server.open(gpa, io, &repo, "origin", .{ .programs = fx.programs() });
+        const server = try lfsapi.Server.open(gpa, io, &repo, "origin", .{ .means = .{ .programs = fx.programs(), .network = &testlfs.network } });
         defer server.deinit(io);
         var pulled = try lfstransfer.pull(io, server, &repo, .{});
         defer pulled.deinit();
@@ -307,7 +307,7 @@ pub fn emptyStore(fx: *Fixture, d: Io.Dir) !void {
 }
 
 pub fn openServer(fx: *Fixture, repo: *repo_mod.Repository) !*lfsapi.Server {
-    return lfsapi.Server.open(fx.gpa, fx.io, repo, "origin", .{ .programs = fx.programs() });
+    return lfsapi.Server.open(fx.gpa, fx.io, repo, "origin", .{ .means = .{ .programs = fx.programs(), .network = &testlfs.network } });
 }
 
 test "ssh is started for git-lfs-authenticate as git-lfs starts it, and its token is what the server takes" {
@@ -799,7 +799,7 @@ test "with no remote named, the remote and the endpoint are the ones git-lfs pic
 
         var repo = try repo_mod.Repository.open(gpa, io, d, .{});
         defer repo.deinit(io);
-        const server = try lfsapi.Server.open(gpa, io, &repo, null, .{ .programs = fx.programs() });
+        const server = try lfsapi.Server.open(gpa, io, &repo, null, .{ .means = .{ .programs = fx.programs(), .network = &testlfs.network } });
         defer server.deinit(io);
         try testing.expectEqualStrings(case.picked, server.remote);
         try testing.expectEqualStrings(served_lfs, (try server.client.endpoint(io, .download)).url);
@@ -829,7 +829,7 @@ test "with no remote named, the remote and the endpoint are the ones git-lfs pic
         const line = env[line_start .. std.mem.findScalarPos(u8, env, line_start, ' ') orelse env.len];
         var repo = try repo_mod.Repository.open(gpa, io, d, .{});
         defer repo.deinit(io);
-        const server = try lfsapi.Server.open(gpa, io, &repo, null, .{ .programs = fx.programs() });
+        const server = try lfsapi.Server.open(gpa, io, &repo, null, .{ .means = .{ .programs = fx.programs(), .network = &testlfs.network } });
         defer server.deinit(io);
         try testing.expectEqualStrings(line, (try server.client.endpoint(io, .download)).url);
     }
@@ -1373,7 +1373,7 @@ test "a proxy is chosen by git-lfs's rules, HTTP_PROXY included, and never for a
             try env.put("HTTP_PROXY", proxy);
             var repo = try repo_mod.Repository.open(gpa, io, d, .{});
             defer repo.deinit(io);
-            const server = try lfsapi.Server.open(gpa, io, &repo, "origin", .{ .programs = .{ .environ = &env } });
+            const server = try lfsapi.Server.open(gpa, io, &repo, "origin", .{ .means = .{ .programs = .{ .environ = &env }, .network = &testlfs.network } });
             defer server.deinit(io);
             var fetched = try lfstransfer.fetch(io, server, &repo, .{});
             defer fetched.deinit();
@@ -1412,7 +1412,7 @@ test "an unreadable client certificate, unreadable authorities and an unsupporte
         if (case.env) |kv| try env.put(kv[0], kv[1]);
         var repo = try repo_mod.Repository.open(gpa, io, d, .{});
         defer repo.deinit(io);
-        const server = try lfsapi.Server.open(gpa, io, &repo, "origin", .{ .programs = .{ .environ = &env } });
+        const server = try lfsapi.Server.open(gpa, io, &repo, "origin", .{ .means = .{ .programs = .{ .environ = &env }, .network = &testlfs.network } });
         defer server.deinit(io);
         try testing.expectError(case.want, lfstransfer.fetch(io, server, &repo, .{}));
     }
@@ -1493,7 +1493,7 @@ test "an https object is reached through a proxy's tunnel, and unchecked where t
                 for (case.env) |kv| try env.put(kv[0], kv[1]);
                 var repo = try repo_mod.Repository.open(gpa, io, d, .{});
                 defer repo.deinit(io);
-                const server = try lfsapi.Server.open(gpa, io, &repo, "origin", .{ .programs = .{ .environ = &env } });
+                const server = try lfsapi.Server.open(gpa, io, &repo, "origin", .{ .means = .{ .programs = .{ .environ = &env }, .network = &testlfs.network } });
                 defer server.deinit(io);
                 var fetched = try lfstransfer.fetch(io, server, &repo, .{});
                 defer fetched.deinit();
@@ -1589,7 +1589,7 @@ test "a client certificate is presented as git-lfs presents it, an encrypted key
             } else {
                 var repo = try repo_mod.Repository.open(gpa, io, d, .{});
                 defer repo.deinit(io);
-                const server = try lfsapi.Server.open(gpa, io, &repo, "origin", .{ .programs = .{ .environ = &fx.env } });
+                const server = try lfsapi.Server.open(gpa, io, &repo, "origin", .{ .means = .{ .programs = .{ .environ = &fx.env }, .network = &testlfs.network } });
                 defer server.deinit(io);
                 if (case.refused) |refused| switch (refused) {
                     .request => |want| try testing.expectError(want, lfstransfer.fetch(io, server, &repo, .{})),
@@ -1655,7 +1655,7 @@ test "a refused credential is described as git-lfs's helpers hear it, with the s
             defer failure.deinit();
             var repo = try repo_mod.Repository.open(gpa, io, d, .{});
             defer repo.deinit(io);
-            const server = try lfsapi.Server.open(gpa, io, &repo, "origin", .{ .programs = fx.programs(), .auth_failure = &failure });
+            const server = try lfsapi.Server.open(gpa, io, &repo, "origin", .{ .means = .{ .programs = fx.programs(), .network = &testlfs.network }, .auth_failure = &failure });
             defer server.deinit(io);
             var fetched = try lfstransfer.fetch(io, server, &repo, .{});
             defer fetched.deinit();
@@ -1766,7 +1766,7 @@ test "an action that expires within five seconds of the time given is not used, 
             } else {
                 var repo = try repo_mod.Repository.open(gpa, io, d, .{});
                 defer repo.deinit(io);
-                const server = try lfsapi.Server.open(gpa, io, &repo, "origin", .{ .programs = fx.programs(), .now = if (i == 1) Io.Clock.real.now(io) else null });
+                const server = try lfsapi.Server.open(gpa, io, &repo, "origin", .{ .means = .{ .programs = fx.programs(), .network = &testlfs.network }, .now = if (i == 1) Io.Clock.real.now(io) else null });
                 defer server.deinit(io);
                 var fetched = try lfstransfer.fetch(io, server, &repo, .{});
                 defer fetched.deinit();
@@ -1824,7 +1824,7 @@ test "a git-lfs-authenticate token is asked for again when it expires, lfs.defau
             } else {
                 var repo = try repo_mod.Repository.open(gpa, io, d, .{});
                 defer repo.deinit(io);
-                const server = try lfsapi.Server.open(gpa, io, &repo, "origin", .{ .programs = fx.programs(), .now = Io.Clock.real.now(io) });
+                const server = try lfsapi.Server.open(gpa, io, &repo, "origin", .{ .means = .{ .programs = fx.programs(), .network = &testlfs.network }, .now = Io.Clock.real.now(io) });
                 defer server.deinit(io);
                 var fetched = try lfstransfer.fetch(io, server, &repo, .{});
                 defer fetched.deinit();
@@ -1877,7 +1877,7 @@ test "lfs/tmp is swept of what git-lfs sweeps from it, counted from the time giv
         } else {
             var repo = try repo_mod.Repository.open(gpa, io, d, .{});
             defer repo.deinit(io);
-            const server = try lfsapi.Server.open(gpa, io, &repo, "origin", .{ .programs = fx.programs(), .now = if (i == 1) gitdate.timestamp(now) else null });
+            const server = try lfsapi.Server.open(gpa, io, &repo, "origin", .{ .means = .{ .programs = fx.programs(), .network = &testlfs.network }, .now = if (i == 1) gitdate.timestamp(now) else null });
             defer server.deinit(io);
             var fetched = try lfstransfer.fetch(io, server, &repo, .{});
             defer fetched.deinit();
@@ -2118,8 +2118,6 @@ test "a custom adapter the batch answer names moves the objects, handed the acti
 }
 
 test "a redirect to another host leaves the request's own Authorization behind, as git-lfs's does, and one to the same host keeps it" {
-    // Only with `http`: the redirect is followed by uplink's client.
-    if (!@import("relic_options").http) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     const tokens: []const testlfs.Token = &.{.{ .token = "t0ken", .user = "ada" }};
@@ -2135,7 +2133,7 @@ test "a redirect to another host leaves the request's own Authorization behind, 
     defer work.close(io);
     var repo = try repo_mod.Repository.open(gpa, io, work, .{});
     defer repo.deinit(io);
-    const server = try lfsapi.Server.open(gpa, io, &repo, "origin", .{ .programs = fx.programs() });
+    const server = try lfsapi.Server.open(gpa, io, &repo, "origin", .{ .means = .{ .programs = fx.programs(), .network = &testlfs.network } });
     defer server.deinit(io);
 
     const route = try gpa.print("repo.git/info/lfs/objects/{s}", .{&oid});
@@ -2193,7 +2191,7 @@ test "a cancel that stops any read or write of an upload or a download is Cancel
             {
                 var repo = try repo_mod.Repository.open(gpa, run_io, m.ours, .{});
                 defer repo.deinit(run_io);
-                const server = try lfsapi.Server.open(gpa, run_io, &repo, "origin", .{ .programs = m.fx.programs() });
+                const server = try lfsapi.Server.open(gpa, run_io, &repo, "origin", .{ .means = .{ .programs = m.fx.programs(), .network = &testlfs.network } });
                 defer server.deinit(run_io);
                 var uploaded = try lfstransfer.upload(run_io, server, &.{m.object}, .{});
                 defer uploaded.deinit();
@@ -2201,7 +2199,7 @@ test "a cancel that stops any read or write of an upload or a download is Cancel
             }
             var repo = try repo_mod.Repository.open(gpa, run_io, m.theirs, .{});
             defer repo.deinit(run_io);
-            const server = try lfsapi.Server.open(gpa, run_io, &repo, "origin", .{ .programs = m.fx.programs() });
+            const server = try lfsapi.Server.open(gpa, run_io, &repo, "origin", .{ .means = .{ .programs = m.fx.programs(), .network = &testlfs.network } });
             defer server.deinit(run_io);
             var fetched = try lfstransfer.fetch(run_io, server, &repo, .{});
             defer fetched.deinit();

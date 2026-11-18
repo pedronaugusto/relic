@@ -20,7 +20,7 @@ const Context = struct {
     fn run(c: *Context, units: u64) !void {
         for (0..units) |_| {
             const who: api.object.Signature = .{ .name = "Fixture", .email = "fixture@example.com", .when_secs = 1_700_000_000, .offset_minutes = 0 };
-            var session = try api.transport.Session.open(c.gpa, c.io, c.path, .{ .service = .receive_pack, .kind = c.from.objectFormat() }, .{ .who = who });
+            var session = try api.transport.Session.open(c.gpa, c.io, c.path, .{ .service = .receive_pack, .kind = c.from.objectFormat() }, .{ .means = .none, .who = who });
             defer session.deinit(c.io);
             var report = try session.push(c.gpa, c.io, c.from, .{ .commands = &.{c.command}, .objects = c.entries, .atomic = true, .who = who });
             defer report.deinit();

@@ -221,7 +221,7 @@ pub fn pull(gpa: Allocator, io: Io, repo: *Repository, remote: ?[]const u8, opti
         .strategy = if (reconciled.rebasing) .rebase else .checkout,
         .who = options.merge.who,
         .transport = options.submodule_transport,
-        .programs = options.fetch.programs,
+        .programs = options.fetch.means.programs,
         .rebasing = options.rebasing,
         .reflog_action = plan.reflog_action,
         .warnings = options.fetch.warnings,

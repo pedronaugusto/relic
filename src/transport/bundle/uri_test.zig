@@ -16,6 +16,7 @@ const testremote = @import("../../testing/remote.zig");
 const suite = @import("../../testing/helpers.zig");
 const config_mod = @import("../../config/config.zig");
 const warning = @import("../../report.zig").warning;
+const testnet = @import("../../testing/net.zig");
 
 const test_who: object.Signature = .{ .name = "F", .email = "f@example.com", .when_secs = 1, .offset_minutes = 0 };
 
@@ -103,7 +104,7 @@ test "clone --bundle-uri and fetch.bundleURI take bundles before the server as g
         try out.dir.createDirPath(io, std.Io.Dir.path.basename(by_relic));
         var dir = try out.dir.openDir(io, std.Io.Dir.path.basename(by_relic), .{});
         defer dir.close(io);
-        var cloned = try clone_mod.clone(gpa, io, url, dir, .{ .who = test_who, .programs = .{ .environ = src.environMap() }, .bundle_uri = case.uri });
+        var cloned = try clone_mod.clone(gpa, io, url, dir, .{ .who = test_who, .means = .{ .programs = .{ .environ = src.environMap() }, .network = &testnet.network }, .bundle_uri = case.uri });
         cloned.deinit(io);
         const want = try describe(&src, io, by_git);
         defer gpa.free(want);
@@ -123,7 +124,7 @@ test "clone --bundle-uri and fetch.bundleURI take bundles before the server as g
     defer relic_dir.close(io);
     var repo = try repo_mod.Repository.open(gpa, io, relic_dir, .{});
     defer repo.deinit(io);
-    var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = src.environMap() } });
+    var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .means = .{ .programs = .{ .environ = src.environMap() }, .network = &testnet.network } });
     outcome.deinit();
     const want = try describe(&src, io, by_git);
     defer gpa.free(want);
@@ -213,7 +214,7 @@ test "git 2.56, a server's bundle-uri list under transfer.bundleURI as git takes
                 defer dir.close(io);
                 var said: warning.Warnings = .init(gpa);
                 defer said.deinit();
-                var cloned = try clone_mod.clone(gpa, io, url, dir, .{ .who = test_who, .checkout = false, .programs = .{ .environ = &env }, .config = &config, .warnings = &said });
+                var cloned = try clone_mod.clone(gpa, io, url, dir, .{ .who = test_who, .checkout = false, .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network }, .config = &config, .warnings = &said });
                 cloned.deinit(io);
                 if (in_error) {
                     try testing.expectEqual(@as(usize, 2), said.items.items.len);

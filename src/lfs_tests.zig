@@ -1,14 +1,13 @@
 //! relic_lfs's tests: the module's root, files and tests, and the LFS tests
 //! of what the core does with LFS supplied (a clone through git-lfs's
 //! filters, a snapshot, a configuration an LFS server teaches). `tests.zig`
-//! names them where relic is built with `lfs`.
+//! names them.
 
 const std = @import("std");
 const builtin = @import("builtin");
-const features = @import("relic_options");
 const lfs = @import("lfs/lfs.zig");
 const api_mod = @import("lfs/api.zig");
-/// The module's root: `server` is in it only where `http` is on.
+/// The module's root.
 const root = @import("lfs.zig");
 
 test "the plumbing is relic_lfs's own: no public name reaches it" {
@@ -25,10 +24,8 @@ test "the plumbing is relic_lfs's own: no public name reaches it" {
 
 test {
     // Every module the API reaches, one level down as well as at the top,
-    // so that every file under the root is compiled and its tests run;
-    // `server` only where `http` is on, a compile error elsewhere.
+    // so that every file under the root is compiled and its tests run.
     inline for (@typeInfo(root).@"struct".decl_names) |name| {
-        if (comptime !features.http and std.mem.eql(u8, name, "server")) continue;
         _ = &@field(root, name);
         if (@TypeOf(@field(root, name)) == type and @typeInfo(@field(root, name)) == .@"struct") std.testing.refAllDecls(@field(root, name));
     }
@@ -58,11 +55,9 @@ test {
         _ = @import("lfs/snapshot_test.zig");
         _ = @import("lfs/clone_config_test.zig");
         _ = @import("lfs/config_refresh_test.zig");
-        if (features.http) {
-            _ = @import("lfs/server.zig");
-            _ = @import("lfs/server/transfer.zig");
-            _ = @import("lfs/server_test.zig");
-            _ = @import("lfs/server/transfer_test.zig");
-        }
+        _ = @import("lfs/server.zig");
+        _ = @import("lfs/server/transfer.zig");
+        _ = @import("lfs/server_test.zig");
+        _ = @import("lfs/server/transfer_test.zig");
     }
 }

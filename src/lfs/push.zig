@@ -31,7 +31,6 @@ const Io = std.Io;
 const core = @import("relic_core");
 const odb_mod = core.odb;
 const repo_mod = core.repo;
-const program = core.process.program;
 const credential = core.wire.credential;
 const progress_mod = core.report.progress;
 const lfs = @import("lfs.zig");
@@ -124,7 +123,8 @@ pub const Report = struct {
 
 /// How the LFS server is reached: the push's own permissions.
 pub const Reach = struct {
-    programs: ?program.Programs = null,
+    /// What the server is reached with (`relic.transport.Means`).
+    means: core.transport.Means,
     prompt: ?credential.Prompt = null,
     progress: ?progress_mod.Progress = null,
     /// Filled in when the LFS server refuses for want of a credential: see
@@ -158,7 +158,7 @@ pub fn beforePush(
     if (options.mode == .auto and pointers.len == 0 and !try usesLfs(io, repo)) return;
     report.ran = true;
 
-    const server = try lfsapi.Server.open(gpa, io, repo, remote, .{ .programs = reach.programs, .prompt = reach.prompt, .auth_failure = reach.auth_failure, .now = options.now });
+    const server = try lfsapi.Server.open(gpa, io, repo, remote, .{ .means = reach.means, .prompt = reach.prompt, .auth_failure = reach.auth_failure, .now = options.now });
     defer server.deinit(io);
     // Remembering the endpoint's access is git-lfs's best-effort config
     // write and never fails a push; a cancel stays for the caller's next
@@ -286,7 +286,7 @@ pub const PushError = Error || push_mod.Error;
 pub const PushOptions = struct { transport: push_mod.Options, lfs: Options = .{} };
 pub fn push(gpa: Allocator, io: Io, repository: *Repository, remote: []const u8, options: PushOptions) PushError!push_mod.Outcome {
     var context: PushContext = .{
-        .reach = .{ .programs = options.transport.programs, .prompt = options.transport.prompt, .progress = options.transport.progress, .auth_failure = options.transport.auth_failure },
+        .reach = .{ .means = options.transport.means, .prompt = options.transport.prompt, .progress = options.transport.progress, .auth_failure = options.transport.auth_failure },
         .options = options.lfs,
         .previous = options.transport.before_send,
     };

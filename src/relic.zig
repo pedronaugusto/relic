@@ -126,7 +126,7 @@
 //! | `transport.send_pack` | Sending to `git-receive-pack`: commands, a pack, and the report. |
 //! | `transport.local` | A remote on this machine: a path, or a `file://` URL. |
 //! | `transport.ssh` | Reaching a remote over ssh: the person's own `ssh`, started the way git starts it. |
-//! | `transport.smart_http` | git's smart HTTP protocol over uplink's client, and a dumb server's files: `Files` and `Early`, each body an `aegis.io.ReadEnd`. |
+//! | `transport.smart_http` | git's smart HTTP protocol: its `Options` and errors, and the interfaces of what a network opens, a dumb server's `Files` and `Early` requests, each body an `aegis.io.ReadEnd`. The engine over uplink's client is `relic_net.network`'s. |
 //! | `transport.credential` | Credentials for an HTTP remote: git's credential helper protocol, and the prompt git falls back to, as git's `credential.c` has them. |
 //! | `transport.credential.cache` | git's `credential-cache` client. |
 //! | `transport.credential_cache_daemon` | Git's `credential-cache--daemon`: credentials held in memory, on a unix socket of the daemon's own, for as long as each was stored for. |
@@ -136,7 +136,6 @@
 //! | `transport.pkt_line` | Pkt-line: the framing under git's wire protocol and its long-running filter processes. |
 //! | `transport.upload_pack` | `Server` — serving fetches, with shallow and every filter. |
 //! | `transport.receive_pack` | `Server`, `connect` — serving pushes as git's receive-pack: quarantine, connectivity and fsck, the receive hooks, `receive.*`, report-status v1 and v2. |
-//! | `transport.http_backend` | `Backend` — git's smart HTTP served on uplink's server: clone, fetch and push over `http://`. Only with `http`. |
 //! | `transport.bundle` | `create`, `write`, `File.open`, `Header.read`, `listHeads`, `writeSummary`, `verify`, `unbundle`, `isBundle`: `git bundle` v2 and v3, its header byte for byte, filtered by any filter git takes, `sparse:oid=` included; a path to a bundle is fetched and cloned from. |
 //! | `transport.bundle_uri` | `fetch`, `fetchList`, `List`: bundle URIs as git's `bundle-uri.c` takes them, a bundle or a bundle list (`mode`, the `creationToken` heuristic) unbundled before a clone or a fetch asks the server, its refs under `refs/bundles/`. |
 //! | `transport.progress` | What a long operation says while it runs. |
@@ -179,7 +178,7 @@ pub const diff = core.diff;
 pub const rev_walk = core.rev_walk;
 pub const merge = core.merge;
 pub const commit = core.commit;
-pub const transport = if (features.http) transport_with_http else core.transport;
+pub const transport = core.transport;
 pub const submodule = core.submodule;
 pub const patch = core.patch;
 pub const grep = core.grep;
@@ -189,73 +188,6 @@ pub const clean = core.clean;
 pub const fast = core.fast;
 
 pub const maintenance = core.maintenance;
-
-/// The features this build has: `http` (uplink and cloak) and `lfs` (strand).
-const features = @import("relic_options");
-
-/// Which optional features relic was built with.
-pub const Features = struct {
-    /// Fetching and pushing over HTTP(S), with uplink and cloak.
-    http: bool,
-    /// Git LFS's transfers, locks and agents, with strand: the `relic_lfs`
-    /// module, which exists only with it.
-    lfs: bool,
-};
-
-/// This build's features, as the dependency's `.http` and `.lfs` options set them.
-pub const built_with: Features = .{ .http = features.http, .lfs = features.lfs };
-
-// A declaration exists exactly when its types do: a namespace with a module
-// only one feature holds is chosen whole, the name absent without it, so
-// `@hasDecl` tells the truth and a consumer is told "no member" when it
-// compiles. The choice lists every name of its namespace and the one it
-// adds, which `sameNamesBut` holds to.
-/// `transport` with `http`: every name of its namespace, and git's http-backend served on uplink's server.
-const transport_with_http = struct {
-    const base = core.transport;
-    pub const filter_spec = base.filter_spec;
-    pub const partial = base.partial;
-    pub const side_band = base.side_band;
-    pub const http_settings = base.http_settings;
-    pub const hidden = base.hidden;
-    pub const promisors = base.promisors;
-    pub const push = base.push;
-    pub const clone = base.clone;
-    pub const fetch = base.fetch;
-    pub const pull = base.pull;
-    pub const backfill = base.backfill;
-    pub const refspec = base.refspec;
-    pub const remote = base.remote;
-    pub const url = base.url;
-    pub const fetch_pack = base.fetch_pack;
-    pub const send_pack = base.send_pack;
-    pub const local = base.local;
-    pub const ssh = base.ssh;
-    pub const smart_http = base.smart_http;
-    pub const credential = base.credential;
-    pub const credential_cache_daemon = base.credential_cache_daemon;
-    pub const auth = base.auth;
-    pub const protocol = base.protocol;
-    pub const connection = base.connection;
-    pub const pkt_line = base.pkt_line;
-    pub const upload_pack = base.upload_pack;
-    pub const receive_pack = base.receive_pack;
-    pub const bundle = base.bundle;
-    pub const bundle_uri = base.bundle_uri;
-    pub const progress = base.progress;
-    pub const remote_helper = base.remote_helper;
-    pub const policy = base.policy;
-    pub const Error = base.Error;
-    pub const Options = base.Options;
-    pub const wantsV2 = base.wantsV2;
-    pub const Session = base.Session;
-    pub const download = base.download;
-    pub const http_backend = core.http_backend;
-};
-
-comptime {
-    core.contract.sameNamesBut(core.transport, transport_with_http, "http_backend");
-}
 
 // The contract relic's public surface keeps (`core.contract`), checked as
 // relic compiles, on any target, so that no build of it breaks one; and how

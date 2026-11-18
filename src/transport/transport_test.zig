@@ -34,8 +34,23 @@ const push_mod = @import("push.zig");
 const pull_mod = @import("pull.zig");
 const program = @import("../process.zig").program;
 const input = @import("input.zig");
+const testnet = @import("../testing/net.zig");
 
 const test_who: object.Signature = .{ .name = "F", .email = "f@example.com", .when_secs = 1, .offset_minutes = 0 };
+
+test "with no network an http(s) remote is HttpUnavailable and a git:// one DaemonUnavailable, before anything is dialed" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    // Port 1 refuses a dial: an engine reached would fail as ConnectionFailed.
+    for ([_][]const u8{ "http://127.0.0.1:1/repo.git", "https://127.0.0.1:1/repo.git" }) |url| {
+        try testing.expectError(error.HttpUnavailable, transport.Session.open(gpa, io, url, .{ .service = .upload_pack }, .{ .who = test_who, .means = .none }));
+        try testing.expectError(error.HttpUnavailable, transport.Session.open(gpa, io, url, .{ .service = .receive_pack }, .{ .who = test_who, .means = .none }));
+    }
+    try testing.expectError(error.DaemonUnavailable, transport.Session.open(gpa, io, "git://127.0.0.1:1/repo.git", .{ .service = .upload_pack }, .{ .who = test_who, .means = .none }));
+    // The same remotes with relic's network reach for the host.
+    try testing.expectError(error.ConnectionFailed, transport.Session.open(gpa, io, "http://127.0.0.1:1/repo.git", .{ .service = .upload_pack }, .{ .who = test_who, .means = testnet.means(null) }));
+    try testing.expectError(error.ConnectionFailed, transport.Session.open(gpa, io, "git://127.0.0.1:1/repo.git", .{ .service = .upload_pack }, .{ .who = test_who, .means = testnet.means(null) }));
+}
 
 /// A bare copy of a history under a directory an HTTP server serves.
 fn servedRepo(gpa: Allocator, io: Io, root: *testing.TmpDir, commits: usize) !void {
@@ -109,7 +124,7 @@ test "a fetch over smart HTTP leaves what git fetch leaves, in v2 and in v0" {
         var heard: Heard = .{};
         var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{
             .who = test_who,
-            .programs = .{ .environ = &env },
+            .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network },
             .progress = .{ .reporter = &heard.interface },
         });
         defer outcome.deinit();
@@ -132,7 +147,7 @@ test "the first request's redirect is followed, and the requests after it go whe
     const url = try server.url(gpa, "moved/repo.git");
     defer gpa.free(url);
 
-    var session = try transport.Session.open(gpa, io, url, .{ .service = .upload_pack, .kind = .sha1 }, .{});
+    var session = try transport.Session.open(gpa, io, url, .{ .service = .upload_pack, .kind = .sha1 }, .{ .means = testnet.means(null) });
     defer session.deinit(io);
     var refs = try session.listRefs(gpa, io, &.{"refs/heads/"});
     defer refs.deinit();
@@ -163,7 +178,7 @@ test "a redirect to another server takes no credential with it, an extraHeader's
     for ([_]*testremote.HttpServer{ here, away }) |server| {
         const url = try server.url(gpa, "moved/repo.git");
         defer gpa.free(url);
-        var session = try transport.Session.open(gpa, io, url, .{ .service = .upload_pack, .kind = .sha1 }, .{ .config = &config });
+        var session = try transport.Session.open(gpa, io, url, .{ .service = .upload_pack, .kind = .sha1 }, .{ .means = testnet.means(null), .config = &config });
         session.deinit(io);
     }
     // The same server: every request with the header.
@@ -185,7 +200,7 @@ test "a redirect to another server takes no credential with it, an extraHeader's
     defer never.deinit();
     const url = try here.url(gpa, "moved/repo.git");
     defer gpa.free(url);
-    try testing.expectError(error.HttpStatus, transport.Session.open(gpa, io, url, .{ .service = .upload_pack, .kind = .sha1 }, .{ .config = &never }));
+    try testing.expectError(error.HttpStatus, transport.Session.open(gpa, io, url, .{ .service = .upload_pack, .kind = .sha1 }, .{ .means = testnet.means(null), .config = &never }));
 }
 
 test "a cancel that lands in any read of a refused request comes back as Canceled, never as the refusal" {
@@ -210,7 +225,7 @@ test "a cancel that lands in any read of a refused request comes back as Cancele
     {
         const faults = try shakedown.FaultIo.init(gpa, io, .{ .trace = .all });
         defer faults.deinit();
-        if (transport.Session.open(gpa, faults.io(), url, inputs, .{})) |opened| {
+        if (transport.Session.open(gpa, faults.io(), url, inputs, .{ .means = testnet.means(null) })) |opened| {
             var session = opened;
             session.deinit(io);
             return error.TestUnexpectedResult;
@@ -228,7 +243,7 @@ test "a cancel that lands in any read of a refused request comes back as Cancele
         const plan = [_]shakedown.IoPlan.Entry{.{ .at = .{ .nth = .{ .call = .net_read, .n = n } }, .fault = .cancel, .times = 1 }};
         const faults = try shakedown.FaultIo.init(gpa, io, .{ .plan = &plan });
         defer faults.deinit();
-        if (transport.Session.open(gpa, faults.io(), url, inputs, .{})) |opened| {
+        if (transport.Session.open(gpa, faults.io(), url, inputs, .{ .means = testnet.means(null) })) |opened| {
             var session = opened;
             session.deinit(io);
             return error.TestUnexpectedResult;
@@ -262,7 +277,7 @@ test "a redirect whose user decodes to a newline is refused before any helper he
     // would be `ProgramsNotGranted`.
     var config = try config_mod.Config.parseText(gpa, "[credential]\n\thelper = store\n", .local);
     defer config.deinit();
-    try testing.expectError(error.CredentialValueUnsafe, transport.Session.open(gpa, io, url, .{ .service = .upload_pack, .kind = .sha1 }, .{ .config = &config }));
+    try testing.expectError(error.CredentialValueUnsafe, transport.Session.open(gpa, io, url, .{ .service = .upload_pack, .kind = .sha1 }, .{ .means = testnet.means(null), .config = &config }));
 }
 
 test "a transport the configuration or GIT_ALLOW_PROTOCOL refuses is not opened" {
@@ -270,12 +285,12 @@ test "a transport the configuration or GIT_ALLOW_PROTOCOL refuses is not opened"
     const io = testing.io;
     var config = try config_mod.Config.parseText(gpa, "[protocol \"http\"]\n\tallow = never\n", .local);
     defer config.deinit();
-    try testing.expectError(error.TransportNotAllowed, transport.Session.open(gpa, io, "http://127.0.0.1:1/repo.git", .{ .service = .upload_pack, .kind = .sha1 }, .{ .config = &config }));
+    try testing.expectError(error.TransportNotAllowed, transport.Session.open(gpa, io, "http://127.0.0.1:1/repo.git", .{ .service = .upload_pack, .kind = .sha1 }, .{ .means = testnet.means(null), .config = &config }));
     var env = try testremote.environ(gpa);
     defer env.deinit();
     try env.put("GIT_ALLOW_PROTOCOL", "https");
-    try testing.expectError(error.TransportNotAllowed, transport.Session.open(gpa, io, "/nonexistent/repo.git", .{ .service = .upload_pack, .kind = .sha1 }, .{ .programs = .{ .environ = &env } }));
-    try testing.expectError(error.TransportNotAllowed, transport.Session.open(gpa, io, "/nonexistent/repo.git", .{ .service = .upload_pack, .kind = .sha1 }, .{ .from_user = false }));
+    try testing.expectError(error.TransportNotAllowed, transport.Session.open(gpa, io, "/nonexistent/repo.git", .{ .service = .upload_pack, .kind = .sha1 }, .{ .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network } }));
+    try testing.expectError(error.TransportNotAllowed, transport.Session.open(gpa, io, "/nonexistent/repo.git", .{ .service = .upload_pack, .kind = .sha1 }, .{ .means = testnet.means(null), .from_user = false }));
 }
 
 test "a malformed transfer.advertiseSID is refused, as git dies on it, where no session id was sent" {
@@ -287,7 +302,7 @@ test "a malformed transfer.advertiseSID is refused, as git dies on it, where no 
     defer gpa.free(path);
     var config = try config_mod.Config.parseText(gpa, "[transfer]\n\tadvertiseSID = maybe\n", .local);
     defer config.deinit();
-    try testing.expectError(error.NotABoolean, transport.Session.open(gpa, io, path, .{ .service = .upload_pack, .kind = .sha1 }, .{ .config = &config }));
+    try testing.expectError(error.NotABoolean, transport.Session.open(gpa, io, path, .{ .service = .upload_pack, .kind = .sha1 }, .{ .means = testnet.means(null), .config = &config }));
 }
 
 test "a missing repository, a dumb setting and a header that is not one are refused by name" {
@@ -300,7 +315,7 @@ test "a missing repository, a dumb setting and a header that is not one are refu
     defer server.stop();
     const missing = try server.url(gpa, "nothere.git");
     defer gpa.free(missing);
-    try testing.expectError(error.RepositoryNotFound, transport.Session.open(gpa, io, missing, .{ .service = .upload_pack, .kind = .sha1 }, .{}));
+    try testing.expectError(error.RepositoryNotFound, transport.Session.open(gpa, io, missing, .{ .service = .upload_pack, .kind = .sha1 }, .{ .means = testnet.means(null) }));
 
     const url = try server.url(gpa, "repo.git");
     defer gpa.free(url);
@@ -320,12 +335,12 @@ test "a missing repository, a dumb setting and a header that is not one are refu
         var config = try config_mod.Config.parseText(gpa, text, .local);
         defer config.deinit();
         const target = if (expected == error.InvalidHttpHeader) url else secure;
-        try testing.expectError(expected, transport.Session.open(gpa, io, target, .{ .service = .upload_pack, .kind = .sha1 }, .{ .config = &config }));
+        try testing.expectError(expected, transport.Session.open(gpa, io, target, .{ .service = .upload_pack, .kind = .sha1 }, .{ .means = testnet.means(null), .config = &config }));
     }
     // Over plain http git reads no TLS setting, and neither does relic.
     var plain = try config_mod.Config.parseText(gpa, "[http]\nsslVerify = false\n", .local);
     defer plain.deinit();
-    var session = try transport.Session.open(gpa, io, url, .{ .service = .upload_pack, .kind = .sha1 }, .{ .config = &plain });
+    var session = try transport.Session.open(gpa, io, url, .{ .service = .upload_pack, .kind = .sha1 }, .{ .means = testnet.means(null), .config = &plain });
     session.deinit(io);
 }
 
@@ -388,12 +403,12 @@ test "credentials come from a helper as git asks for them, are stored when they 
         defer repo.deinit(io);
         if (ok) {
             try git_result;
-            var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &env } });
+            var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network } });
             outcome.deinit();
             try expectSameFetch(gpa, io, &by_git, &by_relic);
         } else {
             try testing.expectError(error.GitFailed, git_result);
-            try testing.expectError(error.AuthenticationFailed, fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &env } }));
+            try testing.expectError(error.AuthenticationFailed, fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network } }));
         }
 
         // The helpers were asked the same things in the same order: `get`,
@@ -419,7 +434,7 @@ test "credentials in the URL, from askpass and from the caller's prompt are what
     const with_userinfo = try gpa.print("http://ada:secret@127.0.0.1:{d}/repo.git", .{server.port});
     defer gpa.free(with_userinfo);
     {
-        var session = try transport.Session.open(gpa, io, with_userinfo, .{ .service = .upload_pack, .kind = .sha1 }, .{});
+        var session = try transport.Session.open(gpa, io, with_userinfo, .{ .service = .upload_pack, .kind = .sha1 }, .{ .means = testnet.means(null) });
         session.deinit(io);
     }
 
@@ -427,7 +442,7 @@ test "credentials in the URL, from askpass and from the caller's prompt are what
     defer gpa.free(url);
     // Without a helper, a prompt, or the permission to run askpass, there
     // is nothing to ask.
-    try testing.expectError(error.CredentialsUnavailable, transport.Session.open(gpa, io, url, .{ .service = .upload_pack, .kind = .sha1 }, .{}));
+    try testing.expectError(error.CredentialsUnavailable, transport.Session.open(gpa, io, url, .{ .service = .upload_pack, .kind = .sha1 }, .{ .means = testnet.means(null) }));
 
     // askpass: asked with git's own prompts.
     var tools = testing.tmpDir(.{ .iterate = true });
@@ -442,9 +457,9 @@ test "credentials in the URL, from askpass and from the caller's prompt are what
     try env.put("GIT_ASKPASS", askpass);
     // askpass is a window in front of the person: without the caller's
     // leave it is not run, and there is still nothing to ask.
-    try testing.expectError(error.CredentialsUnavailable, transport.Session.open(gpa, io, url, .{ .service = .upload_pack, .kind = .sha1 }, .{ .programs = .{ .environ = &env } }));
+    try testing.expectError(error.CredentialsUnavailable, transport.Session.open(gpa, io, url, .{ .service = .upload_pack, .kind = .sha1 }, .{ .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network } }));
     {
-        var session = try transport.Session.open(gpa, io, url, .{ .service = .upload_pack, .kind = .sha1 }, .{ .programs = .{ .environ = &env }, .prompt = .{ .askpass = true } });
+        var session = try transport.Session.open(gpa, io, url, .{ .service = .upload_pack, .kind = .sha1 }, .{ .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network }, .prompt = .{ .askpass = true } });
         session.deinit(io);
     }
     const ours = try tools.dir.readFileAlloc(io, "askpass.log", gpa, .unlimited);
@@ -480,7 +495,7 @@ test "credentials in the URL, from askpass and from the caller's prompt are what
     var asked: Asked = .{};
     defer asked.prompts.deinit(gpa);
     {
-        var session = try transport.Session.open(gpa, io, url, .{ .service = .upload_pack, .kind = .sha1 }, .{ .prompt = .{ .asker = &asked.interface } });
+        var session = try transport.Session.open(gpa, io, url, .{ .service = .upload_pack, .kind = .sha1 }, .{ .means = testnet.means(null), .prompt = .{ .asker = &asked.interface } });
         session.deinit(io);
     }
     try testing.expectEqualStrings(theirs, asked.prompts.items);
@@ -559,7 +574,7 @@ test "ssh is handed the same arguments git hands it" {
         var settings = try config_mod.Config.parseText(gpa, text.items, .local);
         defer settings.deinit();
         if (transport.Session.open(gpa, io, case.url, .{ .service = .upload_pack, .kind = .sha1 }, .{
-            .programs = .{ .environ = &env },
+            .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network },
             .config = &settings,
         })) |opened| {
             var session = opened;
@@ -608,7 +623,7 @@ test "a fetch over ssh leaves what git fetch leaves, in v2 and in v0" {
         defer repo.deinit(io);
         var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{
             .who = .{ .name = "F", .email = "f@example.com", .when_secs = 1, .offset_minutes = 0 },
-            .programs = .{ .environ = &env },
+            .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network },
         });
         defer outcome.deinit();
         try testing.expect(outcome.objects > 0);
@@ -649,7 +664,7 @@ fn gitFailure(gpa: Allocator, io: Io, dir: Io.Dir, env: *const std.process.Envir
 fn relicFetch(gpa: Allocator, io: Io, dir: Io.Dir, env: *const std.process.Environ.Map) !void {
     var repo = try repo_mod.Repository.open(gpa, io, dir, .{});
     defer repo.deinit(io);
-    var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = env } });
+    var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .means = .{ .programs = .{ .environ = env }, .network = &testnet.network } });
     outcome.deinit();
 }
 
@@ -662,8 +677,6 @@ fn tlsFront(gpa: Allocator, io: Io, server: *testremote.HttpServer, options: tes
 }
 
 test "a server's own authority, in http.sslCAInfo or http.sslCAPath, is trusted as git trusts it, and nothing else is" {
-    // Only with `http`: the TLS server and its client are uplink's.
-    if (!@import("relic_options").http) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var root = testing.tmpDir(.{ .iterate = true });
@@ -735,8 +748,6 @@ fn firstLines(gpa: Allocator, log: []const u8) ![]u8 {
 }
 
 test "a proxy is gone through as git goes through it: the whole URL for http, CONNECT and TLS inside for https, not where no_proxy says" {
-    // Only with `http`: the TLS server and its client are uplink's.
-    if (!@import("relic_options").http) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var root = testing.tmpDir(.{ .iterate = true });
@@ -848,7 +859,7 @@ test "a proxy given to a fetch or a clone stands over the configuration's and no
     defer repo.deinit(io);
     // none: the configured proxy is passed over
     {
-        var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &env }, .proxy = .none });
+        var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network }, .proxy = .none });
         outcome.deinit();
         const seen = try proxy.take(gpa);
         defer gpa.free(seen);
@@ -856,7 +867,7 @@ test "a proxy given to a fetch or a clone stands over the configuration's and no
     }
     // left to the configuration, it is gone through
     {
-        var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &env } });
+        var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network } });
         outcome.deinit();
         const seen = try proxy.take(gpa);
         defer gpa.free(seen);
@@ -869,7 +880,7 @@ test "a proxy given to a fetch or a clone stands over the configuration's and no
     var again = try repo_mod.Repository.open(gpa, io, r.dir, .{});
     defer again.deinit(io);
     {
-        var outcome = try fetch_mod.fetch(gpa, io, &again, "origin", .{ .who = test_who, .programs = .{ .environ = &env }, .proxy = .{ .url = proxy_url } });
+        var outcome = try fetch_mod.fetch(gpa, io, &again, "origin", .{ .who = test_who, .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network }, .proxy = .{ .url = proxy_url } });
         outcome.deinit();
         const seen = try proxy.take(gpa);
         defer gpa.free(seen);
@@ -877,7 +888,7 @@ test "a proxy given to a fetch or a clone stands over the configuration's and no
     }
     var target = testing.tmpDir(.{ .iterate = true });
     defer target.cleanup();
-    var cloned = try clone_mod.clone(gpa, io, plain, target.dir, .{ .who = test_who, .programs = .{ .environ = &env }, .proxy = .{ .url = proxy_url } });
+    var cloned = try clone_mod.clone(gpa, io, plain, target.dir, .{ .who = test_who, .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network }, .proxy = .{ .url = proxy_url } });
     defer cloned.deinit(io);
     const seen = try proxy.take(gpa);
     defer gpa.free(seen);
@@ -885,8 +896,6 @@ test "a proxy given to a fetch or a clone stands over the configuration's and no
 }
 
 test "a proxy that asks is answered as curl answers for git: nothing first with anyauth, then Basic or Digest, MD5 or SHA-256" {
-    // Only with `http`: the TLS server and its client are uplink's.
-    if (!@import("relic_options").http) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var root = testing.tmpDir(.{ .iterate = true });
@@ -975,8 +984,6 @@ test "a proxy that asks is answered as curl answers for git: nothing first with 
 }
 
 test "a proxy's credentials come from its URL, or its user's from the helpers, as git's do, and a refusal is named" {
-    // Only with `http`: the TLS server and its client are uplink's.
-    if (!@import("relic_options").http) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var root = testing.tmpDir(.{ .iterate = true });
@@ -1062,8 +1069,6 @@ test "a proxy's credentials come from its URL, or its user's from the helpers, a
 }
 
 test "an https server is fetched from unchecked when http.sslVerify says so, and the caller is told" {
-    // Only with `http`: the TLS server and its client are uplink's.
-    if (!@import("relic_options").http) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var root = testing.tmpDir(.{ .iterate = true });
@@ -1094,7 +1099,7 @@ test "an https server is fetched from unchecked when http.sslVerify says so, and
         defer repo.deinit(io);
         var warnings: warning.Warnings = .init(gpa);
         defer warnings.deinit();
-        var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &env }, .warnings = &warnings });
+        var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network }, .warnings = &warnings });
         outcome.deinit();
         try expectSameFetch(gpa, io, &by_git, &by_relic);
         try testing.expectEqual(@as(usize, 1), warnings.items.items.len);
@@ -1155,7 +1160,7 @@ test "http.cookieFile's cookies are sent, its Set-Cookie lines among them, and h
     defer repo.deinit(io);
     var warnings: warning.Warnings = .init(gpa);
     defer warnings.deinit();
-    var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &env }, .warnings = &warnings });
+    var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network }, .warnings = &warnings });
     outcome.deinit();
     try expectSameFetch(gpa, io, &by_git, &by_relic);
     // The jar was written back: the warning kept for a failed write is given up.
@@ -1197,7 +1202,7 @@ test "http.saveCookies to a file that cannot be written leaves it as curl leaves
     defer repo.deinit(io);
     var warnings: warning.Warnings = .init(gpa);
     defer warnings.deinit();
-    var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &env }, .warnings = &warnings });
+    var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network }, .warnings = &warnings });
     outcome.deinit();
     var not_saved: usize = 0;
     for (warnings.items.items) |w| switch (w) {
@@ -1268,7 +1273,7 @@ test "a 429 is answered as git answers it: http.maxRetries requests in all, Retr
             defer repo.deinit(io);
             var warnings: warning.Warnings = .init(gpa);
             defer warnings.deinit();
-            const opened = transport.Session.open(gpa, io, url, .{ .service = .upload_pack, .kind = .sha1 }, .{ .config = repo.configuration(), .warnings = &warnings });
+            const opened = transport.Session.open(gpa, io, url, .{ .service = .upload_pack, .kind = .sha1 }, .{ .means = testnet.means(null), .config = repo.configuration(), .warnings = &warnings });
             if (case.fails) |f| {
                 try testing.expectError(f[1], opened);
                 continue;
@@ -1313,7 +1318,7 @@ test "a transfer slower than http.lowSpeedLimit for http.lowSpeedTime is given u
     try testing.expect(std.ascii.findIgnoreCase(outcome.stderr, "too slow") != null);
     var repo = try repo_mod.Repository.open(gpa, io, by_relic.dir, .{});
     defer repo.deinit(io);
-    try testing.expectError(error.ConnectionFailed, fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &env } }));
+    try testing.expectError(error.ConnectionFailed, fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network } }));
 }
 
 test "http.version and http.sslVersion as git reads them: an unknown value warned of, SSL 2 and 3 refused, a pinned key nothing can match refused before a connection" {
@@ -1332,7 +1337,7 @@ test "http.version and http.sslVersion as git reads them: an unknown value warne
         var warnings: warning.Warnings = .init(gpa);
         defer warnings.deinit();
         // On http, the TLS version is not read.
-        var session = try transport.Session.open(gpa, io, url, .{ .service = .upload_pack, .kind = .sha1 }, .{ .config = &config, .warnings = &warnings });
+        var session = try transport.Session.open(gpa, io, url, .{ .service = .upload_pack, .kind = .sha1 }, .{ .means = testnet.means(null), .config = &config, .warnings = &warnings });
         session.deinit(io);
         try testing.expectEqual(@as(usize, 1), warnings.items.items.len);
         try testing.expectEqualStrings("unknown value given to http.version: 'HTTP/3'", try warnings.items.items[0].message(warnings.arena.allocator()));
@@ -1345,19 +1350,17 @@ test "http.version and http.sslVersion as git reads them: an unknown value warne
     for (refused) |case| {
         var config = try config_mod.Config.parseText(gpa, case[0], .local);
         defer config.deinit();
-        try testing.expectError(case[1], transport.Session.open(gpa, io, "https://127.0.0.1:1/repo.git", .{ .service = .upload_pack, .kind = .sha1 }, .{ .config = &config }));
+        try testing.expectError(case[1], transport.Session.open(gpa, io, "https://127.0.0.1:1/repo.git", .{ .service = .upload_pack, .kind = .sha1 }, .{ .means = testnet.means(null), .config = &config }));
     }
     var config = try config_mod.Config.parseText(gpa, "[http]\n\tsslVersion = tlsv1.5\n", .local);
     defer config.deinit();
     var warnings: warning.Warnings = .init(gpa);
     defer warnings.deinit();
-    try testing.expectError(error.ConnectionFailed, transport.Session.open(gpa, io, "https://127.0.0.1:1/repo.git", .{ .service = .upload_pack, .kind = .sha1 }, .{ .config = &config, .warnings = &warnings }));
+    try testing.expectError(error.ConnectionFailed, transport.Session.open(gpa, io, "https://127.0.0.1:1/repo.git", .{ .service = .upload_pack, .kind = .sha1 }, .{ .means = testnet.means(null), .config = &config, .warnings = &warnings }));
     try testing.expectEqualStrings("unsupported ssl version tlsv1.5: using default", try warnings.items.items[0].message(warnings.arena.allocator()));
 }
 
 test "http.sslVersion=tlsv1.3 and http.pinnedPubkey hold the server as curl holds it for git: the lowest version spoken, the keys its certificate may hold" {
-    // Only with `http`: the TLS server and its client are uplink's.
-    if (!@import("relic_options").http) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var root = testing.tmpDir(.{ .iterate = true });
@@ -1447,8 +1450,6 @@ test "http.sslVersion=tlsv1.3 and http.pinnedPubkey hold the server as curl hold
 }
 
 test "an idle kept connection does not block another client" {
-    // Only with `http`: the kept connection is uplink's.
-    if (!@import("relic_options").http) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     var root = testing.tmpDir(.{ .iterate = true });
@@ -1531,7 +1532,7 @@ fn relicFetchV(gpa: Allocator, io: Io, dir: Io.Dir, env: *const std.process.Envi
     var repo = try repo_mod.Repository.open(gpa, io, dir, .{});
     defer repo.deinit(io);
     try repo.editConfig(io, &.{.{ .name = "protocol.version", .value = if (v2) "2" else "0" }}, .{});
-    var outcome = try fetch_mod.fetch(gpa, io, &repo, remote, .{ .who = test_who, .programs = .{ .environ = env } });
+    var outcome = try fetch_mod.fetch(gpa, io, &repo, remote, .{ .who = test_who, .means = .{ .programs = .{ .environ = env }, .network = &testnet.network } });
     outcome.deinit();
 }
 
@@ -1684,7 +1685,7 @@ test "a fetch cancelled while its ssh never answers stops and reaps the ssh" {
         fn fetch(allocator: Allocator, task_io: Io, repo: *repo_mod.Repository, env: *const std.process.Environ.Map, state: *Self) void {
             var outcome = fetch_mod.fetch(allocator, task_io, repo, "origin", .{
                 .who = test_who,
-                .programs = .{ .environ = env, .spawn = &state.hook },
+                .means = .{ .programs = .{ .environ = env, .spawn = &state.hook }, .network = &testnet.network },
             }) catch |err| {
                 state.failure = err;
                 return;
@@ -1782,8 +1783,6 @@ fn socksHttpsFetch(gpa: Allocator, io: Io, root: *testing.TmpDir, proxy: *testre
 }
 
 test "clone fetch and push cross each SOCKS tunnel as git crosses it, and a fetch TLS to the origin inside it" {
-    // Only with `http`: the TLS server and its client are uplink's.
-    if (!@import("relic_options").http) return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     try testgit.requireGitVersion(gpa, io, 2, 48);
@@ -1825,7 +1824,7 @@ test "clone fetch and push cross each SOCKS tunnel as git crosses it, and a fetc
             defer gpa.free(theirs);
             var ours = testing.tmpDir(.{ .iterate = true });
             defer ours.cleanup();
-            var repo = try clone_mod.clone(gpa, io, url, ours.dir, .{ .who = test_who, .programs = .{ .environ = &env }, .config = &config });
+            var repo = try clone_mod.clone(gpa, io, url, ours.dir, .{ .who = test_who, .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network }, .config = &config });
             defer repo.deinit(io);
             const our_log = try proxy.take(gpa);
             defer gpa.free(our_log);
@@ -1836,7 +1835,7 @@ test "clone fetch and push cross each SOCKS tunnel as git crosses it, and a fetc
             var by_git = try git_work.dir.openDir(io, "clone", .{});
             defer by_git.close(io);
             try repo.editConfig(io, &.{ .{ .name = "http.proxy", .value = "http://127.0.0.1:9" }, .{ .name = "remote.origin.proxy", .value = proxy_url } }, .{});
-            var fetched = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &env } });
+            var fetched = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network } });
             defer fetched.deinit();
             const fetched_git = try testremote.gitInputEnv(gpa, io, by_git, &env, &.{ "-c", setting, "fetch", "-q", "origin" }, "", true);
             gpa.free(fetched_git);
@@ -1860,7 +1859,7 @@ test "clone fetch and push cross each SOCKS tunnel as git crosses it, and a fetc
             defer gpa.free(relic_spec);
             const pushed_git = try testremote.gitInputEnv(gpa, io, by_git, &env, &.{ "-c", setting, "push", "-q", "origin", git_spec }, "", true);
             gpa.free(pushed_git);
-            var pushed = try push_mod.push(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &env }, .refspecs = &.{relic_spec} });
+            var pushed = try push_mod.push(gpa, io, &repo, "origin", .{ .who = test_who, .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network }, .refspecs = &.{relic_spec} });
             defer pushed.deinit();
             const git_refs = try testremote.gitInput(gpa, io, bare, &.{ "rev-parse", git_ref, relic_ref }, "");
             defer gpa.free(git_refs);
@@ -1889,7 +1888,7 @@ test "a SOCKS proxy's refusals reach a fetch by name: credentials refused, comma
             if (std.mem.eql(u8, scheme, "socks4a") and std.mem.eql(u8, userinfo, "ada:wrong@")) continue;
             const text = try proxy.url(gpa, scheme, userinfo);
             defer gpa.free(text);
-            try testing.expectError(error.ProxyAuthenticationFailed, transport.Session.open(gpa, io, url, .{ .service = .upload_pack, .kind = .sha1 }, .{ .proxy = .{ .url = text } }));
+            try testing.expectError(error.ProxyAuthenticationFailed, transport.Session.open(gpa, io, url, .{ .service = .upload_pack, .kind = .sha1 }, .{ .means = testnet.means(null), .proxy = .{ .url = text } }));
         }
     }
     // RFC 1928's reply codes, 1 to 8.
@@ -1899,7 +1898,7 @@ test "a SOCKS proxy's refusals reach a fetch by name: credentials refused, comma
         defer proxy.stop();
         const text = try proxy.url(gpa, "socks5h", "");
         defer gpa.free(text);
-        try testing.expectError(expected, transport.Session.open(gpa, io, url, .{ .service = .upload_pack, .kind = .sha1 }, .{ .proxy = .{ .url = text } }));
+        try testing.expectError(expected, transport.Session.open(gpa, io, url, .{ .service = .upload_pack, .kind = .sha1 }, .{ .means = testnet.means(null), .proxy = .{ .url = text } }));
     }
 }
 
@@ -1937,12 +1936,12 @@ test "a fetch that prunes and a push that deletes leave no log of the gone remot
 
         var repo = try repo_mod.Repository.open(gpa, io, work.dir, .{});
         defer repo.deinit(io);
-        var fetched = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .prune = true });
+        var fetched = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .means = testnet.means(null), .who = test_who, .prune = true });
         defer fetched.deinit();
         try testing.expectEqual(@as(usize, 1), fetched.pruned.len);
         try testing.expect(!try gitHasLog(io, &work, "refs/remotes/origin/gone"));
 
-        var pushed = try push_mod.push(gpa, io, &repo, "origin", .{ .who = test_who, .refspecs = &.{":refs/heads/feature"} });
+        var pushed = try push_mod.push(gpa, io, &repo, "origin", .{ .means = testnet.means(null), .who = test_who, .refspecs = &.{":refs/heads/feature"} });
         defer pushed.deinit();
         try testing.expectEqual(push_mod.RefResult.Status.ok, pushed.refs[0].status);
         try testing.expect(!try gitHasLog(io, &work, "refs/remotes/origin/feature"));
@@ -2040,7 +2039,7 @@ test "a remote's keywords come in colour as git push shows them, under color.rem
         defer gpa.free(relic_ref);
         var pushed = try push_mod.push(gpa, io, &repo, "origin", .{
             .who = test_who,
-            .programs = .{ .environ = &env },
+            .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network },
             .refspecs = &.{relic_ref},
             .progress = .{ .reporter = &heard.interface, .remote_keywords = if (colors) |*c| c.keywords() else null },
         });
@@ -2084,7 +2083,7 @@ test "a fetch stores fewer objects than fetch.unpackLimit loose and the rest in 
         {
             var repo = try repo_mod.Repository.open(gpa, io, by_relic.dir, .{});
             defer repo.deinit(io);
-            var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &env }, .keep = case.keep });
+            var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network }, .keep = case.keep });
             defer outcome.deinit();
         }
         var stored: [2][]u8 = undefined;
@@ -2175,7 +2174,7 @@ test "server options go with each v2 request as git sends them, from the remote'
             } else {
                 var repo = try repo_mod.Repository.open(gpa, io, twin.dir, .{});
                 defer repo.deinit(io);
-                var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &env }, .server_options = case.given });
+                var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network }, .server_options = case.given });
                 defer outcome.deinit();
             }
             heard[i] = try serverHeard(gpa, io, trace);
@@ -2198,7 +2197,7 @@ test "server options go with each v2 request as git sends them, from the remote'
     try testing.expect(std.mem.find(u8, said, "server options require protocol version 2 or later") != null);
     var repo = try repo_mod.Repository.open(gpa, io, twin.dir, .{});
     defer repo.deinit(io);
-    try testing.expectError(error.ServerOptionsNeedV2, fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &env }, .server_options = &.{"any"} }));
+    try testing.expectError(error.ServerOptionsNeedV2, fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network }, .server_options = &.{"any"} }));
 }
 
 /// The haves git's upload-pack heard, and where each round ended, as its
@@ -2267,7 +2266,7 @@ fn expectHavesOffered(cases: []const Negotiation) !void {
             } else {
                 var repo = try repo_mod.Repository.open(gpa, io, twin.dir, .{});
                 defer repo.deinit(io);
-                var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &env }, .refspecs = &.{"main"} });
+                var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network }, .refspecs = &.{"main"} });
                 defer outcome.deinit();
             }
             heard[i] = try havesHeard(gpa, io, trace);
@@ -2355,7 +2354,7 @@ test "several remotes are fetched as git fetches them: fetch.all and skipFetchAl
             var arena: std.heap.ArenaAllocator = .init(gpa);
             defer arena.deinit();
             const names = try fetch_mod.remotesToFetch(arena.allocator(), repo.configuration(), case.selection);
-            var many = try fetch_mod.fetchMany(gpa, io, &repo, names, .{ .fetch = .{ .who = test_who, .programs = .{ .environ = &env } } });
+            var many = try fetch_mod.fetchMany(gpa, io, &repo, names, .{ .fetch = .{ .who = test_who, .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network } } });
             defer many.deinit();
             try testing.expect(!many.anyFailed());
         }
@@ -2560,7 +2559,7 @@ fn expectSubmoduleFetches(cases: []const SubmoduleFetch) !void {
         var repo = try repo_mod.Repository.open(gpa, io, dir, .{});
         defer repo.deinit(io);
         var options = case.options;
-        options.programs = .{ .environ = &env };
+        options.means = .{ .programs = .{ .environ = &env }, .network = &testnet.network };
         var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", options);
         defer outcome.deinit();
         try testing.expect(!outcome.anySubmoduleFailed());
@@ -2580,28 +2579,28 @@ fn expectSubmoduleFetches(cases: []const SubmoduleFetch) !void {
 
 test "a fetch goes into the submodules as git's fetch_submodules does: on demand, never, and always" {
     try expectSubmoduleFetches(&.{
-        .{ .options = .{ .who = test_who }, .went = &.{ "lib", "lib/inner", "vendor/inner" } },
-        .{ .git_args = &.{"--no-recurse-submodules"}, .options = .{ .who = test_who, .recurse_submodules = .off }, .went = &.{} },
-        .{ .record = false, .options = .{ .who = test_who }, .went = &.{} },
-        .{ .record = false, .git_args = &.{"--recurse-submodules"}, .options = .{ .who = test_who, .recurse_submodules = .on }, .went = &.{ "lib", "lib/inner", "vendor/inner" } },
+        .{ .options = .{ .means = testnet.means(null), .who = test_who }, .went = &.{ "lib", "lib/inner", "vendor/inner" } },
+        .{ .git_args = &.{"--no-recurse-submodules"}, .options = .{ .means = testnet.means(null), .who = test_who, .recurse_submodules = .off }, .went = &.{} },
+        .{ .record = false, .options = .{ .means = testnet.means(null), .who = test_who }, .went = &.{} },
+        .{ .record = false, .git_args = &.{"--recurse-submodules"}, .options = .{ .means = testnet.means(null), .who = test_who, .recurse_submodules = .on }, .went = &.{ "lib", "lib/inner", "vendor/inner" } },
     });
 }
 
 test "a fetch goes into the submodules as git's fetch_submodules does: by fetch.recurseSubmodules, submodule.recurse and a submodule's own setting" {
     try expectSubmoduleFetches(&.{
-        .{ .config = &.{.{ "fetch.recurseSubmodules", "false" }}, .options = .{ .who = test_who }, .went = &.{} },
+        .{ .config = &.{.{ "fetch.recurseSubmodules", "false" }}, .options = .{ .means = testnet.means(null), .who = test_who }, .went = &.{} },
         // The clone wrote `[submodule] active`, so `submodule.recurse` goes
         // there, before `[fetch]`, and the fetch's setting is the later.
-        .{ .config = &.{ .{ "submodule.recurse", "false" }, .{ "fetch.recurseSubmodules", "true" } }, .record = false, .options = .{ .who = test_who }, .went = &.{ "lib", "lib/inner", "vendor/inner" } },
-        .{ .config = &.{.{ "submodule.recurse", "true" }}, .record = false, .options = .{ .who = test_who }, .went = &.{ "lib", "lib/inner", "vendor/inner" } },
-        .{ .config = &.{.{ "submodule.lib.fetchRecurseSubmodules", "true" }}, .record = false, .options = .{ .who = test_who }, .went = &.{ "lib", "lib/inner" } },
+        .{ .config = &.{ .{ "submodule.recurse", "false" }, .{ "fetch.recurseSubmodules", "true" } }, .record = false, .options = .{ .means = testnet.means(null), .who = test_who }, .went = &.{ "lib", "lib/inner", "vendor/inner" } },
+        .{ .config = &.{.{ "submodule.recurse", "true" }}, .record = false, .options = .{ .means = testnet.means(null), .who = test_who }, .went = &.{ "lib", "lib/inner", "vendor/inner" } },
+        .{ .config = &.{.{ "submodule.lib.fetchRecurseSubmodules", "true" }}, .record = false, .options = .{ .means = testnet.means(null), .who = test_who }, .went = &.{ "lib", "lib/inner" } },
     });
 }
 
 test "a fetch goes into the submodules as git's fetch_submodules does: for a commit by name, and several at once" {
     try expectSubmoduleFetches(&.{
-        .{ .ref = "refs/keep/aside", .options = .{ .who = test_who }, .went = &.{ "lib", "lib/inner", "vendor/inner" } },
-        .{ .git_args = &.{ "-j", "2" }, .options = .{ .who = test_who, .submodule_jobs = 2 }, .went = &.{ "lib", "lib/inner", "vendor/inner" } },
+        .{ .ref = "refs/keep/aside", .options = .{ .means = testnet.means(null), .who = test_who }, .went = &.{ "lib", "lib/inner", "vendor/inner" } },
+        .{ .git_args = &.{ "-j", "2" }, .options = .{ .means = testnet.means(null), .who = test_who, .submodule_jobs = 2 }, .went = &.{ "lib", "lib/inner", "vendor/inner" } },
     });
 }
 
@@ -2695,7 +2694,7 @@ fn expectRecursiveClones(cases: []const RecursiveClone) !void {
         var dir = try root.openDir(io, "by-relic", .{ .iterate = true });
         defer dir.close(io);
         var options = case.options;
-        options.programs = .{ .environ = &env };
+        options.means = .{ .programs = .{ .environ = &env }, .network = &testnet.network };
         options.user_config = .{ .pairs = case.config };
         const references = [_]clone_mod.Reference{.{ .path = lender }};
         if (case.lender) options.reference = &references;
@@ -2716,26 +2715,26 @@ const lender_ref = [_]clone_mod.Reference{.{ .path = "LENDER" }};
 
 test "a clone with --recurse-submodules is git's: every submodule, the pathspecs active, and shallow submodules" {
     try expectRecursiveClones(&.{
-        .{ .git_args = &.{"--recurse-submodules"}, .options = .{ .who = test_who, .recurse_submodules = &.{} } },
-        .{ .git_args = &.{"--recurse-submodules=lib"}, .options = .{ .who = test_who, .recurse_submodules = &.{"lib"} } },
-        .{ .git_args = &.{ "--recurse-submodules", "--shallow-submodules" }, .options = .{ .who = test_who, .recurse_submodules = &.{}, .shallow_submodules = true } },
+        .{ .git_args = &.{"--recurse-submodules"}, .options = .{ .means = testnet.means(null), .who = test_who, .recurse_submodules = &.{} } },
+        .{ .git_args = &.{"--recurse-submodules=lib"}, .options = .{ .means = testnet.means(null), .who = test_who, .recurse_submodules = &.{"lib"} } },
+        .{ .git_args = &.{ "--recurse-submodules", "--shallow-submodules" }, .options = .{ .means = testnet.means(null), .who = test_who, .recurse_submodules = &.{}, .shallow_submodules = true } },
     });
 }
 
 test "a clone with --recurse-submodules is git's: filtered submodules, by the option and by clone.filterSubmodules, refused alone, and the lenders' own lending to them" {
     try expectRecursiveClones(&.{
-        .{ .git_args = &.{ "--recurse-submodules", "--filter=blob:none", "--also-filter-submodules" }, .options = .{ .who = test_who, .recurse_submodules = &.{}, .filter = "blob:none", .filter_submodules = true } },
-        .{ .git_args = &.{ "-c", "clone.filterSubmodules=true", "--recurse-submodules", "--filter=blob:none" }, .options = .{ .who = test_who, .recurse_submodules = &.{}, .filter = "blob:none" }, .config = &.{.{ .name = "clone.filterSubmodules", .value = "true" }} },
-        .{ .git_args = &.{ "--recurse-submodules", "--reference", "LENDER" }, .options = .{ .who = test_who, .recurse_submodules = &.{}, .reference = &lender_ref }, .lender = true },
-        .{ .git_args = &.{ "--recurse-submodules", "--also-filter-submodules" }, .options = .{ .who = test_who, .recurse_submodules = &.{}, .filter_submodules = true }, .refused = error.FilterSubmodulesAlone },
+        .{ .git_args = &.{ "--recurse-submodules", "--filter=blob:none", "--also-filter-submodules" }, .options = .{ .means = testnet.means(null), .who = test_who, .recurse_submodules = &.{}, .filter = "blob:none", .filter_submodules = true } },
+        .{ .git_args = &.{ "-c", "clone.filterSubmodules=true", "--recurse-submodules", "--filter=blob:none" }, .options = .{ .means = testnet.means(null), .who = test_who, .recurse_submodules = &.{}, .filter = "blob:none" }, .config = &.{.{ .name = "clone.filterSubmodules", .value = "true" }} },
+        .{ .git_args = &.{ "--recurse-submodules", "--reference", "LENDER" }, .options = .{ .means = testnet.means(null), .who = test_who, .recurse_submodules = &.{}, .reference = &lender_ref }, .lender = true },
+        .{ .git_args = &.{ "--recurse-submodules", "--also-filter-submodules" }, .options = .{ .means = testnet.means(null), .who = test_who, .recurse_submodules = &.{}, .filter_submodules = true }, .refused = error.FilterSubmodulesAlone },
     });
 }
 
 test "a clone with --recurse-submodules is git's: submodules at their remote-tracking branches, with and without recursing, and cloned two at a time" {
     try expectRecursiveClones(&.{
-        .{ .git_args = &.{ "--recurse-submodules", "--remote-submodules" }, .options = .{ .who = test_who, .recurse_submodules = &.{}, .remote_submodules = true }, .advanced = true },
-        .{ .git_args = &.{"--remote-submodules"}, .options = .{ .who = test_who, .remote_submodules = true }, .advanced = true },
-        .{ .git_args = &.{ "--recurse-submodules", "--jobs", "2" }, .options = .{ .who = test_who, .recurse_submodules = &.{}, .submodule_jobs = 2 }, .advanced = true },
+        .{ .git_args = &.{ "--recurse-submodules", "--remote-submodules" }, .options = .{ .means = testnet.means(null), .who = test_who, .recurse_submodules = &.{}, .remote_submodules = true }, .advanced = true },
+        .{ .git_args = &.{"--remote-submodules"}, .options = .{ .means = testnet.means(null), .who = test_who, .remote_submodules = true }, .advanced = true },
+        .{ .git_args = &.{ "--recurse-submodules", "--jobs", "2" }, .options = .{ .means = testnet.means(null), .who = test_who, .recurse_submodules = &.{}, .submodule_jobs = 2 }, .advanced = true },
     });
 }
 
@@ -2775,7 +2774,7 @@ test "a clone with --recurse-submodules makes each submodule from the default te
             .who = test_who,
             .recurse_submodules = &.{},
             .submodule_jobs = try std.fmt.parseInt(u32, jobs, 10),
-            .programs = .{ .environ = &env },
+            .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network },
             .template = .of(template),
             .submodule_template = .of(template),
             .hooks = .{ .output = .ignore },
@@ -2847,7 +2846,7 @@ test "a clone with --recurse-submodules runs post-checkout in the superproject a
         const made = clone_mod.clone(gpa, io, super_url, dir, .{
             .who = test_who,
             .recurse_submodules = &.{},
-            .programs = .{ .environ = &env },
+            .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network },
             .user_config = .{ .pairs = &.{.{ .name = "core.hookspath", .value = hooks_path }} },
             .hooks = .{ .output = .ignore },
             .hook_failure = &failure,
@@ -2944,7 +2943,7 @@ fn expectRemoteUpdates(cases: []const RemoteUpdate) !void {
         defer dir.close(io);
         var repo = try repo_mod.Repository.open(gpa, io, dir, .{});
         defer repo.deinit(io);
-        var t: clone_mod.SubmoduleTransport = .init(.{ .who = test_who, .programs = .{ .environ = &env } });
+        var t: clone_mod.SubmoduleTransport = .init(.{ .who = test_who, .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network } });
         defer t.deinit();
         var refusal: submodule.Refusal = .{};
         const updated = submodule.update(gpa, io, &repo, .{
@@ -3012,7 +3011,7 @@ test "submodules cloned several at once: one whose clone fails twice is named an
     defer by_git_dir.close(io);
     var dir = try world.work.dir.openDir(io, "by-relic", .{});
     defer dir.close(io);
-    var t: clone_mod.SubmoduleTransport = .init(.{ .who = test_who, .programs = .{ .environ = &env } });
+    var t: clone_mod.SubmoduleTransport = .init(.{ .who = test_who, .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network } });
     defer t.deinit();
 
     // git dies on the setting before it clones anything.
@@ -3072,7 +3071,7 @@ test "a submodule whose clone fails is cloned again after the others, as git's u
         world.server.failFirst("lib.git", failures);
         var repo = try repo_mod.Repository.open(gpa, io, dir, .{});
         defer repo.deinit(io);
-        var t: clone_mod.SubmoduleTransport = .init(.{ .who = test_who, .programs = .{ .environ = &env } });
+        var t: clone_mod.SubmoduleTransport = .init(.{ .who = test_who, .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network } });
         defer t.deinit();
         var warnings: warning.Warnings = .init(gpa);
         defer warnings.deinit();
@@ -3149,7 +3148,7 @@ test "an update goes on past submodules whose checkout git refuses and fails at 
     defer dir.close(io);
     var repo = try repo_mod.Repository.open(gpa, io, dir, .{});
     defer repo.deinit(io);
-    var t: clone_mod.SubmoduleTransport = .init(.{ .who = test_who, .programs = .{ .environ = &env } });
+    var t: clone_mod.SubmoduleTransport = .init(.{ .who = test_who, .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network } });
     defer t.deinit();
     var failed: submodule.Failed = .init(gpa);
     defer failed.deinit();
@@ -3218,12 +3217,12 @@ fn expectSubmodulePulls(cases: []const SubmodulePull) !void {
         defer dir.close(io);
         var repo = try repo_mod.Repository.open(gpa, io, dir, .{});
         defer repo.deinit(io);
-        var t: clone_mod.SubmoduleTransport = .init(.{ .who = test_who, .programs = .{ .environ = &env } });
+        var t: clone_mod.SubmoduleTransport = .init(.{ .who = test_who, .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network } });
         defer t.deinit();
         const pulled = pull_mod.pull(gpa, io, &repo, null, .{
             .mode = case.mode,
             .reflog_action = reflog_action,
-            .fetch = .{ .who = test_who, .programs = .{ .environ = &env }, .recurse_submodules = case.recurse },
+            .fetch = .{ .who = test_who, .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network }, .recurse_submodules = case.recurse },
             .merge = .{ .who = test_who },
             .rebasing = .{ .who = test_who },
             .submodule_transport = t.transport(),
@@ -3334,7 +3333,7 @@ fn expectSubmodulePushes(cases: []const SubmodulePush) !void {
         var repo = try repo_mod.Repository.open(gpa, io, dir, .{});
         defer repo.deinit(io);
         var options = case.options;
-        options.programs = .{ .environ = &env };
+        options.means = .{ .programs = .{ .environ = &env }, .network = &testnet.network };
         var warnings: warning.Warnings = .init(gpa);
         defer warnings.deinit();
         options.warnings = &warnings;
@@ -3366,22 +3365,22 @@ fn expectSubmodulePushes(cases: []const SubmodulePush) !void {
 
 test "a push goes into the submodules as git's transport_push does: check refuses, on-demand pushes them first" {
     try expectSubmodulePushes(&.{
-        .{ .git_args = &.{"--recurse-submodules=check"}, .options = .{ .who = test_who, .recurse_submodules = .check }, .refused = error.UnpushedSubmodules },
-        .{ .git_args = &.{"--recurse-submodules=on-demand"}, .options = .{ .who = test_who, .recurse_submodules = .on_demand } },
+        .{ .git_args = &.{"--recurse-submodules=check"}, .options = .{ .means = testnet.means(null), .who = test_who, .recurse_submodules = .check }, .refused = error.UnpushedSubmodules },
+        .{ .git_args = &.{"--recurse-submodules=on-demand"}, .options = .{ .means = testnet.means(null), .who = test_who, .recurse_submodules = .on_demand } },
     });
 }
 
 test "a push goes into the submodules as git's transport_push does: only pushes them alone, and a submodule's only is on-demand" {
     try expectSubmodulePushes(&.{
-        .{ .git_args = &.{"--recurse-submodules=only"}, .options = .{ .who = test_who, .recurse_submodules = .only } },
-        .{ .git_args = &.{}, .options = .{ .who = test_who }, .config = &.{.{ "push.recurseSubmodules", "on-demand" }}, .lib_config = &.{.{ "push.recurseSubmodules", "only" }} },
+        .{ .git_args = &.{"--recurse-submodules=only"}, .options = .{ .means = testnet.means(null), .who = test_who, .recurse_submodules = .only } },
+        .{ .git_args = &.{}, .options = .{ .means = testnet.means(null), .who = test_who }, .config = &.{.{ "push.recurseSubmodules", "on-demand" }}, .lib_config = &.{.{ "push.recurseSubmodules", "only" }} },
     });
 }
 
 test "a push goes into the submodules as git's transport_push does: by submodule.recurse, and not with --no-recurse-submodules over push.recurseSubmodules" {
     try expectSubmodulePushes(&.{
-        .{ .git_args = &.{}, .options = .{ .who = test_who }, .config = &.{.{ "submodule.recurse", "true" }} },
-        .{ .git_args = &.{"--no-recurse-submodules"}, .options = .{ .who = test_who, .recurse_submodules = .no }, .config = &.{.{ "push.recurseSubmodules", "check" }} },
+        .{ .git_args = &.{}, .options = .{ .means = testnet.means(null), .who = test_who }, .config = &.{.{ "submodule.recurse", "true" }} },
+        .{ .git_args = &.{"--no-recurse-submodules"}, .options = .{ .means = testnet.means(null), .who = test_who, .recurse_submodules = .no }, .config = &.{.{ "push.recurseSubmodules", "check" }} },
     });
 }
 
@@ -3428,10 +3427,10 @@ test "a push to a remote group pushes each of its remotes in turn, as git 2.55's
     defer arena_state.deinit();
     const names = try push_mod.remotesToPush(arena_state.allocator(), repo.configuration(), "both");
     try testing.expectEqual(@as(usize, 3), names.len);
-    var many = try push_mod.pushMany(gpa, io, &repo, names, .{ .who = test_who, .refspecs = &.{"main"}, .programs = .{ .environ = &env } });
+    var many = try push_mod.pushMany(gpa, io, &repo, names, .{ .who = test_who, .refspecs = &.{"main"}, .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network } });
     defer many.deinit();
     try testing.expect(!many.anyFailed());
-    try testing.expectError(error.AtomicAcrossRemotes, push_mod.pushMany(gpa, io, &repo, names, .{ .who = test_who, .refspecs = &.{"main"}, .atomic = true }));
+    try testing.expectError(error.AtomicAcrossRemotes, push_mod.pushMany(gpa, io, &repo, names, .{ .means = testnet.means(null), .who = test_who, .refspecs = &.{"main"}, .atomic = true }));
     for ([_][]const u8{ "a", "b" }) |name| {
         var listed: [2][]u8 = undefined;
         for ([_][]const u8{ "git", "relic" }, &listed) |who, *l| {
@@ -3476,7 +3475,7 @@ test "a cancel that lands in one of several remotes' fetches is returned, and th
     const faults = try shakedown.FaultIo.init(gpa, io, .{ .plan = &plan });
     defer faults.deinit();
     const names = [_][]const u8{ "a", "b" };
-    if (fetch_mod.fetchMany(gpa, faults.io(), &repo, &names, .{ .jobs = 1, .fetch = .{ .who = test_who, .programs = .{ .environ = &env } } })) |done| {
+    if (fetch_mod.fetchMany(gpa, faults.io(), &repo, &names, .{ .jobs = 1, .fetch = .{ .who = test_who, .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network } } })) |done| {
         var many = done;
         defer many.deinit();
         try testing.expect(faults.fired().len != 0);

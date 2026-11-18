@@ -20,6 +20,7 @@ const testgit = @import("../testing/git.zig");
 const testremote = @import("../testing/remote.zig");
 const warning = @import("../report.zig").warning;
 const config_mod = @import("../config/config.zig");
+const testnet = @import("../testing/net.zig");
 
 const Oid = hash.Oid;
 const test_who: object.Signature = .{ .name = "F", .email = "f@example.com", .when_secs = 1, .offset_minutes = 0 };
@@ -173,7 +174,7 @@ test "a partial clone is the one git makes, filtered by blob:none, blob:limit, t
         defer gpa.free(filter_arg);
         const out = try testremote.gitInputEnv(gpa, io, twins.tmp.dir, &env, &.{ "clone", "-q", filter_arg, url, twins.git_path }, "", true);
         gpa.free(out);
-        var repo = try clone_mod.clone(gpa, io, url, twins.by_relic, .{ .who = test_who, .filter = spec, .programs = .{ .environ = &env } });
+        var repo = try clone_mod.clone(gpa, io, url, twins.by_relic, .{ .who = test_who, .filter = spec, .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network } });
         repo.deinit(io);
         // Which trees a tree:0 checkout fetches, and in how many packs, is
         // the lazy fetch's own business; what is there after is compared
@@ -196,7 +197,7 @@ test "a partial clone is the one git makes, filtered by blob:none, blob:limit, t
     gpa.free(cloned);
     var warnings: warning.Warnings = .init(gpa);
     defer warnings.deinit();
-    var plain = try clone_mod.clone(gpa, io, path, local.by_relic, .{ .who = test_who, .filter = "blob:none", .warnings = &warnings });
+    var plain = try clone_mod.clone(gpa, io, path, local.by_relic, .{ .means = testnet.means(null), .who = test_who, .filter = "blob:none", .warnings = &warnings });
     plain.deinit(io);
     try expectSame(gpa, io, local.by_git, local.by_relic, true);
     try testing.expectEqualStrings("--filter", warnings.items.items[0].ignored_for_local);
@@ -233,7 +234,7 @@ test "git's partial clone is checked out by relic, which fetches what it reads f
         defer gpa.free(text);
         const blob = try Oid.parse(repo.objectFormat(), std.mem.trimEnd(u8, text, "\n"));
         try testing.expectError(error.ObjectNotFound, repo.objectDatabase().read(io, blob));
-        var lazy: partial.Lazy = .init(gpa, &repo, .{ .programs = .{ .environ = &env } });
+        var lazy: partial.Lazy = .init(gpa, &repo, .{ .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network } });
         defer lazy.deinit();
         lazy.install();
         const found = try repo.objectDatabase().read(io, blob);
@@ -248,7 +249,7 @@ test "git's partial clone is checked out by relic, which fetches what it reads f
     var index = try repo.openIndex(io);
     defer index.deinit();
     try testing.expectError(error.ObjectNotFound, worktree.checkout(gpa, io, repo.workDirectory().?, .{ .index = &index, .db = repo.objectDatabase(), .tree = head }, .{ .rules = try repo.worktreeRules() }));
-    var lazy: partial.Lazy = .init(gpa, &repo, .{ .programs = .{ .environ = &env } });
+    var lazy: partial.Lazy = .init(gpa, &repo, .{ .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network } });
     defer lazy.deinit();
     lazy.install();
     try lazy.prefetchTree(io, head);
@@ -295,7 +296,7 @@ test "a fetch into a partial clone is filtered, and its pack is a promisor's, as
     gpa.free(out);
     var repo = try repo_mod.Repository.open(gpa, io, twins.by_relic, .{});
     defer repo.deinit(io);
-    var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .programs = .{ .environ = &env } });
+    var outcome = try fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network } });
     outcome.deinit();
     try expectSame(gpa, io, twins.by_git, twins.by_relic, true);
     const theirs = try twins.by_git.readFileAlloc(io, ".git/FETCH_HEAD", gpa, .unlimited);
@@ -340,7 +341,7 @@ test "a filter the server does not know is left off with a warning and everythin
         var repo = try clone_mod.clone(gpa, io, url, twins.by_relic, .{
             .who = test_who,
             .filter = "blob:none",
-            .programs = .{ .environ = &env },
+            .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network },
             .config = &settings,
             .warnings = &warnings,
         });
@@ -413,7 +414,7 @@ test "a promised object is fetched from the next promisor remote when one fails,
     const head = (try repo.headTree(io)).?;
     var index = try repo.openIndex(io);
     defer index.deinit();
-    var lazy: partial.Lazy = .init(gpa, &repo, .{ .programs = .{ .environ = &env } });
+    var lazy: partial.Lazy = .init(gpa, &repo, .{ .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network } });
     defer lazy.deinit();
     lazy.install();
     try lazy.prefetchTree(io, head);
@@ -452,7 +453,7 @@ test "a lazy fetch writes the filter it registers, and leaves another process's 
     defer repo.deinit(io);
     try repo.editConfig(io, &.{.{ .name = "fixture.memory", .value = "only" }}, .{});
     gpa.free(try git(gpa, io, dir, &.{ "config", "fixture.external", "yes" }));
-    var lazy: partial.Lazy = .init(gpa, &repo, .{ .programs = .{ .environ = &env } });
+    var lazy: partial.Lazy = .init(gpa, &repo, .{ .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network } });
     defer lazy.deinit();
     lazy.install();
     try lazy.prefetchTree(io, (try repo.headTree(io)).?);

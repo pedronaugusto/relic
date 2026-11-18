@@ -28,6 +28,11 @@ const core = @import("relic_core");
 const program = core.process.program;
 const testgit = @import("git.zig");
 const testremote = @import("remote.zig");
+const lfsapi = @import("../lfs/api.zig");
+
+/// relic's network with relic_lfs's Git LFS engine, as `relic_net.network`
+/// holds it: what a Git LFS test reaches its servers over.
+pub const network: core.transport.Network = core.wire.engines.network(lfsapi.engine());
 
 /// The environment a program started by these tests sees: the test's
 /// `PATH`, `home` as its home directory, no system configuration, no
@@ -1035,7 +1040,6 @@ fn installTool(gpa: Allocator, io: Io, dir: Io.Dir, name: []const u8, kind: []co
 /// `--user=<name>`, `--no-version`. The server is relic_lfs's, there only
 /// with `http`: without it a test that needs one skips.
 pub fn transferScript(gpa: Allocator, io: Io, dir: Io.Dir, root: []const u8, log_dir: []const u8, extra: []const u8) ![]u8 {
-    if (!@import("relic_options").http) return error.SkipZigTest;
     return installTool(gpa, io, dir, "git-lfs-transfer", "transfer", &.{ suite.path(.lfs_transfer_helper), root, log_dir, extra });
 }
 

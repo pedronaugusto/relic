@@ -44,7 +44,7 @@ const partial = @import("partial.zig");
 const worktree = @import("../checkout/checkout.zig");
 const filter = @import("../checkout/filter.zig");
 const url_mod = @import("../wire.zig").url;
-const program = @import("../process.zig").program;
+const Means = @import("transport.zig").Means;
 const transport = @import("transport.zig");
 const object_walk = @import("../walk/object/walk.zig");
 const protocol = @import("../wire.zig").protocol;
@@ -130,7 +130,8 @@ pub const Filters = struct {
 };
 pub const FilterOptions = struct {
     remote: []const u8,
-    programs: ?program.Programs,
+    /// What the remote's LFS server, or a filter's, is reached with.
+    means: Means,
     prompt: ?credential.Prompt,
     auth_failure: ?*auth.Failure,
     skip_smudge: bool,
@@ -268,11 +269,12 @@ pub const Options = struct {
     /// `--filter`: a partial clone, whose server leaves out what the filter
     /// names — `blob:none`, `blob:limit=<size>`, `tree:<depth>` — and is
     /// asked for it when it is read. The checkout's own files are fetched
-    /// before it, in one request, with `programs`.
+    /// before it, in one request, with `means`.
     filter: ?[]const u8 = null,
-    /// The permission to run programs, which an ssh remote and a
-    /// credential helper need.
-    programs: ?program.Programs = null,
+    /// What the remote is reached with: the permission to run programs,
+    /// which an ssh remote and a credential helper need, and the network,
+    /// which an `http(s)` or `git://` remote needs (`transport.Means`).
+    means: Means,
     /// Settings that beat the new repository's own, as `git -c` gives them:
     /// `core.sshCommand`, `http.extraHeader` and the like, which the clone
     /// reads before the repository exists. When it is `null`, the clone
@@ -379,7 +381,7 @@ fn configureSubmodules(arena: Allocator, io: Io, repo: *Repository, settings: ?*
 fn updateSubmodules(gpa: Allocator, io: Io, repo: *Repository, settings: ?*const config_mod.Config, how: struct { filter: ?[]const u8, single_branch: bool }, options: Options) Error!void {
     var t: SubmoduleTransport = .init(.{
         .who = options.who,
-        .programs = options.programs,
+        .means = options.means,
         .config = settings,
         .prompt = options.prompt,
         .progress = options.progress,
@@ -397,7 +399,7 @@ fn updateSubmodules(gpa: Allocator, io: Io, repo: *Repository, settings: ?*const
         .recursive = true,
         .who = options.who,
         .transport = t.transport(),
-        .programs = options.programs,
+        .programs = options.means.programs,
         .remote = options.remote_submodules,
         .fetch = !options.remote_submodules,
         .jobs = options.submodule_jobs,
@@ -697,7 +699,7 @@ fn receiveObjects(
     // offers an alternate's.
     var tips: std.ArrayList(Oid) = .empty;
     try tips.appendSlice(arena, ask.tips);
-    const lent = try alternate_refs.read(gpa, io, repo, options.programs, options.warnings);
+    const lent = try alternate_refs.read(gpa, io, repo, options.means.programs, options.warnings);
     defer gpa.free(lent);
     for (lent) |oid| if (try repo.objectDatabase().exists(io, oid)) try tips.append(arena, oid);
     // What a lender or a bundle holds already is not asked for, as git's
@@ -797,7 +799,7 @@ fn openSession(
 fn transferOptions(local_copy: bool, settings: ?*const config_mod.Config, repo: ?*Repository, options: Options) transport.Options {
     return .{
         .local_copy = local_copy,
-        .programs = options.programs,
+        .means = options.means,
         .config = settings,
         .remote_name = options.origin.?,
         .proxy = options.proxy,
@@ -1132,7 +1134,7 @@ fn reopenWithUserConfig(gpa: Allocator, io: Io, dir: Io.Dir, options: Options) E
 fn checkOutCloned(arena: Allocator, gpa: Allocator, io: Io, repo: *Repository, session: *const transport.Session, commit: Oid, partial_clone: bool, options: Options) Error!void {
     var taken: std.ArrayList([]const u8) = .empty;
     for (session.promisorsTaken()) |info| try taken.append(arena, info.localName());
-    var lazy: partial.Lazy = .init(gpa, repo, .{ .programs = options.programs, .prompt = options.prompt, .check_objects = options.check_objects, .accepted = taken.items });
+    var lazy: partial.Lazy = .init(gpa, repo, .{ .means = options.means, .prompt = options.prompt, .check_objects = options.check_objects, .accepted = taken.items });
     defer lazy.deinit();
     if (partial_clone) {
         lazy.install();
@@ -1149,7 +1151,7 @@ fn postCheckout(gpa: Allocator, io: Io, repo: *Repository, hook_options: hooks_m
         .git_dir = .of(repo.gitDirectory()),
         .common_dir = .of(repo.commonDirectory()),
         .work_dir = if (repo.workDirectory()) |work| .of(work) else null,
-    }, options.programs orelse return error.ProgramsNotGranted, hook_options);
+    }, options.means.programs orelse return error.ProgramsNotGranted, hook_options);
     defer runner.deinit();
     const head = (try repo.head(io)) orelse return;
     defer gpa.free(head.name);
@@ -1236,7 +1238,7 @@ fn initRepository(gpa: Allocator, io: Io, dir: Io.Dir, options: Options, object_
 /// Check out the commit using its attributes and configured filter programs.
 /// The operation owner supplies native formats through `native_filters`.
 fn checkOut(gpa: Allocator, io: Io, repo: *Repository, commit: Oid, options: Options) Error!void {
-    const programs = options.programs;
+    const programs = options.means.programs;
     const tree = try repo.commitTree(io, try peelOrSelf(io, repo, commit));
     var attrs = try repo.loadAttrs(io);
     defer attrs.deinit();
@@ -1247,7 +1249,7 @@ fn checkOut(gpa: Allocator, io: Io, repo: *Repository, commit: Oid, options: Opt
     var filters = if (options.native_filters) |loader|
         try loader.load(gpa, io, repo, .{
             .remote = options.origin.?,
-            .programs = programs,
+            .means = options.means,
             .prompt = options.prompt,
             .auth_failure = options.auth_failure,
             .skip_smudge = skip_smudge,
@@ -1289,8 +1291,8 @@ fn absolutePathAsGit(arena: Allocator, io: Io, path: []const u8) ![]const u8 {
 pub const SubmoduleOptions = struct {
     /// Who the reflog entries are written as, and when.
     who: object.Signature,
-    /// The permission to run `ssh` and credential helpers.
-    programs: ?program.Programs = null,
+    /// What each remote is reached with (`transport.Means`).
+    means: Means,
     /// The person's configuration, for `core.sshCommand`, `http.*` and the
     /// credential helpers, which a new submodule repository does not yet
     /// have: see `user_config.locate`.
@@ -1428,7 +1430,7 @@ pub const SubmoduleTransport = struct {
         const shared: Options = .{
             .separate_git_dir = true,
             .who = o.who,
-            .programs = o.programs,
+            .means = o.means,
             .config = o.config,
             .prompt = o.prompt,
             .auth_failure = &apart.auth_failure,
@@ -1481,7 +1483,7 @@ pub const SubmoduleTransport = struct {
     fn fetchPromisedFn(seam: *submodule.Transport, gpa: Allocator, io: Io, repo: *Repository, oids: []const Oid) submodule.TransportError!void {
         const t: *SubmoduleTransport = @fieldParentPtr("interface", seam);
         const o = t.options;
-        var lazy: partial.Lazy = .init(gpa, repo, .{ .programs = o.programs, .prompt = o.prompt, .check_objects = o.check_objects });
+        var lazy: partial.Lazy = .init(gpa, repo, .{ .means = o.means, .prompt = o.prompt, .check_objects = o.check_objects });
         defer lazy.deinit();
         lazy.fetch(io, oids) catch |err| return t.failed(io, err);
     }
@@ -1493,7 +1495,7 @@ pub const SubmoduleTransport = struct {
         var made = fetch_mod.fetch(gpa, io, repo, remote, .{
             .refspecs = refspecs,
             .who = o.who,
-            .programs = o.programs,
+            .means = o.means,
             .prompt = o.prompt,
             .auth_failure = &apart.auth_failure,
             .progress = o.progress,
@@ -1515,6 +1517,7 @@ const testing = std.testing;
 const testgit = @import("../testing/git.zig");
 const decimal = @import("../text.zig").decimal;
 const testremote = @import("../testing/remote.zig");
+const testnet = @import("../testing/net.zig");
 
 const test_who: object.Signature = .{ .name = "F", .email = "f@example.com", .when_secs = 1, .offset_minutes = 0 };
 
@@ -1612,13 +1615,13 @@ test "a clone from a local repository is the clone git makes, checked out, bare,
 
     const Case = struct { git_args: []const []const u8, options: Options };
     const cases = [_]Case{
-        .{ .git_args = &.{}, .options = .{ .who = test_who } },
-        .{ .git_args = &.{"--bare"}, .options = .{ .who = test_who, .bare = true } },
-        .{ .git_args = &.{ "--branch", "side" }, .options = .{ .who = test_who, .branch = "side" } },
-        .{ .git_args = &.{ "--branch", "old" }, .options = .{ .who = test_who, .branch = "old" } },
-        .{ .git_args = &.{ "--origin", "upstream", "--no-tags" }, .options = .{ .who = test_who, .origin = "upstream", .tags = false } },
-        .{ .git_args = &.{"--ref-format=reftable"}, .options = .{ .who = test_who, .ref_format = .reftable } },
-        .{ .git_args = &.{ "--ref-format=reftable", "--bare" }, .options = .{ .who = test_who, .ref_format = .reftable, .bare = true } },
+        .{ .git_args = &.{}, .options = .{ .means = .none, .who = test_who } },
+        .{ .git_args = &.{"--bare"}, .options = .{ .means = .none, .who = test_who, .bare = true } },
+        .{ .git_args = &.{ "--branch", "side" }, .options = .{ .means = .none, .who = test_who, .branch = "side" } },
+        .{ .git_args = &.{ "--branch", "old" }, .options = .{ .means = .none, .who = test_who, .branch = "old" } },
+        .{ .git_args = &.{ "--origin", "upstream", "--no-tags" }, .options = .{ .means = .none, .who = test_who, .origin = "upstream", .tags = false } },
+        .{ .git_args = &.{"--ref-format=reftable"}, .options = .{ .means = .none, .who = test_who, .ref_format = .reftable } },
+        .{ .git_args = &.{ "--ref-format=reftable", "--bare" }, .options = .{ .means = .none, .who = test_who, .ref_format = .reftable, .bare = true } },
     };
     for (cases) |case| {
         // A reftable repository is git 2.45's to make.
@@ -1684,7 +1687,7 @@ test "a local clone writes its pack on the tasks pack.threads asks for, as git's
     var serial_target = try Twin.init(gpa, io);
     defer serial_target.deinit(gpa, io);
     var serial_tasks: io_mod.Tasks = .init(io, .{});
-    var serial = try clone(gpa, serial_tasks.io(), source_path, serial_target.dir.borrow().*, .{ .who = test_who, .checkout = false, .user_config = .{ .pairs = &.{.{ .name = "pack.threads", .value = "1" }} } });
+    var serial = try clone(gpa, serial_tasks.io(), source_path, serial_target.dir.borrow().*, .{ .means = .none, .who = test_who, .checkout = false, .user_config = .{ .pairs = &.{.{ .name = "pack.threads", .value = "1" }} } });
     defer serial.deinit(io);
     try serial_tasks.state.expect(0, 0);
     var serial_packs = try serial.gitDirectory().openDir(io, "objects/pack", .{ .iterate = true });
@@ -1710,7 +1713,7 @@ test "a local clone writes its pack on the tasks pack.threads asks for, as git's
             var target = try Twin.init(gpa, io);
             defer target.deinit(gpa, io);
             var tasks: io_mod.Tasks = .init(each_io, .{});
-            var repo = try clone(gpa, tasks.io(), source_path, target.dir.borrow().*, .{ .who = test_who, .checkout = false, .user_config = .{ .pairs = case.pairs } });
+            var repo = try clone(gpa, tasks.io(), source_path, target.dir.borrow().*, .{ .means = .none, .who = test_who, .checkout = false, .user_config = .{ .pairs = case.pairs } });
             defer repo.deinit(io);
             // Headers and bodies on at most six tasks, one search group,
             // then deflation on all tasks, each including the caller.
@@ -1778,7 +1781,7 @@ test "a clone over ssh and over HTTP is the clone git makes" {
         gpa.free(out);
         var repo = try clone(gpa, io, url, by_relic.dir.borrow().*, .{
             .who = test_who,
-            .programs = .{ .environ = &env },
+            .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network },
             .config = &settings,
         });
         repo.deinit(io);
@@ -1801,7 +1804,7 @@ test "an empty remote clones to an unborn branch, as git's does" {
     defer by_relic.deinit(gpa, io);
     const out = try git(gpa, io, &env, by_git.tmp.dir, &.{ "clone", "-q", empty_path, by_git.path });
     gpa.free(out);
-    var repo = try clone(gpa, io, empty_path, by_relic.dir.borrow().*, .{ .who = test_who });
+    var repo = try clone(gpa, io, empty_path, by_relic.dir.borrow().*, .{ .means = .none, .who = test_who });
     repo.deinit(io);
     const theirs = try git(gpa, io, &env, by_git.dir.borrow().*, &.{ "symbolic-ref", "HEAD" });
     defer gpa.free(theirs);
@@ -1817,10 +1820,10 @@ test "a destination that is not empty and a filter git does not have are refused
     var tmp = testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     try tmp.dir.writeFile(io, .{ .sub_path = "occupied", .data = "x" });
-    try testing.expectError(error.DestinationNotEmpty, clone(gpa, io, "/nowhere", tmp.dir, .{ .who = test_who }));
+    try testing.expectError(error.DestinationNotEmpty, clone(gpa, io, "/nowhere", tmp.dir, .{ .means = .none, .who = test_who }));
     var empty = testing.tmpDir(.{ .iterate = true });
     defer empty.cleanup();
-    try testing.expectError(error.InvalidFilter, clone(gpa, io, "/nowhere", empty.dir, .{ .who = test_who, .filter = "blob:some" }));
+    try testing.expectError(error.InvalidFilter, clone(gpa, io, "/nowhere", empty.dir, .{ .means = .none, .who = test_who, .filter = "blob:some" }));
 }
 
 test "clone.defaultRemoteName names the remote unless the clone does, and clone.rejectShallow refuses a shallow source, as git's clone reads them" {
@@ -1870,7 +1873,7 @@ test "clone.defaultRemoteName names the remote unless the clone does, and clone.
         gpa.free(out);
         var settings = try config_mod.Config.parseText(gpa, "[clone]\ndefaultRemoteName = upstream\n", .command);
         defer settings.deinit();
-        var repo = try clone(gpa, io, repo_path, by_relic.dir.borrow().*, .{ .who = test_who, .origin = origin, .config = &settings });
+        var repo = try clone(gpa, io, repo_path, by_relic.dir.borrow().*, .{ .means = .none, .who = test_who, .origin = origin, .config = &settings });
         repo.deinit(io);
         try expectSameClone(gpa, io, &env, by_git.dir.borrow().*, by_relic.dir.borrow().*, false);
         const remotes = try git(gpa, io, &env, by_relic.dir.borrow().*, &.{"remote"});
@@ -1921,7 +1924,7 @@ test "clone.defaultRemoteName names the remote unless the clone does, and clone.
         defer settings.deinit();
         const made = clone(gpa, io, case.url, by_relic.dir.borrow().*, .{
             .who = test_who,
-            .programs = .{ .environ = &env },
+            .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network },
             .config = &settings,
             .depth = case.depth,
             .reject_shallow = case.reject,
@@ -1992,7 +1995,7 @@ test "a clone copies its template and reads the template's configuration, as git
 
         var template = try root.dir.openDir(io, case.template, .{ .iterate = true });
         defer template.close(io);
-        var repo = try clone(gpa, io, case.url, by_relic.dir.borrow().*, .{ .who = test_who, .bare = case.bare, .template = .of(template) });
+        var repo = try clone(gpa, io, case.url, by_relic.dir.borrow().*, .{ .means = .none, .who = test_who, .bare = case.bare, .template = .of(template) });
         repo.deinit(io);
         try expectSameClone(gpa, io, &env, by_git.dir.borrow().*, by_relic.dir.borrow().*, case.bare);
         const remotes = try git(gpa, io, &env, by_relic.dir.borrow().*, &.{"remote"});
@@ -2081,7 +2084,7 @@ test "a clone runs post-checkout from its template after the checkout, as git cl
             .who = test_who,
             .bare = case.bare,
             .template = .of(template),
-            .programs = .{ .environ = &env },
+            .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network },
             .hooks = if (case.hooks) .{ .output = .ignore } else null,
             .hook_failure = &failure,
         });
@@ -2159,7 +2162,7 @@ test "a clone takes init.defaultBranch for an empty remote that names no branch,
             .{ .name = "init.defaultBranch", .value = "stem" },
             .{ .name = "init.defaultRefFormat", .value = @tagName(refs_mod.Format.reftable) },
         };
-        var repo = try clone(gpa, io, ssh_url, by_relic.dir.borrow().*, .{ .who = test_who, .programs = .{ .environ = &env }, .user_config = .{ .pairs = &pairs } });
+        var repo = try clone(gpa, io, ssh_url, by_relic.dir.borrow().*, .{ .who = test_who, .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network }, .user_config = .{ .pairs = &pairs } });
         repo.deinit(io);
         for ([_][]const []const u8{ &.{ "symbolic-ref", "HEAD" }, &.{ "rev-parse", "--show-ref-format" }, &.{ "config", "--local", "--get-regexp", "^(remote|branch)\\." } }) |args| {
             const theirs = try git(gpa, io, &env, by_git.dir.borrow().*, args);
@@ -2262,7 +2265,7 @@ test "submodules cloned and fetched from a remote are what git submodule update 
     var by_relic = try work.dir.openDir(io, "by-relic", .{});
     defer by_relic.close(io);
 
-    var t: SubmoduleTransport = .init(.{ .who = test_who, .programs = .{ .environ = &env } });
+    var t: SubmoduleTransport = .init(.{ .who = test_who, .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network } });
     defer t.deinit();
     try gitIn(gpa, io, by_git, &.{ "submodule", "update", "-q", "--init", "--recursive" });
     {
@@ -2336,7 +2339,7 @@ test "a submodule URL naming a repository on this machine is refused unless prot
     try scratch.dir.createDirPath(io, "refused");
     var refused_dir = try scratch.dir.openDir(io, "refused", .{ .iterate = true });
     defer refused_dir.close(io);
-    var refused: SubmoduleTransport = .init(.{ .who = test_who });
+    var refused: SubmoduleTransport = .init(.{ .means = .none, .who = test_who });
     defer refused.deinit();
     try testing.expectError(error.TransportFailed, refused.transport().clone(gpa, io, .{ .url = source_path, .git_dir = .of(refused_dir) }));
     var kept = refused.take(io);
@@ -2349,7 +2352,7 @@ test "a submodule URL naming a repository on this machine is refused unless prot
     try scratch.dir.createDirPath(io, "allowed");
     var allowed_dir = try scratch.dir.openDir(io, "allowed", .{ .iterate = true });
     defer allowed_dir.close(io);
-    var allowed: SubmoduleTransport = .init(.{ .who = test_who, .config = &config });
+    var allowed: SubmoduleTransport = .init(.{ .means = .none, .who = test_who, .config = &config });
     defer allowed.deinit();
     try allowed.transport().clone(gpa, io, .{ .url = source_path, .git_dir = .of(allowed_dir) });
     try testing.expectEqual(@as(u32, 1), allowed.take(io).clones);
@@ -2431,7 +2434,7 @@ test "a clone borrows from --reference and --reference-if-able as git's does, an
         try argv.appendSlice(gpa, &.{ served, by_git.path });
         var warnings: warning.Warnings = .init(gpa);
         defer warnings.deinit();
-        const made = clone(gpa, io, served, by_relic.dir.borrow().*, .{ .who = test_who, .programs = .{ .environ = &env }, .config = &settings, .reference = case.references, .dissociate = case.dissociate, .warnings = &warnings });
+        const made = clone(gpa, io, served, by_relic.dir.borrow().*, .{ .who = test_who, .means = .{ .programs = .{ .environ = &env }, .network = &testnet.network }, .config = &settings, .reference = case.references, .dissociate = case.dissociate, .warnings = &warnings });
         if (case.refused) |err| {
             try testing.expectError(error.GitFailed, testremote.gitInputEnv(gpa, io, by_git.tmp.dir, &env, argv.items, "", false));
             try testing.expectError(err, made);

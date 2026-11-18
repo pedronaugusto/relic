@@ -62,7 +62,7 @@ test "a clone checks out through the filters the person's ~/.gitconfig names, as
         defer d.close(io);
         var repo = try clone_mod.clone(gpa, io, url, d, .{
             .who = test_who,
-            .programs = fx.programs(),
+            .means = .{ .programs = fx.programs(), .network = &testlfs.network },
             .user_config = locations.sources(),
             .home = locations.home,
         });
@@ -85,7 +85,7 @@ test "a clone checks out through the filters the person's ~/.gitconfig names, as
     {
         var d = try fx.dir("without");
         defer d.close(io);
-        var repo = try clone_mod.clone(gpa, io, url, d, .{ .who = test_who, .programs = fx.programs() });
+        var repo = try clone_mod.clone(gpa, io, url, d, .{ .who = test_who, .means = .{ .programs = fx.programs(), .network = &testlfs.network } });
         defer repo.deinit(io);
         const ours = try d.readFileAlloc(io, "a.bin", gpa, .limited(1 << 20));
         defer gpa.free(ours);

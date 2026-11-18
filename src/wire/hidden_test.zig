@@ -67,7 +67,7 @@ test "a repository on this machine lists what git ls-remote lists of it, hidden 
             try theirs.append(gpa, try gpa.print("{s} {s}", .{ line[0..tab], line[tab + 1 ..] }));
         }
 
-        var session = try transport.Session.open(gpa, io, source_path, .{ .service = .upload_pack, .kind = null }, .{ .protocol_v2 = v2 });
+        var session = try transport.Session.open(gpa, io, source_path, .{ .service = .upload_pack, .kind = null }, .{ .means = .none, .protocol_v2 = v2 });
         defer session.deinit(io);
         var refs = try session.listRefs(gpa, io, &.{});
         defer refs.deinit();
@@ -121,7 +121,7 @@ test "a hidden ref's tip is a v0 want only where git's upload-pack allows a tip"
         const git_ok = if (by_git.exec(io, &.{ "fetch", "-q", "origin", spec })) true else |_| false;
         var repo = try Repository.open(gpa, io, by_relic.dir, .{});
         defer repo.deinit(io);
-        const relic_ok = if (fetch_mod.fetch(gpa, io, &repo, "origin", .{ .who = test_who, .refspecs = &.{spec} })) |outcome| blk: {
+        const relic_ok = if (fetch_mod.fetch(gpa, io, &repo, "origin", .{ .means = .none, .who = test_who, .refspecs = &.{spec} })) |outcome| blk: {
             var o = outcome;
             o.deinit();
             break :blk true;
@@ -152,12 +152,12 @@ test "a push to a hidden ref is refused as git's receive-pack refuses it" {
 
     var repo = try Repository.open(gpa, io, here.dir, .{});
     defer repo.deinit(io);
-    var outcome = try push_mod.push(gpa, io, &repo, "origin", .{ .who = test_who, .refspecs = &.{"work:refs/heads/locked"} });
+    var outcome = try push_mod.push(gpa, io, &repo, "origin", .{ .means = .none, .who = test_who, .refspecs = &.{"work:refs/heads/locked"} });
     defer outcome.deinit();
     try testing.expectEqual(push_mod.RefResult.Status.rejected_by_remote, outcome.refs[0].status);
     try testing.expectEqualStrings("deny updating a hidden ref", outcome.refs[0].message.?);
     // An unhidden ref is pushed.
-    var other = try push_mod.push(gpa, io, &repo, "origin", .{ .who = test_who, .refspecs = &.{"work:refs/heads/open"} });
+    var other = try push_mod.push(gpa, io, &repo, "origin", .{ .means = .none, .who = test_who, .refspecs = &.{"work:refs/heads/open"} });
     defer other.deinit();
     try testing.expectEqual(push_mod.RefResult.Status.ok, other.refs[0].status);
 }
