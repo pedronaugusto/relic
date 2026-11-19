@@ -37,6 +37,23 @@ fn compare(gpa: Allocator, io: Io, git: *testgit.Repo, repo: *Repository, args: 
     try std.testing.expectEqual(c.code == 0, outcome.matched);
 }
 
+/// An empty pattern, which matches every line. git matches a pattern with no
+/// special character as a fixed string through PCRE2 when it is built with
+/// it, and otherwise compiles it with the platform's regcomp. macOS's refuses
+/// an empty expression (REG_EMPTY), so a git built there without PCRE2, as
+/// the held git is, dies on `-e ''` where every other build matches every
+/// line; against it relic's answer is held to `-e ^`'s, every line too.
+fn compareEmpty(gpa: Allocator, io: Io, git: *testgit.Repo, repo: *Repository) !void {
+    const options: grep_mod.Options = .{ .patterns = &.{""} };
+    if (builtin.os.tag == .macos) {
+        var c = try git.capture(io, &.{ "grep", "-e", "" });
+        defer c.deinit(gpa);
+        if (c.code == 128 and std.mem.find(u8, c.stderr, "-e option, '': empty (sub)expression") != null)
+            return compare(gpa, io, git, repo, &.{ "-e", "^" }, options);
+    }
+    try compare(gpa, io, git, repo, &.{ "-e", "" }, options);
+}
+
 const source_c =
     \\#include <stdio.h>
     \\
@@ -101,7 +118,7 @@ test "git grep's output for patterns, options and sources comes out byte for byt
     try compare(gpa, io, &git, &repo, &.{ "-a", "count" }, .{ .patterns = &.{"count"}, .binary = .text });
     try compare(gpa, io, &git, &repo, &.{ "-I", "count" }, .{ .patterns = &.{"count"}, .binary = .skip });
     try compare(gpa, io, &git, &repo, &.{ "-e", "alpha", "-e", "hello" }, .{ .patterns = &.{ "alpha", "hello" } });
-    try compare(gpa, io, &git, &repo, &.{ "-e", "" }, .{ .patterns = &.{""} });
+    try compareEmpty(gpa, io, &git, &repo);
     try compare(gpa, io, &git, &repo, &.{"nothing-matches-this"}, .{ .patterns = &.{"nothing-matches-this"} });
     // basic, extended and fixed expressions
     try compare(gpa, io, &git, &repo, &.{ "-n", "^int" }, .{ .patterns = &.{"^int"}, .line_number = true });

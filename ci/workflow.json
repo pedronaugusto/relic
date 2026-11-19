@@ -9,7 +9,6 @@
     "x86_64-macos",
     "aarch64-macos"
   ],
-  "compile_once": false,
   "setup_step": "ci-setup",
   "test_job_timeout": 60,
   "windows_job_timeout": 60,
@@ -27,8 +26,8 @@
     "version": "2.56.0",
     "sha256": "26c56c296b38c0695b26fa95f475f1d01704d2d38e73465ca30b0b2f5dc789d3",
     "windows": {
-      "x86_64": "bfe94e7b419b16eee9fecbd1253a98e3d4f49ba8f029630549052278ffe286a6",
-      "aarch64": "c130c04301d06995ef08f1cbd895342844d1fbb3312f5d32cb27cc05b4b394dc"
+      "x86_64": "eceb5e061aa90df2f69ddd3e90f0030e1b8037a7829934bc40e4be1caa1accc1",
+      "aarch64": "edd9bd32aefa5d2bd4b938c38c18ceca306a7f6b29a6951cd6a4bb16d9d28d8f"
     }
   },
   "jobs": [
