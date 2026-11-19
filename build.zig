@@ -520,9 +520,14 @@ pub fn dev(b: *std.Build, tools: type) void {
     const prepare = b.addRunArtifact(setup);
     prepare.addPassthruArgs();
     b.step("ci-setup", "Install cached Git and LFS tools").dependOn(&prepare.step);
-    // The installer runs only on a hosted runner; its version reading is
-    // proved everywhere.
-    b.step("check-ci-setup", "Test the hosted tool installer").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = setup.root_module })).step);
+    // The installer runs only on a hosted runner; its version reading and
+    // its path file are proved everywhere, and with the tests, so on each
+    // host's own file system: the source checks job, which runs
+    // check-ci-setup, is Linux's alone, and Windows refused a path file
+    // opened only to write (push run 44588375043).
+    const setup_tests = b.addRunArtifact(b.addTest(.{ .root_module = setup.root_module }));
+    b.step("check-ci-setup", "Test the hosted tool installer").dependOn(&setup_tests.step);
+    test_step.dependOn(&setup_tests.step);
 
     // Only relic_net reaches the network's engines. A program over `relic`
     // alone, every public declaration referenced, compiles with uplink and

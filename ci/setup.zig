@@ -169,17 +169,25 @@ fn old(c: Context, root: []const u8) !void {
 /// the first first; ahead of the runner's own, behind nothing setup did
 /// not put there.
 fn addToPath(c: Context, dirs: []const []const u8) !void {
-    const path_file = c.env.get("GITHUB_PATH") orelse return error.HostedSetupOnly;
-    const file = try std.Io.Dir.cwd().openFile(c.io, path_file, .{ .mode = .write_only });
-    defer file.close(c.io);
-    var at = (try file.stat(c.io)).size;
+    try appendPath(c.a, c.io, c.env.get("GITHUB_PATH") orelse return error.HostedSetupOnly, dirs);
+}
+
+/// `dirs` appended to the path file `path_file`, one a line, the last first.
+/// The file is opened to read as well as write: its size is where they go,
+/// and on Windows a handle opened only to write has no right to read the
+/// file's attributes, so asking its size is AccessDenied (every Windows
+/// shard of push run 44588375043).
+fn appendPath(a: std.mem.Allocator, io: std.Io, path_file: []const u8, dirs: []const []const u8) !void {
+    const file = try std.Io.Dir.cwd().openFile(io, path_file, .{ .mode = .read_write });
+    defer file.close(io);
+    var at = (try file.stat(io)).size;
     // GitHub puts each line it reads ahead of the path so far, so the last
     // line written is the first on the path.
     var i = dirs.len;
     while (i > 0) {
         i -= 1;
-        const line = try c.a.print("{s}\n", .{dirs[i]});
-        try file.writePositionalAll(c.io, line, at);
+        const line = try a.print("{s}\n", .{dirs[i]});
+        try file.writePositionalAll(io, line, at);
         at += line.len;
     }
 }
@@ -259,6 +267,22 @@ fn gitMaster(c: Context, root: []const u8) !void {
     if (!recent(version)) return error.GitTooOld;
     try addToPath(c, &.{bin});
     try report("{s}", c.io, .{version});
+}
+
+test "the path file gets the directories after what it held, the first last, so first on the path" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "path", .data = "D:\\runner\\bin\n" });
+    const path_file = try std.Io.Dir.path.join(gpa, &.{ ".zig-cache", "tmp", &tmp.sub_path, "path" });
+    defer gpa.free(path_file);
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    try appendPath(arena.allocator(), io, path_file, &.{ "tools\\git", "tools\\lfs" });
+    const written = try tmp.dir.readFileAlloc(io, "path", gpa, .limited(4096));
+    defer gpa.free(written);
+    try std.testing.expectEqualStrings("D:\\runner\\bin\ntools\\lfs\ntools\\git\n", written);
 }
 
 test "Git fixtures require 2.47 including Windows version suffixes" {
