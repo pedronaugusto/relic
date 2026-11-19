@@ -456,6 +456,23 @@ pub fn dev(b: *std.Build, tools: type) void {
     }
     test_step.dependOn(examples_step);
 
+    const setup = b.addExecutable(.{ .name = "ci-setup", .root_module = b.createModule(.{ .root_source_file = p.path("ci/setup.zig"), .target = b.graph.host, .optimize = .safe }) });
+    // The release the comparisons are held to, which setup installs.
+    setup.root_module.addImport("git_release", b.createModule(.{ .root_source_file = p.path("src/testing/git_release.zig"), .target = b.graph.host, .optimize = .safe }));
+    const prepare = b.addRunArtifact(setup);
+    prepare.addPassthruArgs();
+    b.step("ci-setup", "Install cached Git and LFS tools").dependOn(&prepare.step);
+    // The installer runs only on a hosted runner; its version reading and
+    // its path file are proved everywhere, and with the tests, so on each
+    // host's own file system: the source checks job, which runs
+    // check-ci-setup, is Linux's alone, and Windows refused a path file
+    // opened only to write (push run 44588375043). A test joins the tests
+    // before addCi reads them below, so ci runs it under preflight's runner
+    // (push run 44616529348 refused it, joined after: TestOutsideRunner).
+    const setup_tests = b.addRunArtifact(b.addTest(.{ .root_module = setup.root_module }));
+    b.step("check-ci-setup", "Test the hosted tool installer").dependOn(&setup_tests.step);
+    test_step.dependOn(&setup_tests.step);
+
     //=====================================================================
     // Benchmarks
     //
@@ -514,21 +531,6 @@ pub fn dev(b: *std.Build, tools: type) void {
             p.dependency("cloak", .{}),
         },
     });
-    const setup = b.addExecutable(.{ .name = "ci-setup", .root_module = b.createModule(.{ .root_source_file = p.path("ci/setup.zig"), .target = b.graph.host, .optimize = .safe }) });
-    // The release the comparisons are held to, which setup installs.
-    setup.root_module.addImport("git_release", b.createModule(.{ .root_source_file = p.path("src/testing/git_release.zig"), .target = b.graph.host, .optimize = .safe }));
-    const prepare = b.addRunArtifact(setup);
-    prepare.addPassthruArgs();
-    b.step("ci-setup", "Install cached Git and LFS tools").dependOn(&prepare.step);
-    // The installer runs only on a hosted runner; its version reading and
-    // its path file are proved everywhere, and with the tests, so on each
-    // host's own file system: the source checks job, which runs
-    // check-ci-setup, is Linux's alone, and Windows refused a path file
-    // opened only to write (push run 44588375043).
-    const setup_tests = b.addRunArtifact(b.addTest(.{ .root_module = setup.root_module }));
-    b.step("check-ci-setup", "Test the hosted tool installer").dependOn(&setup_tests.step);
-    test_step.dependOn(&setup_tests.step);
-
     // Only relic_net reaches the network's engines. A program over `relic`
     // alone, every public declaration referenced, compiles with uplink and
     // cloak replaced by a module that stops any compilation reaching it;
