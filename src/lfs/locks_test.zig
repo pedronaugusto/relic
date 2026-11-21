@@ -78,14 +78,16 @@ const Pair = struct {
 
 /// What git-lfs changes on a lockable file: its permission bits, or on
 /// Windows its read-only attribute.
-/// The first directory of a Windows `PATH` holding `name`.
-fn directoryHolding(io: Io, path: []const u8, name: []const u8) ![]const u8 {
+/// The first directory of a Windows `PATH` holding every one of `names`.
+fn directoryHolding(io: Io, path: []const u8, names: []const []const u8) ![]const u8 {
     var dirs = std.mem.tokenizeScalar(u8, path, ';');
-    while (dirs.next()) |dir| {
-        var buf: [Io.Dir.max_path_bytes]u8 = undefined;
-        const candidate = std.mem.print(&buf, "{s}\\{s}", .{ dir, name }) catch continue;
-        if (!Io.Dir.path.isAbsolute(candidate)) continue;
-        Io.Dir.accessAbsolute(io, candidate, .{}) catch continue;
+    next: while (dirs.next()) |dir| {
+        for (names) |name| {
+            var buf: [Io.Dir.max_path_bytes]u8 = undefined;
+            const candidate = std.mem.print(&buf, "{s}\\{s}", .{ dir, name }) catch continue :next;
+            if (!Io.Dir.path.isAbsolute(candidate)) continue :next;
+            Io.Dir.accessAbsolute(io, candidate, .{}) catch continue :next;
+        }
         return dir;
     }
     return error.FileNotFound;
@@ -377,14 +379,19 @@ test "a repository with git-lfs's hooks works on a machine without git-lfs" {
     // No git-lfs anywhere on the path the hooks are run with. On Windows
     // that path keeps the directory `sh` is in: git for Windows starts a
     // `#!/bin/sh` hook through the interpreter's name on `PATH`, as relic
-    // does, so without it the hook could not start at all.
+    // does, so without it the hook could not start at all. That `sh` is
+    // MSYS's own, beside its runtime: Git for Windows' `bin\sh.exe` only
+    // redirects to it, and first puts `mingw64\bin` -- git-lfs's directory
+    // -- on the path it starts it with, so a hook run through the
+    // redirector finds git-lfs (push run 44642088256, the hosted image's
+    // `PATH` naming `Git\bin` before `Git\usr\bin`).
     try fx.tmp.dir.createDirPath(io, "empty-path");
     const empty = try fx.path("empty-path");
     defer gpa.free(empty);
     var bare_env = try fx.env.clone(gpa);
     defer bare_env.deinit();
     if (builtin.target.os.tag == .windows) {
-        const sh_dir = try directoryHolding(io, fx.env.get("PATH") orelse "", "sh.exe");
+        const sh_dir = try directoryHolding(io, fx.env.get("PATH") orelse "", &.{ "sh.exe", "msys-2.0.dll" });
         var lfs_buf: [Io.Dir.max_path_bytes]u8 = undefined;
         const beside = try std.mem.print(&lfs_buf, "{s}\\git-lfs.exe", .{sh_dir});
         // The test means nothing where git-lfs sits beside `sh`.

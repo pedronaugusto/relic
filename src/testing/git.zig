@@ -112,6 +112,12 @@ pub const Repo = struct {
     /// a submodule's URL — still names it, so `source` outlives the twin.
     /// The copied files are new to the file system, so every index, the
     /// submodules' too, is refreshed, as clean as git left `source`'s.
+    ///
+    /// The submodules' only where the copy has one checked out, a `.git`
+    /// below its top: `git submodule` is still a shell script, which costs
+    /// fifteen times another git command on macOS and starts MSYS's bash on
+    /// Windows, and the sweeps that copy a repository with none for each of
+    /// their runs ran past the 120 s bound there (push run 44642088256).
     pub fn copyOf(gpa: Allocator, io: Io, source: *const Repo) !Repo {
         var tmp = std.testing.tmpDir(.{ .iterate = true });
         errdefer tmp.cleanup();
@@ -121,10 +127,10 @@ pub const Repo = struct {
         defer gpa.free(home_path);
         var isolated = try isolatedEnviron(gpa, home_path);
         errdefer isolated.deinit();
-        try copyTree(gpa, io, source.dir, tmp.dir);
+        const nested = try copyTreeCounting(gpa, io, source.dir, tmp.dir);
         var repo: Repo = .{ .gpa = gpa, .tmp = tmp, .dir = tmp.dir, .home = home, .isolated = isolated };
         try repo.exec(io, &.{ "update-index", "-q", "--refresh" });
-        try repo.exec(io, &.{ "submodule", "foreach", "--quiet", "--recursive", "git update-index -q --refresh" });
+        if (nested != 0) try repo.exec(io, &.{ "submodule", "foreach", "--quiet", "--recursive", "git update-index -q --refresh" });
         return repo;
     }
 
@@ -730,13 +736,24 @@ pub fn corpusCases(full: usize) usize {
 /// building it again takes. A tree with anything else in it, a symbolic
 /// link, is refused.
 pub fn copyTree(gpa: Allocator, io: Io, from: Io.Dir, to: Io.Dir) !void {
+    _ = try copyTreeCounting(gpa, io, from, to);
+}
+
+/// `copyTree`, and how many `.git`s, a checked-out submodule's file or
+/// directory, it copied below the top.
+fn copyTreeCounting(gpa: Allocator, io: Io, from: Io.Dir, to: Io.Dir) !usize {
+    var nested: usize = 0;
     var walker = try from.walk(gpa);
     defer walker.deinit();
-    while (try walker.next(io)) |entry| switch (entry.kind) {
-        .directory => try to.createDirPath(io, entry.path),
-        .file => try from.copyFile(entry.path, to, entry.path, io, .{}),
-        else => return error.UnexpectedEntryKind,
-    };
+    while (try walker.next(io)) |entry| {
+        if (std.mem.eql(u8, entry.basename, ".git") and entry.path.len != ".git".len) nested += 1;
+        switch (entry.kind) {
+            .directory => try to.createDirPath(io, entry.path),
+            .file => try from.copyFile(entry.path, to, entry.path, io, .{}),
+            else => return error.UnexpectedEntryKind,
+        }
+    }
+    return nested;
 }
 
 /// `error.SkipZigTest` unless a usable `git` is on the path; on a hosted
@@ -816,6 +833,16 @@ pub fn eachRefFormat(in_format: *const fn (RefFormat) anyerror!void) !void {
     }
 }
 
+/// `eachRefFormat` for one format, for a comparison too long to run in
+/// both under one test's bound: `error.SkipZigTest` where the git found
+/// does not write it.
+pub fn inRefFormat(format: RefFormat, in_format: *const fn (RefFormat) anyerror!void) !void {
+    for (try refFormats(std.testing.allocator, std.testing.io)) |found| {
+        if (found == format) return in_format(format);
+    }
+    return error.SkipZigTest;
+}
+
 /// Whether the `git` on the path is at least `major.minor`, for a test
 /// that compares one thing against every git and another only against the
 /// release that has it. `error.SkipZigTest` when there is no git at all.
@@ -860,6 +887,47 @@ test "the libcurl a git names in its build options" {
     try std.testing.expectEqual(@as(u32, 8), found.major);
     try std.testing.expectEqual(@as(u32, 18), found.minor);
     try std.testing.expectEqual(@as(?git_release.Version, null), libcurlRelease("git version 2.56.0\ncpu: arm64\n"));
+}
+
+test "a copy's indexes are as clean as git left the source's, a checked-out submodule's too, and a .git below the top is what says one is there" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var repo = try Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+    try repo.writeFile(io, "top", "top\n");
+    try repo.exec(io, &.{ "add", "-A" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "base" });
+    {
+        var plain = std.testing.tmpDir(.{});
+        defer plain.cleanup();
+        try std.testing.expectEqual(@as(usize, 0), try copyTreeCounting(gpa, io, repo.dir, plain.dir));
+    }
+    try repo.exec(io, &.{ "init", "-q", "-b", "main", "sub" });
+    try repo.writeFile(io, "sub/s", "s\n");
+    try repo.exec(io, &.{ "-C", "sub", "add", "-A" });
+    try repo.exec(io, &.{ "-C", "sub", "commit", "-q", "-m", "s" });
+    try repo.exec(io, &.{ "submodule", "add", "-q", "./sub", "sub" });
+    try repo.exec(io, &.{ "commit", "-q", "-m", "add sub" });
+    {
+        var with_sub = std.testing.tmpDir(.{});
+        defer with_sub.cleanup();
+        try std.testing.expectEqual(@as(usize, 1), try copyTreeCounting(gpa, io, repo.dir, with_sub.dir));
+    }
+    var copy = try Repo.copyOf(gpa, io, &repo);
+    defer copy.deinit();
+    // diff-files compares the index's stat with the files' and refreshes
+    // nothing: a copy's new files are stale in an index not refreshed. The
+    // submodule's first: the top's diff-files asks the submodule's status,
+    // which refreshes the submodule's index.
+    for ([_][]const []const u8{ &.{ "-C", "sub", "diff-files" }, &.{"diff-files"} }) |where| {
+        var args: std.ArrayList([]const u8) = .empty;
+        defer args.deinit(gpa);
+        try args.appendSlice(gpa, where);
+        try args.append(gpa, "--name-only");
+        const stale = try copy.run(io, args.items);
+        defer gpa.free(stale);
+        try std.testing.expectEqualStrings("", stale);
+    }
 }
 
 test "a git the harness runs reads no configuration but the harness's own" {

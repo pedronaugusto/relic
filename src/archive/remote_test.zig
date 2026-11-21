@@ -265,6 +265,11 @@ test "a cancel that stops a read of git's upload-archive is Canceled, not a prot
     var here = try testgit.Repo.init(gpa, io, &.{});
     defer here.deinit();
     try here.exec(io, &.{ "config", "core.sshCommand", fake });
+    // OpenSSH's variant named, so no `-G` probe runs: the probe runs a
+    // program to its end, which on Windows reads its pipes on tasks the
+    // `Io` below refuses (ConcurrencyUnavailable, push run 44642088256).
+    // The reads canceled are the conversation's own.
+    try here.exec(io, &.{ "config", "ssh.variant", "ssh" });
     var repo = try repo_mod.Repository.open(gpa, io, here.dir, .{});
     defer repo.deinit(io);
     // Over ssh, so the answer comes through a program's pipe.
