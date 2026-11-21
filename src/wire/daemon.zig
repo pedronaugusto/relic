@@ -148,9 +148,9 @@ pub fn dial(gpa: Allocator, io: Io, host: []const u8, port: u16) connection.Erro
     // A host that cannot be reached is `ConnectionFailed`, however the dial
     // failed, as smart HTTP names it.
     var dialed = uplink.net.dial.dial(io, host, port, .{ .socket = .{ .nodelay = true, .keepalive = .{ .on = .{} } } }) catch |err| switch (err) {
-        error.InvalidHostName, error.NameNotResolved, error.ConnectionFailed, error.OptionUnsupported, error.AccessDenied, error.AddressFamilyMismatch, error.TimedOut, error.ConcurrencyUnavailable => return error.ConnectionFailed,
+        error.InvalidHostName, error.UnknownHostName, error.NoAddressReturned, error.NameServerFailure, error.DetectingNetworkConfigurationFailed, error.ResolvConfParseFailed, error.SystemResources, error.ConnectionFailed, error.OptionUnsupported, error.AccessDenied, error.AddressFamilyMismatch, error.TimedOut, error.ConcurrencyUnavailable => return error.ConnectionFailed,
         error.Canceled => return error.Canceled,
-        error.NamedPipeUnsupported => aegis.assert.never("a host and port is dialed, never a named pipe"),
+        error.NamedPipeUnsupported, error.FileNotFound => aegis.assert.never("a host and port is dialed, never a named pipe or a socket's path"),
     };
     errdefer dialed.stream.deinit(io);
     return Socket.start(gpa, io, &dialed.stream);

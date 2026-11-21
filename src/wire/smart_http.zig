@@ -1204,7 +1204,13 @@ const Http = struct {
                 var buf: [48]u8 = undefined;
                 return h.fail(error.ConnectionFailed, std.mem.print(&buf, "the connection failed ({t})", .{d.stage}) catch "the connection failed");
             },
-            error.NameNotResolved => h.fail(error.ConnectionFailed, "the host's name was not found"),
+            error.InvalidHostName => h.fail(error.ConnectionFailed, "the host is not a host name"),
+            error.UnknownHostName => h.fail(error.ConnectionFailed, "the host's name was not found"),
+            error.NoAddressReturned => h.fail(error.ConnectionFailed, "the host's name has no address"),
+            error.NameServerFailure => h.fail(error.ConnectionFailed, "no name server answered for the host"),
+            error.DetectingNetworkConfigurationFailed, error.ResolvConfParseFailed => h.fail(error.ConnectionFailed, "the system's name configuration could not be read"),
+            error.SystemResources => h.fail(error.ConnectionFailed, "the system ran out of resources looking the host up"),
+            error.FileNotFound => h.fail(error.ConnectionFailed, "the socket's path names no file"),
             error.ConcurrencyUnavailable => h.fail(error.ConnectionFailed, "no task to look the host up with"),
             error.AccessDenied => h.fail(error.ConnectionFailed, "the connection was refused to this process"),
             error.OptionUnsupported => h.fail(error.ConnectionFailed, "the system refused a socket option"),

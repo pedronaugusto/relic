@@ -40,29 +40,15 @@ const aegis = @import("aegis");
 
 /// A directory handle with its one owner, which closes it once: what an
 /// opener hands its caller, and what a struct keeping a handle open holds.
-pub const OwnedDir = aegis.own.OwnedIo(Io.Dir, closeDir);
+/// Each is aegis's owner type of that handle, so a handle relic hands back
+/// passes to any package (conduit's, reactor's) as the same type.
+pub const OwnedDir = aegis.own.Dir;
 /// A file handle with its one owner, as `OwnedDir`.
-pub const OwnedFile = aegis.own.OwnedIo(Io.File, closeFile);
+pub const OwnedFile = aegis.own.File;
 /// A connected socket with its one owner, as `OwnedDir`.
-pub const OwnedStream = aegis.own.OwnedIo(Io.net.Stream, closeStream);
+pub const OwnedStream = aegis.own.Stream;
 /// A listening socket with its one owner, as `OwnedDir`.
-pub const OwnedServer = aegis.own.OwnedIo(Io.net.Server, closeServer);
-
-fn closeDir(dir: *Io.Dir, io: Io) void {
-    dir.close(io);
-}
-
-fn closeFile(file: *Io.File, io: Io) void {
-    file.close(io);
-}
-
-fn closeStream(stream: *Io.net.Stream, io: Io) void {
-    stream.close(io);
-}
-
-fn closeServer(server: *Io.net.Server, io: Io) void {
-    server.deinit(io);
-}
+pub const OwnedServer = aegis.own.Server;
 
 /// A requested durability level was refused by the filesystem.
 pub const SyncError = airlock.DirSyncError || airlock.SyncPathError || error{LevelUnavailable};
