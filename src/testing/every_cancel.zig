@@ -246,8 +246,16 @@ test "every cancellation point of add returns error.Canceled (design §11)" {
     try sweep(.add, .{});
 }
 
-test "every cancellation point of a commit returns error.Canceled (design §11)" {
-    try sweep(.commit, .{});
+test "every cancellation point of a commit returns error.Canceled, the points' third 1 (design §11)" {
+    try sweep(.commit, .{ .index = 0, .count = 3 });
+}
+
+test "every cancellation point of a commit returns error.Canceled, the points' third 2 (design §11)" {
+    try sweep(.commit, .{ .index = 1, .count = 3 });
+}
+
+test "every cancellation point of a commit returns error.Canceled, the points' third 3 (design §11)" {
+    try sweep(.commit, .{ .index = 2, .count = 3 });
 }
 
 test "every cancellation point of a checkout returns error.Canceled (design §11)" {

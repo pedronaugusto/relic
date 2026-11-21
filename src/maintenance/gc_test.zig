@@ -431,6 +431,12 @@ fn expireCanceledInFormat(format: testgit.RefFormat) !void {
     try testing_io.everyCancel(gpa, io, &e);
 }
 
-test "a cancel that lands in judging a log entry stops reflog expire before the log or the ref is written, in both ref formats" {
-    try testgit.eachRefFormat(expireCanceledInFormat);
+// One test for each ref format: both under one ran past the 120 s bound on
+// Windows (push run 44642088256).
+test "a cancel that lands in judging a log entry stops reflog expire before the log or the ref is written, in the files format" {
+    try testgit.inRefFormat(.files, expireCanceledInFormat);
+}
+
+test "a cancel that lands in judging a log entry stops reflog expire before the log or the ref is written, in the reftable format" {
+    try testgit.inRefFormat(.reftable, expireCanceledInFormat);
 }
