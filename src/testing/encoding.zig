@@ -443,8 +443,8 @@ comptime {
     std.debug.assert(iconv_record.part_count == 6);
 }
 
-/// The libiconv-2.dll of the held git (the git the tests run, its tree's
-/// `mingw64/bin`) measured over the labels of the record's part `part`, against that part
+/// The libiconv-2.dll of the held git (the git the tests run, in its
+/// prefix's `bin`: `heldIconv`) measured over the labels of the record's part `part`, against that part
 /// of the record the tables were written from: where they differ, the test
 /// fails with the part measured, in its output and in the job's artifact of
 /// preflight's timings, to be committed and the tables written again.
@@ -458,15 +458,15 @@ fn heldIconvAsRecorded(part: u8) !void {
     // the path: preflight's test runner keeps its PREFLIGHT_ variables,
     // PREFLIGHT_GIT among them, from the tests (push run 44966563412 found
     // none). It names its own tree by its exec path, the tree's
-    // mingw64/libexec/git-core. A Windows machine with no git, not a hosted
+    // ucrt64/libexec/git-core (2.56.0's). A Windows machine with no git, not a hosted
     // one, skips; the tree's name below holds any other git to the pin.
     var env = try testgit.programEnviron(a);
     const asked = testgit.run(a, io, .{ .argv = &.{ testgit.program(), "--exec-path" }, .environ_map = &env }) catch
         return if (testgit.hostedJob()) error.NoHeldGit else error.SkipZigTest;
     if (asked.term != .exited or asked.term.exited != 0) return error.NoHeldGit;
-    const exec_path = std.mem.trimEnd(u8, asked.stdout, "\r\n");
-    const dir = path.dirname(path.dirname(path.dirname(exec_path) orelse return error.NotTheHeldGit) orelse return error.NotTheHeldGit) orelse return error.NotTheHeldGit;
-    const dll = "mingw64/bin/libiconv-2.dll";
+    const held = try heldIconv(a, std.mem.trimEnd(u8, asked.stdout, "\r\n"));
+    const dir = held.tree;
+    const dll = held.dll;
     const workflow = try Io.Dir.cwd().readFileAlloc(io, build_options.repo_root ++ "/ci/workflow.json", a, .limited(1 << 20));
     const pin = try std.json.parseFromSliceLeaky(struct {
         git: struct { version: []const u8, windows: struct { x86_64: []const u8 } },
@@ -507,6 +507,36 @@ fn heldIconvAsRecorded(part: u8) !void {
     std.debug.print("The part measured, also {s} in this job's timings artifact: tools/git-for-windows-iconv.txt is the parts 1 to 6 in order; with this one in its place, write the tables again (bay dev encodings).\n" ++
         "----- {s} -----\n{s}----- end -----\n", .{ name, name, measured });
     return error.GitForWindowsIconvNotAsRecorded;
+}
+
+/// Where a Git for Windows tree keeps the iconv its git converts through,
+/// from that git's exec path, `<tree>/<prefix>/libexec/git-core`: the tree,
+/// and the `libiconv-2.dll` in its prefix's `bin`, beside the git.exe there,
+/// as a path within the tree. The prefix is the git's own, not a name
+/// assumed: the held 2.56.0's is `ucrt64`, where older trees had `mingw64`.
+fn heldIconv(a: std.mem.Allocator, exec_path: []const u8) !struct { tree: []const u8, dll: []const u8 } {
+    const path = std.fs.path;
+    const libexec = path.dirname(exec_path) orelse return error.NotTheHeldGit;
+    const prefix = path.dirname(libexec) orelse return error.NotTheHeldGit;
+    if (!std.mem.eql(u8, path.basename(exec_path), "git-core") or !std.mem.eql(u8, path.basename(libexec), "libexec")) return error.NotTheHeldGit;
+    return .{
+        .tree = path.dirname(prefix) orelse return error.NotTheHeldGit,
+        .dll = try a.print("{s}/bin/libiconv-2.dll", .{path.basename(prefix)}),
+    };
+}
+
+test "the held git's iconv is the libiconv-2.dll in its own prefix's bin, whichever the tree has" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const ucrt = try heldIconv(a, "D:/a/_temp/preflight-git/Git-2.56.0-x86_64/ucrt64/libexec/git-core");
+    try testing.expectEqualStrings("D:/a/_temp/preflight-git/Git-2.56.0-x86_64", ucrt.tree);
+    try testing.expectEqualStrings("ucrt64/bin/libiconv-2.dll", ucrt.dll);
+    const mingw = try heldIconv(a, "C:/Program Files/Git/mingw64/libexec/git-core");
+    try testing.expectEqualStrings("C:/Program Files/Git", mingw.tree);
+    try testing.expectEqualStrings("mingw64/bin/libiconv-2.dll", mingw.dll);
+    try testing.expectError(error.NotTheHeldGit, heldIconv(a, "/usr/lib/git"));
+    try testing.expectError(error.NotTheHeldGit, heldIconv(a, "D:/Git/ucrt64/bin"));
 }
 
 /// The iconv the host's git converts through: Apple's on macOS, glibc's on
