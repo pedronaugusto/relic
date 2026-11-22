@@ -7,7 +7,8 @@
   ],
   "test_dependencies": [
     "shakedown",
-    "airlock.testing"
+    "airlock.testing",
+    "iconv_record"
   ],
   "test_support": [
     "src/testing/**",

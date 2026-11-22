@@ -326,6 +326,9 @@ pub fn dev(b: *std.Build, tools: type) void {
         "Run the test of a blob past 4 GiB, which takes minutes and gigabytes of disk",
     ) orelse false;
     build_options.addOption(bool, "large_objects", large_objects);
+    // Where a test leaves what a hosted job uploads with preflight's
+    // timings (.zig-cache/preflight-timings, the job's artifact).
+    build_options.addOptionPathUntracked("repo_root", p.path("."));
     build_options.addOptionPath("upload_pack_helper_path", upload_pack_helper.getEmittedBin());
     build_options.addOptionPath("receive_pack_helper_path", receive_pack_helper.getEmittedBin());
     build_options.addOptionPath("upload_archive_helper_path", upload_archive_helper.getEmittedBin());
@@ -361,6 +364,11 @@ pub fn dev(b: *std.Build, tools: type) void {
     test_module.addImport("shakedown", shakedown.module("shakedown"));
     // The fixtures the tests read, outside src/ and the paths a project fetches.
     test_module.addImport("testdata", p.createModule(.{ .root_source_file = p.path("testdata/root.zig") }));
+    // Git for Windows' iconv as recorded, which the tables were written
+    // from, and the record a Windows run holds that DLL to it with
+    // (designs/relic.md §14).
+    test_module.addImport("git-for-windows-iconv.txt", p.createModule(.{ .root_source_file = p.path("tools/git-for-windows-iconv.txt") }));
+    test_module.addImport("iconv_record", p.createModule(.{ .root_source_file = p.path("tools/iconv_record.zig"), .target = target, .optimize = optimize }));
     filter_helper.root_module.addImport("relic", module);
     lfs_transfer_helper.root_module.addImport("relic", module);
     lfs_transfer_helper.root_module.addImport("relic_lfs", package.module("relic_lfs"));
@@ -472,6 +480,15 @@ pub fn dev(b: *std.Build, tools: type) void {
     const setup_tests = b.addRunArtifact(b.addTest(.{ .root_module = setup.root_module }));
     b.step("check-ci-setup", "Test the hosted tool installer").dependOn(&setup_tests.step);
     test_step.dependOn(&setup_tests.step);
+    // The record of an iconv the encodings' generator cannot run where it
+    // writes the tables (Git for Windows', tools/iconv_record.zig): written
+    // and read back on every host, with the tests for the same reason.
+    const iconv_record_tests = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = p.path("tools/iconv_record.zig"),
+        .target = target,
+        .optimize = optimize,
+    }) }));
+    test_step.dependOn(&iconv_record_tests.step);
 
     //=====================================================================
     // Benchmarks
@@ -553,23 +570,9 @@ pub fn dev(b: *std.Build, tools: type) void {
     }
 
     // The encodings' deltas (designs/relic.md §14): the generator runs
-    // Apple's libiconv, so on macOS, and reads glibc's from its source.
-    const host_xenoglyph = p.dependency("xenoglyph", .{ .target = b.graph.host, .optimize = .safe }).module("xenoglyph");
-    const encodings = b.addExecutable(.{ .name = "encodings", .root_module = b.createModule(.{
-        .root_source_file = p.path("tools/encodings.zig"),
-        .target = b.graph.host,
-        .optimize = .safe,
-        .link_libc = true,
-        .imports = &.{
-            .{ .name = "xenoglyph", .module = host_xenoglyph },
-            .{ .name = "legacy", .module = b.createModule(.{
-                .root_source_file = p.path("src/text/legacy.zig"),
-                .target = b.graph.host,
-                .optimize = .safe,
-                .imports = &.{.{ .name = "xenoglyph", .module = host_xenoglyph }},
-            }) },
-        },
-    }) });
+    // Apple's libiconv, so on macOS, reads glibc's from its source, and
+    // Git for Windows' from a record of it made on Windows.
+    const encodings = encodingsTool(b, p, b.graph.host);
     if (b.graph.host.result.os.tag == .macos) {
         encodings.root_module.linkSystemLibrary("iconv", .{});
         check_step.dependOn(&encodings.step);
@@ -577,10 +580,19 @@ pub fn dev(b: *std.Build, tools: type) void {
     const measure = b.addRunArtifact(encodings);
     measure.setCwd(p.path("."));
     if (b.option([]const u8, "glibc-source", "glibc's source, for the encodings step")) |source| measure.addArg(source);
+    measure.addArg(b.option([]const u8, "windows-iconv", "Git for Windows' iconv, recorded by encodings-record, for the encodings step") orelse "tools/git-for-windows-iconv.txt");
     measure.addArg("src/text/legacy/tables.zig");
     measure.addArg("src/testing/legacy_disputes.zig");
     measure.has_side_effects = true;
-    b.step("encodings", "Write src/text/legacy/tables.zig and the tests' src/testing/legacy_disputes.zig from Apple's libiconv and glibc's source (-Dglibc-source)").dependOn(&measure.step);
+    b.step("encodings", "Write src/text/legacy/tables.zig and the tests' src/testing/legacy_disputes.zig from Apple's libiconv, glibc's source (-Dglibc-source) and Git for Windows' record (-Dwindows-iconv)").dependOn(&measure.step);
+    // Apple's iconv recorded as the Windows test records Git for Windows'
+    // (`-- apple <record file>`, on macOS): the record's own check.
+    const record_iconv = b.addRunArtifact(encodings);
+    record_iconv.setCwd(p.path("."));
+    record_iconv.addArg("record");
+    record_iconv.addPassthruArgs();
+    record_iconv.has_side_effects = true;
+    b.step("encodings-record", "Record Apple's libiconv as Git for Windows' is recorded, the record's own check (-- apple <record file>, on macOS)").dependOn(&record_iconv.step);
 }
 
 /// What stands for relic_net's packages, uplink (HTTP and TCP) and cloak
@@ -592,6 +604,27 @@ const lfs_packages = [_][]const u8{"strand"};
 
 /// `name`'s module of the same name, or `null` until the build has fetched
 /// the package, when it asks again.
+/// tools/encodings.zig built for `target`.
+fn encodingsTool(b: *std.Build, p: *std.Build, target: std.Build.ResolvedTarget) *std.Build.Step.Compile {
+    const xenoglyph = p.dependency("xenoglyph", .{ .target = target, .optimize = .safe }).module("xenoglyph");
+    return b.addExecutable(.{ .name = "encodings", .root_module = b.createModule(.{
+        .root_source_file = p.path("tools/encodings.zig"),
+        .target = target,
+        .optimize = .safe,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "xenoglyph", .module = xenoglyph },
+            .{ .name = "iconv_record", .module = b.createModule(.{ .root_source_file = p.path("tools/iconv_record.zig"), .target = target, .optimize = .safe }) },
+            .{ .name = "legacy", .module = b.createModule(.{
+                .root_source_file = p.path("src/text/legacy.zig"),
+                .target = target,
+                .optimize = .safe,
+                .imports = &.{.{ .name = "xenoglyph", .module = xenoglyph }},
+            }) },
+        },
+    }) });
+}
+
 fn lazyModule(b: *std.Build, name: []const u8, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) ?*std.Build.Module {
     const dep = b.dependencyLazy(name, .{ .target = target, .optimize = optimize }) catch |err| switch (err) {
         error.LazyDependencyNeeded => return null,

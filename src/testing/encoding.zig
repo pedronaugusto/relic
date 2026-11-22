@@ -28,6 +28,9 @@ const legacy = @import("../text/legacy.zig");
 const legacy_tables = @import("../text/legacy/tables.zig");
 const legacy_disputes = @import("legacy_disputes.zig");
 const builtin = @import("builtin");
+const build_options = @import("build_options");
+const iconv_record = @import("iconv_record");
+const xenoglyph = @import("xenoglyph");
 
 const testing = std.testing;
 
@@ -411,6 +414,92 @@ test "each encoding is converted as the host's git log converts it where its ico
         if (emoji_len) |n| if (try heldToStandardWrite(l, 0x1f600, emoji[0..n])) continue;
         try expectLoggedAlike(a, io, &r, try commitOf(a, io, &r, null, "unmappable \xf0\x9f\x98\x80\n"), name, name);
     }
+}
+
+// Git for Windows' own iconv, the held PortableGit's libiconv-2.dll, reads
+// and writes as tools/git-for-windows-iconv.txt records it, which the tables
+// were written from (designs/relic.md §14): a test for each part of the
+// record, each within a test's time on a Windows runner.
+test "Git for Windows' own iconv reads and writes as tools/git-for-windows-iconv.txt records it, its part 1 of 6" {
+    if (comptime builtin.os.tag == .windows) try heldIconvAsRecorded(0) else return error.SkipZigTest;
+}
+test "Git for Windows' own iconv reads and writes as tools/git-for-windows-iconv.txt records it, its part 2 of 6" {
+    if (comptime builtin.os.tag == .windows) try heldIconvAsRecorded(1) else return error.SkipZigTest;
+}
+test "Git for Windows' own iconv reads and writes as tools/git-for-windows-iconv.txt records it, its part 3 of 6" {
+    if (comptime builtin.os.tag == .windows) try heldIconvAsRecorded(2) else return error.SkipZigTest;
+}
+test "Git for Windows' own iconv reads and writes as tools/git-for-windows-iconv.txt records it, its part 4 of 6" {
+    if (comptime builtin.os.tag == .windows) try heldIconvAsRecorded(3) else return error.SkipZigTest;
+}
+test "Git for Windows' own iconv reads and writes as tools/git-for-windows-iconv.txt records it, its part 5 of 6" {
+    if (comptime builtin.os.tag == .windows) try heldIconvAsRecorded(4) else return error.SkipZigTest;
+}
+test "Git for Windows' own iconv reads and writes as tools/git-for-windows-iconv.txt records it, its part 6 of 6" {
+    if (comptime builtin.os.tag == .windows) try heldIconvAsRecorded(5) else return error.SkipZigTest;
+}
+
+comptime {
+    std.debug.assert(iconv_record.part_count == 6);
+}
+
+/// The libiconv-2.dll of the held git (`PREFLIGHT_GIT`, its `cmd\git.exe`)
+/// measured over the labels of the record's part `part`, against that part
+/// of the record the tables were written from: where they differ, the test
+/// fails with the part measured, in its output and in the job's artifact of
+/// preflight's timings, to be committed and the tables written again.
+fn heldIconvAsRecorded(part: u8) !void {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = testing.io;
+    const path = std.fs.path;
+    // preflight's held git, by its path; a Windows machine with none, not
+    // a hosted one, has a git whose iconv nothing pinned.
+    const git = testgit.program();
+    if (!path.isAbsolute(git)) return if (testgit.hostedJob()) error.NoHeldGit else error.SkipZigTest;
+    const dir = path.dirname(path.dirname(git) orelse return error.NotTheHeldGit) orelse return error.NotTheHeldGit;
+    const dll = "mingw64/bin/libiconv-2.dll";
+    const workflow = try Io.Dir.cwd().readFileAlloc(io, build_options.repo_root ++ "/ci/workflow.json", a, .limited(1 << 20));
+    const pin = try std.json.parseFromSliceLeaky(struct {
+        git: struct { version: []const u8, windows: struct { x86_64: []const u8 } },
+    }, a, workflow, .{ .ignore_unknown_fields = true });
+    // The archive preflight checked against the pin, and unpacked here.
+    if (!std.mem.eql(u8, path.basename(dir), try a.print("Git-{s}-x86_64", .{pin.git.version}))) return error.NotTheHeldGit;
+    const dll_bytes = try Io.Dir.cwd().readFileAlloc(io, try path.join(a, &.{ dir, dll }), a, .limited(64 << 20));
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(dll_bytes, &digest, .{});
+    const measured = try iconv_record.measurePart(
+        a,
+        try iconv_record.dllIconv(a, try path.join(a, &.{ dir, dll })),
+        .{ try a.print("PortableGit-{s}-64-bit.7z.exe", .{pin.git.version}), pin.git.windows.x86_64 },
+        .{ dll, try a.print("{x}", .{&digest}) },
+        try iconv_record.labels(a, xenoglyph.encoding, legacy),
+        part,
+    );
+    const recorded = iconv_record.partOf(@embedFile("git-for-windows-iconv.txt"), part) orelse "";
+    if (std.mem.eql(u8, measured, recorded)) return;
+    var line: usize = 1;
+    var theirs = std.mem.splitScalar(u8, recorded, '\n');
+    var ours = std.mem.splitScalar(u8, measured, '\n');
+    while (true) : (line += 1) {
+        const x = theirs.next();
+        const y = ours.next();
+        if (x == null or y == null or !std.mem.eql(u8, x.?, y.?)) {
+            std.debug.print("Git for Windows' iconv differs from tools/git-for-windows-iconv.txt's part {d} at its line {d}: recorded \"{s}\", measured \"{s}\"\n", .{ part + 1, line, x orelse "(its end)", y orelse "(its end)" });
+            break;
+        }
+    }
+    // preflight uploads its timings' directory from every job, and folds only its .ndjson files.
+    const kept = build_options.repo_root ++ "/.zig-cache/preflight-timings";
+    Io.Dir.cwd().createDirPath(io, kept) catch {};
+    const name = try a.print("git-for-windows-iconv.part{d}.record", .{part + 1});
+    Io.Dir.cwd().writeFile(io, .{ .sub_path = try a.print("{s}/{s}", .{ kept, name }), .data = measured }) catch |err| {
+        std.debug.print("the part measured was not kept in {s}: {t}\n", .{ kept, err });
+    };
+    std.debug.print("The part measured, also {s} in this job's timings artifact: tools/git-for-windows-iconv.txt is the parts 1 to 6 in order; with this one in its place, write the tables again (bay dev encodings).\n" ++
+        "----- {s} -----\n{s}----- end -----\n", .{ name, name, measured });
+    return error.GitForWindowsIconvNotAsRecorded;
 }
 
 /// The iconv the host's git converts through: Apple's on macOS, glibc's on

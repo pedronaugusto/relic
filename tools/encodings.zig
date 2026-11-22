@@ -1,9 +1,13 @@
-//! Writes `src/text/legacy/tables.zig`: each encoding name either iconv git
-//! is built with takes, and how relic's meaning of it differs from the
-//! WHATWG standard's (designs/relic.md §14).
+//! Writes `src/text/legacy/tables.zig`: each encoding name any iconv git is
+//! built with takes, and how relic's meaning of it differs from the WHATWG
+//! standard's (designs/relic.md §14).
 //!
-//! `encodings <glibc source> <output file>`, on macOS. Apple's libiconv,
-//! which the Mac's git links, is run. glibc's iconv is read from its source,
+//! `encodings <glibc source> <Windows record> <tables file> <disputes file>`,
+//! on macOS. Apple's libiconv, which the Mac's git links, is run. Git for
+//! Windows' own, the libiconv-2.dll of the held PortableGit, is read from
+//! the record of it at tools/git-for-windows-iconv.txt (`iconv_record.zig`),
+//! which a test on every Windows run holds to that DLL
+//! (src/testing/encoding.zig). glibc's iconv is read from its source,
 //! as its own `iconvdata/tst-tables.sh` states each module: a name is
 //! stripped and upper-cased as `iconv/gconv_charset.c` does and followed
 //! through the aliases of `iconvdata/gconv-modules*` and
@@ -16,7 +20,7 @@
 //!
 //! relic's meaning (§14's rule): where git behaves the same on every
 //! platform, relic matches git; where the platforms' gits differ, the
-//! standard decides. So a sequence of bytes reads as both iconvs read it
+//! standard decides. So a sequence of bytes reads as the three iconvs read it
 //! where they agree, refusing included, and as the standard reads it where
 //! they differ; a character likewise. An iconv that takes no such name
 //! refuses everything in it. A delta holds the sequences and characters
@@ -26,37 +30,54 @@
 //! letters with up to three marks of the composing encodings) and every
 //! character, and writes nothing if any differs.
 const std = @import("std");
+const builtin = @import("builtin");
 const xenoglyph = @import("xenoglyph");
 const legacy = @import("legacy");
+const iconv_record = @import("iconv_record");
 
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const xg = xenoglyph.encoding;
+const Converter = iconv_record.Converter;
 
 extern "c" fn iconv_open(to: [*:0]const u8, from: [*:0]const u8) ?*anyopaque;
 extern "c" fn iconv(cd: *anyopaque, inbuf: *?[*]u8, inleft: *usize, outbuf: *?[*]u8, outleft: *usize) usize;
-const iconv_failed: usize = std.math.maxInt(usize);
+
+/// Apple's libiconv, which the Mac's git links.
+fn appleIconv() iconv_record.Iconv {
+    return if (comptime builtin.os.tag == .macos) .{ .open = &iconv_open, .convert = &iconv } else @panic("Apple's libiconv is the Mac's");
+}
 
 pub fn main(init: std.process.Init) !void {
     const a = init.arena.allocator();
     const io = init.io;
     const args = try init.minimal.args.toSlice(a);
-    if (args.len != 4) {
-        std.debug.print("usage: encodings <glibc source> <tables file> <disputes file>\n", .{});
+    if (args.len == 4 and std.mem.eql(u8, args[1], "record")) return recordMain(a, io, args[2], args[3]);
+    if (args.len != 5) {
+        std.debug.print("usage: encodings <glibc source> <Windows record> <tables file> <disputes file>\n" ++
+            "       encodings record apple <record file>\n", .{});
         return error.Usage;
     }
-    const root = try Io.Dir.cwd().openDir(io, args[1], .{});
+    const glibc_source, const windows_record, const tables_file, const disputes_file = args[1..5].*;
+    const root = try Io.Dir.cwd().openDir(io, glibc_source, .{});
     var glibc = try Glibc.load(a, io, root);
+    const windows = try iconv_record.Recorded.parse(a, try Io.Dir.cwd().readFileAlloc(io, windows_record, a, .limited(256 << 20)));
     var out: Io.Writer.Allocating = .init(a);
     const w = &out.writer;
     const macos = try macosVersion(a, io);
-    try w.print(
-        \\//! Written by tools/encodings.zig from glibc {s}'s source and Apple's
-        \\//! libiconv on macOS {s} (designs/relic.md §14). Not to be edited.
+    const sources = try a.print(
+        \\//! Written by tools/encodings.zig from glibc {s}'s source, Apple's libiconv
+        \\//! on macOS {s}, and Git for Windows' {s} (sha256 {s}) of
+        \\//! {s} (sha256 {s}), as recorded on Windows
+        \\//! (designs/relic.md §14). Not to be edited.
+        \\
+    , .{ glibc.version, macos, windows.library[0], windows.library[1], windows.source[0], windows.source[1] });
+    try w.writeAll(sources);
+    try w.writeAll(
         \\const legacy = @import("../legacy.zig");
         \\const Legacy = legacy.Legacy;
         \\
-    , .{ glibc.version, macos });
+    );
 
     var meanings: std.ArrayList(Meaning) = .empty;
     var names: std.ArrayList(Name) = .empty;
@@ -78,16 +99,21 @@ pub fn main(init: std.process.Init) !void {
         const resolved = glibc.resolve(label);
         // A name Apple's iconv does not take: the Mac's git keeps every
         // text in it, glibc's converts, so the standard decides.
-        const apple: ?Apple = if (appleOpen("UTF-8", label)) |dec| if (appleOpen(label, "UTF-8")) |enc| .{ .decoder = dec, .encoder = enc } else null else null;
-        // relic's own, UTF-8 and the UTFs, ASCII and ISO-8859-1, where both
-        // take the name; one only glibc takes is the standard's to decide.
-        if (resolved) |m| if (own(m) and apple != null) continue;
+        const apple = Converter.open(appleIconv(), label);
+        // Git for Windows' likewise; the record has every label the standard has.
+        const windows_table = windows.labels.get(label) orelse {
+            std.debug.print("{s}: not in the Windows record\n", .{label});
+            return error.NotRecorded;
+        };
+        // relic's own, UTF-8 and the UTFs, ASCII and ISO-8859-1, where all
+        // take the name; one only some take is the standard's to decide.
+        if (resolved) |m| if (own(m) and apple != null and windows_table != null) continue;
         // A name glibc takes with no table its source states is not read.
         const map: *const Map = if (resolved) |m| (try glibc.module(a, io, root, m)) orelse continue else &no_map;
-        // Neither takes it: git keeps every text in it on each platform.
-        if (resolved == null and apple == null) continue;
+        // None takes it: git keeps every text in it on each platform.
+        if (resolved == null and apple == null and windows_table == null) continue;
         const module = resolved orelse try std.ascii.allocUpperString(a, xg.name(encoding));
-        const meaning = try measure(a, encoding, map, apple, module);
+        const meaning = try measure(a, encoding, map, apple, windows_table, module);
         const index = for (meanings.items, 0..) |m, i| {
             if (std.mem.eql(u8, m.module, meaning.module) and std.mem.eql(u8, m.text, meaning.text)) break i;
         } else blk: {
@@ -121,19 +147,15 @@ pub fn main(init: std.process.Init) !void {
     );
     for (names.items) |n| try w.print("    .{{ \"{s}\", &{s} }},\n", .{ n.label, meanings.items[n.meaning].ident });
     try w.writeAll("};\n");
-    try Io.Dir.cwd().writeFile(io, .{ .sub_path = args[2], .data = out.written() });
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = tables_file, .data = out.written() });
 
     // The tests' record of where the platforms' gits differ, so each host's
     // git is compared with relic only where its iconv agrees with relic.
     var disputes: Io.Writer.Allocating = .init(a);
     const d = &disputes.writer;
-    try d.print(
-        \\//! Written by tools/encodings.zig from glibc {s}'s source and Apple's
-        \\//! libiconv on macOS {s} (designs/relic.md §14). Not to be edited.
-        \\
-    , .{ glibc.version, macos });
+    try d.writeAll(sources);
     try d.writeAll(
-        \\//! Where the two iconvs differ, relic reads and writes as the standard
+        \\//! Where the three iconvs differ, relic reads and writes as the standard
         \\//! does: these are those sequences and characters, each range with which
         \\//! iconv reads or writes it otherwise than relic. A test holds relic to
         \\//! a host's git everywhere else, and to the standard here.
@@ -142,7 +164,7 @@ pub fn main(init: std.process.Init) !void {
         \\
         \\/// Sequences of `len` bytes, `first` to `last` read as big-endian
         \\/// numbers, or characters `first` to `last` (`len` 0).
-        \\pub const Range = struct { len: u8 = 0, first: u32, last: u32, apple: bool, glibc: bool };
+        \\pub const Range = struct { len: u8 = 0, first: u32, last: u32, apple: bool, glibc: bool, windows: bool };
         \\
         \\pub const Disputes = struct { reads: []const Range = &.{}, writes: []const Range = &.{} };
         \\
@@ -151,7 +173,7 @@ pub fn main(init: std.process.Init) !void {
     );
     for (meanings.items) |m| if (m.disputes.len > 0) try d.print("    .{{ &tables.{s}, .{{\n{s}    }} }},\n", .{ m.ident, m.disputes });
     try d.writeAll("};\n");
-    try Io.Dir.cwd().writeFile(io, .{ .sub_path = args[3], .data = disputes.written() });
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = disputes_file, .data = disputes.written() });
 }
 
 const Name = struct { label: []const u8, meaning: usize };
@@ -179,14 +201,8 @@ fn own(module: []const u8) bool {
     return false;
 }
 
-/// An encoding the standard reads sequence by sequence: not the UTFs, the
-/// replacement and x-user-defined, and not ISO-2022-JP, whose escapes
-/// change how every later byte reads.
 fn tabled(e: xg.Encoding) bool {
-    return switch (e) {
-        .utf_8, .utf_16le, .utf_16be, .replacement, .x_user_defined, .iso_2022_jp => false,
-        else => true,
-    };
+    return iconv_record.tabled(@tagName(e));
 }
 
 fn identifier(a: Allocator, module: []const u8) ![]const u8 {
@@ -206,43 +222,20 @@ fn macosVersion(a: Allocator, io: Io) ![]const u8 {
 }
 
 //=========================================================================
-// Apple's libiconv
+// Apple's libiconv, recorded: the record's own check
 //=========================================================================
 
-const Apple = struct {
-    decoder: *anyopaque,
-    encoder: *anyopaque,
-};
-
-fn appleOpen(to: []const u8, from: []const u8) ?*anyopaque {
-    var t: [64:0]u8 = @splat(0);
-    var f: [64:0]u8 = @splat(0);
-    if (to.len >= t.len or from.len >= f.len) return null;
-    @memcpy(t[0..to.len], to);
-    @memcpy(f[0..from.len], from);
-    const cd = iconv_open(&t, &f) orelse return null;
-    if (@intFromPtr(cd) == iconv_failed) return null;
-    return cd;
-}
-
-/// `in` whole through `cd` into `out`, or null where it stops.
-fn appleRun(cd: *anyopaque, in: []const u8, out: []u8) ?[]const u8 {
-    var no_in: ?[*]u8 = null;
-    var no_len: usize = 0;
-    var no_out: ?[*]u8 = null;
-    var no_out_len: usize = 0;
-    _ = iconv(cd, &no_in, &no_len, &no_out, &no_out_len);
-    var copy: [32]u8 = undefined;
-    if (in.len > copy.len) return null;
-    @memcpy(copy[0..in.len], in);
-    var ip: ?[*]u8 = &copy;
-    var il = in.len;
-    var op: ?[*]u8 = out.ptr;
-    var ol = out.len;
-    if (iconv(cd, &ip, &il, &op, &ol) == iconv_failed) return null;
-    if (iconv(cd, &no_in, &no_len, &op, &ol) == iconv_failed) return null;
-    if (il != 0) return null;
-    return out[0 .. out.len - ol];
+/// `encodings record apple <record file>`, on macOS: Apple's iconv recorded
+/// as src/testing/encoding.zig records Git for Windows' on Windows, over the
+/// same labels. Read back as the Windows record (-Dwindows-iconv), it must
+/// write the tables Apple's and glibc's alone write, each disputed range's
+/// `.windows` equal to its `.apple`.
+fn recordMain(a: Allocator, io: Io, which: []const u8, path: []const u8) !void {
+    if (!std.mem.eql(u8, which, "apple")) return error.Usage;
+    const to_measure = try iconv_record.labels(a, xg, legacy);
+    var out: Io.Writer.Allocating = .init(a);
+    try iconv_record.record(a, &out.writer, appleIconv(), .{ "macOS", try macosVersion(a, io) }, .{ "/usr/lib/libiconv.2.dylib", "-" }, to_measure);
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = out.written() });
 }
 
 //=========================================================================
@@ -617,8 +610,8 @@ const Compose = struct {
 //=========================================================================
 
 /// The common meaning of one name, and its delta.
-fn measure(a: Allocator, encoding: xg.Encoding, map: *const Map, apple: ?Apple, module: []const u8) !Meaning {
-    var cx: Context = .{ .a = a, .map = map, .apple = apple, .l = .{ .encoding = encoding }, .standard = .{ .encoding = encoding } };
+fn measure(a: Allocator, encoding: xg.Encoding, map: *const Map, apple: ?Converter, windows: ?*const iconv_record.Table, module: []const u8) !Meaning {
+    var cx: Context = .{ .a = a, .map = map, .apple = apple, .windows = windows, .l = .{ .encoding = encoding }, .standard = .{ .encoding = encoding } };
     const keys = try cx.decodeKeys(encoding);
     try cx.buildDecode(keys);
     const chars = try cx.encodeKeys(encoding);
@@ -635,9 +628,10 @@ fn measure(a: Allocator, encoding: xg.Encoding, map: *const Map, apple: ?Apple, 
         .disputes = disputes.written(),
         .module = module,
         .text = text.written(),
-        .doc = try a.print("{s} and {s}, from the standard's {s}.", .{
+        .doc = try a.print("{s}, {s} and {s}, from the standard's {s}.", .{
             if (map.decode.count() == 0) "No name of glibc's" else try a.print("glibc's {s} ({s})", .{ module, map.charmap }),
             if (apple == null) "no name of Apple's" else "Apple's",
+            if (windows == null) "no name of Git for Windows'" else "Git for Windows'",
             xg.name(encoding),
         }),
         .summary = try a.print("{s}: {d} decode, {d} encode, {d} pairs", .{ xg.name(encoding), cx.decode.items.len, cx.encode.items.len, cx.pairs.items.len }),
@@ -659,7 +653,9 @@ const Context = struct {
     a: Allocator,
     map: *const Map,
     /// Null for a name Apple's iconv does not take.
-    apple: ?Apple,
+    apple: ?Converter,
+    /// Git for Windows', recorded; null for a name it does not take.
+    windows: ?*const iconv_record.Table,
     l: legacy.Legacy,
     /// The standard's encoding with no delta.
     standard: legacy.Legacy,
@@ -678,39 +674,43 @@ const Context = struct {
         cx.l.pairs = cx.pairs.items;
     }
 
-    /// What relic reads `bytes` as: what both iconvs read, where they
-    /// agree (both refusing included), and the standard's reading where
+    /// What relic reads `bytes` as: what the three iconvs read, where they
+    /// agree (all refusing included), and the standard's reading where
     /// they differ.
     fn commonRead(cx: *Context, bytes: []const u8) !?[]const u8 {
         var buf: [64]u8 = undefined;
-        const theirs: ?[]const u8 = if (cx.apple) |apple| appleRun(apple.decoder, bytes, &buf) else null;
+        var wbuf: [64]u8 = undefined;
+        const theirs: ?[]const u8 = if (cx.apple) |apple| apple.read(bytes, &buf) else null;
         const mine: ?[]const u8 = if (try cx.map.read(bytes, &cx.scratch, cx.a)) cx.scratch.items else null;
+        const windows: ?[]const u8 = if (cx.windows) |t| try t.read(bytes, &wbuf) else null;
         const key = keyValue(bytes);
-        if (same(theirs, mine)) {
-            try cx.disputed_reads.append(cx.a, .{ .len = @intCast(bytes.len), .first = key, .last = key, .apple = false, .glibc = false });
+        if (same(theirs, mine) and same(theirs, windows)) {
+            try cx.disputed_reads.append(cx.a, .{ .len = @intCast(bytes.len), .first = key, .last = key, .apple = false, .glibc = false, .windows = false });
             return if (theirs) |t| try cx.a.dupe(u8, t) else null;
         }
         var out: std.ArrayList(u8) = .empty;
         const standard: ?[]const u8 = if (try readWith(cx.a, &cx.standard, bytes, &out)) out.items else null;
-        try cx.disputed_reads.append(cx.a, .{ .len = @intCast(bytes.len), .first = key, .last = key, .apple = !same(theirs, standard), .glibc = !same(mine, standard) });
+        try cx.disputed_reads.append(cx.a, .{ .len = @intCast(bytes.len), .first = key, .last = key, .apple = !same(theirs, standard), .glibc = !same(mine, standard), .windows = !same(windows, standard) });
         return standard;
     }
 
-    /// What relic writes `cps` as: what both iconvs write, where they agree
-    /// (both refusing included), and the standard's bytes where they differ.
+    /// What relic writes `cps` as: what the three iconvs write, where they
+    /// agree (all refusing included), and the standard's bytes where they differ.
     fn commonWrite(cx: *Context, cps: []const u21) !?[]const u8 {
         var buf: [64]u8 = undefined;
+        var wbuf: [64]u8 = undefined;
         var in: [8]u8 = undefined;
-        const theirs: ?[]const u8 = if (cx.apple) |apple| appleRun(apple.encoder, utf8Into(&in, cps), &buf) else null;
+        const theirs: ?[]const u8 = if (cx.apple) |apple| apple.write(utf8Into(&in, cps), &buf) else null;
         const mine: ?[]const u8 = if (try cx.map.write(cps, &cx.scratch, cx.a)) cx.scratch.items else null;
-        if (same(theirs, mine)) {
+        const windows: ?[]const u8 = if (cx.windows) |t| try t.write(cps, &wbuf) else null;
+        if (same(theirs, mine) and same(theirs, windows)) {
             // A character alone: the tests write characters one at a time.
-            if (cps.len == 1) try cx.disputed_writes.append(cx.a, .{ .first = cps[0], .last = cps[0], .apple = false, .glibc = false });
+            if (cps.len == 1) try cx.disputed_writes.append(cx.a, .{ .first = cps[0], .last = cps[0], .apple = false, .glibc = false, .windows = false });
             return if (theirs) |t| try cx.a.dupe(u8, t) else null;
         }
         var out: std.ArrayList(u8) = .empty;
         const standard: ?[]const u8 = if (try writeWith(cx.a, &cx.standard, cps, &out)) out.items else null;
-        if (cps.len == 1) try cx.disputed_writes.append(cx.a, .{ .first = cps[0], .last = cps[0], .apple = !same(theirs, standard), .glibc = !same(mine, standard) });
+        if (cps.len == 1) try cx.disputed_writes.append(cx.a, .{ .first = cps[0], .last = cps[0], .apple = !same(theirs, standard), .glibc = !same(mine, standard), .windows = !same(windows, standard) });
         return standard;
     }
 
@@ -1045,7 +1045,7 @@ fn writeWith(a: Allocator, l: *const legacy.Legacy, cps: []const u21, out: *std.
 }
 
 /// A disputed sequence or character range (`legacy_disputes.zig`'s).
-const Range = struct { len: u8 = 0, first: u32, last: u32, apple: bool, glibc: bool };
+const Range = struct { len: u8 = 0, first: u32, last: u32, apple: bool, glibc: bool, windows: bool };
 
 /// The disputed among `ranges`, every key measured: sorted, and a run of
 /// keys of one length and one verdict as one range, whatever values lie
@@ -1061,7 +1061,7 @@ fn mergedRanges(a: Allocator, ranges: []Range) ![]const Range {
     for (ranges) |r| {
         if (out.items.len > 0) {
             const prev = &out.items[out.items.len - 1];
-            if (prev.len == r.len and prev.apple == r.apple and prev.glibc == r.glibc) {
+            if (prev.len == r.len and prev.apple == r.apple and prev.glibc == r.glibc and prev.windows == r.windows) {
                 prev.last = r.last;
                 continue;
             }
@@ -1069,7 +1069,7 @@ fn mergedRanges(a: Allocator, ranges: []Range) ![]const Range {
         try out.append(a, r);
     }
     var disputed: std.ArrayList(Range) = .empty;
-    for (out.items) |r| if (r.apple or r.glibc) try disputed.append(a, r);
+    for (out.items) |r| if (r.apple or r.glibc or r.windows) try disputed.append(a, r);
     return disputed.items;
 }
 
@@ -1079,7 +1079,7 @@ fn writeRanges(w: *Io.Writer, field: []const u8, ranges: []const Range) !void {
     for (ranges) |r| {
         try w.writeAll("            .{");
         if (r.len > 0) try w.print(" .len = {d},", .{r.len});
-        try w.print(" .first = 0x{x}, .last = 0x{x}, .apple = {s}, .glibc = {s} }},\n", .{ r.first, r.last, if (r.apple) "true" else "false", if (r.glibc) "true" else "false" });
+        try w.print(" .first = 0x{x}, .last = 0x{x}, .apple = {}, .glibc = {}, .windows = {} }},\n", .{ r.first, r.last, r.apple, r.glibc, r.windows });
     }
     try w.writeAll("        },\n");
 }
