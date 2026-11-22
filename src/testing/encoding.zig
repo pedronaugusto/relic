@@ -443,8 +443,8 @@ comptime {
     std.debug.assert(iconv_record.part_count == 6);
 }
 
-/// The libiconv-2.dll of the held git (`PREFLIGHT_GIT`, its `cmd\git.exe`)
-/// measured over the labels of the record's part `part`, against that part
+/// The libiconv-2.dll of the held git (the git the tests run, its tree's
+/// `mingw64/bin`) measured over the labels of the record's part `part`, against that part
 /// of the record the tables were written from: where they differ, the test
 /// fails with the part measured, in its output and in the job's artifact of
 /// preflight's timings, to be committed and the tables written again.
@@ -454,11 +454,18 @@ fn heldIconvAsRecorded(part: u8) !void {
     const a = arena.allocator();
     const io = testing.io;
     const path = std.fs.path;
-    // preflight's held git, by its path; a Windows machine with none, not
-    // a hosted one, has a git whose iconv nothing pinned.
-    const git = testgit.program();
-    if (!path.isAbsolute(git)) return if (testgit.hostedJob()) error.NoHeldGit else error.SkipZigTest;
-    const dir = path.dirname(path.dirname(git) orelse return error.NotTheHeldGit) orelse return error.NotTheHeldGit;
+    // The git the tests run, preflight's held git on a hosted job, first on
+    // the path: preflight's test runner keeps its PREFLIGHT_ variables,
+    // PREFLIGHT_GIT among them, from the tests (push run 44966563412 found
+    // none). It names its own tree by its exec path, the tree's
+    // mingw64/libexec/git-core. A Windows machine with no git, not a hosted
+    // one, skips; the tree's name below holds any other git to the pin.
+    var env = try testgit.programEnviron(a);
+    const asked = testgit.run(a, io, .{ .argv = &.{ testgit.program(), "--exec-path" }, .environ_map = &env }) catch
+        return if (testgit.hostedJob()) error.NoHeldGit else error.SkipZigTest;
+    if (asked.term != .exited or asked.term.exited != 0) return error.NoHeldGit;
+    const exec_path = std.mem.trimEnd(u8, asked.stdout, "\r\n");
+    const dir = path.dirname(path.dirname(path.dirname(exec_path) orelse return error.NotTheHeldGit) orelse return error.NotTheHeldGit) orelse return error.NotTheHeldGit;
     const dll = "mingw64/bin/libiconv-2.dll";
     const workflow = try Io.Dir.cwd().readFileAlloc(io, build_options.repo_root ++ "/ci/workflow.json", a, .limited(1 << 20));
     const pin = try std.json.parseFromSliceLeaky(struct {
