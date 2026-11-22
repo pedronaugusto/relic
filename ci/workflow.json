@@ -54,6 +54,16 @@
       "args": ["-Doptimize=safe", "-Dci-lint=false", "-Dci-timings=true"],
       "timeout": 60,
       "shards": 2
+    },
+    {
+      "name": "git master (Linux)",
+      "step": "ci-test",
+      "os": ["ubuntu-latest"],
+      "setup": "ci-setup-master",
+      "args": ["-Doptimize=safe", "-Dci-lint=false", "-Dci-timings=true"],
+      "timeout": 60,
+      "shards": 2,
+      "advisory": true
     }
   ]
 }

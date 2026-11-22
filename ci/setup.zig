@@ -66,9 +66,9 @@ const Context = struct {
     }
 };
 
-/// The gits the compatibility jobs build themselves (the oldest-git job of
-/// ci/workflow.json, and .github/workflows/git.yml's git-master); every
-/// other job runs preflight's held git.
+/// The gits the compatibility jobs of ci/workflow.json build themselves
+/// (the oldest-git job, and the advisory git-master job); every other job
+/// runs preflight's held git.
 const Git = enum { master, floor };
 
 fn buildGit(c: Context, root: []const u8, kind: Git) !void {
@@ -303,15 +303,20 @@ pub fn main(init: std.process.Init) !void {
     try report("{s}", c.io, .{version});
 }
 
-/// git's development branch, built for the compatibility job that runs it
-/// (`RELIC_GIT=master`), first on the path of the steps after this one.
+/// git's development branch, built for the advisory job that runs it,
+/// first on the path of the steps after this one with its git-lfs, as the
+/// oldest git is, and `RELIC_GIT=master`.
 fn gitMaster(c: Context, root: []const u8) !void {
     if (builtin.target.os.tag != .linux) return error.UnsupportedHost;
     try buildGit(c, root, .master);
     const bin = try std.Io.Dir.path.join(c.a, &.{ root, "master", "bin" });
-    const version = try c.capture(&.{ try std.Io.Dir.path.join(c.a, &.{ bin, "git" }), "--version" });
+    const git = try std.Io.Dir.path.join(c.a, &.{ bin, "git" });
+    const version = try c.capture(&.{ git, "--version" });
     if (!recent(version)) return error.GitTooOld;
-    try addToPath(c, &.{bin});
+    try lfs(c, root);
+    try selectLfs(c, root, git);
+    try addToPath(c, &.{ bin, try std.Io.Dir.path.join(c.a, &.{ root, "lfs", "bin" }) });
+    try addToEnv(c, &.{.{ "RELIC_GIT", "master" }});
     try report("{s}", c.io, .{version});
 }
 

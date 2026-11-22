@@ -476,6 +476,11 @@ pub fn dev(b: *std.Build, tools: type) void {
     const prepare_old = b.addRunArtifact(setup);
     prepare_old.addArg("old");
     b.step("ci-setup-old", "Build the oldest supported Git for the oldest-git job").dependOn(&prepare_old.step);
+    // The advisory git-master job's: git's development branch, built, first
+    // on the path and with RELIC_GIT=master for the steps after it.
+    const prepare_master = b.addRunArtifact(setup);
+    prepare_master.addArg("master");
+    b.step("ci-setup-master", "Build git's development branch for the git-master job").dependOn(&prepare_master.step);
     // The installer runs only on a hosted runner; its version reading and
     // its path file are proved everywhere, and with the tests, so on each
     // host's own file system: the source checks job, which runs
