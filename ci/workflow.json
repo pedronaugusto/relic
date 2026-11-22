@@ -45,6 +45,15 @@
       "args": ["-Doptimize=safe", "-Dci-lint=false", "-Dlarge-objects=true", "-Dtest-filter=GiB"],
       "tiers": ["release"],
       "timeout": 45
+    },
+    {
+      "name": "Oldest supported git (Linux)",
+      "step": "ci-test",
+      "os": ["ubuntu-latest"],
+      "setup": "ci-setup-old",
+      "args": ["-Doptimize=safe", "-Dci-lint=false", "-Dci-timings=true"],
+      "timeout": 60,
+      "shards": 2
     }
   ]
 }

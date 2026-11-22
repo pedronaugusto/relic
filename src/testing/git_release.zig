@@ -48,8 +48,9 @@ pub fn parse(line: []const u8) ?Version {
 // The tools on a hosted runner. preflight puts its held git first on the
 // path of every step after it and names its program in `PREFLIGHT_GIT`;
 // relic's setup (`zig build ci-setup`) adds its git-lfs to the path after
-// it. The suite's compatibility jobs (.github/workflows/git.yml) put the
-// git they build there instead. The suite reads these while it runs: a
+// it. The suite's compatibility jobs (the oldest-git job of
+// ci/workflow.json, .github/workflows/git.yml's git-master) put the git
+// they build there instead, the oldest-git job in PREFLIGHT_GIT too. The suite reads these while it runs: a
 // variable the build set on the test run would be baked into Zig's cached
 // configuration, carried to a later run whose tools, shard or seed differ.
 //=====================================================================

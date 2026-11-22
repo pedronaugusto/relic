@@ -3,8 +3,9 @@ const std = @import("std");
 const builtin = @import("builtin");
 const git_release = @import("git_release");
 
-/// The oldest Git the compatibility job builds, and the LFS release every
-/// job installs; the release every other job runs is `git_release.held`.
+/// The oldest Git the oldest-git job builds (`ci-setup-old`, a job of
+/// ci/workflow.json's), and the LFS release every job installs; the release
+/// every other job runs is `git_release.held`.
 const floor_version = "2.39.5";
 const floor_sha256 = "c58da92c378df4a986ca33266897a7397e86c22ee266a284d8c2432c39066b59";
 const lfs_version = "3.8.0";
@@ -65,8 +66,9 @@ const Context = struct {
     }
 };
 
-/// The gits the compatibility jobs (.github/workflows/git.yml) build
-/// themselves; every other job runs preflight's held git.
+/// The gits the compatibility jobs build themselves (the oldest-git job of
+/// ci/workflow.json, and .github/workflows/git.yml's git-master); every
+/// other job runs preflight's held git.
 const Git = enum { master, floor };
 
 fn buildGit(c: Context, root: []const u8, kind: Git) !void {
@@ -92,12 +94,18 @@ fn buildGit(c: Context, root: []const u8, kind: Git) !void {
             try c.command(&.{ "git", "-C", source, "checkout", "--detach", "FETCH_HEAD" });
         } else try c.command(&.{ "git", "clone", "--depth", "1", "https://github.com/git/git.git", source });
     } else {
-        const archive = try std.Io.Dir.path.join(c.a, &.{ root, try c.a.print("{s}.tar.xz", .{name}) });
-        try c.fetch("https://mirrors.edge.kernel.org/pub/software/scm/git/git-" ++ floor_version ++ ".tar.xz", archive, floor_sha256);
-        // A cached tree of another release must not underlie this one.
-        try std.Io.Dir.cwd().deleteTree(c.io, source);
-        try std.Io.Dir.cwd().createDirPath(c.io, source);
-        try c.command(&.{ "tar", "-xJf", archive, "-C", source, "--strip-components=1" });
+        // The tree an attempt before this one unpacked and part built is
+        // built on: preflight gives each attempt at the setup five minutes,
+        // and a build cut short resumes where make stopped. A tree of
+        // another release must not underlie this one.
+        if (!wholeRelease(c.a, c.io, source, floor_version)) {
+            const archive = try std.Io.Dir.path.join(c.a, &.{ root, try c.a.print("{s}.tar.xz", .{name}) });
+            try c.fetch("https://mirrors.edge.kernel.org/pub/software/scm/git/git-" ++ floor_version ++ ".tar.xz", archive, floor_sha256);
+            try std.Io.Dir.cwd().deleteTree(c.io, source);
+            try std.Io.Dir.cwd().createDirPath(c.io, source);
+            try c.command(&.{ "tar", "-xJf", archive, "-C", source, "--strip-components=1" });
+            try std.Io.Dir.cwd().writeFile(c.io, .{ .sub_path = try std.Io.Dir.path.join(c.a, &.{ source, unpacked_marker }), .data = floor_version ++ "\n" });
+        }
     }
     var args: std.ArrayList([]const u8) = .empty;
     try args.appendSlice(c.a, &.{ "make", "-C", source, try c.a.print("-j{d}", .{try std.Thread.getCpuCount()}) });
@@ -107,6 +115,19 @@ fn buildGit(c: Context, root: []const u8, kind: Git) !void {
     try c.command(args.items);
     args.items[args.items.len - 1] = "install";
     try c.command(args.items);
+}
+
+/// The file setup writes in a source tree once `tar` has unpacked all of
+/// it, naming the release.
+const unpacked_marker = "relic-unpacked";
+
+/// Whether `source` holds git `version`'s release tarball, whole: setup
+/// marks a tree only after `tar` unpacked it all, so a tree an attempt was
+/// cut short in unpacking has no mark.
+fn wholeRelease(a: std.mem.Allocator, io: std.Io, source: []const u8, version: []const u8) bool {
+    const file = std.Io.Dir.path.join(a, &.{ source, unpacked_marker }) catch return false;
+    const text = std.Io.Dir.cwd().readFileAlloc(io, file, a, .limited(64)) catch return false;
+    return std.mem.eql(u8, std.mem.trimEnd(u8, text, "\r\n"), version);
 }
 
 fn lfs(c: Context, root: []const u8) !void {
@@ -160,8 +181,12 @@ fn old(c: Context, root: []const u8) !void {
     if (!std.mem.eql(u8, std.mem.trimEnd(u8, version, "\r\n"), "git version " ++ floor_version)) return error.WrongOldestGit;
     try lfs(c, root);
     try selectLfs(c, root, git);
-    // The next hosted step must choose this Git before the runner's own.
+    // The next hosted step must choose this Git before the runner's own, and
+    // before preflight's held git, which an earlier step named in
+    // PREFLIGHT_GIT: the tests start that path's program, and compare
+    // against the oldest git where RELIC_GIT says so.
     try addToPath(c, &.{ bin, try std.Io.Dir.path.join(c.a, &.{ root, "lfs", "bin" }) });
+    try addToEnv(c, &.{ .{ "PREFLIGHT_GIT", git }, .{ "RELIC_GIT", "old" } });
     try report("{s}", c.io, .{version});
 }
 
@@ -170,6 +195,26 @@ fn old(c: Context, root: []const u8) !void {
 /// not put there.
 fn addToPath(c: Context, dirs: []const []const u8) !void {
     try appendPath(c.a, c.io, c.env.get("GITHUB_PATH") orelse return error.HostedSetupOnly, dirs);
+}
+
+/// `variables` set for the hosted steps after this one (`GITHUB_ENV`), each
+/// over what an earlier step set.
+fn addToEnv(c: Context, variables: []const [2][]const u8) !void {
+    try appendEnv(c.a, c.io, c.env.get("GITHUB_ENV") orelse return error.HostedSetupOnly, variables);
+}
+
+/// `variables` appended to the environment file `env_file`, `name=value` a
+/// line, in order: GitHub reads the file top to bottom, so a name's last
+/// line is its value.
+fn appendEnv(a: std.mem.Allocator, io: std.Io, env_file: []const u8, variables: []const [2][]const u8) !void {
+    const file = try std.Io.Dir.cwd().openFile(io, env_file, .{ .mode = .read_write });
+    defer file.close(io);
+    var at = (try file.stat(io)).size;
+    for (variables) |variable| {
+        const line = try a.print("{s}={s}\n", .{ variable[0], variable[1] });
+        try file.writePositionalAll(io, line, at);
+        at += line.len;
+    }
 }
 
 /// `dirs` appended to the path file `path_file`, one a line, the last first.
@@ -283,6 +328,44 @@ test "the path file gets the directories after what it held, the first last, so 
     const written = try tmp.dir.readFileAlloc(io, "path", gpa, .limited(4096));
     defer gpa.free(written);
     try std.testing.expectEqualStrings("D:\\runner\\bin\ntools\\lfs\ntools\\git\n", written);
+}
+
+test "the env file gets the variables after what it held, in order, so the last line of a name is its value" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "env", .data = "PREFLIGHT_GIT=/held/bin/git\n" });
+    const env_file = try std.Io.Dir.path.join(gpa, &.{ ".zig-cache", "tmp", &tmp.sub_path, "env" });
+    defer gpa.free(env_file);
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    try appendEnv(arena.allocator(), io, env_file, &.{ .{ "PREFLIGHT_GIT", "/old/bin/git" }, .{ "RELIC_GIT", "old" } });
+    const written = try tmp.dir.readFileAlloc(io, "env", gpa, .limited(4096));
+    defer gpa.free(written);
+    try std.testing.expectEqualStrings("PREFLIGHT_GIT=/held/bin/git\nPREFLIGHT_GIT=/old/bin/git\nRELIC_GIT=old\n", written);
+}
+
+test "an unpacked tree is built on only when it is the release's, whole" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const source = try std.Io.Dir.path.join(a, &.{ ".zig-cache", "tmp", &tmp.sub_path });
+    // cut short before its last member
+    try std.testing.expect(!wholeRelease(a, io, source, "2.39.5"));
+    // git's own version file is no mark
+    try tmp.dir.writeFile(io, .{ .sub_path = "version", .data = "2.39.5\n" });
+    try std.testing.expect(!wholeRelease(a, io, source, "2.39.5"));
+    try tmp.dir.writeFile(io, .{ .sub_path = unpacked_marker, .data = "2.39.5\n" });
+    try std.testing.expect(wholeRelease(a, io, source, "2.39.5"));
+    try std.testing.expect(!wholeRelease(a, io, source, "2.39.4"));
+    try std.testing.expect(!wholeRelease(a, io, source, "2.39"));
+    try tmp.dir.writeFile(io, .{ .sub_path = unpacked_marker, .data = "2.39.4\n" });
+    try std.testing.expect(!wholeRelease(a, io, source, "2.39.5"));
 }
 
 test "Git fixtures require 2.47 including Windows version suffixes" {
