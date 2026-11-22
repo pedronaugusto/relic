@@ -182,11 +182,12 @@ fn old(c: Context, root: []const u8) !void {
     try lfs(c, root);
     try selectLfs(c, root, git);
     // The next hosted step must choose this Git before the runner's own, and
-    // before preflight's held git, which an earlier step named in
-    // PREFLIGHT_GIT: the tests start that path's program, and compare
+    // before preflight's held git, which an earlier step put first on the
+    // path: the tests start the path's `git` (preflight's test runner keeps
+    // every PREFLIGHT_ variable from them, PREFLIGHT_GIT too), and compare
     // against the oldest git where RELIC_GIT says so.
     try addToPath(c, &.{ bin, try std.Io.Dir.path.join(c.a, &.{ root, "lfs", "bin" }) });
-    try addToEnv(c, &.{ .{ "PREFLIGHT_GIT", git }, .{ "RELIC_GIT", "old" } });
+    try addToEnv(c, &.{.{ "RELIC_GIT", "old" }});
     try report("{s}", c.io, .{version});
 }
 
@@ -335,15 +336,15 @@ test "the env file gets the variables after what it held, in order, so the last 
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(io, .{ .sub_path = "env", .data = "PREFLIGHT_GIT=/held/bin/git\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "env", .data = "RELIC_GIT=master\n" });
     const env_file = try std.Io.Dir.path.join(gpa, &.{ ".zig-cache", "tmp", &tmp.sub_path, "env" });
     defer gpa.free(env_file);
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
-    try appendEnv(arena.allocator(), io, env_file, &.{ .{ "PREFLIGHT_GIT", "/old/bin/git" }, .{ "RELIC_GIT", "old" } });
+    try appendEnv(arena.allocator(), io, env_file, &.{ .{ "RELIC_GIT", "old" }, .{ "SECOND", "2" } });
     const written = try tmp.dir.readFileAlloc(io, "env", gpa, .limited(4096));
     defer gpa.free(written);
-    try std.testing.expectEqualStrings("PREFLIGHT_GIT=/held/bin/git\nPREFLIGHT_GIT=/old/bin/git\nRELIC_GIT=old\n", written);
+    try std.testing.expectEqualStrings("RELIC_GIT=master\nRELIC_GIT=old\nSECOND=2\n", written);
 }
 
 test "an unpacked tree is built on only when it is the release's, whole" {
