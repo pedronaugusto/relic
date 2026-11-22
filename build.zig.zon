@@ -3,13 +3,13 @@
     .version = "0.29.2",
     .dependencies = .{
         .aegis = .{
-            .url = "git+https://github.com/pedronaugusto/aegis#3728fa7b46ad9d0e0000d508f8dc551693599307",
-            .hash = "aegis-0.2.4-rsxouu4xDgBmBIgZalpZZOzRTZ5psUMfuaCIknvUKZ0K",
+            .url = "git+https://github.com/pedronaugusto/aegis?ref=v0.4.0#4739dccd71cfc16b0c15bc27e2d7dca76de9bc21",
+            .hash = "aegis-0.4.0-rsxouv1KDgCdGc-mhY-qBfyE70ar4OQiGGKHKndirWnQ",
         },
 
         .conduit = .{
-            .url = "git+https://github.com/pedronaugusto/conduit#08c6d7693485512ba8580fd8cf15e850f96fad8a",
-            .hash = "conduit-0.10.6-4rIA74qBFgBwCap28QhEIRepzpBicHJgH5u9KgMTappP",
+            .url = "git+https://github.com/pedronaugusto/conduit#cad2151c50b47e5ba93f4607b0c61a5e880fd079",
+            .hash = "conduit-0.10.6-4rIA75KBFgDQ6Xj7OTKNrBXksvyuhJeXqb3xK2mRWp7x",
         },
 
         .sweep = .{
@@ -23,8 +23,8 @@
         },
 
         .uplink = .{
-            .url = "git+https://github.com/pedronaugusto/uplink#442f28bf44ce51a2b5747ce5e4edebc4d12e4ef3",
-            .hash = "uplink-0.10.2-0eVSJuLzHgAcPeRT6QvOP8xbveohVer_CQgHilbhCHdf",
+            .url = "git+https://github.com/pedronaugusto/uplink#46e64a5aa69717a529ac6d5e43bdf73adfb8ed5d",
+            .hash = "uplink-0.10.2-0eVSJu3zHgB8AjPYGbjnwLA7mTnPzNSc3NBM0Df85eFM",
             .lazy = true,
         },
 
@@ -39,8 +39,8 @@
         },
 
         .cloak = .{
-            .url = "git+https://github.com/pedronaugusto/cloak#6e41f93991b45c94288a81230c38b97f6f8ab4b8",
-            .hash = "cloak-0.23.1-9onwcacAgABecOW9vBln-QV7eI3fLwASsLa4PAMbsLVG",
+            .url = "git+https://github.com/pedronaugusto/cloak#b08e46b347305276e9b8d8e42297d3c4bb51b35e",
+            .hash = "cloak-0.23.1-9onwcbIAgAANIgCuV6Kq2_AlwFol5p3HsH3hAfWj4RFn",
             .lazy = true,
         },
 
@@ -55,8 +55,8 @@
         },
 
         .reactor = .{
-            .url = "git+https://github.com/pedronaugusto/reactor#7304265a10d31d253f28065789cf017865b6d0c1",
-            .hash = "reactor-0.9.0-MjQ-WO6SFwAMG3SCSLVjBwpCxnCdMCFeVwfkGht87qU1",
+            .url = "git+https://github.com/pedronaugusto/reactor#c7aa6c7e3cffbcf62277ab31b0fe5b0cc0fa7887",
+            .hash = "reactor-0.9.0-MjQ-WPWSFwCCMNBNQAD3nnmdUtim04WBjdycJmFu4p6F",
         },
         .ladar = .{
             .url = "git+https://github.com/pedronaugusto/ladar#489a91674a8c48d5acb28bd05e1223d96b549057",
