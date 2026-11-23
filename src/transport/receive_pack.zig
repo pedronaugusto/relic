@@ -110,8 +110,8 @@ pub const Options = struct {
     service_dir: []const u8 = ".",
 };
 
-/// How a `receive.deny*` setting answers.
-const Deny = enum { unconfigured, ignore, warn, refuse, update_instead };
+/// How a `receive.deny*` setting answers, in `Settings`.
+pub const Deny = enum { unconfigured, ignore, warn, refuse, update_instead };
 
 /// git's `parse_deny_action`: one of its four words, else a boolean, which
 /// git dies on when it is neither.
@@ -126,8 +126,9 @@ fn denyAction(config: *const config_mod.Config, key: []const u8) config_mod.Valu
     return if (try config_mod.parseBool(raw)) .refuse else .ignore;
 }
 
-/// The `receive.*` settings, read once.
-const Settings = struct {
+/// The `receive.*` settings, read once from the repository's configuration by
+/// `Server.init`: a caller only reads them.
+pub const Settings = struct {
     deny_deletes: bool,
     deny_non_fast_forwards: bool,
     deny_current_branch: Deny,
@@ -255,8 +256,9 @@ const Channel = struct {
     }
 };
 
-/// The capabilities the client asked for.
-const Asked = struct {
+/// The capabilities the client asked for, which the server records as it
+/// reads them: a caller only reads them.
+pub const Asked = struct {
     report_status: bool = false,
     report_status_v2: bool = false,
     band: side_band.Band = .none,
