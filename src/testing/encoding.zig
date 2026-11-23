@@ -540,12 +540,14 @@ test "the held git's iconv is the libiconv-2.dll in its own prefix's bin, whiche
 }
 
 /// The iconv the host's git converts through: Apple's on macOS, glibc's on
-/// a GNU Linux. Elsewhere (Windows, musl, a BSD) it is neither relic's
-/// meaning was measured against, so every disputed sequence is the
+/// a GNU Linux, Git for Windows' own on Windows (its record,
+/// tools/git-for-windows-iconv.txt). Elsewhere (musl, a BSD) it is none
+/// relic's meaning was measured against, so every disputed sequence is the
 /// standard's alone.
-const host: enum { apple, glibc, other } = switch (builtin.os.tag) {
+const host: enum { apple, glibc, windows, other } = switch (builtin.os.tag) {
     .macos => .apple,
     .linux => if (builtin.abi.isGnu()) .glibc else .other,
+    .windows => .windows,
     else => .other,
 };
 
@@ -559,6 +561,7 @@ fn hostDisputes(ranges: []const legacy_disputes.Range, len: usize, key: u32) boo
     for (ranges) |r| if (r.len == len and key >= r.first and key <= r.last) return switch (host) {
         .apple => r.apple,
         .glibc => r.glibc,
+        .windows => r.windows,
         .other => true,
     };
     return false;
