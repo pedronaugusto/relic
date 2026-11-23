@@ -110,7 +110,7 @@ const Session = struct {
         return get(context).lfsSmudge(a, io, input.path, input.bytes, input.can_delay);
     }
     fn canonical(a: Allocator, _: *anyopaque, bytes: []const u8) native.Error!?[]const u8 {
-        const pointer = lfs.Pointer.decode(bytes) catch return null;
+        const pointer = lfs.Pointer.recognize(bytes) orelse return null;
         if (pointer.extension_count != 0) return error.NativeFilterExtensionUnsupported;
         const encoded = try encodePointer(a, &pointer);
         return encoded;
@@ -183,7 +183,7 @@ const Session = struct {
     /// object; one whose object is not is written as the canonical pointer,
     /// which is git-lfs's own fallback.
     fn lfsSmudge(s: *Session, a: Allocator, io: Io, path: []const u8, bytes: []const u8, can_delay: bool) native.Error!native.Content {
-        const pointer = lfs.Pointer.decode(bytes) catch return .{ .bytes = bytes };
+        const pointer = lfs.Pointer.recognize(bytes) orelse return .{ .bytes = bytes };
         if (pointer.size == 0) return .{ .bytes = "" };
         if (pointer.extension_count != 0) return error.NativeFilterExtensionUnsupported;
         const l = &s.backend.lfs;
@@ -323,7 +323,7 @@ test "native LFS selection owns settings, preserves custom commands and hash-onl
     defer session.deinit(io);
     const pointer_bytes = try session.clean(gpa, io, .{ .bytes = "large content", .storing = .hash_only });
     defer gpa.free(pointer_bytes);
-    const pointer = try lfs.Pointer.decode(pointer_bytes);
+    const pointer = lfs.Pointer.recognize(pointer_bytes) orelse return error.TestUnexpectedResult;
     const store: lfs.Store = .{ .base = .of(tmp.dir), .root = "lfs" };
     try testing.expect(!try store.contains(io, &pointer));
     const installed_bytes = try session.clean(gpa, io, .{ .bytes = "large content" });

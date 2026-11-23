@@ -93,17 +93,19 @@ pub const Pointer = struct {
     /// size.
     pub const max_encoded_len = 512 + max_extensions * (16 + 64 + 64);
 
-    /// Why bytes are not a pointer. Either way git-lfs would not read them
-    /// as one, and they are content.
-    pub const DecodeError = error{
+    /// What bytes are, read as a pointer: the pointer, or why they are not
+    /// one. Either reason is an ordinary answer, not a failure: git-lfs
+    /// would not read the bytes as a pointer, and they are content.
+    pub const Decoded = union(enum) {
+        pointer: Pointer,
         /// No marker, a line with no space, a line after `size`, or no
         /// version.
-        NotAPointer,
+        not_a_pointer,
         /// Shaped like a pointer, with a value that is not valid: a version
         /// that is not one of the three, an oid that is not sixty-four
         /// lower-case hexadecimal digits, a size that is not a count, an
         /// unknown key, or two extensions at one priority.
-        BadPointer,
+        bad_pointer,
     };
 
     /// The extensions, lowest priority first.
@@ -116,21 +118,24 @@ pub const Pointer = struct {
     /// pointer, not which rule it breaks (git-lfs's scanners and filters
     /// pass content over either way).
     pub fn recognize(bytes: []const u8) ?Pointer {
-        return decode(bytes) catch null;
+        return switch (decode(bytes)) {
+            .pointer => |p| p,
+            .not_a_pointer, .bad_pointer => null,
+        };
     }
 
     /// Read `bytes` as git-lfs reads them: the first 1024, trimmed. No
     /// bytes at all are the empty file's pointer; blanks alone, which trim
-    /// to nothing, carry no marker and are `error.NotAPointer`.
-    pub fn decode(bytes: []const u8) DecodeError!Pointer {
+    /// to nothing, carry no marker and are `.not_a_pointer`.
+    pub fn decode(bytes: []const u8) Decoded {
         const head = bytes[0..@min(bytes.len, pointer_size_cutoff)];
-        if (head.len == 0) return .{ .oid = empty_oid, .size = 0 };
+        if (head.len == 0) return .{ .pointer = .{ .oid = empty_oid, .size = 0 } };
         const data = trimSpace(head);
         if (std.mem.find(u8, data, "git-media") == null and
             std.mem.find(u8, data, "hawser") == null and
             std.mem.find(u8, data, "git-lfs") == null)
         {
-            return error.NotAPointer;
+            return .not_a_pointer;
         }
 
         const keys = [_][]const u8{ "version", "oid", "size" };
@@ -145,12 +150,12 @@ pub const Pointer = struct {
             // line, and an empty line is no line at all.
             const text = if (raw.len > 0 and raw[raw.len - 1] == '\r') raw[0 .. raw.len - 1] else raw;
             if (text.len == 0) continue;
-            const space = std.mem.findScalar(u8, text, ' ') orelse return error.NotAPointer;
+            const space = std.mem.findScalar(u8, text, ' ') orelse return .not_a_pointer;
             const key = text[0..space];
             const value = text[space + 1 ..];
-            if (line >= keys.len) return error.NotAPointer;
+            if (line >= keys.len) return .not_a_pointer;
             if (!std.mem.eql(u8, key, keys[line])) {
-                if (!isExtensionKey(key)) return error.BadPointer;
+                if (!isExtensionKey(key)) return .bad_pointer;
                 // The same key twice keeps the later value, and more distinct
                 // keys than there are priorities cannot all be valid.
                 for (ext_keys[0..ext_count], 0..) |seen, i| {
@@ -159,7 +164,7 @@ pub const Pointer = struct {
                         break;
                     }
                 } else {
-                    if (ext_count == max_extensions) return error.BadPointer;
+                    if (ext_count == max_extensions) return .bad_pointer;
                     ext_keys[ext_count] = key;
                     ext_values[ext_count] = value;
                     ext_count += 1;
@@ -170,27 +175,30 @@ pub const Pointer = struct {
             line += 1;
         }
 
-        if (values[0].len == 0) return error.NotAPointer;
+        if (values[0].len == 0) return .not_a_pointer;
         for (accepted_versions) |version| {
             if (std.mem.eql(u8, values[0], version)) break;
-        } else return error.BadPointer;
-        if (line < 2) return error.BadPointer;
-        var p: Pointer = .{ .oid = try parseOid(values[1]), .size = try parseSize(values[2]) };
+        } else return .bad_pointer;
+        if (line < 2) return .bad_pointer;
+        var p: Pointer = .{
+            .oid = parseOid(values[1]) orelse return .bad_pointer,
+            .size = parseSize(values[2]) orelse return .bad_pointer,
+        };
 
         for (ext_keys[0..ext_count], ext_values[0..ext_count]) |key, value| {
             const priority = key["ext-".len] - '0';
             for (p.exts()) |existing| {
-                if (existing.priority == priority) return error.BadPointer;
+                if (existing.priority == priority) return .bad_pointer;
             }
             p.extensions[p.extension_count] = .{
                 .priority = priority,
                 .name = key["ext-0-".len..],
-                .oid = try parseOid(value),
+                .oid = parseOid(value) orelse return .bad_pointer,
             };
             p.extension_count += 1;
         }
         std.mem.sort(Extension, p.extensions[0..p.extension_count], {}, lowerPriority);
-        return p;
+        return .{ .pointer = p };
     }
 
     /// The canonical bytes: the version, the extensions by priority, the oid
@@ -228,36 +236,40 @@ fn isExtensionKey(key: []const u8) bool {
     return std.ascii.isAlphanumeric(c) or c == '_';
 }
 
-fn parseOid(value: []const u8) Pointer.DecodeError![64]u8 {
-    const colon = std.mem.findScalar(u8, value, ':') orelse return error.BadPointer;
-    if (!std.mem.eql(u8, value[0..colon], "sha256")) return error.BadPointer;
+/// A `sha256:` oid in lower-case hexadecimal, or null.
+fn parseOid(value: []const u8) ?[64]u8 {
+    const colon = std.mem.findScalar(u8, value, ':') orelse return null;
+    if (!std.mem.eql(u8, value[0..colon], "sha256")) return null;
     const hex = value[colon + 1 ..];
-    if (hex.len != 64) return error.BadPointer;
+    if (hex.len != 64) return null;
     for (hex) |c| switch (c) {
         '0'...'9', 'a'...'f' => {},
-        else => return error.BadPointer,
+        else => return null,
     };
     return hex[0..64].*;
 }
 
 /// A signed decimal that fits in 63 bits and is not below zero, which is
 /// what git-lfs's `strconv.ParseInt` accepts: `+6` and `-0` included.
-fn parseSize(value: []const u8) Pointer.DecodeError!u64 {
+fn parseSize(value: []const u8) ?u64 {
     var digits = value;
     var negative = false;
     if (digits.len > 0 and (digits[0] == '+' or digits[0] == '-')) {
         negative = digits[0] == '-';
         digits = digits[1..];
     }
-    if (digits.len == 0) return error.BadPointer;
+    if (digits.len == 0) return null;
     var n: u64 = 0;
     for (digits) |c| {
-        if (!std.ascii.isDigit(c)) return error.BadPointer;
-        n = std.math.mul(u64, n, 10) catch return error.BadPointer;
-        n = std.math.add(u64, n, c - '0') catch return error.BadPointer;
+        if (!std.ascii.isDigit(c)) return null;
+        const times = @mulWithOverflow(n, 10);
+        if (times[1] != 0) return null;
+        const plus = @addWithOverflow(times[0], c - '0');
+        if (plus[1] != 0) return null;
+        n = plus[0];
     }
-    if (n > std.math.maxInt(i64)) return error.BadPointer;
-    if (negative and n != 0) return error.BadPointer;
+    if (n > std.math.maxInt(i64)) return null;
+    if (negative and n != 0) return null;
     return n;
 }
 
@@ -699,7 +711,7 @@ test "settings that outgrow the arena's first block are all freed with it" {
 
 test "a pointer decodes and encodes to the same bytes" {
     const text = pointerText(hello_oid, "6");
-    const p = try Pointer.decode(text);
+    const p = Pointer.recognize(text) orelse return error.TestUnexpectedResult;
     try testing.expectEqualStrings(hello_oid, &p.oid);
     try testing.expectEqual(@as(u64, 6), p.size);
     var buf: [Pointer.max_encoded_len]u8 = undefined;
@@ -718,7 +730,7 @@ test "what git-lfs reads as a pointer is one here, spelled any way it accepts" {
         comptime pointerText(oid, "6") ++ "\u{a0}\u{3000}",
     };
     for (accepted) |text| {
-        const p = try Pointer.decode(text);
+        const p = Pointer.recognize(text) orelse return error.TestUnexpectedResult;
         try testing.expectEqualStrings(oid, &p.oid);
         try testing.expectEqual(@as(u64, 6), p.size);
     }
@@ -726,22 +738,27 @@ test "what git-lfs reads as a pointer is one here, spelled any way it accepts" {
 
 test "what git-lfs does not read as a pointer is content, and the reason is named" {
     const oid = hello_oid;
-    const refused = [_]struct { []const u8, Pointer.DecodeError }{
-        .{ "hello\n", error.NotAPointer },
-        .{ "version https://git-lfs.github.com/spec/v2\noid sha256:" ++ oid ++ "\nsize 6\n", error.BadPointer },
-        .{ "version https://git-lfs.github.com/spec/v1\noid sha256:" ++ oid[0..63] ++ "\nsize 6\n", error.BadPointer },
-        .{ "version https://git-lfs.github.com/spec/v1\noid sha256:" ++ oid ++ "\nsize -1\n", error.BadPointer },
-        .{ "version https://git-lfs.github.com/spec/v1\noid md5:" ++ oid ++ "\nsize 6\n", error.BadPointer },
-        .{ "version https://git-lfs.github.com/spec/v1\nsize 6\noid sha256:" ++ oid ++ "\n", error.BadPointer },
-        .{ comptime pointerText(oid, "6") ++ "extra line\n", error.NotAPointer },
-        .{ "version https://git-lfs.github.com/spec/v1\noid sha256:" ++ oid ++ "\nsize 6 7\n", error.BadPointer },
-        .{ "git-lfs\n", error.NotAPointer },
+    const refused = [_]struct { []const u8, std.meta.Tag(Pointer.Decoded) }{
+        .{ "hello\n", .not_a_pointer },
+        .{ "version https://git-lfs.github.com/spec/v2\noid sha256:" ++ oid ++ "\nsize 6\n", .bad_pointer },
+        .{ "version https://git-lfs.github.com/spec/v1\noid sha256:" ++ oid[0..63] ++ "\nsize 6\n", .bad_pointer },
+        .{ "version https://git-lfs.github.com/spec/v1\noid sha256:" ++ oid ++ "\nsize -1\n", .bad_pointer },
+        .{ "version https://git-lfs.github.com/spec/v1\noid md5:" ++ oid ++ "\nsize 6\n", .bad_pointer },
+        .{ "version https://git-lfs.github.com/spec/v1\nsize 6\noid sha256:" ++ oid ++ "\n", .bad_pointer },
+        .{ comptime pointerText(oid, "6") ++ "extra line\n", .not_a_pointer },
+        .{ "version https://git-lfs.github.com/spec/v1\noid sha256:" ++ oid ++ "\nsize 6 7\n", .bad_pointer },
+        .{ "git-lfs\n", .not_a_pointer },
+        .{ "version https://git-lfs.github.com/spec/v1\next-0-foo sha256:" ++ oid[0..63] ++ "\noid sha256:" ++ oid ++ "\nsize 6\n", .bad_pointer },
+        // Past 64 bits, whichever of the multiplication and the addition
+        // overflows: wrapped, these would read as sizes 4 and 0.
+        .{ "version https://git-lfs.github.com/spec/v1\noid sha256:" ++ oid ++ "\nsize 18446744073709551620\n", .bad_pointer },
+        .{ "version https://git-lfs.github.com/spec/v1\noid sha256:" ++ oid ++ "\nsize 18446744073709551616\n", .bad_pointer },
     };
-    for (refused) |case| try testing.expectError(case[1], Pointer.decode(case[0]));
+    for (refused) |case| try testing.expectEqual(case[1], std.meta.activeTag(Pointer.decode(case[0])));
 }
 
 test "empty content is the pointer of an empty file, which encodes as nothing" {
-    const p = try Pointer.decode("");
+    const p = Pointer.recognize("") orelse return error.TestUnexpectedResult;
     try testing.expectEqual(@as(u64, 0), p.size);
     try testing.expectEqualStrings(&empty_oid, &p.oid);
     var buf: [Pointer.max_encoded_len]u8 = undefined;
@@ -755,7 +772,7 @@ test "extensions are read in any order before the size and written by priority" 
         "ext-1-bar sha256:" ++ other ++ "\n" ++
         "ext-0-foo sha256:" ++ other ++ "\n" ++
         "oid sha256:" ++ oid ++ "\nsize 6\n";
-    const p = try Pointer.decode(text);
+    const p = Pointer.recognize(text) orelse return error.TestUnexpectedResult;
     try testing.expectEqual(@as(usize, 2), p.exts().len);
     try testing.expectEqualStrings("foo", p.exts()[0].name);
     try testing.expectEqualStrings("bar", p.exts()[1].name);
@@ -769,16 +786,16 @@ test "extensions are read in any order before the size and written by priority" 
         "ext-0-foo sha256:" ++ other ++ "\n" ++
         "ext-0-bar sha256:" ++ other ++ "\n" ++
         "oid sha256:" ++ oid ++ "\nsize 6\n";
-    try testing.expectError(error.BadPointer, Pointer.decode(twice));
+    try testing.expectEqual(.bad_pointer, std.meta.activeTag(Pointer.decode(twice)));
 }
 
 test "only the first 1024 bytes are asked whether they are a pointer" {
     var long: [2048]u8 = @splat('\n');
     const text = pointerText(hello_oid, "6");
     @memcpy(long[0..text.len], text);
-    _ = try Pointer.decode(&long);
+    try testing.expect(Pointer.recognize(&long) != null);
     long[1500] = 'x';
-    _ = try Pointer.decode(&long);
+    try testing.expect(Pointer.recognize(&long) != null);
 }
 
 test "the store names an object by its SHA-256 and gives it back at the right size" {
@@ -891,7 +908,7 @@ test "a setting written with no value is not there, as git-lfs reads it: .lfscon
     try testing.expectEqualStrings("a", l.settings.fetch_include[0].text);
 }
 
-test "fuzz: any bytes are a pointer or a named error, and a pointer survives its encoding" {
+test "fuzz: any bytes are a pointer or a named reason, and a pointer survives its encoding" {
     try shakedown.check(testing.allocator, {}, fuzzPointer, .{});
 }
 
@@ -899,10 +916,11 @@ fn fuzzPointer(_: void, case: *shakedown.Case) anyerror!void {
     var scratch: [1400]u8 = undefined;
     const n = shakedown.gen.intRange(case.source, usize, 0, scratch.len);
     case.source.bytes(scratch[0..n]);
-    // Bytes refused are refused with one of the named errors, and are no
+    // Bytes refused are refused for one of the named reasons, and are no
     // pointer to encode.
-    const p = Pointer.decode(scratch[0..n]) catch |err| return switch (err) {
-        error.NotAPointer, error.BadPointer => {},
+    const p = switch (Pointer.decode(scratch[0..n])) {
+        .pointer => |found| found,
+        .not_a_pointer, .bad_pointer => return,
     };
     var buf: [Pointer.max_encoded_len]u8 = undefined;
     const encoded = try p.encodeBuf(&buf);
@@ -911,11 +929,11 @@ fn fuzzPointer(_: void, case: *shakedown.Case) anyerror!void {
     // The oldest version string is shorter than the one written, so a
     // pointer at the limit can encode past it.
     if (encoded.len >= pointer_size_cutoff) return;
-    const again = try Pointer.decode(encoded);
+    const again = Pointer.recognize(encoded) orelse return error.TestUnexpectedResult;
     try testing.expectEqualStrings(&p.oid, &again.oid);
     try testing.expectEqual(p.size, again.size);
     try testing.expectEqual(p.extension_count, again.extension_count);
 }
 
 /// All errors reported by this namespace.
-pub const Error = Pointer.DecodeError || Store.ObjectPathError || Store.OpenError || Store.InstallError || FetchError || Lfs.LoadError || Io.Writer.Error || Io.Reader.ShortError || Allocator.Error || Self.FetchError;
+pub const Error = Store.ObjectPathError || Store.OpenError || Store.InstallError || FetchError || Lfs.LoadError || Io.Writer.Error || Io.Reader.ShortError || Allocator.Error || Self.FetchError;
