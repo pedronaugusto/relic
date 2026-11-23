@@ -1,4 +1,5 @@
 {
+  "policy": "family",
   "sources": [
     "src"
   ],
@@ -45,6 +46,11 @@
       "zig",
       "build",
       "check-ci-setup"
+    ],
+    [
+      "zig",
+      "build",
+      "check-consumer"
     ]
   ],
   "glint": {

@@ -15,12 +15,14 @@
   "source_job_timeout": 10,
   "cross_job_timeout": 30,
   "fast_shards": 2,
+  "hardened": true,
   "shards": {
     "linux": 2,
     "macos": 3,
     "windows": 6,
     "linux_arm": 2,
-    "windows_arm": 8
+    "windows_arm": 8,
+    "tsan": 8
   },
   "git": {
     "version": "2.56.0",
@@ -31,14 +33,6 @@
     }
   },
   "jobs": [
-    {
-      "name": "ThreadSanitizer (Linux)",
-      "step": "test",
-      "args": ["-Dci-tsan=true", "-Doptimize=debug", "-Dci-lint=false", "-Dci-timings=true"],
-      "tiers": ["release"],
-      "timeout": 30,
-      "shards": 8
-    },
     {
       "name": "Objects past 4 GiB (Linux)",
       "step": "test",
