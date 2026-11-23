@@ -734,13 +734,11 @@ pub const OnContention = union(enum) {
     wait: Io.Duration,
 };
 
-/// Errors from taking a lock.
-pub const LockError = error{
-    /// `<path>.lock` already exists. Another writer — possibly a running git
-    /// — holds it. It is never removed on your behalf; `staleReport` says
-    /// what can be found out about the holder.
-    LockHeld,
-} || airlock.CreateError || Io.Cancelable;
+/// Errors from taking a lock: airlock's. `error.LockHeld` is `<path>.lock`
+/// already there: another writer, possibly a running git, holds it. It is
+/// never removed on your behalf; `staleReport` says what can be found out
+/// about the holder.
+pub const LockError = airlock.LockError;
 
 /// Errors from finishing a lock.
 /// A write to a lock: the file's own error, which a writer's
@@ -750,7 +748,10 @@ pub const WriteError = Io.Writer.Error || Io.File.Writer.Error;
 pub const CommitError = WriteError || SyncError || Io.Dir.RenameError || Io.Dir.DeleteFileError || Io.Dir.OpenError || Io.File.SetLengthError || airlock.Pending.CommitError;
 
 /// git's lock file: `<path>.lock`, created with `O_CREAT|O_EXCL`, written,
-/// made durable as the policy asks, and renamed over `<path>`.
+/// made durable as the policy asks, and renamed over `<path>`. The protocol
+/// is airlock's `Lock` (git's backoff, `core.lockfilePid`'s holder file, the
+/// commit and the release); relic's policy is around it: `Sync` and
+/// `sync_directory`, and `core.sharedRepository`'s permissions.
 ///
 /// A reader of `<path>` sees either the old file or the new one and never
 /// blocks. If this process dies the lock stays on the disk, exactly as git's
@@ -758,8 +759,8 @@ pub const CommitError = WriteError || SyncError || Io.Dir.RenameError || Io.Dir.
 pub const LockFile = struct {
     pub const Error = ErrorNamespace.Error;
 
-    /// The lock, airlock's exact-named temp of the target.
-    pending: airlock.Pending,
+    /// The lock, airlock's: `<target>.lock`, and its holder file when asked.
+    lock: airlock.Lock,
     /// The directory the lock is in, which the caller keeps open.
     dir: aegis.own.Unowned(Io.Dir),
     /// The name being replaced, relative to `dir`. Borrowed from the caller
@@ -767,9 +768,6 @@ pub const LockFile = struct {
     target: []const u8,
     /// `<target>.lock`, owned by this lock.
     lock_name: []u8,
-    /// `<target>~pid.lock`, which names this process while the lock is
-    /// held, owned; `null` when there is none.
-    pid_name: ?[]u8 = null,
     gpa: Allocator,
     file_writer: Io.File.Writer,
     sync: Sync,
@@ -788,8 +786,8 @@ pub const LockFile = struct {
         /// git's `core.lockfilePid`: while the lock is held,
         /// `<target>~pid.lock` beside it says `pid <n>`, so that a later
         /// writer that meets it -- git or relic -- can say who holds it
-        /// (`staleReport`). It goes with the lock. A file that cannot be
-        /// made is none, as git's.
+        /// (`staleReport`). It goes with the lock. One a crash left is the
+        /// new lock's to replace, or to remove when this is false.
         write_pid: bool = false,
         /// Sync the target's parent directory after the commit rename, so
         /// the new name is flushed too. Independent of the file sync policy.
@@ -816,24 +814,39 @@ pub const LockFile = struct {
         options: Options,
     ) OpenError!LockFile {
         const sub_path = inputs.sub_path;
-        const buffer = inputs.buffer;
         const lock_name = try gpa.print("{s}.lock", .{sub_path});
         errdefer gpa.free(lock_name);
 
-        var pending = try createLock(io, dir, sub_path, lock_name[baseStart(lock_name)..], options.on_contention);
-        errdefer pending.discard(io);
+        var lock = try airlock.lock(io, dir, sub_path, .{
+            .contention = switch (options.on_contention) {
+                .fail => .fail,
+                .wait => |d| .{ .wait = d },
+            },
+            .holder = if (options.write_pid) .pid_file else .none,
+            .read = true,
+        });
+        errdefer lock.release(io);
+        // A holder file that could not be written (`lock.holder`) is none,
+        // the lock taken all the same: git 2.56 says nothing of it either.
+        // git's tempfiles, the holder file among them, are given
+        // `core.sharedRepository`'s permissions after the create, from the
+        // ones the umask left (`adjust_shared_perm`).
         try adjustShared(io, dir, lock_name, options.shared);
+        if (lock.holder == .recorded) {
+            var pid_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
+            // airlock wrote the holder file, so its name fit.
+            const pid_name = std.mem.print(&pid_buffer, "{s}~pid.lock", .{sub_path}) catch
+                aegis.assert.never("a held lock's holder file name fits a path");
+            try adjustShared(io, dir, pid_name, options.shared);
+        }
 
-        const pid_name: ?[]u8 = if (options.write_pid) try writePidFile(gpa, io, dir, sub_path, options.shared) else null;
-
-        const file_writer = pending.file().writer(io, buffer);
+        const file_writer = lock.file().writer(io, inputs.buffer);
         return .{
             // Its file was lent here: it moves to the lock's address.
-            .pending = pending.move(),
+            .lock = lock.move(),
             .dir = .of(dir),
             .target = sub_path,
             .lock_name = lock_name,
-            .pid_name = pid_name,
             .gpa = gpa,
             .file_writer = file_writer,
             .sync = options.sync,
@@ -880,10 +893,9 @@ pub const LockFile = struct {
         // from a per-file sync in what happens at the end of the batch, not
         // here. A commit that fails before the name is visible leaves the
         // lock to `deinit`, which gives it up.
-        try syncFile(io, lock.pending.file(), .{ .policy = lock.sync });
-        _ = try lock.pending.commit(io, .{ .level = .none });
+        try syncFile(io, lock.lock.file(), .{ .policy = lock.sync });
+        _ = try lock.lock.commit(io, .{ .level = .none });
         lock.finished = true;
-        try lock.removePidFile(io);
         if (lock.sync_directory) {
             // `target` may be refs/heads/main relative to the repository: it
             // is heads, not the repository directory, that was changed.
@@ -897,62 +909,13 @@ pub const LockFile = struct {
     /// Give the lock up, leaving the target as it was. Safe to call after
     /// `commit`, which is what makes `defer lock.deinit(io)` the right shape.
     pub fn deinit(lock: *LockFile, io: Io) void {
-        // Giving up says nothing to its caller, so it takes no cancel in:
-        // one that arrives meanwhile stays for the caller's next point.
-        const protection = io.swapCancelProtection(.blocked);
-        defer _ = io.swapCancelProtection(protection);
-        lock.pending.discard(io);
-        // Under the protection no cancel lands; one that did is put back.
-        lock.removePidFile(io) catch io.recancel();
+        // airlock gives the lock up under cancel protection: a cancel that
+        // arrives meanwhile stays for the caller's next point.
+        lock.lock.release(io);
         lock.gpa.free(lock.lock_name);
         lock.* = undefined;
     }
-
-    /// The pid file goes with the lock; one that will not go is said. A
-    /// cancel is returned and the name kept, for `deinit` to remove it.
-    fn removePidFile(lock: *LockFile, io: Io) Io.Cancelable!void {
-        const name = lock.pid_name orelse return;
-        lock.dir.get().deleteFile(io, name) catch |err| switch (err) {
-            error.Canceled => return error.Canceled,
-            else => std.log.warn("unable to remove '{s}': {t}", .{ name, err }),
-        };
-        lock.gpa.free(name);
-        lock.pid_name = null;
-    }
 };
-
-/// git's `create_lock_pid_file`: `<sub_path>~pid.lock` made exclusively and
-/// given `pid <n>`, or `null` where it cannot be, which leaves the lock
-/// itself as good. A cancel is returned, and takes the file it made with it.
-fn writePidFile(gpa: Allocator, io: Io, dir: Io.Dir, sub_path: []const u8, shared: Shared) (Allocator.Error || Io.Cancelable)!?[]u8 {
-    const name = try gpa.print("{s}~pid.lock", .{sub_path});
-    errdefer gpa.free(name);
-    const file = dir.createFile(io, name, .{ .exclusive = true }) catch |err| switch (err) {
-        error.Canceled => return error.Canceled,
-        else => {
-            gpa.free(name);
-            return null;
-        },
-    };
-    defer file.close(io);
-    errdefer dir.deleteFile(io, name) catch |e| std.log.warn("unable to remove '{s}': {t}", .{ name, e });
-    try adjustShared(io, dir, name, shared);
-    var text: [32]u8 = undefined;
-    const line = std.mem.print(&text, "pid {d}\n", .{currentPid()}) catch
-        aegis.assert.never("a u32 pid is at most ten digits: \"pid \", they and a newline fit thirty-two bytes");
-    file.writePositionalAll(io, line, 0) catch |err| {
-        if (err == error.Canceled) return error.Canceled;
-        std.log.warn("could not write lock pid file '{s}': {t}", .{ name, err });
-        dir.deleteFile(io, name) catch |e| switch (e) {
-            // The errdefers above remove the file and free the name.
-            error.Canceled => return error.Canceled,
-            else => std.log.warn("unable to remove '{s}': {t}", .{ name, e }),
-        };
-        gpa.free(name);
-        return null;
-    };
-    return name;
-}
 
 /// git for Windows' `core.hideDotFiles`: which of what git makes is given
 /// the hidden attribute. Nothing outside Windows.
@@ -1027,74 +990,6 @@ fn baseStart(path: []const u8) usize {
     const slash = std.mem.findScalarLast(u8, path, '/');
     const separator = if (builtin.target.os.tag == .windows) std.mem.findScalarLast(u8, path, '\\') else null;
     return @max(if (slash) |at| at + 1 else 0, if (separator) |at| at + 1 else 0);
-}
-
-/// Create `lock` (the base name `lock_base` beside `target`) exclusively,
-/// waiting for a holder as `on_contention` says.
-/// How long `createLock` waits for a lock held elsewhere.
-const WaitMillis = aegis.units.Duration(.millisecond, u32);
-/// A wait as std holds it, every one exactly.
-const IoSpan = aegis.units.Duration(.nanosecond, i96);
-
-fn createLock(
-    io: Io,
-    dir: Io.Dir,
-    target: []const u8,
-    lock_base: []const u8,
-    on_contention: OnContention,
-) LockError!airlock.Pending {
-    const deadline_ms: u32 = switch (on_contention) {
-        .fail => 0,
-        // A wait no u32 of milliseconds holds is none when it is negative,
-        // and as long as there is otherwise.
-        .wait => |d| (WaitMillis.fromIoDuration(d, .down) catch
-            WaitMillis.fromRaw(if (IoSpan.fromIoDuration(d, .exact).compare(.fromRaw(0)) == .lt) 0 else std.math.maxInt(u32))).raw(),
-    };
-    var waited: u32 = 0;
-    var attempt: u32 = 0;
-    while (true) {
-        if (airlock.create(io, dir, target, .{ .temp = .{ .exact = lock_base }, .mode = .default, .read = true })) |pending| {
-            return pending;
-        } else |err| switch (err) {
-            // Windows keeps the name of a deleted file while another
-            // process holds it, which airlock says as `Busy`: a lock that
-            // is as good as held.
-            error.PathAlreadyExists, error.Busy => {},
-            // Windows hands back a sharing violation as access denied when
-            // an indexer or a scanner holds the file between the write and
-            // the rename. Two independent implementations settled on the
-            // same answer: retry briefly.
-            error.AccessDenied, error.PermissionDenied => if (builtin.target.os.tag != .windows) return err,
-            else => return err,
-        }
-        if (waited >= deadline_ms) return error.LockHeld;
-        var jitter: [2]u8 = undefined;
-        io.random(&jitter);
-        const delay = backoffMs(attempt, std.mem.readInt(u16, &jitter, .little));
-        try Io.Timeout.sleep(.{ .duration = .{ .raw = aegis.units.Duration(.millisecond, i64).fromRaw(delay).toIoDuration(), .clock = .awake } }, io);
-        waited +|= @intCast(delay);
-        attempt += 1;
-    }
-}
-
-/// git's backoff, from `lock_file_timeout`: the attempt number squared, in
-/// milliseconds, capped at a thousand, and each wait somewhere between
-/// three quarters and five quarters of that so that two waiters do not
-/// retry in step. `random` picks where.
-fn backoffMs(attempt: u32, random: u16) i64 {
-    const n: u64 = @as(u64, attempt) + 1;
-    const multiplier: u64 = @min(n * n, 1000);
-    const spread: u64 = 750 + @as(u64, random % 500);
-    return @intCast(@max(1, spread * multiplier / 1000));
-}
-
-test "the backoff grows as git's does, by squares to a second, with spread" {
-    try std.testing.expectEqual(@as(i64, 1), backoffMs(0, 250));
-    try std.testing.expectEqual(@as(i64, 4), backoffMs(1, 250));
-    try std.testing.expectEqual(@as(i64, 9), backoffMs(2, 250));
-    try std.testing.expectEqual(@as(i64, 1000), backoffMs(40, 250));
-    try std.testing.expectEqual(@as(i64, 750), backoffMs(40, 0));
-    try std.testing.expectEqual(@as(i64, 1249), backoffMs(40, 499));
 }
 
 /// Removes `name` from `dir` when a cleanup leaves it behind: a lock let
@@ -1474,27 +1369,13 @@ pub const StaleReport = struct {
 /// lock it did not take, whatever the report says. A cancel is returned,
 /// never taken for a lock that is not there.
 pub fn staleReport(io: Io, dir: Io.Dir, sub_path: []const u8) Io.Cancelable!StaleReport {
-    var name_buf: [512]u8 = undefined;
-    const lock_name = std.mem.print(&name_buf, "{s}.lock", .{sub_path}) catch return .{ .held = false, .pid = null, .holder_alive = null };
-    dir.access(io, lock_name, .{}) catch |err| switch (err) {
+    const none: StaleReport = .{ .held = false, .pid = null, .holder_alive = null };
+    // airlock reads the holder file as git's `read_lock_pid` does.
+    const held = (airlock.lockHolder(io, dir, sub_path) catch |err| switch (err) {
         error.Canceled => return error.Canceled,
-        else => return .{ .held = false, .pid = null, .holder_alive = null },
-    };
-
-    // git's `read_lock_pid`: `<sub_path>~pid.lock`, at most 32 bytes,
-    // `pid <n>` once the trailing space is gone.
-    var pid_buf: [512]u8 = undefined;
-    const pid_name = std.mem.print(&pid_buf, "{s}~pid.lock", .{sub_path}) catch return .{ .held = true, .pid = null, .holder_alive = null };
-    var contents: [input.pid_record_max]u8 = undefined;
-    const text = input.pidRecord(io, dir, pid_name, &contents) catch |err| switch (err) {
-        error.Canceled => return error.Canceled,
-        else => return .{ .held = true, .pid = null, .holder_alive = null },
-    };
-    const line = std.mem.trimEnd(u8, text, " \t\n\r");
-    if (!std.mem.startsWith(u8, line, "pid ")) return .{ .held = true, .pid = null, .holder_alive = null };
-    const pid = decimal.digits(u32, line[4..]) orelse
-        return .{ .held = true, .pid = null, .holder_alive = null };
-    if (pid == 0) return .{ .held = true, .pid = null, .holder_alive = null };
+        else => return none,
+    }) orelse return none;
+    const pid = held.pid orelse return .{ .held = true, .pid = null, .holder_alive = null };
     return .{ .held = true, .pid = pid, .holder_alive = processAlive(pid) };
 }
 
@@ -2072,6 +1953,61 @@ test "waiting for a lock gives up with the same named error" {
         error.LockHeld,
         LockFile.open(gpa, io, dir, .{ .sub_path = "thing", .buffer = &buf2 }, .{ .sync = .none, .on_contention = .{ .wait = .fromMilliseconds(5) } }),
     );
+}
+
+test "a lock waited for backs off on the caller's Io before it gives up, and one not waited for does not" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buf: [64]u8 = undefined;
+    var held = try LockFile.open(gpa, io, tmp.dir, .{ .sub_path = "thing", .buffer = &buf }, .{ .sync = .per_file });
+    defer held.deinit(io);
+    for ([_]OnContention{ .fail, .{ .wait = .fromMilliseconds(5) } }) |on_contention| {
+        const faults = try shakedown.FaultIo.init(gpa, io, .{});
+        defer faults.deinit();
+        var buf2: [64]u8 = undefined;
+        try std.testing.expectError(
+            error.LockHeld,
+            LockFile.open(gpa, faults.io(), tmp.dir, .{ .sub_path = "thing", .buffer = &buf2 }, .{ .sync = .none, .on_contention = on_contention }),
+        );
+        try std.testing.expectEqual(on_contention == .wait, faults.count(.sleep) > 0);
+    }
+}
+
+test "a lock's holder file is given core.sharedRepository's permissions, as the lock is" {
+    if (!Io.File.Permissions.has_executable_bit) return error.SkipZigTest;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buf: [64]u8 = undefined;
+    var lock = try LockFile.open(std.testing.allocator, io, tmp.dir, .{ .sub_path = "thing", .buffer = &buf }, .{ .sync = .none, .write_pid = true, .shared = .{ .mode = 0o640 } });
+    defer lock.deinit(io);
+    for ([_][]const u8{ "thing.lock", "thing~pid.lock" }) |name| {
+        const stat = try tmp.dir.statFile(io, name, .{});
+        try std.testing.expectEqual(@as(u32, 0o640), stat.permissions.toMode() & 0o777);
+    }
+}
+
+test "a holder file that cannot be made leaves the lock taken, as git's" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // A directory where `thing~pid.lock` goes: git 2.56 with core.lockfilePid
+    // still takes the lock and writes the file.
+    try tmp.dir.createDirPath(io, "thing~pid.lock/in");
+    const before = try tmp.dir.statFile(io, "thing~pid.lock", .{});
+    var buf: [64]u8 = undefined;
+    var lock = try LockFile.open(std.testing.allocator, io, tmp.dir, .{ .sub_path = "thing", .buffer = &buf }, .{ .sync = .none, .write_pid = true, .shared = .{ .mode = 0o600 } });
+    defer lock.deinit(io);
+    // What stands where the holder file would be is not relic's: its
+    // permissions are left as they were.
+    try std.testing.expectEqual(before.permissions, (try tmp.dir.statFile(io, "thing~pid.lock", .{})).permissions);
+    try lock.writer().writeAll("new");
+    try lock.commit(io);
+    var out: [8]u8 = undefined;
+    try std.testing.expectEqualStrings("new", try tmp.dir.readFile(io, "thing", &out));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "thing.lock", .{}));
 }
 
 test "a replacement keeps the permissions of the file it replaces only when asked" {

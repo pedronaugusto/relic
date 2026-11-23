@@ -1,7 +1,6 @@
 //! The file layer's input seam: where bytes from outside enter relic
 //! through the file layer. A file's contents (a whole file, one a stat has
-//! measured, one holding a secret), a lock's pid record and a link's target
-//! are read here and nowhere else in `fs`; each read is held to a limit,
+//! measured, one holding a secret) and a link's target are read here and nowhere else in `fs`; each read is held to a limit,
 //! the one its caller names or the one named here, and what reads the
 //! bytes these hand back parses them as the input they are.
 
@@ -10,16 +9,6 @@ const builtin = @import("builtin");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const aegis = @import("aegis");
-
-/// The most of a lock's pid file git reads (`read_lock_pid`'s 32 bytes):
-/// `pid <n>` and a newline.
-pub const pid_record_max = 32;
-
-/// `name` in `dir`, a lock's pid record, at most `pid_record_max` bytes,
-/// in `buffer`.
-pub fn pidRecord(io: Io, dir: Io.Dir, name: []const u8, buffer: *[pid_record_max]u8) Io.Dir.ReadFileError![]u8 {
-    return dir.readFile(io, name, buffer);
-}
 
 /// The target of the link `sub_path` in `dir`, at most a path's length, in
 /// `buffer`.
