@@ -555,8 +555,9 @@ pub const Runner = struct {
 
         fn run(w: *AtOnceWork) void {
             while (w.canceled.load(.monotonic) == .running) {
-                const at = w.next.fetchAddWrapping(Claims.fromRaw(1), .monotonic).raw();
-                if (at >= w.planned.len) return;
+                const claim = w.next.fetchAddWrapping(Claims.fromRaw(1), .monotonic);
+                if (claim.compare(.fromRaw(w.planned.len)) != .lt) return;
+                const at = claim.raw();
                 w.results[at] = w.runCaptured(w.planned[at]) catch |err| .{ .err = err };
                 if (w.results[at].err) |err| if (err == error.Canceled) w.canceled.store(.canceled, .monotonic);
             }

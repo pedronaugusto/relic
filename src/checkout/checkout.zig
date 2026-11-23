@@ -2861,8 +2861,9 @@ const WriteBatch = struct {
 
     fn run(io: Io, wt: Io.Dir, jobs: []Job, next: *Claimed) void {
         while (true) {
-            const at = next.fetchAddWrapping(Claims.fromRaw(1), .monotonic).raw();
-            if (at >= jobs.len) return;
+            const claim = next.fetchAddWrapping(Claims.fromRaw(1), .monotonic);
+            if (claim.compare(.fromRaw(jobs.len)) != .lt) return;
+            const at = claim.raw();
             const job = &jobs[at];
             job.result = write(io, wt, job);
         }
