@@ -2211,3 +2211,42 @@ test "a cancel that stops any read or write of an upload or a download is Cancel
         try testing_io.eachCallCanceled(gpa, io, &move, call);
     }
 }
+
+test "an upload goes through while another connection holds the test server with a body it never finishes" {
+    // The connection a child started elsewhere in the test process keeps
+    // open after the client closes its own copy, which on Darwin is any
+    // socket made in the moment before close-on-exec is set: its request is
+    // unfinished, so the server's read of it never ends. A server that took
+    // one connection at a time stopped for good there, and each later request
+    // waited out `lfs.activitytimeout` -- 30 seconds, nine tries a batch -- so
+    // a cancel sweep ran past its watchdog. Each connection is its own task.
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const fx = try Fixture.init(gpa, io, .{});
+    defer fx.deinit();
+    const nobody = try testlfs.credentialHelper(gpa, io, fx.tools, "nobody", "no", "no");
+    defer gpa.free(nobody);
+    const content = "held\n";
+    const ours = try committed(fx, "ours", nobody, &.{.{ "a.bin", content }});
+    defer ours.close(io);
+    // A server that stops would fail this in seconds, not minutes.
+    try fx.gitIn(ours, &.{ "config", "lfs.activitytimeout", "2" });
+    const address = try Io.net.IpAddress.parse("127.0.0.1", fx.server.port);
+    const held = try address.connect(io, .{ .mode = .stream });
+    defer held.close(io);
+    var head_buffer: [256]u8 = undefined;
+    var head = held.writer(io, &head_buffer);
+    const unknown: [64]u8 = @splat('0');
+    try head.interface.writeAll("PUT /repo.git/info/lfs/objects/" ++ &unknown ++ " HTTP/1.1\r\nHost: x\r\nContent-Length: 1000\r\n\r\nabc");
+    try head.interface.flush();
+
+    var repo = try repo_mod.Repository.open(gpa, io, ours, .{});
+    defer repo.deinit(io);
+    const server = try openServer(fx, &repo);
+    defer server.deinit(io);
+    const object: lfstransfer.Object = .{ .oid = testlfs.sha256Hex(content), .size = content.len, .name = "a.bin" };
+    var uploaded = try lfstransfer.upload(io, server, &.{object}, .{});
+    defer uploaded.deinit();
+    try expectNoFailures(&uploaded);
+    try testing.expectEqual(lfstransfer.Result.Status.transferred, uploaded.results[0].status);
+}

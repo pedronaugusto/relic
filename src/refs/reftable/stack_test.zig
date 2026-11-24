@@ -706,7 +706,7 @@ fn runWithInput(io: Io, repo: *testgit.Repo, args: []const []const u8, input: []
     try argv.append(repo.gpa, testgit.program());
     try argv.appendSlice(repo.gpa, repo.defaults);
     try argv.appendSlice(repo.gpa, args);
-    var child = try testgit.spawn(io, .{
+    var child = try testgit.spawn(repo.gpa, io, .{
         .argv = argv.items,
         .cwd = .{ .dir = repo.dir },
         .environ_map = repo.environMap(),
@@ -714,16 +714,10 @@ fn runWithInput(io: Io, repo: *testgit.Repo, args: []const []const u8, input: []
         .stdout = .ignore,
         .stderr = .inherit,
     });
-    {
-        var buf: [4096]u8 = undefined;
-        var w = child.stdin.?.writer(io, &buf);
-        try w.interface.writeAll(input);
-        try w.interface.flush();
-        child.stdin.?.close(io);
-        child.stdin = null;
-    }
-    const term = try child.wait(io);
-    switch (term) {
+    defer child.deinit(io);
+    var said = try child.exchange(repo.gpa, io, input, .{});
+    defer said.deinit();
+    switch (said.term()) {
         .exited => |code| if (code != 0) return error.GitFailed,
         else => return error.GitFailed,
     }

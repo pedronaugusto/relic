@@ -18,7 +18,7 @@ const Oid = hash.Oid;
 /// Run the helper, which takes a lock and holds it until its standard input
 /// closes.
 const Holder = struct {
-    child: std.process.Child,
+    child: testgit.Child,
     released: bool = false,
 
     fn start(gpa: std.mem.Allocator, io: Io, dir: Io.Dir, lock_path: []const u8) !Holder {
@@ -26,7 +26,7 @@ const Holder = struct {
         // the person's all the same: every process the suite starts is.
         var env = try testgit.programEnviron(gpa);
         defer env.deinit();
-        var child = try testgit.spawn(io, .{
+        var child = try testgit.spawn(gpa, io, .{
             .argv = &.{ suite.path(.lock_helper), lock_path },
             .cwd = .{ .dir = dir },
             .environ_map = &env,
@@ -36,10 +36,11 @@ const Holder = struct {
         });
         // Wait for the `held` line, so the lock is certainly on the disk
         // before the test tries to take it.
+        errdefer child.deinit(io);
         var buf: [16]u8 = undefined;
-        var reader = child.stdout.?.readerStreaming(io, &buf);
+        var reader = child.stdoutReader(io, &buf).?;
         _ = reader.interface.takeDelimiterExclusive('\n') catch {
-            child.kill(io);
+            _ = child.killWait(io, .fromRaw(0)) catch {};
             return error.HelperFailed;
         };
         return .{ .child = child };
@@ -50,11 +51,9 @@ const Holder = struct {
     fn release(h: *Holder, io: Io) void {
         if (h.released) return;
         h.released = true;
-        if (h.child.stdin) |stdin| {
-            stdin.close(io);
-            h.child.stdin = null;
-        }
+        h.child.closeStdin(io);
         _ = h.child.wait(io) catch {};
+        h.child.deinit(io);
     }
 };
 

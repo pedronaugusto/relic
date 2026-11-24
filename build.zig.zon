@@ -8,8 +8,8 @@
         },
 
         .conduit = .{
-            .url = "git+https://github.com/pedronaugusto/conduit#60ee9d63b1a426dd0c3eea71d3e3f40710f945d4",
-            .hash = "conduit-0.10.6-4rIA797xFQC3Nf4LTEJlFjWX_IOAWD-JOfbTCoi9OfY9",
+            .url = "git+https://github.com/pedronaugusto/conduit#db6777b90f2bf517f173b6ebcb9b2171f2d646f0",
+            .hash = "conduit-0.10.6-4rIA7065FgAiLvXVA7eQgEhVbDGhAL1ZLOKEKJ5O-Snn",
         },
 
         .sweep = .{
@@ -55,8 +55,8 @@
         },
 
         .reactor = .{
-            .url = "git+https://github.com/pedronaugusto/reactor#2d727924ff03d468782755d7c46eb564a4eb4094",
-            .hash = "reactor-0.9.0-MjQ-WM1RFwCbqbbrrarqtx8RvOrs3L1Wvk6SC1hqBy6W",
+            .url = "git+https://github.com/pedronaugusto/reactor#9eaa9f400e4c9146cba0e6f17bb7a52042f6dfd2",
+            .hash = "reactor-0.9.0-MjQ-WJdYFwDCwOQrcVPgx-9P8rsyW6MEQAx3-NlPstXE",
         },
         .ladar = .{
             .url = "git+https://github.com/pedronaugusto/ladar#489a91674a8c48d5acb28bd05e1223d96b549057",
