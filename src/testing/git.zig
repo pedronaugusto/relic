@@ -31,6 +31,7 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const Environ = std.process.Environ;
 const conduit = @import("conduit");
+const shakedown = @import("shakedown");
 
 /// The child `spawn` starts.
 pub const Child = conduit.Child;
@@ -194,8 +195,9 @@ pub const Repo = struct {
     }
 
     /// Run `git` with `input` on its standard input and return its standard
-    /// output, which is the caller's, whatever it exits with.
-    pub fn runInput(r: *Repo, io: Io, args: []const []const u8, input: []const u8) ![]u8 {
+    /// output, which is the caller's, whatever it exits with. Like `run`,
+    /// on the runner's Io (`fixture_io`), not the test's.
+    pub fn runInput(r: *Repo, _: Io, args: []const []const u8, input: []const u8) ![]u8 {
         var argv: std.ArrayList([]const u8) = .empty;
         defer argv.deinit(r.gpa);
         try argv.append(r.gpa, program());
@@ -207,7 +209,7 @@ pub const Repo = struct {
             own = try isolatedEnviron(r.gpa, no_home);
             break :blk &own.?;
         };
-        var child = try spawn(r.gpa, io, .{
+        var child = try spawn(r.gpa, fixture_io, .{
             .argv = argv.items,
             .cwd = .{ .dir = r.dir },
             .environ_map = environ_map,
@@ -215,8 +217,8 @@ pub const Repo = struct {
             .stdout = .pipe,
             .stderr = .ignore,
         });
-        defer child.deinit(io);
-        var said = try child.exchange(r.gpa, io, input, .{ .max_bytes = .literal("256MiB") });
+        defer child.deinit(fixture_io);
+        var said = try child.exchange(r.gpa, fixture_io, input, .{ .max_bytes = .literal("256MiB") });
         defer said.deinit();
         return said.takeStdout();
     }
@@ -718,17 +720,26 @@ pub const RunResult = struct {
     stderr: []u8,
 };
 
-/// `spawn`, run to its end with its output kept.
-pub fn run(gpa: Allocator, io: Io, options: RunOptions) !RunResult {
-    var child = try spawn(gpa, io, .{
+/// The Io a fixture's program runs on, whatever Io the test hands the
+/// harness: the test runner's. A test that limits its own Io (no second
+/// task, faults planted in it) limits relic, the code under test, and not
+/// the git that sets its repositories up; conduit reads a child's two
+/// streams on tasks where it has no exit handle to watch (Windows), so a
+/// fixture run on an Io without them would fail before the test began.
+const fixture_io = std.testing.io;
+
+/// `spawn`, run to its end with its output kept, on `fixture_io`: the Io a
+/// test hands it is the test's, and its limits are not the fixture's.
+pub fn run(gpa: Allocator, _: Io, options: RunOptions) !RunResult {
+    var child = try spawn(gpa, fixture_io, .{
         .argv = options.argv,
         .cwd = options.cwd,
         .environ_map = options.environ_map,
         .stdout = .pipe,
         .stderr = .pipe,
     });
-    defer child.deinit(io);
-    var said = try child.output(gpa, io, .{ .max_bytes = .literal("256MiB") });
+    defer child.deinit(fixture_io);
+    var said = try child.output(gpa, fixture_io, .{ .max_bytes = .literal("256MiB") });
     defer said.deinit();
     return .{ .term = said.term(), .stdout = said.takeStdout(), .stderr = said.takeStderr() };
 }
@@ -1104,4 +1115,22 @@ test "GnuPG test homes use the selected root and clean up independently" {
     try std.testing.expect(!std.mem.eql(u8, first.path(), removed));
     try std.testing.expectError(error.FileNotFound, Io.Dir.cwd().access(io, removed, .{}));
     try Io.Dir.cwd().access(io, first.path(), .{});
+}
+
+test "a fixture's git runs on the test runner's Io, whatever Io the test hands the harness" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var repo = try Repo.init(gpa, io, &.{});
+    defer repo.deinit();
+    // An Io whose every call is canceled: a test limiting its own Io (on
+    // Windows, to no second task, which conduit reads a child's two streams
+    // on) limits relic, and the fixture still runs.
+    const refused = try shakedown.FaultIo.init(gpa, io, .{ .plan = &.{.{ .at = .{ .nth = .{ .n = 1 } }, .fault = .cancel, .times = 0 }} });
+    defer refused.deinit();
+    const blob = try repo.runInput(refused.io(), &.{ "hash-object", "-w", "--stdin" }, "fixture\n");
+    defer gpa.free(blob);
+    const said = try repo.run(refused.io(), &.{ "cat-file", "-p", std.mem.trimEnd(u8, blob, "\n") });
+    defer gpa.free(said);
+    try std.testing.expectEqualStrings("fixture\n", said);
+    try std.testing.expectEqual(@as(usize, 0), refused.fired().len);
 }
