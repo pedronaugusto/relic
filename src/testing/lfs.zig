@@ -147,6 +147,13 @@ pub const Server = struct {
     env: Environ.Map,
     git_root: ?[]u8 = null,
     task: Io.Future(void) = undefined,
+    /// One task per connection, as `testing/remote.zig`'s servers have: a
+    /// connection whose client never finishes its request holds its own task
+    /// and no other. One served at a time was a server any such connection
+    /// stopped for good -- a client's socket a child started elsewhere in the
+    /// test process kept open, on Darwin, where a socket has no close-on-exec
+    /// for a moment after it is made.
+    handlers: Io.Group = .init,
     stopping: std.atomic.Value(bool) = .init(false),
     mutex: Io.Mutex = .init,
     objects: std.array_hash_map.String([]u8) = .empty,
@@ -242,6 +249,8 @@ pub const Server = struct {
         if (address.connect(io, .{ .mode = .stream })) |stream| stream.close(io) else |_| {}
         s.task.await(io);
         s.listener.deinit(io);
+        // A connection still waiting on its client is ended here.
+        s.handlers.cancel(io);
         s.env.deinit();
         if (s.git_root) |r| s.gpa.free(r);
         var it = s.objects.iterator();
@@ -429,10 +438,15 @@ pub const Server = struct {
     fn serve(s: *Server) void {
         while (!s.stopping.load(.acquire)) {
             const stream = s.listener.accept(s.io) catch return;
-            defer stream.close(s.io);
-            if (s.stopping.load(.acquire)) return;
-            s.handle(stream) catch {};
+            if (s.stopping.load(.acquire)) return stream.close(s.io);
+            // An `Io` with no room for another task serves it here.
+            s.handlers.concurrent(s.io, serveConnection, .{ s, stream }) catch serveConnection(s, stream);
         }
+    }
+
+    fn serveConnection(s: *Server, stream: Io.net.Stream) void {
+        defer stream.close(s.io);
+        s.handle(stream) catch {};
     }
 
     fn takeFault(s: *Server, route: Fault.Route) ?Fault {
@@ -1116,4 +1130,41 @@ test "the test server answers a batch, a transfer and a lock as the API says" {
     const listing = try s.lockListing(gpa);
     defer gpa.free(listing);
     try std.testing.expectEqualStrings("a.bin bob\n", listing);
+}
+
+test "stopping the test server ends a connection whose request never finishes" {
+    // The poll below is POSIX's.
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const s = try Server.start(gpa, io, .{});
+    const address = try Io.net.IpAddress.parse("127.0.0.1", s.port);
+    const held = try address.connect(io, .{ .mode = .stream });
+    defer held.close(io);
+    var held_buffer: [256]u8 = undefined;
+    var held_writer = held.writer(io, &held_buffer);
+    try held_writer.interface.writeAll("PUT /x HTTP/1.1\r\nHost: x\r\nContent-Length: 1000\r\n\r\nabc");
+    try held_writer.interface.flush();
+    // Connections are taken in order: once a later one is answered, the held
+    // one is the server's, waiting on the rest of its body.
+    {
+        const later = try address.connect(io, .{ .mode = .stream });
+        defer later.close(io);
+        var later_buffer: [256]u8 = undefined;
+        var later_writer = later.writer(io, &later_buffer);
+        try later_writer.interface.writeAll("GET /x HTTP/1.1\r\nHost: x\r\n\r\n");
+        try later_writer.interface.flush();
+        var read_buffer: [1024]u8 = undefined;
+        var later_reader = later.reader(io, &read_buffer);
+        const answer = try later_reader.interface.allocRemaining(gpa, .limited(1 << 16));
+        defer gpa.free(answer);
+        try std.testing.expect(std.mem.startsWith(u8, answer, "HTTP/1.1 404"));
+    }
+    s.stop();
+    // The server's end of the held connection is closed by now, so it reads
+    // as ended at once, where a connection left to its task waits forever.
+    var fds = [_]std.posix.pollfd{.{ .fd = held.socket.handle, .events = std.posix.POLL.IN, .revents = 0 }};
+    try std.testing.expectEqual(@as(usize, 1), try std.posix.poll(&fds, 10_000));
+    var byte: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), std.posix.read(held.socket.handle, &byte) catch 0);
 }

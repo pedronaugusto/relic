@@ -372,12 +372,10 @@ pub fn dev(b: *std.Build, tools: type) void {
     filter_helper.root_module.addImport("relic", module);
     lfs_transfer_helper.root_module.addImport("relic", module);
     lfs_transfer_helper.root_module.addImport("relic_lfs", package.module("relic_lfs"));
-    hook_fixture.root_module.addImport("relic", module);
     upload_pack_helper.root_module.addImport("relic", module);
     receive_pack_helper.root_module.addImport("relic", module);
     upload_archive_helper.root_module.addImport("relic", module);
     upload_pack_helper.root_module.addImport("conduit", conduit);
-    hook_fixture.root_module.addImport("conduit", conduit);
     test_module.addOptions("build_options", build_options);
 
     const tests = b.addTest(.{

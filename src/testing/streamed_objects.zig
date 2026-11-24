@@ -454,10 +454,11 @@ fn sameArchive(gpa: Allocator, io: Io, env: *const std.process.Environ.Map, dir:
     try argv.append(gpa, "archive");
     try argv.appendSlice(gpa, args);
     try argv.append(gpa, "HEAD");
-    var child = try testgit.spawn(io, .{ .argv = argv.items, .cwd = .{ .dir = dir }, .environ_map = env, .stdout = .pipe, .stderr = .inherit });
-    defer child.kill(io);
+    var child = try testgit.spawn(gpa, io, .{ .argv = argv.items, .cwd = .{ .dir = dir }, .environ_map = env, .stdout = .pipe, .stderr = .inherit });
+    defer child.deinit(io);
+    errdefer _ = child.killWait(io, .fromRaw(0)) catch {};
     var in_buffer: [64 << 10]u8 = undefined;
-    var theirs = child.stdout.?.reader(io, &in_buffer);
+    var theirs = child.stdoutReader(io, &in_buffer).?;
     var out_buffer: [64 << 10]u8 = undefined;
     var same: Same = .init(&theirs.interface, &out_buffer);
     errdefer std.debug.print("git archive {any} and relic's alike for {d} bytes\n", .{ args, same.at });

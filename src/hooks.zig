@@ -1457,8 +1457,17 @@ test "git-lfs's hooks are known by their text from every release, and nothing el
 test "an event's hooks run hook.jobs at once when each may, their output whole in the order they started, as git's" {
     const gpa = testing.allocator;
     const io = testing.io;
-    const hooks_config = "[hook \"first\"]\n\tevent = pre-commit\n\tcommand = \"echo first start >&2; sleep 0.5; echo first end\"\n" ++
-        "[hook \"second\"]\n\tevent = pre-commit\n\tcommand = \"echo second start >&2; sleep 0.5; echo second end\"\n";
+    // Whether the two ran at once is seen, not timed: the first waits for
+    // the second to have started, which it can only have done beside it,
+    // and leaves what it saw in `first.saw`. Where they should run at once
+    // it waits up to ten seconds, which no start takes, however slow the
+    // build (ThreadSanitizer's is several times slower: a bound on the time
+    // the pair took failed there); where they should not, one second, the
+    // time a start that should not have happened has to show itself.
+    const first = "[hook \"first\"]\n\tevent = pre-commit\n\tcommand = \"echo first start >&2; : > first.started; n=0; " ++
+        "while [ ! -e second.started ] && [ $n -lt {d} ]; do sleep 0.05; n=$((n+1)); done; " ++
+        "if [ -e second.started ]; then echo together > first.saw; else echo alone > first.saw; fi; echo first end\"\n";
+    const second = "[hook \"second\"]\n\tevent = pre-commit\n\tcommand = \"echo second start >&2; : > second.started; echo second end\"\n";
     const Case = struct { extra: []const u8, at_once: bool };
     const cases = [_]Case{
         .{ .extra = "", .at_once = false },
@@ -1472,12 +1481,14 @@ test "an event's hooks run hook.jobs at once when each may, their output whole i
     for (cases, 0..) |case, n| {
         var repo = try testgit.Repo.init(gpa, io, &.{});
         defer repo.deinit();
-        const text = try std.mem.concat(gpa, u8, &.{ hooks_config, case.extra });
+        const waits: u32 = if (case.at_once) 200 else 20;
+        const text = try gpa.print(first ++ second ++ "{s}", .{ waits, case.extra });
         defer gpa.free(text);
         try repo.writeFile(io, ".git/config-hooks", text);
         try repo.exec(io, &.{ "config", "include.path", "config-hooks" });
         const git_said = try gitStderr(gpa, io, &repo, &.{ "hook", "run", "pre-commit" });
         defer gpa.free(git_said);
+        for ([_][]const u8{ "first.started", "second.started", "first.saw" }) |marker| try repo.dir.deleteFile(io, marker);
 
         var environ = try testEnviron(gpa);
         defer environ.deinit();
@@ -1485,12 +1496,12 @@ test "an event's hooks run hook.jobs at once when each may, their output whole i
         defer opened.git_dir.deinit(io);
         defer opened.config.deinit();
         defer opened.runner.deinit();
-        const started = std.Io.Clock.awake.now(io);
         const ran = try opened.runner.run(io, "pre-commit", .{});
-        const took = started.durationTo(std.Io.Clock.awake.now(io)).toMilliseconds();
         try testing.expectEqual(@as(u32, 2), ran.count);
-        testing.expectEqual(case.at_once, took < 900) catch |err| {
-            std.debug.print("hooks case {d}: {d} ms\n", .{ n, took });
+        const saw = try repo.dir.readFileAlloc(io, "first.saw", gpa, .limited(64));
+        defer gpa.free(saw);
+        testing.expectEqualStrings(if (case.at_once) "together\n" else "alone\n", saw) catch |err| {
+            std.debug.print("hooks case {d}\n", .{n});
             return err;
         };
         testing.expectEqualStrings(git_said, opened.runner.captured.items) catch |err| {

@@ -35,7 +35,7 @@ test "snapshot keeps native LFS writes inside the private store" {
     _ = try store.restore(io, captured.snapshot, dest.dir, .{});
     const pointer_text = try dest.dir.readFileAlloc(io, "large.bin", gpa, .limited(1024));
     defer gpa.free(pointer_text);
-    const pointer = try lfs.Pointer.decode(pointer_text);
+    const pointer = lfs.Pointer.recognize(pointer_text) orelse return error.TestUnexpectedResult;
     const payloads: lfs.Store = .{ .base = .of(store.dir.borrow().*), .root = "lfs" };
     try testing.expect(try payloads.contains(io, &pointer));
 }

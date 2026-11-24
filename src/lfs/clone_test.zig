@@ -46,7 +46,7 @@ test "native LFS clone fetches content and skip-smudge leaves pointers" {
         const bytes = try target.readFileAlloc(io, "one.bin", gpa, .limited(4096));
         defer gpa.free(bytes);
         if (skip) {
-            const pointer = try lfs.Pointer.decode(bytes);
+            const pointer = lfs.Pointer.recognize(bytes) orelse return error.TestUnexpectedResult;
             try testing.expectEqual(@as(u64, "native clone payload\n".len), pointer.size);
         } else try testing.expectEqualStrings("native clone payload\n", bytes);
     }

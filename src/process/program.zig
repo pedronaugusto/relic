@@ -744,3 +744,32 @@ test "opposite full pipes refuse unavailable concurrency instead of deadlocking"
 test {
     _ = @import("input.zig");
 }
+
+test "a program relic starts has its three streams and no other descriptor of relic's, one without close-on-exec included" {
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var environ = try testEnviron();
+    defer environ.deinit();
+    // A connection, as relic's own to an LFS server is, at a number without
+    // close-on-exec: `dup2` never copies the flag, so this is the state a
+    // socket is in on Darwin between `socket` or `accept` and the `fcntl`
+    // that marks it, where another thread's spawn can land. A child that
+    // keeps it keeps the connection open after relic closes it, and the
+    // server at the far end waits for the rest of a body that never comes.
+    const address = try Io.net.IpAddress.parse("127.0.0.1", 0);
+    var listener = try address.listen(io, .{});
+    defer listener.deinit(io);
+    const stream = try listener.socket.address.connect(io, .{ .mode = .stream });
+    defer stream.close(io);
+    const unmarked: std.c.fd_t = 200;
+    if (std.c.dup2(stream.socket.handle, unmarked) != unmarked) return error.SkipZigTest;
+    defer _ = std.c.close(unmarked);
+    var outcome = try run(gpa, io, .{ .environ = &environ }, .{
+        .argv = &.{"if test -e /dev/fd/200; then echo held; else echo free; fi"},
+        .shell = true,
+    }, .{});
+    defer outcome.deinit(gpa);
+    try testing.expect(outcome.succeeded());
+    try testing.expectEqualStrings("free\n", outcome.stdout);
+}

@@ -31,7 +31,7 @@ fn pieced(s: *shakedown.Source, buffer: []u8, pieces: []const []const u8, max: u
 }
 
 // Pointer.decode: "Read bytes as git-lfs reads them: the first 1024,
-// trimmed." DecodeError.BadPointer: "an oid that is not sixty-four
+// trimmed." Decoded.bad_pointer: "an oid that is not sixty-four
 // lower-case hexadecimal digits ... or two extensions at one priority".
 
 const oid = "4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393";
@@ -47,11 +47,15 @@ const pointer_pieces = [_][]const u8{
 };
 const spaces = [_][]const u8{ " ", "\t", "\n", "\r", "\x0b", "\x0c" };
 
-const Decoded = Pointer.DecodeError!Pointer;
+const Decoded = Pointer.Decoded;
 
 fn expectSame(want: Decoded, got: Decoded) !void {
-    const a = want catch |err| return testing.expectError(err, got);
-    const b = try got;
+    try testing.expectEqual(std.meta.activeTag(want), std.meta.activeTag(got));
+    const a = switch (want) {
+        .pointer => |p| p,
+        .not_a_pointer, .bad_pointer => return,
+    };
+    const b = got.pointer;
     try testing.expectEqualSlices(u8, &a.oid, &b.oid);
     try testing.expectEqual(a.size, b.size);
     try testing.expectEqual(a.extension_count, b.extension_count);
@@ -76,7 +80,7 @@ fn anyPointer(_: void, case: *shakedown.Case) !void {
     const after = pieced(case.source, padded_buffer[before.len + body.len ..], &spaces, 40);
     const padded = padded_buffer[0 .. before.len + body.len + after.len];
     if (body.len == 0 and padded.len != 0)
-        try testing.expectError(error.NotAPointer, Pointer.decode(padded))
+        try testing.expectEqual(.not_a_pointer, std.meta.activeTag(Pointer.decode(padded)))
     else
         try expectSame(decoded, Pointer.decode(padded));
 
@@ -91,7 +95,10 @@ fn anyPointer(_: void, case: *shakedown.Case) !void {
 
     // What is read has a lower-case SHA-256, its extensions by priority,
     // one each, and, pointing at something, encodes to itself.
-    const p = decoded catch return;
+    const p = switch (decoded) {
+        .pointer => |found| found,
+        .not_a_pointer, .bad_pointer => return,
+    };
     for (p.oid) |c| try testing.expect(std.ascii.isDigit(c) or (c >= 'a' and c <= 'f'));
     for (p.exts(), 0..) |ext, i| {
         for (ext.oid) |c| try testing.expect(std.ascii.isDigit(c) or (c >= 'a' and c <= 'f'));
@@ -99,7 +106,7 @@ fn anyPointer(_: void, case: *shakedown.Case) !void {
     }
     if (p.size == 0) return;
     var encoded: [Pointer.max_encoded_len]u8 = undefined;
-    try expectSame(p, Pointer.decode(try p.encodeBuf(&encoded)));
+    try expectSame(.{ .pointer = p }, Pointer.decode(try p.encodeBuf(&encoded)));
 }
 
 test "property: a pointer is read from a blob's first 1024 bytes, trimmed, and one read is canonical" {

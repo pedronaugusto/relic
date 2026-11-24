@@ -30,6 +30,12 @@ const build_options = @import("build_options");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const Environ = std.process.Environ;
+const conduit = @import("conduit");
+
+/// The child `spawn` starts.
+pub const Child = conduit.Child;
+/// This file, for `Repo`'s methods to name its `run` past their own.
+const harness = @This();
 
 /// The settings every invocation carries unless a test changes them.
 pub const default_settings = [_][]const u8{
@@ -158,7 +164,7 @@ pub const Repo = struct {
             own = try isolatedEnviron(r.gpa, no_home);
             break :blk &own.?;
         };
-        const result = try std.process.run(r.gpa, io, .{
+        const result = try harness.run(r.gpa, io, .{
             .argv = argv.items,
             .cwd = .{ .dir = r.dir },
             .environ_map = environ_map,
@@ -201,7 +207,7 @@ pub const Repo = struct {
             own = try isolatedEnviron(r.gpa, no_home);
             break :blk &own.?;
         };
-        var child = try std.process.spawn(io, .{
+        var child = try spawn(r.gpa, io, .{
             .argv = argv.items,
             .cwd = .{ .dir = r.dir },
             .environ_map = environ_map,
@@ -209,22 +215,10 @@ pub const Repo = struct {
             .stdout = .pipe,
             .stderr = .ignore,
         });
-        defer child.kill(io);
-        {
-            var buf: [4096]u8 = undefined;
-            var w = child.stdin.?.writer(io, &buf);
-            try w.interface.writeAll(input);
-            try w.interface.flush();
-            child.stdin.?.close(io);
-            child.stdin = null;
-        }
-        var out: std.ArrayList(u8) = .empty;
-        errdefer out.deinit(r.gpa);
-        var buf: [4096]u8 = undefined;
-        var reader = child.stdout.?.reader(io, &buf);
-        try reader.interface.appendRemainingUnlimited(r.gpa, &out);
-        _ = try child.wait(io);
-        return out.toOwnedSlice(r.gpa);
+        defer child.deinit(io);
+        var said = try child.exchange(r.gpa, io, input, .{ .max_bytes = .literal("256MiB") });
+        defer said.deinit();
+        return said.takeStdout();
     }
 
     /// Run `git` and keep what it said, whatever it exits with.
@@ -240,13 +234,13 @@ pub const Repo = struct {
             own = try isolatedEnviron(r.gpa, no_home);
             break :blk &own.?;
         };
-        const result = try std.process.run(r.gpa, io, .{
+        const result = try harness.run(r.gpa, io, .{
             .argv = argv.items,
             .cwd = .{ .dir = r.dir },
             .environ_map = environ_map,
         });
         const code: u8 = switch (result.term) {
-            .exited => |c| c,
+            .exited => |c| @truncate(c),
             else => 255,
         };
         return .{ .code = code, .stdout = result.stdout, .stderr = result.stderr };
@@ -625,7 +619,7 @@ fn probeVersion(name: []const u8) ?git_release.Version {
     const gpa = std.testing.allocator;
     var env = isolatedEnviron(gpa, no_home) catch return null;
     defer env.deinit();
-    const result = std.process.run(gpa, std.testing.io, .{ .argv = &.{ name, "--version" }, .environ_map = &env }) catch return null;
+    const result = run(gpa, std.testing.io, .{ .argv = &.{ name, "--version" }, .environ_map = &env }) catch return null;
     defer gpa.free(result.stdout);
     defer gpa.free(result.stderr);
     switch (result.term) {
@@ -654,16 +648,89 @@ pub fn programEnviron(gpa: Allocator) !std.process.Environ.Map {
 /// (`isolatedEnviron`, `programEnviron`, `isolate`, or a map of its own):
 /// a child left to inherit the test process's would find the person's git,
 /// gpg and ssh settings, so it is refused with `error.InheritedEnvironment`.
-/// The suite starts its children only here (`ci/layers.zig`).
-pub fn spawn(io: Io, options: std.process.SpawnOptions) (std.process.SpawnError || error{InheritedEnvironment})!std.process.Child {
-    if (options.environ_map == null) return error.InheritedEnvironment;
-    return std.process.spawn(io, options);
+/// The suite starts its children only here (`ci/layers.zig`), through
+/// conduit, as the library starts its own: one way to start a program, and a
+/// child given its three standard streams and nothing else of the test
+/// process's. A child std's spawn starts on Darwin is handed any descriptor
+/// without close-on-exec, and every socket the process opens has none for a
+/// moment after it is made: a `git credential-cache--daemon` a test's git
+/// left running kept an LFS test's client socket, and the server waited on
+/// it for as long as the daemon lived.
+pub fn spawn(gpa: Allocator, io: Io, options: SpawnOptions) (conduit.Child.SpawnError || Io.Dir.RealPathError || error{InheritedEnvironment})!conduit.Child {
+    const environ = options.environ_map orelse return error.InheritedEnvironment;
+    var cwd_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
+    const cwd: ?[]const u8 = switch (options.cwd) {
+        .inherit => null,
+        .path => |path| path,
+        .dir => |dir| cwd_buffer[0..try dir.realPath(io, &cwd_buffer)],
+    };
+    return conduit.Child.spawn(gpa, io, .{
+        .argv = options.argv,
+        .cwd = cwd,
+        .environ = environ,
+        .stdio = .{ .streams = .{
+            .stdin = options.stdin.stream(),
+            .stdout = options.stdout.stream(),
+            .stderr = options.stderr.stream(),
+        } },
+    });
 }
 
+/// What `spawn` starts: the program, where, in what environment (one the
+/// test made; `null` is refused), and its three streams.
+pub const SpawnOptions = struct {
+    argv: []const []const u8,
+    cwd: Cwd = .inherit,
+    environ_map: ?*const Environ.Map,
+    stdin: Stream = .ignore,
+    stdout: Stream = .inherit,
+    stderr: Stream = .inherit,
+
+    pub const Cwd = union(enum) { inherit, dir: Io.Dir, path: []const u8 };
+
+    pub const Stream = enum {
+        inherit,
+        ignore,
+        pipe,
+
+        fn stream(s: Stream) conduit.Child.Stream {
+            return switch (s) {
+                .inherit => .inherit,
+                .ignore => .ignore,
+                .pipe => .pipe,
+            };
+        }
+    };
+};
+
+/// What `run` starts; its output is collected.
+pub const RunOptions = struct {
+    argv: []const []const u8,
+    cwd: SpawnOptions.Cwd = .inherit,
+    environ_map: ?*const Environ.Map,
+};
+
+/// How a program `run` started ended, and what it wrote, both the caller's
+/// to free with the allocator `run` was given.
+pub const RunResult = struct {
+    term: conduit.Child.Term,
+    stdout: []u8,
+    stderr: []u8,
+};
+
 /// `spawn`, run to its end with its output kept.
-pub fn run(gpa: Allocator, io: Io, options: std.process.RunOptions) (std.process.RunError || error{InheritedEnvironment})!std.process.RunResult {
-    if (options.environ_map == null) return error.InheritedEnvironment;
-    return std.process.run(gpa, io, options);
+pub fn run(gpa: Allocator, io: Io, options: RunOptions) !RunResult {
+    var child = try spawn(gpa, io, .{
+        .argv = options.argv,
+        .cwd = options.cwd,
+        .environ_map = options.environ_map,
+        .stdout = .pipe,
+        .stderr = .pipe,
+    });
+    defer child.deinit(io);
+    var said = try child.output(gpa, io, .{ .max_bytes = .literal("256MiB") });
+    defer said.deinit();
+    return .{ .term = said.term(), .stdout = said.takeStdout(), .stderr = said.takeStderr() };
 }
 
 /// Install a native hook fixture with `action` and `data` as its sidecar
@@ -862,7 +929,7 @@ pub fn curlAtLeast(gpa: Allocator, io: Io, major: u32, minor: u32) !bool {
     try requireGit(gpa, io);
     var env = try isolatedEnviron(gpa, no_home);
     defer env.deinit();
-    const result = try std.process.run(gpa, io, .{ .argv = &.{ program(), "version", "--build-options" }, .environ_map = &env });
+    const result = try run(gpa, io, .{ .argv = &.{ program(), "version", "--build-options" }, .environ_map = &env });
     defer gpa.free(result.stdout);
     defer gpa.free(result.stderr);
     const found = libcurlRelease(result.stdout) orelse return false;

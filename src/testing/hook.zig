@@ -1,9 +1,14 @@
 //! A native hook for the test suite. A copy beside a `.fixture` file runs
 //! the action named there, so the same hook runs under git and relic on
 //! Unix and Windows.
+//!
+//! It stands in for programs that are not relic's (hooks, a signing
+//! program), so it imports nothing of relic's: a module it shared with the
+//! tests would be built as theirs are, and under ThreadSanitizer its
+//! runtime would write its own warnings into what this says on standard
+//! error.
 
 const std = @import("std");
-const relic = @import("relic");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const testprogram = @import("program.zig");
@@ -324,12 +329,23 @@ fn historyRecord(h: *const Hook) !u8 {
             try entry.appendSlice(arena, " msg=[");
             try appendTranslated(arena, &entry, message, '|');
         } else {
-            const stripped = try relic.repo.program.run(arena, io, .{ .environ = h.environ }, .{ .argv = &.{ "git", "stripspace", "-s" } }, .{
-                .input = message,
+            const git = try testprogram.path(arena, io, h.environ, "git");
+            const message_file = try Io.Dir.cwd().openFile(io, h.args[1], .{});
+            defer message_file.close(io);
+            var child = try std.process.spawn(io, .{
+                .argv = &.{ git, "stripspace", "-s" },
+                .environ_map = h.environ,
+                .stdin = .{ .file = message_file },
+                .stdout = .pipe,
             });
-            if (!stripped.succeeded()) return error.GitFailed;
+            defer child.kill(io);
+            var stdout_buf: [4096]u8 = undefined;
+            var stdout = child.stdout.?.readerStreaming(io, &stdout_buf);
+            const stripped = try stdout.interface.allocRemaining(arena, .limited(1 << 20));
+            const term = try child.wait(io);
+            if (term != .exited or term.exited != 0) return error.GitFailed;
             try entry.appendSlice(arena, " edited=[");
-            try appendTranslated(arena, &entry, stripped.stdout, '|');
+            try appendTranslated(arena, &entry, stripped, '|');
         }
         try entry.append(arena, ']');
     }
