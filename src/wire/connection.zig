@@ -178,8 +178,8 @@ pub const Connection = struct {
 };
 
 /// The last four kilobytes a program wrote on its standard error, read by
-/// a task beside the conversation.
-const Tail = struct {
+/// a task beside the conversation. A caller only reads it.
+pub const Tail = struct {
     buffer: [4096]u8 = undefined,
     len: usize = 0,
     task: ?Io.Future(void) = null,

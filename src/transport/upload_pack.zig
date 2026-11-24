@@ -106,7 +106,8 @@ pub const Options = struct {
 /// Which filters a client may ask for: `uploadpackfilter.allow`, the
 /// fallback, `uploadpackfilter.<filter>.allow` for one, and
 /// `uploadpackfilter.tree.maxDepth`, which allows `tree` up to that depth.
-const FilterRules = struct {
+/// Read from the configuration when the server is made: a caller only reads them.
+pub const FilterRules = struct {
     fallback: bool = true,
     /// Each named filter's word, the last one said winning.
     named: [6]?bool = @splat(null),

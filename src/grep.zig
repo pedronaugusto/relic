@@ -1207,8 +1207,9 @@ fn runWorker(work: *Work, io: Io, worker: usize) Io.Cancelable!void {
             work.canceled.store(.canceled, .monotonic);
             return err;
         };
-        const i = work.next.fetchAddWrapping(Work.Claims.fromRaw(1), .monotonic).raw();
-        if (i >= work.items.len) return;
+        const claim = work.next.fetchAddWrapping(Work.Claims.fromRaw(1), .monotonic);
+        if (claim.compare(.fromRaw(work.items.len)) != .lt) return;
+        const i = claim.raw();
         const content = work.contents[i] orelse continue;
         const buf = work.buffers[worker];
         var w: Io.Writer = .fixed(buf[work.used[worker]..]);

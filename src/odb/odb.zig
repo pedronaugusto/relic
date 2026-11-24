@@ -4443,11 +4443,11 @@ fn TaskSet(comptime Context: type, comptime work: fn (Io, Context, usize, usize)
 
         fn take(set: *Self, worker: usize) ?usize {
             if (worker < set.limited_workers) {
-                const i = set.next_limited.fetchAddWrapping(Claims.fromRaw(1), .monotonic).raw();
-                if (i < set.failures.len) return i;
+                const limited = set.next_limited.fetchAddWrapping(Claims.fromRaw(1), .monotonic);
+                if (limited.compare(.fromRaw(set.failures.len)) == .lt) return limited.raw();
             }
-            const i = set.next_open.fetchAddWrapping(Claims.fromRaw(1), .monotonic).raw();
-            if (i < set.limited_from) return i;
+            const open = set.next_open.fetchAddWrapping(Claims.fromRaw(1), .monotonic);
+            if (open.compare(.fromRaw(set.limited_from)) == .lt) return open.raw();
             return null;
         }
 
@@ -4970,9 +4970,9 @@ const Build = struct {
     /// packed one is inflated with, and its deflated entry's room.
     fn plan(b: *Build, batch: *PackBatch, start: usize) void {
         // a third of the batch budget, rounded down
-        const share = (b.options.batch_bytes.divTrunc(3) catch |err| switch (err) {
+        const share = b.options.batch_bytes.divTrunc(3) catch |err| switch (err) {
             error.DivisionByZero, error.Overflow => aegis.assert.never("a third of an unsigned size is a size"),
-        }).raw();
+        };
         var end = start;
         var charged: usize = 0;
         while (end < b.ordered.len) {
@@ -4988,14 +4988,14 @@ const Build = struct {
             const size = std.math.cast(usize, b.ordered[end].size) orelse std.math.maxInt(usize);
             const slack: usize = if (b.ordered[end].loose) 0 else pack.Pack.inflate_slack;
             const charge = if (b.reusedAt(end)) |r| r.stored.len else size +| slack +| pack.Deflater.room(size);
-            if (end > start and charged +| charge > share) break;
+            if (end > start and share.compare(.fromRaw(charged +| charge)) == .lt) break;
             charged +|= charge;
             end += 1;
         }
         batch.* = .{
             .start = start,
             .end = end,
-            .alone = end == start + 1 and charged > share,
+            .alone = end == start + 1 and share.compare(.fromRaw(charged)) == .lt,
             .pending = batch.pending,
             .parts = batch.parts,
             .retired = batch.retired,

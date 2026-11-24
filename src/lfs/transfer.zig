@@ -1200,8 +1200,9 @@ fn workerTask(state: *Run, worker: usize) void {
 fn work(state: *Run, worker: usize) void {
     while (true) {
         if (state.failure() != null) return;
-        const i = state.next.fetchAddWrapping(Run.Claims.fromRaw(1), .monotonic).raw();
-        if (i >= state.jobs.len) return;
+        const claim = state.next.fetchAddWrapping(Run.Claims.fromRaw(1), .monotonic);
+        if (claim.compare(.fromRaw(state.jobs.len)) != .lt) return;
+        const i = claim.raw();
         runJob(state, &state.jobs[i], worker) catch |err| state.setFatal(err);
         state.say(.object);
     }

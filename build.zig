@@ -551,9 +551,15 @@ pub fn dev(b: *std.Build, tools: type) void {
     // Only relic_net reaches the network's engines. A program over `relic`
     // alone, every public declaration referenced, compiles with uplink and
     // cloak replaced by a module that stops any compilation reaching it;
-    // one over `relic_lfs` too, with cloak replaced: its server's
+    // one over `relic_lfs` too, with relic's cloak replaced: its server's
     // signatures name uplink's server, but its HTTP client, which needs
     // cloak, is reached only through relic_net. Part of `check`.
+    //
+    // Each proof is a static library, not an object. uplink's server holds
+    // a cloak TLS session (src/server/Socket.zig), so the `relic_lfs` proof
+    // takes cloak, and with it cloak's assembly, beside its Zig. An object
+    // must link those into one, and Zig 0.17's COFF linker cannot, so a
+    // Windows target could not build it; an archive keeps them apart.
     const poison = p.createModule(.{ .root_source_file = p.path("src/testing/poison.zig") });
     const offline_step = b.step("check-offline", "Prove a program that names no relic_net compiles none of the network's engines");
     for ([_]struct { []const u8, Poison, bool }{
@@ -564,7 +570,7 @@ pub fn dev(b: *std.Build, tools: type) void {
         const offline = p.createModule(.{ .root_source_file = p.path(proof[0]), .target = target, .optimize = optimize });
         offline.addImport("relic", p.createModule(relicModule(p, target, optimize, offline_core)));
         if (proof[2]) offline.addImport("relic_lfs", p.createModule(lfsModule(p, target, optimize, offline_core)));
-        const offline_check = b.addObject(.{ .name = std.Io.Dir.path.stem(proof[0]), .root_module = offline });
+        const offline_check = b.addLibrary(.{ .linkage = .static, .name = std.Io.Dir.path.stem(proof[0]), .root_module = offline });
         offline_step.dependOn(&offline_check.step);
         check_step.dependOn(&offline_check.step);
     }

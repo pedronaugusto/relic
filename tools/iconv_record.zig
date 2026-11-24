@@ -331,7 +331,9 @@ const Run = struct {
             while (view.nextCodepoint()) |cp| try w.print(" {x}", .{cp});
         } else if (r.value) |v| {
             if (r.kind == 'w') {
-                try w.print(" {x:0>[1]}", .{ v, r.width * 2 });
+                // A character written as nothing, as GNU libiconv writes the
+                // tag characters (U+E0000 to U+E007F), is `_`.
+                if (r.width == 0) try w.writeAll(" _") else try w.print(" {x:0>[1]}", .{ v, r.width * 2 });
             } else try w.print(" {x}", .{v});
         } else try w.writeAll(" -");
         try w.writeByte('\n');
@@ -428,7 +430,9 @@ pub fn recordTable(a: Allocator, w: *Io.Writer, c: Converter, l: Label) !void {
         const got: ?Bytes = if (c.write(utf8Into(&in, &.{ first, second }), &buf)) |s| try Bytes.of(s) else null;
         if (same(Bytes, got, concat(Bytes, &.{ writes[first], writes[second] }))) continue;
         if (got) |g| {
-            try w.print("p {x} {x} {x:0>[3]}\n", .{ first, second, g.value(), g.len * 2 });
+            if (g.len == 0) {
+                try w.print("p {x} {x} _\n", .{ first, second });
+            } else try w.print("p {x} {x} {x:0>[3]}\n", .{ first, second, g.value(), g.len * 2 });
         } else try w.print("p {x} {x} -\n", .{ first, second });
     };
 }
@@ -710,7 +714,7 @@ pub const Table = struct {
             const first = try std.fmt.parseInt(u21, f.next() orelse return error.BadRecord, 16);
             const second = try std.fmt.parseInt(u21, f.next() orelse return error.BadRecord, 16);
             const bytes = f.next() orelse return error.BadRecord;
-            const got: ?Bytes = if (std.mem.eql(u8, bytes, "-")) null else try hexBytes(bytes);
+            const got: ?Bytes = if (std.mem.eql(u8, bytes, "-")) null else if (std.mem.eql(u8, bytes, "_")) .{} else try hexBytes(bytes);
             try t.pairs.put(a, pairKey(first, second), got);
             return;
         }
@@ -770,7 +774,14 @@ pub const Table = struct {
                 }
             },
             'w', 'G' => {
-                if (refused or nothing) return error.BadRecord;
+                if (refused or (nothing and kind[0] == 'G')) return error.BadRecord;
+                if (nothing) {
+                    // Each character of the run written as nothing.
+                    if (f.next() != null) return error.BadRecord;
+                    var cp = first;
+                    while (cp <= last) : (cp += 1) try t.writes.put(a, @intCast(cp), .{});
+                    return;
+                }
                 const start: Bytes = if (kind[0] == 'G') try Bytes.of(&gbBytes(try std.fmt.parseInt(u32, value_text, 16))) else try hexBytes(value_text);
                 var cp = first;
                 while (cp <= last) : (cp += 1) {
@@ -837,7 +848,8 @@ fn hexBytes(s: []const u8) !Bytes {
 /// "toy": ASCII; 80 for €; 90 40–4F for U+4E00–U+4E0F, 90 alone or before
 /// any other byte refused; C1 for the acute accent, and e then C1 read as é,
 /// which is written e C1 ("toy-twin" the same); A with the accent refused as two characters
-/// though each writes alone; FF refused. "gb" is GB18030's four bytes for
+/// though each writes alone; FF refused; U+200B to U+200D written as nothing,
+/// as GNU libiconv writes the tag characters. "gb" is GB18030's four bytes for
 /// U+10000 on (index 0x2E248 on) up to U+1000F, the rest refused. "none" opens neither way.
 const toy = struct {
     var decoder_toy: u8 = 0;
@@ -918,6 +930,7 @@ const toy = struct {
                     out[n] = @intCast(0x40 + cp - 0x4e00);
                 },
                 0x301 => out[n] = 0xc1,
+                0x200b...0x200d => continue,
                 0xe9 => {
                     out[n] = 'e';
                     n += 1;
@@ -993,6 +1006,9 @@ test "a record reads back as the iconv reads and writes, over every sequence, ch
     try std.testing.expectEqual(null, try t.read("\x90\x50", &out));
     try std.testing.expectEqual(null, try t.write(&.{ 'A', 0x301 }, &out));
     try std.testing.expectEqualStrings("e\xc1", (try t.write(&.{0xe9}, &out)).?);
+    // A character written as nothing is recorded and read back as nothing.
+    try std.testing.expect(std.mem.find(u8, text, "\nw 200b 200b _\n") != null);
+    try std.testing.expectEqualStrings("", (try t.write(&.{0x200c}, &out)).?);
     // What was not measured is no answer.
     try std.testing.expectError(error.NotMeasured, t.read("abc", &out));
     try std.testing.expectError(error.NotMeasured, t.read("\x81\x30\x81\x30", &out));
@@ -1028,6 +1044,20 @@ test "a record refuses lines it cannot read, another format, and a label named t
     try std.testing.expectError(error.OtherFormat, Recorded.parse(a, "format 2\n"));
     try std.testing.expectError(error.BadRecord, Recorded.parse(a, "format 1\ntable 0 plain\nr 1 41 41 41\n"));
     try std.testing.expectError(error.BadRecord, Recorded.parse(a, "format 1\ntable 0 plain\nr 1 42 41 41\nend\n"));
+    // A pair written as nothing reads back as nothing.
+    const empty_pair = try Recorded.parse(a, "format 1\nsource s 0\nlibrary l 0\ntable 0 plain pairs\np 41 301 _\nend\nlabel x 0\n");
+    var out: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("", (try empty_pair.labels.get("x").?.?.write(&.{ 'A', 0x301 }, &out)).?);
+    // A run of characters written as nothing, each of them.
+    const empty_run = try Recorded.parse(a, "format 1\nsource s 0\nlibrary l 0\ntable 0 plain\nw 200b 200d _\nend\nlabel x 0\n");
+    try std.testing.expectEqualStrings("", (try empty_run.labels.get("x").?.?.write(&.{0x200d}, &out)).?);
+    // Nothing is a writing's answer, never a GB18030 index's, and alone.
+    const head = "format 1\nsource s 0\nlibrary l 0\ntable 0 gb18030 wide\n";
+    const tail = "end\nlabel x 0\n";
+    _ = try Recorded.parse(a, head ++ "G 10000 10000 2e248\n" ++ tail);
+    try std.testing.expectError(error.BadRecord, Recorded.parse(a, head ++ "G 10000 10000 _\n" ++ tail));
+    _ = try Recorded.parse(a, head ++ "w 41 41 _\n" ++ tail);
+    try std.testing.expectError(error.BadRecord, Recorded.parse(a, head ++ "w 41 41 _ 41\n" ++ tail));
     try std.testing.expectError(error.BadRecord, Recorded.parse(a, "format 1\nsource s 0\nlibrary l 0\nlabel x refused\nlabel x refused\n"));
     try std.testing.expectError(error.BadRecord, Recorded.parse(a, "format 1\nsource s 0\nlibrary l 0\nlabel x 0\n"));
     try std.testing.expectError(error.BadRecord, Recorded.parse(a, "format 1\nsource s 0\nlibrary l 0\nformat 1\nsource t 0\nlibrary l 0\n"));

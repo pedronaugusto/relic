@@ -236,8 +236,8 @@ pub const Session = struct {
     };
 
     /// Which side of a conversation announced a capability: git's
-    /// `credential_capability`.
-    const Capability = struct {
+    /// `credential_capability`. A caller only reads it.
+    pub const Capability = struct {
         /// The caller can take it: relic, over HTTP, always.
         initial: bool = false,
         /// The helper that answered announced it.
@@ -1185,8 +1185,9 @@ fn interactive(config: ?*const config_mod.Config) bool {
     return !std.mem.eql(u8, value, "never");
 }
 
-/// The `credential.*` settings a credential has once it is configured.
-const Settings = struct {
+/// The `credential.*` settings a credential has once it is configured, read
+/// once from git's configuration by the session: a caller only reads them.
+pub const Settings = struct {
     helpers: [][]u8 = &.{},
     /// `credentialStore.lockTimeoutMS`: how long the native store waits
     /// for its file's lock.

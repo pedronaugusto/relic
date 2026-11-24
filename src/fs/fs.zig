@@ -510,8 +510,9 @@ pub const Stat = struct {
     // git's index keeps a time as its whole seconds and the nanoseconds
     // within them: the one place a time is split so.
     fn splitSec(t: Io.Timestamp) u32 {
-        const sec = WholeSeconds.fromTimestamp(t, .down).raw();
-        if (sec < 0) return 0;
+        const whole = WholeSeconds.fromTimestamp(t, .down);
+        if (whole.compare(.fromRaw(0)) == .lt) return 0;
+        const sec = whole.raw();
         return @truncate(@as(u96, @intCast(sec)));
     }
 

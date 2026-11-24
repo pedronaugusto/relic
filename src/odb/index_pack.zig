@@ -1602,8 +1602,9 @@ const Worker = struct {
     fn run(w: *Worker) void {
         const x = w.x;
         while (x.failed.load(.acquire) == .running) {
-            const next = x.next_root.fetchAddWrapping(Indexer.Roots.fromRaw(1), .monotonic).raw();
-            if (next >= x.roots.len) return;
+            const claim = x.next_root.fetchAddWrapping(Indexer.Roots.fromRaw(1), .monotonic);
+            if (claim.compare(.fromRaw(x.roots.len)) != .lt) return;
+            const next = claim.raw();
             w.walkFrom(x.roots[next]) catch |err| {
                 var guard = x.shared.acquireUncancelable(x.io);
                 defer guard.deinit(x.io);
