@@ -346,27 +346,29 @@ pub const Case = struct {
 
     /// What a person does after a crash before git runs again: removes the
     /// locks the crashed run held.
-    pub fn recover(c: *Case, io: Io) !void {
+    pub fn recover(c: *Case, io: Io, _: std.mem.Allocator) !void {
         _ = c;
         try removeLocks(io, Io.Dir.cwd());
     }
 
-    pub fn check(c: *Case, io: Io) !void {
+    /// `recovery` is the recovery's own allocator, whose blocks are freed
+    /// before it returns; the states seen outlive it, on `c.gpa`.
+    pub fn check(c: *Case, io: Io, recovery: std.mem.Allocator) !void {
         // A state is its files, their bytes and their times: one seen
         // before is checked already.
         var image = try Image.read(c.gpa, io, Io.Dir.cwd());
         const slot = try c.states.getOrPut(c.gpa, image.digest());
         if (slot.found_existing) return image.deinit(c.gpa);
         slot.value_ptr.* = image;
-        try c.honest(io);
+        try c.honest(io, recovery);
     }
 
     /// relic reads the state whole, and its status calls no changed file
     /// clean.
-    fn honest(c: *Case, base: Io) !void {
+    fn honest(c: *Case, base: Io, recovery: std.mem.Allocator) !void {
         defer _ = c.arena.reset(.free_all);
         // airlock's calls reach the recovered disk through a seam of its own.
-        const h = try seam.Seam.create(c.gpa, base, .{ .trace = .off });
+        const h = try seam.Seam.create(recovery, base, .{ .trace = .off });
         defer h.destroy();
         const io = h.io();
         const gpa = c.arena.allocator();
