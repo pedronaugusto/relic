@@ -66,6 +66,11 @@ test {
     _ = @import("lfs_tests.zig");
 }
 
+// The core's own tests: its facades keep the contract.
+test {
+    _ = @import("core.zig");
+}
+
 test {
     _ = @import("testing/policy_options.zig");
     // Every module the API reaches, one level down as well as at the top,

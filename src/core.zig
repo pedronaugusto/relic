@@ -52,9 +52,10 @@ pub const http_backend = @import("transport/http_backend.zig");
 pub const contract = @import("contract.zig");
 
 // A facade publishes every declaration of its implementation, as the
-// implementation's type.
-comptime {
-    for (.{
+// implementation's type: checked by relic's own test build, not in every
+// program that imports relic.
+test "the core's facades keep the contract: each publishes every declaration of its implementation" {
+    comptime for (.{
         .{ repo, "repo", @import("repo/repo.zig") },
         .{ hash, "hash", @import("hash/hash.zig") },
         .{ object, "object", @import("object/object.zig") },

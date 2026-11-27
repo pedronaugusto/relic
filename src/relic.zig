@@ -189,20 +189,23 @@ pub const fast = core.fast;
 
 pub const maintenance = core.maintenance;
 
-// The contract relic's public surface keeps (`core.contract`), checked as
-// relic compiles, on any target, so that no build of it breaks one; and how
-// a program ended is conduit's `Term` wherever relic shows it, and a
-// program's working directory is relic's own `Cwd`.
-comptime {
-    core.contract.check(@This(), .{
-        .source = @embedFile("relic.zig"),
-        .path = "src/relic.zig",
-        .readme = @embedFile("README.md"),
-        .begin = "<!-- BEGIN MODULES -->",
-        .end = "<!-- END MODULES -->",
-        .depth = 3,
-    });
-    checkPrograms();
+// The contract relic's public surface keeps (`core.contract`), and how a
+// program ended is conduit's `Term` wherever relic shows it, and a program's
+// working directory is relic's own `Cwd`: checked by relic's own test build,
+// which CI compiles for every target, and not in every program that imports
+// relic, which would analyse nearly all of relic to run them.
+test "relic's public surface keeps the contract" {
+    comptime {
+        core.contract.check(@This(), .{
+            .source = @embedFile("relic.zig"),
+            .path = "src/relic.zig",
+            .readme = @embedFile("README.md"),
+            .begin = "<!-- BEGIN MODULES -->",
+            .end = "<!-- END MODULES -->",
+            .depth = 3,
+        });
+        checkPrograms();
+    }
 }
 
 const conduit = @import("conduit");

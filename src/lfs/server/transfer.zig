@@ -26,10 +26,10 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
+const aegis = @import("aegis");
 
 const core = @import("relic_core");
 const pkt_line = core.codec.pkt_line;
-const local = core.transport.local;
 const http_backend = core.http_backend;
 const decimal = core.text.decimal;
 const lfs = @import("../lfs.zig");
@@ -151,7 +151,9 @@ pub const Request = struct {
 pub const Session = struct {
     gpa: Allocator,
     io: Io,
-    remote: *local.Remote,
+    /// The repository's git directory, where its locks are kept: all of the
+    /// repository a session reads. Lent for the session.
+    git_dir: aegis.own.Unowned(Io.Dir),
     repository: []const u8,
     operation: Operation,
     options: Options,
@@ -351,7 +353,7 @@ pub const Session = struct {
 
     fn lock(s: *Session, arena: Allocator, req: Request, user: Who) Error!void {
         const path = req.arg("path") orelse return s.status(400, &.{}, &.{"no path"});
-        var table = try lock_store.Table.take(s.gpa, arena, s.io, s.remote.repo.gitDirectory());
+        var table = try lock_store.Table.take(s.gpa, arena, s.io, s.git_dir.get());
         defer table.deinit();
         for (table.list) |l| if (std.mem.eql(u8, l.path, path)) {
             return s.status(409, try lockArgs(arena, l), &.{"already locked"});
@@ -369,7 +371,7 @@ pub const Session = struct {
     }
 
     fn listLocks(s: *Session, arena: Allocator, req: Request, user: Who) Error!void {
-        const all = try lock_store.read(arena, s.io, s.remote.repo.gitDirectory());
+        const all = try lock_store.read(arena, s.io, s.git_dir.get());
         var matching: std.ArrayList(locks.Lock) = .empty;
         for (all) |l| {
             if (req.arg("path")) |p| if (!std.mem.eql(u8, l.path, p)) continue;
@@ -392,7 +394,7 @@ pub const Session = struct {
     }
 
     fn unlock(s: *Session, arena: Allocator, req: Request, id: []const u8, user: Who) Error!void {
-        var table = try lock_store.Table.take(s.gpa, arena, s.io, s.remote.repo.gitDirectory());
+        var table = try lock_store.Table.take(s.gpa, arena, s.io, s.git_dir.get());
         defer table.deinit();
         const at = for (table.list, 0..) |l, i| {
             if (std.mem.eql(u8, l.id, id)) break i;
@@ -446,7 +448,7 @@ pub fn serve(gpa: Allocator, io: Io, connection: Connection, options: Options) (
     const repository = std.mem.trim(u8, connection.path, "/");
     var remote = (try http_backend.openServed(gpa, io, connection.root, repository, true)) orelse return false;
     defer remote.deinit(io);
-    var session: Session = .{ .gpa = gpa, .io = io, .remote = &remote, .repository = repository, .operation = connection.operation, .options = options, .in = connection.in, .out = connection.out };
+    var session: Session = .{ .gpa = gpa, .io = io, .git_dir = .of(remote.repo.gitDirectory()), .repository = repository, .operation = connection.operation, .options = options, .in = connection.in, .out = connection.out };
     try session.greet();
     while (true) {
         var arena_state: std.heap.ArenaAllocator = .init(gpa);

@@ -28,9 +28,11 @@ pub const network: core.transport.Network = core.wire.engines.network(lfs.api.en
 
 pub const http_backend = core.http_backend;
 
-// relic_net's public surface keeps relic's contract (`core.contract`).
-comptime {
-    core.contract.check(@This(), .{
+// relic_net's public surface keeps relic's contract (`core.contract`):
+// checked by relic's own test build (`relic-net-contract`, this file as its
+// root), not in every program that imports relic_net.
+test "relic_net's public surface keeps the contract" {
+    comptime core.contract.check(@This(), .{
         .source = @embedFile("net.zig"),
         .path = "src/net.zig",
         .readme = @embedFile("README.md"),

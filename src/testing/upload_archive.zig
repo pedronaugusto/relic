@@ -11,7 +11,7 @@
 const std = @import("std");
 const Io = std.Io;
 const pkt_line = @import("relic").transport.pkt_line;
-const local = @import("relic").transport.local;
+const Repository = @import("relic").repo.Repository;
 const remote = @import("relic").archive.remote;
 
 pub fn main(init: std.process.Init) !void {
@@ -21,14 +21,18 @@ pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(arena);
     if (args.len != 2) return error.NoRepository;
 
-    var here = try local.Remote.open(gpa, io, args[1], .{});
-    defer here.deinit(io);
+    // The repository at the path git gives, not searched above, as a
+    // remote's is opened: upload-archive reads nothing else of a remote.
+    var dir = try Io.Dir.cwd().openDir(io, args[1], .{ .iterate = true });
+    defer dir.close(io);
+    var repo = try Repository.open(gpa, io, dir, .{ .discover = false, .odb = .{ .probe_timestamp_resolution = false } });
+    defer repo.deinit(io);
 
     const in_buffer = try arena.alloc(u8, pkt_line.max_line);
     var in = Io.File.stdin().readerStreaming(io, in_buffer);
     const out_buffer = try arena.alloc(u8, pkt_line.max_line);
     var out = Io.File.stdout().writerStreaming(io, out_buffer);
-    var server: remote.Server = .{ .gpa = gpa, .io = io, .repo = &here.repo, .options = .{
+    var server: remote.Server = .{ .gpa = gpa, .io = io, .repo = &repo, .options = .{
         .programs = .{ .environ = init.environ_map },
         .now = Io.Clock.real.now(io),
     } };

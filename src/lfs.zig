@@ -62,10 +62,13 @@ const implementation = @import("lfs/lfs.zig");
 const core = @import("relic_core");
 
 // relic_lfs's public surface keeps relic's contract (`core.contract`), and
-// publishes every declaration of its implementation.
-comptime {
-    core.contract.check(@This(), surface);
-    core.contract.covers(@This(), "relic_lfs", implementation);
+// publishes every declaration of its implementation: checked by relic's own
+// test build, not in every program that imports relic_lfs.
+test "relic_lfs's public surface keeps the contract" {
+    comptime {
+        core.contract.check(@This(), surface);
+        core.contract.covers(@This(), "relic_lfs", implementation);
+    }
 }
 
 /// relic_lfs's module tables, this file's and the README's.

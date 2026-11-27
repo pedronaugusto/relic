@@ -186,6 +186,17 @@ test "relic's upload-archive gives git's client what git's gives: archives, list
     defer ours.deinit(gpa);
     try std.testing.expectEqual(@as(u8, 0), ours.code);
     try std.testing.expect(std.mem.eql(u8, theirs.stdout, ours.stdout));
+
+    // Asked from another repository: git runs the server where it is run,
+    // and the server serves the repository at the path git gives.
+    var elsewhere = try testgit.Repo.init(gpa, io, &.{});
+    defer elsewhere.deinit();
+    var theirs_away = try gitArchive(gpa, io, &elsewhere, path, null, &.{"HEAD"});
+    defer theirs_away.deinit(gpa);
+    var ours_away = try gitArchive(gpa, io, &elsewhere, path, helper, &.{"HEAD"});
+    defer ours_away.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), ours_away.code);
+    try std.testing.expect(try same(gpa, theirs_away.stdout, ours_away.stdout));
 }
 
 test "relic's client takes git's archive, here and from git's upload-archive over ssh" {

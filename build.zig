@@ -399,11 +399,26 @@ pub fn dev(b: *std.Build, tools: type) void {
     const test_step = b.step("test", "Run the relic tests");
     test_step.dependOn(&run_tests.step);
 
+    // relic_net's contract, its root's test: the relic tests import nothing
+    // of relic_net, and a module's test blocks run only where it is the
+    // root, so relic_net, as a consumer gets it, is the root of its own.
+    const net_core = coreModule(p, target, optimize, .{});
+    const net_module = p.createModule(.{
+        .root_source_file = p.path("src/net.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = rootImports(p, target, optimize, net_core, &.{}),
+    });
+    net_module.addImport("relic_lfs", p.createModule(lfsModule(p, target, optimize, net_core)));
+    const net_contract = b.addTest(.{ .name = "relic-net-contract", .root_module = net_module });
+    test_step.dependOn(&b.addRunArtifact(net_contract).step);
+
     // Compiling without running: the step a cross-compilation check uses,
     // and the one an editor can keep warm. It covers the tests too, which
     // the default install step does not.
     const check_step = b.step("check", "Compile everything without running it");
     check_step.dependOn(&tests.step);
+    check_step.dependOn(&net_contract.step);
     check_step.dependOn(&held_git.step);
     check_step.dependOn(&lock_helper.step);
     check_step.dependOn(&filter_helper.step);

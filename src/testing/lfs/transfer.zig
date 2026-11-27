@@ -64,16 +64,15 @@ pub fn main(init: std.process.Init) !void {
     defer if (options.log_dir) |dir| writeLog(io, dir, log.items);
     try log.print(gpa, "== {s} {s}\n", .{ options.path, options.operation });
 
-    const root_path = try root.realPathFileAlloc(io, ".", gpa);
-    const location = try std.Io.Dir.path.join(gpa, &.{ root_path, relative });
-    var remote = try relic.transport.local.Remote.open(gpa, io, location, .{});
-    defer remote.deinit(io);
+    // The repository is bare, made above: its directory is its git directory.
+    var git_dir = try root.openDir(io, relative, .{});
+    defer git_dir.close(io);
     var who: Who = .{ .user = options.user };
     var tokens: Transfer.Tokens = .{ .vtable = &.{ .issue = issue, .check = check } };
     var session: Transfer.Session = .{
         .gpa = gpa,
         .io = io,
-        .remote = &remote,
+        .git_dir = .of(git_dir),
         .repository = relative,
         .operation = Transfer.Operation.named(options.operation) orelse return error.Usage,
         .options = .{
